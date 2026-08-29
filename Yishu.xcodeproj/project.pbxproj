@@ -30,7 +30,18 @@
 		100000000000000000000015 /* SubscriptionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* SubscriptionStore.swift */; };
 		100000000000000000000016 /* SubscriptionPaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* SubscriptionPaywallView.swift */; };
 		100000000000000000000017 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* PrivacyInfo.xcprivacy */; };
+		A10000000000000000000001 /* ContentAndAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* ContentAndAccessTests.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A90000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 600000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 500000000000000000000001;
+			remoteInfo = Yishu;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		200000000000000000000001 /* YishuApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YishuApp.swift; sourceTree = "<group>"; };
@@ -57,10 +68,19 @@
 		200000000000000000000016 /* SubscriptionPaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionPaywallView.swift; sourceTree = "<group>"; };
 		200000000000000000000017 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		200000000000000000000099 /* Yishu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yishu.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000001 /* ContentAndAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentAndAccessTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000099 /* YishuTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YishuTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		400000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A40000000000000000000002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -79,6 +99,7 @@
 				300000000000000000000005 /* Yishu/Components */,
 				300000000000000000000006 /* Yishu/Views */,
 				300000000000000000000007 /* Yishu/Resources */,
+				A30000000000000000000001 /* YishuTests */,
 				300000000000000000000008 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -152,8 +173,17 @@
 			isa = PBXGroup;
 			children = (
 				200000000000000000000099 /* Yishu.app */,
+				A20000000000000000000099 /* YishuTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		A30000000000000000000001 /* YishuTests */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000001 /* ContentAndAccessTests.swift */,
+			);
+			path = YishuTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -176,6 +206,24 @@
 			productReference = 200000000000000000000099 /* Yishu.app */;
 			productType = "com.apple.product-type.application";
 		};
+		A50000000000000000000001 /* YishuTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000001 /* Build configuration list for PBXNativeTarget "YishuTests" */;
+			buildPhases = (
+				A40000000000000000000001 /* Sources */,
+				A40000000000000000000002 /* Frameworks */,
+				A40000000000000000000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A90000000000000000000002 /* PBXTargetDependency */,
+			);
+			name = YishuTests;
+			productName = YishuTests;
+			productReference = A20000000000000000000099 /* YishuTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -188,6 +236,10 @@
 				TargetAttributes = {
 					500000000000000000000001 = {
 						CreatedOnToolsVersion = 26.6;
+					};
+					A50000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 500000000000000000000001;
 					};
 				};
 			};
@@ -206,6 +258,7 @@
 			projectRoot = "";
 			targets = (
 				500000000000000000000001 /* Yishu */,
+				A50000000000000000000001 /* YishuTests */,
 			);
 		};
 /* End PBXProject section */
@@ -218,6 +271,13 @@
 				10000000000000000000000C /* Assets.xcassets in Resources */,
 				100000000000000000000014 /* LaunchScreen.storyboard in Resources */,
 				100000000000000000000017 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A40000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -251,7 +311,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A40000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* ContentAndAccessTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A90000000000000000000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 500000000000000000000001 /* Yishu */;
+			targetProxy = A90000000000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		700000000000000000000001 /* Debug */ = {
@@ -313,7 +389,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -346,7 +422,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -373,6 +449,42 @@
 			};
 			name = Release;
 		};
+		A70000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6F34K54BYJ;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishuTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Yishu.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Yishu";
+			};
+			name = Debug;
+		};
+		A70000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6F34K54BYJ;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishuTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Yishu.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Yishu";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -390,6 +502,15 @@
 			buildConfigurations = (
 				700000000000000000000003 /* Debug */,
 				700000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A80000000000000000000001 /* Build configuration list for PBXNativeTarget "YishuTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A70000000000000000000001 /* Debug */,
+				A70000000000000000000002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

@@ -70,15 +70,25 @@ enum ContentCatalog {
     static let appContentURL = URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-content")!
     static let premiumAppContentURL = URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-content/premium")!
     static let heroImages = [
-        URL(string: "https://img.shuzijun.com.cn/images/hero-mobile-1.webp")!,
-        URL(string: "https://img.shuzijun.com.cn/images/hero-mobile-2.webp")!,
-        URL(string: "https://img.shuzijun.com.cn/images/hero-mobile-3.webp")!,
+        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-01-nas-1943-20260829.jpg")!,
+        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-02-nas-1938-20260829.jpg")!,
+        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-03-nas-1940-20260829.jpg")!,
+        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-04-nas-1942-20260829.jpg")!,
+        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-05-nas-1939-20260829.jpg")!,
     ]
+    private static let heroAssetNames = ["HeroOne", "HeroTwo", "HeroThree", "HeroFour", "HeroFive"]
+
+    static func heroAssetName(at index: Int) -> String? {
+        heroAssetNames.indices.contains(index) ? heroAssetNames[index] : nil
+    }
+    private static let launchPosterFallbackURL = URL(
+        string: "https://img.shuzijun.com.cn/images/hero-mobile-1.webp"
+    )!
     static let launchPosters = [
         LaunchPosterContent(
             id: "evergreen",
             isEnabled: true,
-            imageURL: heroImages[0],
+            imageURL: launchPosterFallbackURL,
             eyebrow: "YI SHU",
             title: "易姝",
             subtitle: "镜头之内，自有叙事。",

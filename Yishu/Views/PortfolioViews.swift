@@ -43,9 +43,10 @@ struct PortfolioGridView: View {
 
                         HStack(spacing: 7) {
                             Image(systemName: store.contentOrigin == .network ? "checkmark.icloud" : "internaldrive")
-                            Text(store.syncStatus)
                             if let lastUpdated = store.lastUpdated {
-                                Text("· \(lastUpdated.formatted(date: .omitted, time: .shortened))")
+                                Text("\(store.syncStatus) \(lastUpdated.formatted(date: .omitted, time: .shortened))")
+                            } else {
+                                Text(store.syncStatus)
                             }
                         }
                         .font(.caption2)
@@ -115,10 +116,12 @@ struct PortfolioGridView: View {
         .sheet(isPresented: $showSubscription) {
             SubscriptionPaywallView()
         }
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
     }
 
     private var hasFullAccess: Bool {
-        subscription.hasFullPhotoAccess || admin.isAuthenticated
+        admin.isAuthenticated
+            || (subscription.hasActiveSubscription && store.protectedContentState == .available)
     }
 
     private func refreshContent() async {
@@ -135,6 +138,7 @@ struct PortfolioGridView: View {
 
 private struct PortfolioGridCard: View {
     let portfolio: Portfolio
+    @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var subscription: SubscriptionStore
     @EnvironmentObject private var admin: AdminSessionStore
 
@@ -155,12 +159,12 @@ private struct PortfolioGridCard: View {
             .foregroundStyle(.white)
             .padding(14)
 
-            if !subscription.hasFullPhotoAccess, !admin.isAuthenticated,
+            if !hasFullAccess,
                portfolio.displayImageCount > PhotoAccessPolicy.freePreviewCount {
                 VStack {
                     HStack {
                         Spacer()
-                        Label("3 张预览", systemImage: "lock.fill")
+                        Label(badgeTitle, systemImage: badgeIcon)
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.88))
                             .padding(.horizontal, 9)
@@ -174,6 +178,19 @@ private struct PortfolioGridCard: View {
         }
         .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 3))
+    }
+
+    private var hasFullAccess: Bool {
+        admin.isAuthenticated
+            || (subscription.hasActiveSubscription && store.protectedContentState == .available)
+    }
+
+    private var badgeTitle: String {
+        subscription.hasActiveSubscription ? "正在载入" : "3 张预览"
+    }
+
+    private var badgeIcon: String {
+        subscription.hasActiveSubscription ? "arrow.clockwise" : "lock.fill"
     }
 }
 
@@ -207,7 +224,8 @@ struct PortfolioDetailView: View {
     }
 
     private var hasFullAccess: Bool {
-        subscription.hasFullPhotoAccess || admin.isAuthenticated
+        admin.isAuthenticated
+            || (subscription.hasActiveSubscription && store.protectedContentState == .available)
     }
 
     private var currentPortfolio: Portfolio {
@@ -240,13 +258,19 @@ struct PortfolioDetailView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("\(currentPortfolio.displayImageCount) 帧影像")
                                 .foregroundStyle(AppTheme.warmWhite)
-                            Text(hasFullAccess ? "点击照片全屏浏览" : "前 3 张可免费预览")
+                            Text(accessDescription)
                                 .font(.caption2)
                         }
                         Spacer()
                         if hasFullAccess {
                             Label("已解锁", systemImage: "checkmark.seal.fill")
                                 .foregroundStyle(AppTheme.gold)
+                        } else if subscription.hasActiveSubscription {
+                            Button { showSubscription = true } label: {
+                                Label("重新载入", systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(AppTheme.gold)
                         } else {
                             Button { showSubscription = true } label: {
                                 Label("\(subscription.localizedMonthlyPrice)/月解锁", systemImage: "lock.fill")
@@ -266,7 +290,7 @@ struct PortfolioDetailView: View {
                             let canAccess = PhotoAccessPolicy.canAccess(
                                 image,
                                 in: currentPortfolio,
-                                hasSubscription: subscription.hasFullPhotoAccess,
+                                hasSubscription: hasFullAccess,
                                 isAdministrator: admin.isAuthenticated
                             )
                             Button {
@@ -321,6 +345,7 @@ struct PortfolioDetailView: View {
                 .padding(.bottom, 30)
             }
         }
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .navigationTitle(currentPortfolio.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
@@ -332,6 +357,12 @@ struct PortfolioDetailView: View {
         .sheet(isPresented: $showSubscription) {
             SubscriptionPaywallView()
         }
+    }
+
+    private var accessDescription: String {
+        if hasFullAccess { return "点击照片全屏浏览" }
+        if subscription.hasActiveSubscription { return "订阅已确认，完整作品待载入" }
+        return "前 3 张可免费预览"
     }
 }
 
@@ -439,45 +470,10 @@ private struct EditorialArtworkImage: View {
     let url: URL
 
     var body: some View {
-        GeometryReader { proxy in
-            AsyncImage(
-                url: url,
-                transaction: Transaction(animation: .easeOut(duration: 0.3))
-            ) { phase in
-                switch phase {
-                case .empty:
-                    placeholder
-                        .overlay { ProgressView().tint(AppTheme.gold) }
-                case .success(let image):
-                    ZStack {
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                            .blur(radius: 22)
-                            .scaleEffect(1.12)
-                            .opacity(0.3)
-
-                        Color.black.opacity(0.22)
-
-                        image
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                    }
-                    .transition(.opacity)
-                case .failure:
-                    placeholder
-                        .overlay {
-                            Image(systemName: "photo")
-                                .font(.title2)
-                                .foregroundStyle(AppTheme.muted)
-                        }
-                @unknown default:
-                    placeholder
-                }
-            }
-            .frame(width: proxy.size.width, height: proxy.size.height)
+        ZStack {
+            placeholder
+            Color.black.opacity(0.12)
+            ArtworkImage(url: url, contentMode: .fit)
         }
         .background(AppTheme.elevatedInk)
         .clipped()
@@ -516,6 +512,7 @@ private struct PortfolioEmptyArtwork: View {
 
 struct GalleryViewer: View {
     let portfolio: Portfolio
+    @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var favorites: FavoritesStore
     @EnvironmentObject private var subscription: SubscriptionStore
     @EnvironmentObject private var admin: AdminSessionStore
@@ -538,7 +535,8 @@ struct GalleryViewer: View {
     private var accessibleImages: [PortfolioImage] {
         PhotoAccessPolicy.accessibleImages(
             in: portfolio,
-            hasSubscription: subscription.hasFullPhotoAccess,
+            hasSubscription: subscription.hasActiveSubscription
+                && store.protectedContentState == .available,
             isAdministrator: admin.isAuthenticated
         )
     }

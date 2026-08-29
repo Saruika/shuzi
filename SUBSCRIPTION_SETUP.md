@@ -32,11 +32,10 @@ App 内订阅功能已经接入 StoreKit 2。正式收费前，需要由 Apple D
 - 管理员：登录后始终拥有完整访问权限，便于维护内容。
 - 订阅到期：已收藏记录保留，但付费照片重新锁定。
 - 购买与恢复购买：完全由 Apple StoreKit 处理，App 不保存支付信息。
-- Debug 构建：付费墙底部提供“开发测试：模拟订阅成功”，仅用于本地验收，不会进入 Release 构建。
+- Debug 构建不再提供跳过 Apple 凭证的“假解锁”。完整内容必须通过 Sandbox/TestFlight 产生的 Apple 签名 JWS 进行全链路验证。
 
 ## 测试顺序
 
-1. Debug 模式分别验证访客、模拟订阅和管理员三种状态。
-2. App Store Connect 商品建立后，用 Sandbox Apple Account 验证真实购买、自动续期、取消和恢复购买。
-3. 使用 TestFlight 再验证一次商品价格、本地化文本和订阅管理入口。
-
+1. Debug 模式验证访客和管理员状态，订阅状态使用 Apple Sandbox 账号验证。
+2. App Store Connect 商品建立后，用 Sandbox Apple Account 验证真实购买、完整清单加载、自动续期、取消和恢复购买。
+3. 使用 TestFlight 再验证一次商品价格、本地化文本、订阅管理入口和服务端 JWS 校验。TestFlight 中的购买使用 Sandbox，不会真实扣费。

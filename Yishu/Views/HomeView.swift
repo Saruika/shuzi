@@ -26,7 +26,7 @@ private struct HeroPager: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject private var localWeather: LocalWeatherStore
-    @ScaledMetric(relativeTo: .largeTitle) private var titleSize: CGFloat = 42
+    @ScaledMetric(relativeTo: .largeTitle) private var scaledTitleSize: CGFloat = 42
     @State private var selection = 0
     @State private var isVisible = false
 
@@ -43,7 +43,11 @@ private struct HeroPager: View {
             ZStack(alignment: .bottom) {
                 TabView(selection: $selection) {
                     ForEach(slides.indices, id: \.self) { index in
-                        HeroSlideImage(url: slides[index])
+                        HeroSlideImage(
+                            url: slides[index],
+                            fallbackName: ContentCatalog.heroAssetName(at: index),
+                            loadsRemoteImage: abs(index - selection) <= 1
+                        )
                             .frame(width: proxy.size.width, height: proxy.size.height)
                             .clipped()
                             .accessibilityHidden(true)
@@ -93,14 +97,17 @@ private struct HeroPager: View {
                     Spacer()
 
                     Text("镜头之内，\n自有叙事。")
-                        .font(.editorial(titleSize))
+                        .font(.editorial(min(scaledTitleSize, 54)))
                         .lineSpacing(4)
                         .foregroundStyle(.white)
+                        .minimumScaleFactor(0.82)
 
                     Text("短剧演员 · 模特 · 视频创作者")
                         .font(.system(size: 11, weight: .medium))
                         .tracking(0.9)
                         .foregroundStyle(.white.opacity(0.72))
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.82)
                         .padding(.top, 15)
 
                     HStack(spacing: 14) {
@@ -157,7 +164,9 @@ private struct HeroPager: View {
         }
         .onChange(of: slides) { oldSlides, newSlides in
             guard oldSlides != newSlides else { return }
-            selection = 0
+            let selectedURL = oldSlides.indices.contains(selection) ? oldSlides[selection] : nil
+            selection = selectedURL.flatMap(newSlides.firstIndex(of:))
+                ?? min(selection, max(0, newSlides.count - 1))
         }
     }
 
@@ -173,44 +182,54 @@ private struct HeroPager: View {
 
 private struct HeroSlideImage: View {
     let url: URL
-
-    private var bundledFallback: String? {
-        guard let index = ContentCatalog.heroImages.firstIndex(of: url) else { return nil }
-        let names = ["HeroOne", "HeroTwo", "HeroThree"]
-        guard names.indices.contains(index) else { return nil }
-        return names[index]
-    }
+    let fallbackName: String?
+    let loadsRemoteImage: Bool
 
     var body: some View {
-        AsyncImage(
-            url: url,
-            transaction: Transaction(animation: .easeOut(duration: 0.35))
-        ) { phase in
-            switch phase {
-            case .empty:
-                fallback
-                    .overlay(alignment: .center) {
-                        if bundledFallback == nil {
-                            ProgressView().tint(AppTheme.gold)
-                        }
+        GeometryReader { proxy in
+            if loadsRemoteImage {
+                DownsampledAsyncImage(
+                    url: url,
+                    targetSize: proxy.size,
+                    maximumPixelSize: 1_800
+                ) { phase in
+                    switch phase {
+                    case .empty:
+                        fallback
+                            .overlay(alignment: .center) {
+                                if fallbackName == nil {
+                                    ProgressView().tint(AppTheme.gold)
+                                }
+                            }
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                            .transition(.opacity)
+                    case .failure:
+                        fallback
+                    @unknown default:
+                        fallback
                     }
-            case .success(let image):
-                image
-                    .resizable()
-                    .scaledToFill()
-                    .transition(.opacity)
-            case .failure:
-                fallback
-            @unknown default:
-                fallback
+                }
+            } else {
+                ZStack {
+                    AppTheme.elevatedInk
+                    LinearGradient(
+                        colors: [.white.opacity(0.035), .clear, AppTheme.gold.opacity(0.05)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                }
             }
         }
+        .clipped()
     }
 
     @ViewBuilder
     private var fallback: some View {
-        if let bundledFallback {
-            Image(bundledFallback)
+        if let fallbackName {
+            Image(fallbackName)
                 .resizable()
                 .scaledToFill()
         } else {

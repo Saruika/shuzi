@@ -21,15 +21,29 @@ struct RootView: View {
     private let visualPortfolioTitle: String?
 
     init() {
+        let arguments = ProcessInfo.processInfo.arguments
         let prefix = "-visual-portfolio-title="
-        let title = ProcessInfo.processInfo.arguments
+        let title = arguments
             .first { $0.hasPrefix(prefix) }
             .map { String($0.dropFirst(prefix.count)) }
         visualPortfolioTitle = title
-        let startsOnPortfolio = title != nil || ProcessInfo.processInfo.arguments.contains(
-            "-open-portfolio-for-visual-testing"
-        )
-        _selectedTab = State(initialValue: startsOnPortfolio ? .portfolio : .home)
+        let initialTab: AppTab
+#if DEBUG
+        if title != nil || arguments.contains("-open-portfolio-for-visual-testing") {
+            initialTab = .portfolio
+        } else if arguments.contains("-open-about-for-visual-testing") {
+            initialTab = .about
+        } else if arguments.contains("-open-credits-for-visual-testing") {
+            initialTab = .credits
+        } else if arguments.contains("-open-favorites-for-visual-testing") {
+            initialTab = .favorites
+        } else {
+            initialTab = .home
+        }
+#else
+        initialTab = title == nil ? .home : .portfolio
+#endif
+        _selectedTab = State(initialValue: initialTab)
     }
 
     var body: some View {
@@ -80,13 +94,13 @@ struct RootView: View {
         .protectedFromScreenCapture()
         .onAppear { prepareLaunchPosterIfNeeded() }
         .task {
-            async let contentRefresh: Void = portfolioStore.refresh()
             async let sessionRestore: Void = adminSession.restoreSession()
             async let subscriptionRefresh: Void = subscription.refresh()
-            _ = await (contentRefresh, sessionRestore, subscriptionRefresh)
+            await portfolioStore.restoreCachedContent()
+            await portfolioStore.refresh()
+            _ = await (sessionRestore, subscriptionRefresh)
             await refreshProtectedContentIfAllowed(reloadPublicIfLocked: false)
             recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
-            prefetchUnlockedPhotosIfAllowed()
             if let visualPortfolioTitle,
                let portfolio = portfolioStore.portfolios.first(where: { $0.title == visualPortfolioTitle }) {
                 portfolioPath = [portfolio]
@@ -94,7 +108,6 @@ struct RootView: View {
         }
         .onChange(of: portfolioStore.portfolios) { _, portfolios in
             recentlyViewed.retainAvailablePortfolios(in: portfolios)
-            prefetchUnlockedPhotosIfAllowed()
         }
         .onChange(of: subscription.entitlementJWS) { _, _ in
             Task { await refreshProtectedContentIfAllowed() }
@@ -111,7 +124,15 @@ struct RootView: View {
 
     private func prepareLaunchPosterIfNeeded() {
         guard !hasPreparedLaunchPoster else { return }
-        if visualPortfolioTitle != nil || selectedTab == .portfolio {
+        let skipsPosterForTesting: Bool
+#if DEBUG
+        skipsPosterForTesting = ProcessInfo.processInfo.arguments.contains(
+            "-skip-launch-poster-for-visual-testing"
+        )
+#else
+        skipsPosterForTesting = false
+#endif
+        if skipsPosterForTesting || visualPortfolioTitle != nil || selectedTab != .home {
             launchPosterSnapshot = nil
             isLaunchPosterVisible = false
             hasPreparedLaunchPoster = true
@@ -120,11 +141,6 @@ struct RootView: View {
         launchPosterSnapshot = portfolioStore.activeLaunchPoster
         isLaunchPosterVisible = launchPosterSnapshot != nil
         hasPreparedLaunchPoster = true
-    }
-
-    private func prefetchUnlockedPhotosIfAllowed() {
-        guard subscription.hasFullPhotoAccess || adminSession.isAuthenticated else { return }
-        portfolioStore.prefetchUnlockedPortfolioImages()
     }
 
     private func refreshProtectedContentIfAllowed(reloadPublicIfLocked: Bool = true) async {
@@ -140,6 +156,5 @@ struct RootView: View {
                 await portfolioStore.refresh()
             }
         }
-        prefetchUnlockedPhotosIfAllowed()
     }
 }

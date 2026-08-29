@@ -3,25 +3,47 @@ import SwiftUI
 struct AboutView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var localWeather: LocalWeatherStore
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
         ZStack {
             AppTheme.ink.ignoresSafeArea()
             ScrollView {
-                VStack(spacing: 0) {
-                    portrait
-                    biography
-                    profileActions
-                    links
-                    copyrightNotice
-                    adminAccess
-                    weatherAttribution
+                if horizontalSizeClass == .regular {
+                    HStack(alignment: .top, spacing: 24) {
+                        portrait
+                            .frame(maxWidth: 520)
+                        profileDetails
+                            .frame(maxWidth: 620)
+                    }
+                    .frame(maxWidth: 1_164)
+                    .padding(.horizontal, 24)
+                    .frame(maxWidth: .infinity)
+                } else {
+                    VStack(spacing: 0) {
+                        portrait
+                            .frame(maxWidth: 720)
+                            .frame(maxWidth: .infinity)
+                        profileDetails
+                    }
                 }
             }
             .scrollIndicators(.hidden)
             .contentMargins(.bottom, 84, for: .scrollContent)
         }
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private var profileDetails: some View {
+        VStack(spacing: 0) {
+            biography
+            profileActions
+            links
+            copyrightNotice
+            adminAccess
+            weatherAttribution
+        }
     }
 
     private var portrait: some View {
@@ -43,11 +65,11 @@ struct AboutView: View {
                 Text("短剧演员 / 模特 / 视频创作者")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.7))
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.78)
             }
             .padding(22)
         }
-        .frame(maxWidth: 720)
-        .frame(maxWidth: .infinity)
     }
 
     private var biography: some View {

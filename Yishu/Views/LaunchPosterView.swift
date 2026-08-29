@@ -9,13 +9,17 @@ struct LaunchPosterView: View {
     var body: some View {
         ZStack {
             GeometryReader { proxy in
-                Image("HeroOne")
+                Image("LaunchPosterFallback")
                     .resizable()
                     .scaledToFill()
                     .frame(width: proxy.size.width, height: proxy.size.height)
                     .clipped()
 
-                AsyncImage(url: poster.imageURL) { phase in
+                DownsampledAsyncImage(
+                    url: poster.imageURL,
+                    targetSize: proxy.size,
+                    maximumPixelSize: 1_800
+                ) { phase in
                     if case .success(let image) = phase {
                         image
                             .resizable()
@@ -84,6 +88,7 @@ struct LaunchPosterView: View {
             .padding(.top, 12)
             .padding(.bottom, 20)
         }
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .background(AppTheme.ink.ignoresSafeArea())
         .task(id: poster.id) {
             do {

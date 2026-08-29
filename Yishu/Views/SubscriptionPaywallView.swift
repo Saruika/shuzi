@@ -3,6 +3,7 @@ import StoreKit
 
 struct SubscriptionPaywallView: View {
     @EnvironmentObject private var subscription: SubscriptionStore
+    @EnvironmentObject private var portfolioStore: PortfolioStore
     @Environment(\.dismiss) private var dismiss
     @State private var legalDocument: SubscriptionLegalDocument?
     @State private var showManageSubscriptions = false
@@ -35,24 +36,23 @@ struct SubscriptionPaywallView: View {
             }
             .manageSubscriptionsSheet(isPresented: $showManageSubscriptions)
         }
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .preferredColorScheme(.dark)
     }
 
     private var hero: some View {
         VStack(spacing: 16) {
-            Image(systemName: subscription.hasFullPhotoAccess ? "checkmark.seal.fill" : "photo.stack.fill")
+            Image(systemName: hasUsableFullAccess ? "checkmark.seal.fill" : "photo.stack.fill")
                 .font(.system(size: 44, weight: .light))
                 .foregroundStyle(AppTheme.gold)
                 .frame(width: 82, height: 82)
                 .background(AppTheme.gold.opacity(0.1), in: Circle())
 
-            Text(subscription.hasFullPhotoAccess ? "全部作品已解锁" : "解锁全部影像作品")
+            Text(heroTitle)
                 .font(.editorial(34))
                 .multilineTextAlignment(.center)
 
-            Text(subscription.hasFullPhotoAccess
-                 ? "感谢你的支持，订阅有效期间可以浏览全部相册照片。"
-                 : "每个相册可免费预览 3 张照片，订阅后即可浏览所有完整作品。")
+            Text(heroMessage)
                 .font(.subheadline)
                 .foregroundStyle(AppTheme.muted)
                 .multilineTextAlignment(.center)
@@ -87,18 +87,24 @@ struct SubscriptionPaywallView: View {
 
     private var purchaseSection: some View {
         VStack(spacing: 12) {
-            if subscription.hasFullPhotoAccess {
-                Label("订阅已生效", systemImage: "checkmark.circle.fill")
+            if subscription.hasActiveSubscription {
+                Label(subscriptionStatusTitle, systemImage: subscriptionStatusIcon)
                     .font(.headline)
                     .foregroundStyle(AppTheme.gold)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 15)
                     .background(AppTheme.gold.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
 
-                if subscription.hasActiveSubscription {
-                    Button("管理订阅") { showManageSubscriptions = true }
-                        .buttonStyle(SubscriptionSecondaryButtonStyle())
+                if !hasUsableFullAccess {
+                    Button("重新加载完整作品") {
+                        Task { await reloadProtectedContent() }
+                    }
+                    .buttonStyle(SubscriptionSecondaryButtonStyle())
+                    .disabled(portfolioStore.protectedContentState == .loading)
                 }
+
+                Button("管理订阅") { showManageSubscriptions = true }
+                    .buttonStyle(SubscriptionSecondaryButtonStyle())
             } else {
                 Button {
                     Task { await subscription.purchaseMonthly() }
@@ -137,11 +143,10 @@ struct SubscriptionPaywallView: View {
             }
 
 #if DEBUG
-            Button(subscription.hasFullPhotoAccess ? "开发测试：恢复访客状态" : "开发测试：模拟订阅成功") {
-                subscription.toggleDebugAccess()
-            }
-            .font(.caption)
-            .foregroundStyle(AppTheme.gold.opacity(0.85))
+            Label("开发构建也使用 Apple Sandbox 测试真实订阅链路。", systemImage: "hammer")
+                .font(.caption)
+                .foregroundStyle(AppTheme.gold.opacity(0.85))
+                .multilineTextAlignment(.center)
 #endif
 
             if let message = subscription.statusMessage {
@@ -151,7 +156,61 @@ struct SubscriptionPaywallView: View {
                     .multilineTextAlignment(.center)
                     .padding(.top, 2)
             }
+
+            if subscription.hasActiveSubscription,
+               let message = portfolioStore.statusMessage {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.muted)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 2)
+            }
         }
+    }
+
+    private var hasUsableFullAccess: Bool {
+        subscription.hasActiveSubscription && portfolioStore.protectedContentState == .available
+    }
+
+    private var heroTitle: String {
+        if hasUsableFullAccess { return "全部作品已解锁" }
+        if subscription.hasActiveSubscription { return "订阅已确认" }
+        return "解锁全部影像作品"
+    }
+
+    private var heroMessage: String {
+        if hasUsableFullAccess {
+            return "感谢你的支持，订阅有效期间可以浏览全部相册照片。"
+        }
+        if subscription.hasActiveSubscription {
+            return "Apple 订阅有效，正在安全加载完整作品。加载成功前仍保留 3 张免费预览。"
+        }
+        return "每个相册可免费预览 3 张照片，订阅后即可浏览所有完整作品。"
+    }
+
+    private var subscriptionStatusTitle: String {
+        switch portfolioStore.protectedContentState {
+        case .available:
+            return "订阅已生效"
+        case .loading:
+            return "正在加载完整作品"
+        case .locked, .unavailable:
+            return "订阅已确认，内容待加载"
+        }
+    }
+
+    private var subscriptionStatusIcon: String {
+        portfolioStore.protectedContentState == .available
+            ? "checkmark.circle.fill"
+            : "arrow.clockwise.circle"
+    }
+
+    private func reloadProtectedContent() async {
+        guard let entitlementJWS = subscription.entitlementJWS else {
+            await subscription.restorePurchases()
+            return
+        }
+        await portfolioStore.refreshPremiumContent(with: entitlementJWS)
     }
 
     private var legalDisclosure: some View {

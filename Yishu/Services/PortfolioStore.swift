@@ -6,6 +6,19 @@ enum ContentOrigin: Equatable {
     case network
 }
 
+enum ProtectedContentState: Equatable {
+    case locked
+    case loading
+    case available
+    case unavailable
+}
+
+private enum PremiumContentError: Error {
+    case credentialRejected
+    case verifierUnavailable
+    case serverUnavailable
+}
+
 private final class ProtectedContentSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(
         _ session: URLSession,
@@ -35,6 +48,7 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var statusMessage: String?
     @Published private(set) var contentOrigin: ContentOrigin = .bundled
+    @Published private(set) var protectedContentState: ProtectedContentState = .locked
 
     private let baseURL = URL(string: "https://www.shuzijun.com.cn/wp-json/wp/v2")!
     private let protectedSession: URLSession = {
@@ -52,27 +66,34 @@ final class PortfolioStore: ObservableObject {
             delegateQueue: nil
         )
     }()
-    private var prefetchTask: Task<Void, Never>?
+    init() {}
 
-    init() {
-        if let cache = Self.loadCache(), !cache.portfolios.isEmpty {
-            portfolios = cache.portfolios
-            heroImages = cache.heroImages ?? ContentCatalog.heroImages
-            launchPosters = cache.launchPosters ?? ContentCatalog.launchPosters
-            showreel = cache.showreel ?? ContentCatalog.showreel
-            dramas = cache.dramas ?? ContentCatalog.dramas
-            lastUpdated = cache.updatedAt
-            contentOrigin = .cached
-        }
+    /// Disk reads and JSON decoding stay off the main actor. The subsequent
+    /// network refresh replaces this snapshot with the latest public content.
+    func restoreCachedContent() async {
+        guard contentOrigin == .bundled else { return }
+        let cache = await Task.detached(priority: .userInitiated) {
+            Self.loadCache()
+        }.value
+        guard contentOrigin == .bundled,
+              let cache,
+              !cache.portfolios.isEmpty else { return }
+        portfolios = cache.portfolios
+        heroImages = cache.heroImages ?? ContentCatalog.heroImages
+        launchPosters = cache.launchPosters ?? ContentCatalog.launchPosters
+        showreel = cache.showreel ?? ContentCatalog.showreel
+        dramas = cache.dramas ?? ContentCatalog.dramas
+        lastUpdated = cache.updatedAt
+        contentOrigin = .cached
     }
 
     var syncStatus: String {
         if isRefreshing { return "正在同步" }
         switch contentOrigin {
         case .network:
-            return "内容已同步"
+            return lastUpdated == nil ? "内容已同步" : "内容更新于"
         case .cached:
-            return "上次同步内容"
+            return lastUpdated == nil ? "上次同步内容" : "上次更新于"
         case .bundled:
             return "离线基础内容"
         }
@@ -95,20 +116,19 @@ final class PortfolioStore: ObservableObject {
         dramas = manifest.dramas
         lastUpdated = manifest.updatedAt
         contentOrigin = .network
+        protectedContentState = .available
         statusMessage = nil
-        prefetchImages(
-            in: manifest.portfolios,
-            dramas: manifest.dramas,
-            posterURL: manifest.showreel.posterURL,
-            heroImages: manifest.heroImages,
-            launchPosters: manifest.launchPosters ?? launchPosters
-        )
     }
 
     /// Premium manifests can contain short-lived signed URLs. They are applied
     /// only in memory and are never written to the app cache or device backup.
     func refreshPremiumContent(with transactionJWS: String) async {
-        guard (100...16_384).contains(transactionJWS.count) else { return }
+        guard (100...16_384).contains(transactionJWS.count) else {
+            protectedContentState = .unavailable
+            statusMessage = "Apple 订阅凭证不完整，请恢复购买后重试。"
+            return
+        }
+        protectedContentState = .loading
         do {
             let manifest = try await fetchPremiumContentManifest(transactionJWS: transactionJWS)
             guard manifest.schemaVersion == 1,
@@ -117,7 +137,14 @@ final class PortfolioStore: ObservableObject {
                 throw URLError(.secureConnectionFailed)
             }
             applyPublishedManifest(manifest)
+        } catch PremiumContentError.verifierUnavailable {
+            protectedContentState = .unavailable
+            statusMessage = "订阅已确认，但完整内容服务尚未就绪。"
+        } catch PremiumContentError.credentialRejected {
+            protectedContentState = .unavailable
+            statusMessage = "Apple 订阅凭证未通过服务器校验，请恢复购买后重试。"
         } catch {
+            protectedContentState = .unavailable
             statusMessage = "订阅已确认，受保护照片暂时无法载入。"
         }
     }
@@ -125,7 +152,7 @@ final class PortfolioStore: ObservableObject {
     /// Immediately removes protected URLs when a subscription expires or an
     /// administrator signs out, before the public preview refresh completes.
     func discardProtectedContent() {
-        prefetchTask?.cancel()
+        protectedContentState = .locked
         portfolios = portfolios.map { portfolio in
             let preview = Array(portfolio.images.prefix(PhotoAccessPolicy.freePreviewCount))
             return Portfolio(
@@ -162,21 +189,15 @@ final class PortfolioStore: ObservableObject {
             dramas = manifest.dramas
             lastUpdated = manifest.updatedAt
             contentOrigin = .network
+            protectedContentState = .locked
             statusMessage = nil
-            Self.persistCache(
+            Self.persistCacheInBackground(
                 portfolios: manifest.portfolios,
                 heroImages: manifest.heroImages,
                 launchPosters: manifest.launchPosters ?? launchPosters,
                 showreel: manifest.showreel,
                 dramas: manifest.dramas,
                 updatedAt: manifest.updatedAt
-            )
-            prefetchImages(
-                in: manifest.portfolios,
-                dramas: manifest.dramas,
-                posterURL: manifest.showreel.posterURL,
-                heroImages: manifest.heroImages,
-                launchPosters: manifest.launchPosters ?? launchPosters
             )
         } catch {
             do {
@@ -186,20 +207,13 @@ final class PortfolioStore: ObservableObject {
                 lastUpdated = Date()
                 contentOrigin = .network
                 statusMessage = "内容接口升级中，照片已同步"
-                Self.persistCache(
+                Self.persistCacheInBackground(
                     portfolios: remotePortfolios,
                     heroImages: heroImages,
                     launchPosters: launchPosters,
                     showreel: showreel,
                     dramas: dramas,
                     updatedAt: lastUpdated ?? Date()
-                )
-                prefetchImages(
-                    in: remotePortfolios,
-                    dramas: dramas,
-                    posterURL: showreel.posterURL,
-                    heroImages: heroImages,
-                    launchPosters: launchPosters
                 )
             } catch {
                 statusMessage = contentOrigin == .bundled
@@ -209,72 +223,7 @@ final class PortfolioStore: ObservableObject {
         }
     }
 
-    private func prefetchImages(
-        in portfolios: [Portfolio],
-        dramas: [DramaWork],
-        posterURL: URL,
-        heroImages: [URL],
-        launchPosters: [LaunchPosterContent]
-    ) {
-        let priorityURLs = Self.uniqueURLs(
-            heroImages + launchPosters.map(\.imageURL) + [posterURL]
-        )
-        let prioritySet = Set(priorityURLs)
-        let remainingURLs = Self.uniqueURLs(
-            portfolios.flatMap { portfolio in
-                portfolio.images.prefix(PhotoAccessPolicy.freePreviewCount).map(\.url)
-                    + [portfolio.coverURL].compactMap { $0 }
-            } + dramas.map(\.imageURL)
-        ).filter { !prioritySet.contains($0) }
-
-        prefetchTask?.cancel()
-        prefetchTask = Task.detached(priority: .utility) {
-            // The first carousel transition occurs after five seconds. Fetch
-            // every hero concurrently so a cold launch never turns into a
-            // placeholder while the next slide is arriving.
-            await withTaskGroup(of: Void.self) { group in
-                for url in priorityURLs {
-                    group.addTask {
-                        await Self.prefetch(url)
-                    }
-                }
-            }
-
-            for url in remainingURLs {
-                guard !Task.isCancelled else { return }
-                await Self.prefetch(url)
-            }
-        }
-    }
-
-    /// Called only after StoreKit or administrator authentication has granted
-    /// access. Visitors never background-download the locked portion of an album.
-    func prefetchUnlockedPortfolioImages() {
-        let urls = Self.uniqueURLs(portfolios.flatMap { $0.images.map(\.url) })
-        prefetchTask?.cancel()
-        prefetchTask = Task.detached(priority: .utility) {
-            for url in urls {
-                guard !Task.isCancelled else { return }
-                await Self.prefetch(url)
-            }
-        }
-    }
-
-    nonisolated private static func uniqueURLs(_ urls: [URL]) -> [URL] {
-        var seen = Set<URL>()
-        return urls.filter { seen.insert($0).inserted }
-    }
-
-    nonisolated private static func prefetch(_ url: URL) async {
-        guard !Task.isCancelled else { return }
-        var request = URLRequest(url: url)
-        request.cachePolicy = .returnCacheDataElseLoad
-        request.timeoutInterval = 20
-        guard URLCache.shared.cachedResponse(for: request) == nil else { return }
-        _ = try? await URLSession.shared.data(for: request)
-    }
-
-    private static func loadCache() -> PortfolioCacheEnvelope? {
+    nonisolated private static func loadCache() -> PortfolioCacheEnvelope? {
         guard let url = cacheFileURL(createDirectory: false),
               let data = try? Data(contentsOf: url),
               data.count <= 5 * 1024 * 1024,
@@ -284,7 +233,27 @@ final class PortfolioStore: ObservableObject {
         return cache
     }
 
-    private static func persistCache(
+    private static func persistCacheInBackground(
+        portfolios: [Portfolio],
+        heroImages: [URL],
+        launchPosters: [LaunchPosterContent],
+        showreel: ShowreelContent,
+        dramas: [DramaWork],
+        updatedAt: Date
+    ) {
+        Task.detached(priority: .utility) {
+            Self.persistCache(
+                portfolios: portfolios,
+                heroImages: heroImages,
+                launchPosters: launchPosters,
+                showreel: showreel,
+                dramas: dramas,
+                updatedAt: updatedAt
+            )
+        }
+    }
+
+    nonisolated private static func persistCache(
         portfolios: [Portfolio],
         heroImages: [URL],
         launchPosters: [LaunchPosterContent],
@@ -319,7 +288,7 @@ final class PortfolioStore: ObservableObject {
         }
     }
 
-    private static func cacheFileURL(createDirectory: Bool) -> URL? {
+    nonisolated private static func cacheFileURL(createDirectory: Bool) -> URL? {
         guard let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -421,8 +390,18 @@ final class PortfolioStore: ObservableObject {
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
         let (data, response) = try await protectedSession.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.userAuthenticationRequired)
+        guard let http = response as? HTTPURLResponse else {
+            throw PremiumContentError.serverUnavailable
+        }
+        switch http.statusCode {
+        case 200..<300:
+            break
+        case 401, 403:
+            throw PremiumContentError.credentialRejected
+        case 503:
+            throw PremiumContentError.verifierUnavailable
+        default:
+            throw PremiumContentError.serverUnavailable
         }
         guard data.count <= 8 * 1024 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
         let decoder = JSONDecoder()

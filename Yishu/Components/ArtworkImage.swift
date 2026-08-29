@@ -1,6 +1,143 @@
 import AVFoundation
+import ImageIO
 import SwiftUI
 import UIKit
+
+private enum ArtworkImageLoadError: Error {
+    case invalidResponse
+    case payloadTooLarge
+    case decodeFailed
+}
+
+/// A small, size-aware image pipeline. `AsyncImage` decodes the original file
+/// before SwiftUI scales it, which is expensive for the 2560 px portfolio
+/// artwork. This pipeline creates a thumbnail close to the actual view size and
+/// coalesces duplicate requests made by adjacent carousel/gallery views.
+private actor ArtworkImagePipeline {
+    static let shared = ArtworkImagePipeline()
+
+    private let cache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 24
+        cache.totalCostLimit = 48 * 1024 * 1024
+        return cache
+    }()
+    private var inFlight: [String: Task<UIImage, Error>] = [:]
+
+    func image(for url: URL, maxPixelSize: Int) async throws -> UIImage {
+        let bucket = min(2_200, max(320, ((maxPixelSize + 159) / 160) * 160))
+        let key = "\(url.absoluteString)#\(bucket)"
+        if let cached = cache.object(forKey: key as NSString) {
+            return cached
+        }
+        if let existing = inFlight[key] {
+            return try await existing.value
+        }
+
+        let task = Task.detached(priority: .utility) {
+            var request = URLRequest(url: url)
+            request.cachePolicy = .returnCacheDataElseLoad
+            request.timeoutInterval = 20
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200..<300).contains(http.statusCode) else {
+                throw ArtworkImageLoadError.invalidResponse
+            }
+            guard data.count <= 20 * 1024 * 1024 else {
+                throw ArtworkImageLoadError.payloadTooLarge
+            }
+            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  let cgImage = CGImageSourceCreateThumbnailAtIndex(
+                    source,
+                    0,
+                    [
+                        kCGImageSourceCreateThumbnailFromImageAlways: true,
+                        kCGImageSourceCreateThumbnailWithTransform: true,
+                        kCGImageSourceThumbnailMaxPixelSize: bucket,
+                        kCGImageSourceShouldCacheImmediately: true,
+                    ] as CFDictionary
+                  ) else {
+                throw ArtworkImageLoadError.decodeFailed
+            }
+            return UIImage(cgImage: cgImage)
+        }
+        inFlight[key] = task
+
+        do {
+            let image = try await task.value
+            let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
+            cache.setObject(image, forKey: key as NSString, cost: cost)
+            inFlight[key] = nil
+            return image
+        } catch {
+            inFlight[key] = nil
+            throw error
+        }
+    }
+}
+
+struct DownsampledAsyncImage<Content: View>: View {
+    let url: URL?
+    let targetSize: CGSize
+    var maximumPixelSize: Int = 2_200
+    let content: (AsyncImagePhase) -> Content
+
+    @Environment(\.displayScale) private var displayScale
+    @State private var image: UIImage?
+    @State private var error: Error?
+
+    init(
+        url: URL?,
+        targetSize: CGSize,
+        maximumPixelSize: Int = 2_200,
+        @ViewBuilder content: @escaping (AsyncImagePhase) -> Content
+    ) {
+        self.url = url
+        self.targetSize = targetSize
+        self.maximumPixelSize = maximumPixelSize
+        self.content = content
+    }
+
+    private var maxPixelSize: Int {
+        min(
+            maximumPixelSize,
+            Int(ceil(max(targetSize.width, targetSize.height) * displayScale))
+        )
+    }
+
+    private var requestID: String {
+        guard let url else { return "missing" }
+        return "\(url.absoluteString)#\(maxPixelSize)"
+    }
+
+    var body: some View {
+        content(phase)
+            .task(id: requestID) {
+                image = nil
+                error = nil
+                guard let url, maxPixelSize > 0 else { return }
+                do {
+                    let loaded = try await ArtworkImagePipeline.shared.image(
+                        for: url,
+                        maxPixelSize: maxPixelSize
+                    )
+                    guard !Task.isCancelled else { return }
+                    image = loaded
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.error = error
+                }
+            }
+    }
+
+    private var phase: AsyncImagePhase {
+        if let image { return .success(Image(uiImage: image)) }
+        if let error { return .failure(error) }
+        return .empty
+    }
+}
 
 struct ArtworkImage: View {
     let url: URL?
@@ -8,9 +145,9 @@ struct ArtworkImage: View {
 
     var body: some View {
         GeometryReader { proxy in
-            AsyncImage(
+            DownsampledAsyncImage(
                 url: url,
-                transaction: Transaction(animation: .easeOut(duration: 0.35))
+                targetSize: proxy.size
             ) { phase in
                 switch phase {
                 case .empty:
@@ -21,6 +158,7 @@ struct ArtworkImage: View {
                         .resizable()
                         .aspectRatio(contentMode: contentMode)
                         .frame(width: proxy.size.width, height: proxy.size.height)
+                        .animation(.easeOut(duration: 0.25), value: url)
                         .transition(.opacity)
                 case .failure:
                     placeholder

@@ -12,18 +12,10 @@ final class SubscriptionStore: ObservableObject {
     @Published private(set) var isPurchasing = false
     @Published var statusMessage: String?
 
-#if DEBUG
-    @Published private(set) var isDebugAccessEnabled = false
-#endif
-
     private var transactionUpdatesTask: Task<Void, Never>?
 
     var hasFullPhotoAccess: Bool {
-#if DEBUG
-        hasActiveSubscription || isDebugAccessEnabled
-#else
         hasActiveSubscription
-#endif
     }
 
     var localizedMonthlyPrice: String {
@@ -84,6 +76,13 @@ final class SubscriptionStore: ObservableObject {
                     statusMessage = "购买凭证未通过 Apple 验证，请联系支持。"
                     return
                 }
+                // Publish the verified transaction immediately. Waiting for
+                // currentEntitlements after finish() can briefly leave the UI
+                // in an "unlocked" state without the JWS needed by the
+                // protected-content endpoint.
+                hasActiveSubscription = true
+                entitlementJWS = verification.jwsRepresentation
+                statusMessage = "订阅已确认，正在加载完整作品。"
                 await transaction.finish()
                 await refreshEntitlement()
                 if !hasActiveSubscription {
@@ -110,7 +109,7 @@ final class SubscriptionStore: ObservableObject {
             try await AppStore.sync()
             await refreshEntitlement()
             statusMessage = hasActiveSubscription
-                ? "已恢复订阅，全部作品现已解锁。"
+                ? "已恢复订阅，正在加载完整作品。"
                 : "没有找到仍在有效期内的订阅。"
         } catch {
             statusMessage = "恢复购买失败：\(error.localizedDescription)"
@@ -120,13 +119,6 @@ final class SubscriptionStore: ObservableObject {
     func clearStatusMessage() {
         statusMessage = nil
     }
-
-#if DEBUG
-    func toggleDebugAccess() {
-        isDebugAccessEnabled.toggle()
-        statusMessage = isDebugAccessEnabled ? "测试模式：全部作品已解锁。" : nil
-    }
-#endif
 
     private func refreshEntitlement() async {
         var isEntitled = false
