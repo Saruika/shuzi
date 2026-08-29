@@ -13,6 +13,7 @@ struct AboutView: View {
                     biography
                     profileActions
                     links
+                    copyrightNotice
                     adminAccess
                     weatherAttribution
                 }
@@ -125,6 +126,42 @@ struct AboutView: View {
             contactLink("官方网站", detail: "shuzijun.com.cn", icon: "globe.asia.australia", url: ContentCatalog.websiteURL)
         }
         .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
+    private var copyrightNotice: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Label("版权与授权", systemImage: "c.circle")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(AppTheme.gold)
+
+            Text("本 App 展示的照片与影像均已取得合法展示授权，相关著作权、肖像权及其他权利归各自权利人所有。未经书面许可，不得下载、复制、截图传播、转载、改编、二次创作或用于商业用途。")
+                .font(.system(size: 13))
+                .lineSpacing(6)
+                .foregroundStyle(.white.opacity(0.68))
+                .fixedSize(horizontal: false, vertical: true)
+
+            NavigationLink {
+                CollaborationInquiryView()
+            } label: {
+                HStack(spacing: 6) {
+                    Text("申请内容使用授权")
+                    Image(systemName: "arrow.up.right")
+                        .font(.caption2.weight(.semibold))
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(AppTheme.warmWhite)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(16)
+        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
+        .overlay {
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(AppTheme.gold.opacity(0.18), lineWidth: 0.8)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
         .padding(.bottom, 8)
     }
 

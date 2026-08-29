@@ -303,6 +303,20 @@ struct PortfolioDetailView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 28)
                     }
+
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "c.circle")
+                            .foregroundStyle(AppTheme.gold)
+                        Text("本组照片已获合法展示授权并受版权保护，仅限在本 App 内浏览；未经许可不得下载、复制、转载、改编或用于商业用途。")
+                            .font(.caption)
+                            .lineSpacing(4)
+                            .foregroundStyle(AppTheme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(14)
+                    .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
+                    .padding(.horizontal, 12)
+                    .padding(.top, 24)
                 }
                 .padding(.bottom, 30)
             }
