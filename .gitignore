@@ -20,3 +20,5 @@ xcuserdata/
 *.mobileprovision
 Secrets.xcconfig
 AuthKey_*.p8
+__pycache__/
+*.py[cod]
