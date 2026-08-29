@@ -104,7 +104,7 @@ struct PortfolioGridView: View {
                 .padding(.bottom, 36)
             }
             .contentMargins(.bottom, 84, for: .scrollContent)
-            .refreshable { await store.refresh() }
+            .refreshable { await refreshContent() }
         }
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: Portfolio.self) { portfolio in
@@ -119,6 +119,17 @@ struct PortfolioGridView: View {
 
     private var hasFullAccess: Bool {
         subscription.hasFullPhotoAccess || admin.isAuthenticated
+    }
+
+    private func refreshContent() async {
+        await store.refresh()
+        if admin.isAuthenticated {
+            if let manifest = try? await admin.fetchContent() {
+                store.applyPublishedManifest(manifest)
+            }
+        } else if let entitlementJWS = subscription.entitlementJWS {
+            await store.refreshPremiumContent(with: entitlementJWS)
+        }
     }
 }
 
@@ -145,7 +156,7 @@ private struct PortfolioGridCard: View {
             .padding(14)
 
             if !subscription.hasFullPhotoAccess, !admin.isAuthenticated,
-               portfolio.images.count > PhotoAccessPolicy.freePreviewCount {
+               portfolio.displayImageCount > PhotoAccessPolicy.freePreviewCount {
                 VStack {
                     HStack {
                         Spacer()
@@ -168,6 +179,7 @@ private struct PortfolioGridCard: View {
 
 struct PortfolioDetailView: View {
     let portfolio: Portfolio
+    @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
     @EnvironmentObject private var subscription: SubscriptionStore
     @EnvironmentObject private var admin: AdminSessionStore
@@ -185,11 +197,21 @@ struct PortfolioDetailView: View {
     }
 
     private var galleryImages: [PortfolioImage] {
-        Array(portfolio.images.dropFirst())
+        Array(currentPortfolio.images.dropFirst())
+    }
+
+    private var lockedImageNumbers: [Int] {
+        guard !hasFullAccess,
+              currentPortfolio.displayImageCount > currentPortfolio.images.count else { return [] }
+        return Array((currentPortfolio.images.count + 1)...currentPortfolio.displayImageCount)
     }
 
     private var hasFullAccess: Bool {
         subscription.hasFullPhotoAccess || admin.isAuthenticated
+    }
+
+    private var currentPortfolio: Portfolio {
+        store.portfolios.first { $0.id == portfolio.id } ?? portfolio
     }
 
     var body: some View {
@@ -197,11 +219,11 @@ struct PortfolioDetailView: View {
             AppTheme.ink.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    if let firstImage = portfolio.images.first {
+                    if let firstImage = currentPortfolio.images.first {
                         Button { selectedImage = firstImage } label: {
                             PortfolioHeroArtwork(
                                 image: firstImage,
-                                portfolio: portfolio
+                                portfolio: currentPortfolio
                             )
                             .frame(maxWidth: 760)
                             .frame(height: heroHeight)
@@ -210,13 +232,13 @@ struct PortfolioDetailView: View {
                         .buttonStyle(.plain)
                         .accessibilityLabel("打开\(firstImage.altText)")
                     } else {
-                        PortfolioEmptyArtwork(portfolio: portfolio)
+                        PortfolioEmptyArtwork(portfolio: currentPortfolio)
                             .frame(height: 360)
                     }
 
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("\(portfolio.images.count) 帧影像")
+                            Text("\(currentPortfolio.displayImageCount) 帧影像")
                                 .foregroundStyle(AppTheme.warmWhite)
                             Text(hasFullAccess ? "点击照片全屏浏览" : "前 3 张可免费预览")
                                 .font(.caption2)
@@ -243,7 +265,7 @@ struct PortfolioDetailView: View {
                             let imageNumber = offset + 2
                             let canAccess = PhotoAccessPolicy.canAccess(
                                 image,
-                                in: portfolio,
+                                in: currentPortfolio,
                                 hasSubscription: subscription.hasFullPhotoAccess,
                                 isAdministrator: admin.isAuthenticated
                             )
@@ -263,10 +285,18 @@ struct PortfolioDetailView: View {
                             .buttonStyle(.plain)
                             .accessibilityLabel(canAccess ? image.altText : "第 \(imageNumber) 张照片，需要订阅")
                         }
+
+                        ForEach(lockedImageNumbers, id: \.self) { imageNumber in
+                            Button { showSubscription = true } label: {
+                                LockedPortfolioGalleryTile(number: imageNumber)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("第 \(imageNumber) 张照片，需要订阅")
+                        }
                     }
                     .padding(.horizontal, 12)
 
-                    if portfolio.images.count == 1 {
+                    if currentPortfolio.displayImageCount == 1 {
                         Text("本组影像暂时只有封面作品")
                             .font(.caption)
                             .foregroundStyle(AppTheme.muted)
@@ -277,13 +307,13 @@ struct PortfolioDetailView: View {
                 .padding(.bottom, 30)
             }
         }
-        .navigationTitle(portfolio.title)
+        .navigationTitle(currentPortfolio.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .onAppear { recentlyViewed.record(portfolio) }
+        .onAppear { recentlyViewed.record(currentPortfolio) }
         .fullScreenCover(item: $selectedImage) { image in
-            GalleryViewer(portfolio: portfolio, initialImage: image)
+            GalleryViewer(portfolio: currentPortfolio, initialImage: image)
         }
         .sheet(isPresented: $showSubscription) {
             SubscriptionPaywallView()

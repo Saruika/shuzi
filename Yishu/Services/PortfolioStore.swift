@@ -6,6 +6,24 @@ enum ContentOrigin: Equatable {
     case network
 }
 
+private final class ProtectedContentSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard request.url?.scheme?.lowercased() == "https",
+              request.url?.host?.lowercased() == "www.shuzijun.com.cn",
+              request.url?.port == nil || request.url?.port == 443 else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
+    }
+}
+
 @MainActor
 final class PortfolioStore: ObservableObject {
     @Published private(set) var portfolios: [Portfolio] = Portfolio.fallback
@@ -19,6 +37,21 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var contentOrigin: ContentOrigin = .bundled
 
     private let baseURL = URL(string: "https://www.shuzijun.com.cn/wp-json/wp/v2")!
+    private let protectedSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.urlCredentialStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 30
+        return URLSession(
+            configuration: configuration,
+            delegate: ProtectedContentSessionDelegate(),
+            delegateQueue: nil
+        )
+    }()
     private var prefetchTask: Task<Void, Never>?
 
     init() {
@@ -52,7 +85,9 @@ final class PortfolioStore: ObservableObject {
     }
 
     func applyPublishedManifest(_ manifest: AppContentManifest) {
-        guard manifest.schemaVersion == 1, !manifest.portfolios.isEmpty else { return }
+        guard manifest.schemaVersion == 1,
+              !manifest.portfolios.isEmpty,
+              ContentSecurityPolicy.isTrusted(manifest) else { return }
         portfolios = manifest.portfolios
         heroImages = manifest.heroImages
         launchPosters = manifest.launchPosters ?? launchPosters
@@ -61,14 +96,6 @@ final class PortfolioStore: ObservableObject {
         lastUpdated = manifest.updatedAt
         contentOrigin = .network
         statusMessage = nil
-        Self.persistCache(
-            portfolios: manifest.portfolios,
-            heroImages: manifest.heroImages,
-            launchPosters: manifest.launchPosters ?? launchPosters,
-            showreel: manifest.showreel,
-            dramas: manifest.dramas,
-            updatedAt: manifest.updatedAt
-        )
         prefetchImages(
             in: manifest.portfolios,
             dramas: manifest.dramas,
@@ -78,6 +105,44 @@ final class PortfolioStore: ObservableObject {
         )
     }
 
+    /// Premium manifests can contain short-lived signed URLs. They are applied
+    /// only in memory and are never written to the app cache or device backup.
+    func refreshPremiumContent(with transactionJWS: String) async {
+        guard (100...16_384).contains(transactionJWS.count) else { return }
+        do {
+            let manifest = try await fetchPremiumContentManifest(transactionJWS: transactionJWS)
+            guard manifest.schemaVersion == 1,
+                  !manifest.portfolios.isEmpty,
+                  ContentSecurityPolicy.isTrusted(manifest) else {
+                throw URLError(.secureConnectionFailed)
+            }
+            applyPublishedManifest(manifest)
+        } catch {
+            statusMessage = "订阅已确认，受保护照片暂时无法载入。"
+        }
+    }
+
+    /// Immediately removes protected URLs when a subscription expires or an
+    /// administrator signs out, before the public preview refresh completes.
+    func discardProtectedContent() {
+        prefetchTask?.cancel()
+        portfolios = portfolios.map { portfolio in
+            let preview = Array(portfolio.images.prefix(PhotoAccessPolicy.freePreviewCount))
+            return Portfolio(
+                id: portfolio.id,
+                title: portfolio.title,
+                subtitle: portfolio.subtitle,
+                eyebrow: portfolio.eyebrow,
+                slug: portfolio.slug,
+                websiteURL: portfolio.websiteURL,
+                coverURL: preview.first?.url ?? portfolio.coverURL,
+                images: preview,
+                totalImageCount: portfolio.displayImageCount
+            )
+        }
+        URLCache.shared.removeAllCachedResponses()
+    }
+
     func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
@@ -85,7 +150,9 @@ final class PortfolioStore: ObservableObject {
 
         do {
             let manifest = try await fetchContentManifest()
-            guard manifest.schemaVersion == 1, !manifest.portfolios.isEmpty else {
+            guard manifest.schemaVersion == 1,
+                  !manifest.portfolios.isEmpty,
+                  ContentSecurityPolicy.isTrusted(manifest) else {
                 throw URLError(.zeroByteResource)
             }
             portfolios = manifest.portfolios
@@ -155,7 +222,8 @@ final class PortfolioStore: ObservableObject {
         let prioritySet = Set(priorityURLs)
         let remainingURLs = Self.uniqueURLs(
             portfolios.flatMap { portfolio in
-                portfolio.images.map(\.url) + [portfolio.coverURL].compactMap { $0 }
+                portfolio.images.prefix(PhotoAccessPolicy.freePreviewCount).map(\.url)
+                    + [portfolio.coverURL].compactMap { $0 }
             } + dramas.map(\.imageURL)
         ).filter { !prioritySet.contains($0) }
 
@@ -179,6 +247,19 @@ final class PortfolioStore: ObservableObject {
         }
     }
 
+    /// Called only after StoreKit or administrator authentication has granted
+    /// access. Visitors never background-download the locked portion of an album.
+    func prefetchUnlockedPortfolioImages() {
+        let urls = Self.uniqueURLs(portfolios.flatMap { $0.images.map(\.url) })
+        prefetchTask?.cancel()
+        prefetchTask = Task.detached(priority: .utility) {
+            for url in urls {
+                guard !Task.isCancelled else { return }
+                await Self.prefetch(url)
+            }
+        }
+    }
+
     nonisolated private static func uniqueURLs(_ urls: [URL]) -> [URL] {
         var seen = Set<URL>()
         return urls.filter { seen.insert($0).inserted }
@@ -195,8 +276,12 @@ final class PortfolioStore: ObservableObject {
 
     private static func loadCache() -> PortfolioCacheEnvelope? {
         guard let url = cacheFileURL(createDirectory: false),
-              let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(PortfolioCacheEnvelope.self, from: data)
+              let data = try? Data(contentsOf: url),
+              data.count <= 5 * 1024 * 1024,
+              let cache = try? JSONDecoder().decode(PortfolioCacheEnvelope.self, from: data),
+              cache.isPublicPreview,
+              ContentSecurityPolicy.isTrusted(cache) else { return nil }
+        return cache
     }
 
     private static func persistCache(
@@ -215,10 +300,23 @@ final class PortfolioStore: ObservableObject {
                     launchPosters: launchPosters,
                     showreel: showreel,
                     dramas: dramas,
-                    updatedAt: updatedAt
+                    updatedAt: updatedAt,
+                    isPublicPreview: true
                 )
               ) else { return }
-        try? data.write(to: url, options: .atomic)
+        do {
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            try FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: url.path
+            )
+            var resourceValues = URLResourceValues()
+            resourceValues.isExcludedFromBackup = true
+            var protectedURL = url
+            try protectedURL.setResourceValues(resourceValues)
+        } catch {
+            // A failed cache write must never prevent the live catalog from loading.
+        }
     }
 
     private static func cacheFileURL(createDirectory: Bool) -> URL? {
@@ -231,7 +329,8 @@ final class PortfolioStore: ObservableObject {
         if createDirectory {
             try? FileManager.default.createDirectory(
                 at: directory,
-                withIntermediateDirectories: true
+                withIntermediateDirectories: true,
+                attributes: [.protectionKey: FileProtectionType.complete]
             )
         }
         return directory.appending(path: "portfolio-cache.json")
@@ -259,11 +358,13 @@ final class PortfolioStore: ObservableObject {
             )
             let media: [WPMedia] = try await request(mediaURL)
             let images = media.compactMap { item -> PortfolioImage? in
-                guard let full = URL(string: item.sourceURL) else { return nil }
+                guard let full = URL(string: item.sourceURL),
+                      ContentSecurityPolicy.isTrustedMediaURL(full) else { return nil }
                 let preferred = item.mediaDetails?.sizes?["large"]?.sourceURL
                     ?? item.mediaDetails?.sizes?["medium_large"]?.sourceURL
                     ?? item.sourceURL
-                guard let display = URL(string: preferred) else { return nil }
+                guard let display = URL(string: preferred),
+                      ContentSecurityPolicy.isTrustedMediaURL(display) else { return nil }
                 return PortfolioImage(
                     id: item.id,
                     url: display,
@@ -272,7 +373,8 @@ final class PortfolioStore: ObservableObject {
                 )
             }
 
-            guard let pageURL = URL(string: post.link) else { continue }
+            guard let pageURL = URL(string: post.link),
+                  ContentSecurityPolicy.isTrustedWebsiteURL(pageURL) else { continue }
             let metadata = Self.metadata(for: post.title.rendered)
             result.append(
                 Portfolio(
@@ -301,6 +403,28 @@ final class PortfolioStore: ObservableObject {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
+        guard data.count <= 5 * 1024 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let manifest = try decoder.decode(AppContentManifest.self, from: data)
+        guard ContentSecurityPolicy.isTrusted(manifest) else { throw URLError(.secureConnectionFailed) }
+        return manifest
+    }
+
+    private func fetchPremiumContentManifest(transactionJWS: String) async throws -> AppContentManifest {
+        var request = URLRequest(url: ContentCatalog.premiumAppContentURL)
+        request.timeoutInterval = 20
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Bearer \(transactionJWS)", forHTTPHeaderField: "Authorization")
+        request.setValue("Yishu-iOS/2.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+        let (data, response) = try await protectedSession.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.userAuthenticationRequired)
+        }
+        guard data.count <= 8 * 1024 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(AppContentManifest.self, from: data)
@@ -317,6 +441,7 @@ final class PortfolioStore: ObservableObject {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
+        guard data.count <= 5 * 1024 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
         return try JSONDecoder().decode(T.self, from: data)
     }
 
@@ -334,13 +459,83 @@ final class PortfolioStore: ObservableObject {
     }
 }
 
-private struct PortfolioCacheEnvelope: Codable {
+enum ContentSecurityPolicy {
+    private static let trustedMediaHosts: Set<String> = [
+        "www.shuzijun.com.cn",
+        "img.shuzijun.com.cn",
+        "shuzijun.com.cn",
+    ]
+
+    private static let trustedDestinationHosts: Set<String> = [
+        "novelquickapp.com",
+        "www.novelquickapp.com",
+        "xhslink.com",
+        "www.xhslink.com",
+        "v.douyin.com",
+        "www.douyin.com",
+        "www.xiaohongshu.com",
+    ]
+
+    static func isTrusted(_ manifest: AppContentManifest) -> Bool {
+        manifest.heroImages.allSatisfy(isTrustedMediaURL)
+            && (manifest.launchPosters ?? []).allSatisfy { isTrustedMediaURL($0.imageURL) }
+            && isTrustedMediaURL(manifest.showreel.videoURL)
+            && isTrustedMediaURL(manifest.showreel.posterURL)
+            && manifest.dramas.allSatisfy {
+                isTrustedMediaURL($0.imageURL) && isTrustedDestinationURL($0.destinationURL)
+            }
+            && manifest.portfolios.allSatisfy(isTrusted)
+    }
+
+    fileprivate static func isTrusted(_ cache: PortfolioCacheEnvelope) -> Bool {
+        (cache.heroImages ?? []).allSatisfy(isTrustedMediaURL)
+            && (cache.launchPosters ?? []).allSatisfy { isTrustedMediaURL($0.imageURL) }
+            && (cache.showreel.map {
+                isTrustedMediaURL($0.videoURL) && isTrustedMediaURL($0.posterURL)
+            } ?? true)
+            && (cache.dramas ?? []).allSatisfy {
+                isTrustedMediaURL($0.imageURL) && isTrustedDestinationURL($0.destinationURL)
+            }
+            && cache.portfolios.allSatisfy(isTrusted)
+    }
+
+    static func isTrustedMediaURL(_ url: URL) -> Bool {
+        isSecure(url) && trustedMediaHosts.contains(url.host?.lowercased() ?? "")
+    }
+
+    static func isTrustedWebsiteURL(_ url: URL) -> Bool {
+        isTrustedMediaURL(url)
+    }
+
+    private static func isTrustedDestinationURL(_ url: URL) -> Bool {
+        isSecure(url) && trustedDestinationHosts.contains(url.host?.lowercased() ?? "")
+    }
+
+    private static func isTrusted(_ portfolio: Portfolio) -> Bool {
+        isTrustedWebsiteURL(portfolio.websiteURL)
+            && (portfolio.totalImageCount.map { $0 >= portfolio.images.count && $0 <= 300 } ?? true)
+            && (portfolio.coverURL.map(isTrustedMediaURL) ?? true)
+            && portfolio.images.allSatisfy {
+                isTrustedMediaURL($0.url) && isTrustedMediaURL($0.fullSizeURL)
+            }
+    }
+
+    private static func isSecure(_ url: URL) -> Bool {
+        url.scheme?.lowercased() == "https"
+            && url.user == nil
+            && url.password == nil
+            && (url.port == nil || url.port == 443)
+    }
+}
+
+fileprivate struct PortfolioCacheEnvelope: Codable {
     let portfolios: [Portfolio]
     let heroImages: [URL]?
     let launchPosters: [LaunchPosterContent]?
     let showreel: ShowreelContent?
     let dramas: [DramaWork]?
     let updatedAt: Date
+    let isPublicPreview: Bool
 }
 
 private struct WPPortfolio: Decodable {

@@ -1,0 +1,12 @@
+--- a/usr/local/sbin/shuzijun-cdn-publish-worker
++++ b/usr/local/sbin/shuzijun-cdn-publish-worker
+@@
+ def read_queue(drain):
+-    QUEUE_PATH.touch(exist_ok=True)
++    if not QUEUE_PATH.exists():
++        QUEUE_PATH.touch()
+@@
+-        if drain:
++        if drain and values:
+             queue.seek(0)
+             queue.truncate(0)

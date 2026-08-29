@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned public content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author: Shuzijun
  */
 
@@ -13,15 +13,24 @@ final class Shuzijun_App_Content_API {
     const OPTION_UPDATED = 'shuzijun_app_content_updated_at';
     const CAPABILITY = 'manage_yishu_app_content';
     const ROLE = 'yishu_content_manager';
+    const FREE_PREVIEW_COUNT = 3;
 
     public static function init() {
         add_action('init', array(__CLASS__, 'ensure_roles'), 20);
         add_action('rest_api_init', array(__CLASS__, 'register_routes'));
         add_action('save_post_portfolio', array(__CLASS__, 'portfolio_changed'), 20, 3);
+        add_action('template_redirect', array(__CLASS__, 'block_public_portfolio_pages'), 1);
+        add_action('pre_get_posts', array(__CLASS__, 'hide_public_portfolio_queries'));
+        add_action('wp_head', array(__CLASS__, 'hide_public_portfolio_section'));
+        add_filter('rest_post_dispatch', array(__CLASS__, 'secure_rest_response'), 10, 3);
+        add_filter('rest_pre_dispatch', array(__CLASS__, 'block_public_catalog_routes'), 10, 3);
+        add_filter('wp_sitemaps_post_types', array(__CLASS__, 'remove_portfolios_from_sitemaps'));
+        add_filter('theme_mod_hero_cta', array(__CLASS__, 'public_hero_cta'));
+        add_filter('theme_mod_hero_cta_link', array(__CLASS__, 'public_hero_cta_link'));
 
         // Application Passwords are revocable, per-client credentials intended
-        // for HTTPS REST clients. Restrict them to the dedicated content role.
-        add_filter('wp_is_application_passwords_available', '__return_true', 20);
+        // for HTTPS REST clients. Keep the site's global disable policy and
+        // restrict the dedicated content credential to this plugin's routes.
         add_filter('wp_is_application_passwords_available_for_user', array(__CLASS__, 'application_passwords_for_user'), 20, 2);
     }
 
@@ -70,6 +79,12 @@ final class Shuzijun_App_Content_API {
             'permission_callback' => array(__CLASS__, 'can_manage'),
         ));
 
+        register_rest_route('shuzijun/v1', '/app-content/premium', array(
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => array(__CLASS__, 'get_premium_content'),
+            'permission_callback' => array(__CLASS__, 'can_access_premium'),
+        ));
+
         register_rest_route('shuzijun/v1', '/app-content/portfolio/(?P<id>\d+)/gallery', array(
             'methods' => WP_REST_Server::EDITABLE,
             'callback' => array(__CLASS__, 'update_gallery'),
@@ -86,8 +101,177 @@ final class Shuzijun_App_Content_API {
         ));
     }
 
-    public static function can_manage() {
-        return current_user_can(self::CAPABILITY);
+    public static function can_manage($request = null) {
+        if (!self::authenticate_content_manager($request)) { return false; }
+        if (!$request instanceof WP_REST_Request || $request->get_method() === 'GET') { return true; }
+
+        // Bound authenticated mutation bursts by WordPress user, not by a
+        // spoofable forwarding IP. Normal app publishing is far below this.
+        $key = 'yishu_app_rate_' . get_current_user_id();
+        $count = (int) get_transient($key);
+        if ($count >= 120) {
+            return new WP_Error(
+                'yishu_rate_limited',
+                '操作过于频繁，请稍后再试。',
+                array('status' => 429)
+            );
+        }
+        set_transient($key, $count + 1, MINUTE_IN_SECONDS);
+        return true;
+    }
+
+    private static function authenticate_content_manager($request) {
+        if (current_user_can(self::CAPABILITY)) { return true; }
+        if (!$request instanceof WP_REST_Request) { return false; }
+
+        $authorization = trim((string) $request->get_header('authorization'));
+        if (!preg_match('/^Basic\\s+([A-Za-z0-9+\\/=]{8,4096})$/', $authorization, $matches)) {
+            return false;
+        }
+        $decoded = base64_decode($matches[1], true);
+        if ($decoded === false || strlen($decoded) > 4096 || strpos($decoded, ':') === false) {
+            return false;
+        }
+        list($username, $password) = explode(':', $decoded, 2);
+        if (!$username || !$password || strlen($username) > 120 || strlen($password) > 256) {
+            return false;
+        }
+        // A security plugin disables Application Passwords globally. Enable
+        // verification only for this capability-scoped check, then immediately
+        // restore the site's global policy.
+        add_filter('wp_is_application_passwords_available', '__return_true', PHP_INT_MAX);
+        $user = wp_authenticate_application_password(null, $username, $password);
+        remove_filter('wp_is_application_passwords_available', '__return_true', PHP_INT_MAX);
+        if (is_wp_error($user) || !$user instanceof WP_User || !user_can($user, self::CAPABILITY)) {
+            return false;
+        }
+        wp_set_current_user($user->ID);
+        return true;
+    }
+
+    public static function secure_rest_response($result, $server, $request) {
+        if (!$request instanceof WP_REST_Request || strpos($request->get_route(), '/shuzijun/v1/') !== 0) {
+            return $result;
+        }
+        if (is_wp_error($result)) { return $result; }
+        $response = rest_ensure_response($result);
+        $response->header('X-Content-Type-Options', 'nosniff');
+        $response->header('X-Frame-Options', 'DENY');
+        $response->header('Referrer-Policy', 'no-referrer');
+        $response->header('X-Robots-Tag', 'noindex, nofollow');
+        if ($request->get_route() !== '/shuzijun/v1/app-content' || $request->get_method() !== 'GET') {
+            $response->header('Cache-Control', 'private, no-store');
+        }
+        return $response;
+    }
+
+    public static function block_public_catalog_routes($result, $server, $request) {
+        if ($result !== null || !$request instanceof WP_REST_Request
+            || self::authenticate_content_manager($request)) {
+            return $result;
+        }
+        $route = $request->get_route();
+        if (preg_match('#^/wp/v2/(portfolio|media)(?:/|$)#', $route)) {
+            return new WP_Error('rest_no_route', '未找到匹配 URL 和请求方式的路由。', array('status' => 404));
+        }
+        return $result;
+    }
+
+    public static function block_public_portfolio_pages() {
+        if (current_user_can(self::CAPABILITY)) { return; }
+        // Attachment pages reveal the original upload URL and can remain in
+        // search indexes even after a portfolio page is removed. The website
+        // does not use attachment pages, so fail closed for all visitors.
+        if (!is_singular('portfolio') && !is_post_type_archive('portfolio') && !is_attachment()) {
+            return;
+        }
+        global $wp_query;
+        $wp_query->set_404();
+        status_header(404);
+        nocache_headers();
+        wp_die(
+            esc_html__('此内容仅在易姝 App 内提供。', 'shuzijun'),
+            esc_html__('页面不可用', 'shuzijun'),
+            array('response' => 404)
+        );
+    }
+
+    public static function remove_portfolios_from_sitemaps($post_types) {
+        unset($post_types['portfolio']);
+        return $post_types;
+    }
+
+    public static function hide_public_portfolio_queries($query) {
+        if (is_admin() || current_user_can(self::CAPABILITY)
+            || (defined('REST_REQUEST') && REST_REQUEST)) {
+            return;
+        }
+        $post_type = $query->get('post_type');
+        $is_portfolio_query = $post_type === 'portfolio'
+            || (is_array($post_type) && in_array('portfolio', $post_type, true));
+        if ($is_portfolio_query) {
+            $query->set('post__in', array(0));
+        }
+    }
+
+    public static function hide_public_portfolio_section() {
+        if (current_user_can(self::CAPABILITY)) { return; }
+        echo '<style id="yishu-private-portfolio">#portfolio{display:none!important}</style>';
+    }
+
+    public static function public_hero_cta($value) {
+        return current_user_can(self::CAPABILITY) ? $value : '合作邀约';
+    }
+
+    public static function public_hero_cta_link($value) {
+        return current_user_can(self::CAPABILITY) ? $value : '#contact';
+    }
+
+    public static function can_access_premium(WP_REST_Request $request) {
+        if (self::authenticate_content_manager($request)) { return true; }
+
+        $authorization = trim((string) $request->get_header('authorization'));
+        if (!preg_match('/^Bearer\\s+([A-Za-z0-9._-]+)$/', $authorization, $matches)) {
+            return new WP_Error('premium_credential_required', '需要有效的 Apple 订阅凭证。', array('status' => 401));
+        }
+        $jws = $matches[1];
+        if (strlen($jws) < 100 || strlen($jws) > 16384) {
+            return new WP_Error('premium_credential_invalid', 'Apple 订阅凭证无效。', array('status' => 401));
+        }
+        $cache_key = 'yishu_entitlement_' . hash('sha256', $jws);
+        if (get_transient($cache_key) === 'active') { return true; }
+
+        if (!defined('YISHU_ENTITLEMENT_VERIFIER_URL') || !defined('YISHU_ENTITLEMENT_VERIFIER_TOKEN')) {
+            return new WP_Error('premium_verifier_unavailable', '订阅校验服务尚未完成配置。', array('status' => 503));
+        }
+        $verifier_url = esc_url_raw((string) YISHU_ENTITLEMENT_VERIFIER_URL, array('https', 'http'));
+        $verifier_host = strtolower((string) wp_parse_url($verifier_url, PHP_URL_HOST));
+        $is_local_verifier = in_array($verifier_host, array('127.0.0.1', 'localhost', '::1'), true);
+        if (!$verifier_url || (wp_parse_url($verifier_url, PHP_URL_SCHEME) !== 'https' && !$is_local_verifier)) {
+            return new WP_Error('premium_verifier_insecure', '订阅校验服务配置不安全。', array('status' => 503));
+        }
+
+        $verification = wp_remote_post($verifier_url, array(
+            'timeout' => 12,
+            'redirection' => 0,
+            'sslverify' => true,
+            'headers' => array(
+                'Content-Type' => 'application/json',
+                'Accept' => 'application/json',
+                'X-Yishu-Internal-Token' => (string) YISHU_ENTITLEMENT_VERIFIER_TOKEN,
+            ),
+            'body' => wp_json_encode(array('transactionJWS' => $jws)),
+        ));
+        if (is_wp_error($verification)) {
+            return new WP_Error('premium_verifier_unavailable', '暂时无法校验订阅。', array('status' => 503));
+        }
+        $status = (int) wp_remote_retrieve_response_code($verification);
+        $payload = json_decode((string) wp_remote_retrieve_body($verification), true);
+        if ($status !== 200 || !is_array($payload) || empty($payload['active'])) {
+            return new WP_Error('premium_entitlement_inactive', '订阅已失效或未通过校验。', array('status' => 403));
+        }
+        set_transient($cache_key, 'active', 5 * MINUTE_IN_SECONDS);
+        return true;
     }
 
     public static function session() {
@@ -102,9 +286,21 @@ final class Shuzijun_App_Content_API {
         return $response;
     }
 
-    public static function get_content() {
-        $response = rest_ensure_response(self::manifest());
-        $response->header('Cache-Control', 'public, max-age=60, stale-while-revalidate=300');
+    public static function get_content($request = null) {
+        $audience = self::authenticate_content_manager($request) ? 'admin' : 'public';
+        $response = rest_ensure_response(self::manifest($audience));
+        $response->header(
+            'Cache-Control',
+            $audience === 'admin'
+                ? 'private, no-store'
+                : 'public, max-age=60, stale-while-revalidate=300'
+        );
+        return $response;
+    }
+
+    public static function get_premium_content() {
+        $response = rest_ensure_response(self::manifest('premium'));
+        $response->header('Cache-Control', 'private, no-store');
         return $response;
     }
 
@@ -138,7 +334,7 @@ final class Shuzijun_App_Content_API {
 
         update_option(self::OPTION_CONFIG, $current, false);
         self::mark_updated();
-        $response = rest_ensure_response(self::manifest());
+        $response = rest_ensure_response(self::manifest('admin'));
         $response->header('Cache-Control', 'private, no-store');
         return $response;
     }
@@ -154,9 +350,22 @@ final class Shuzijun_App_Content_API {
             return new WP_Error('invalid_media_ids', 'mediaIDs 必须是数组。', array('status' => 400));
         }
         $media_ids = array_values(array_unique(array_filter(array_map('absint', $media_ids))));
+        if (count($media_ids) > 300) {
+            return new WP_Error('too_many_media', '单个相册最多 300 张照片。', array('status' => 413));
+        }
+        $current_user_id = get_current_user_id();
         foreach ($media_ids as $media_id) {
-            if (get_post_type($media_id) !== 'attachment') {
-                return new WP_Error('invalid_media', '包含无效媒体。', array('status' => 400));
+            $attachment = get_post($media_id);
+            if (!$attachment instanceof WP_Post
+                || $attachment->post_type !== 'attachment'
+                || $attachment->post_status === 'trash'
+                || !wp_attachment_is_image($media_id)) {
+                return new WP_Error('invalid_media', '相册只能包含有效图片。', array('status' => 400));
+            }
+            $already_attached = (int) $attachment->post_parent === $portfolio_id;
+            $owns_attachment = (int) $attachment->post_author === $current_user_id;
+            if (!$already_attached && !$owns_attachment && !current_user_can('edit_others_posts')) {
+                return new WP_Error('media_not_owned', '不能将其他用户的媒体加入相册。', array('status' => 403));
             }
         }
 
@@ -178,7 +387,7 @@ final class Shuzijun_App_Content_API {
             'ok' => true,
             'portfolioID' => $portfolio_id,
             'mediaIDs' => $media_ids,
-            'content' => self::manifest(),
+            'content' => self::manifest('admin'),
         ));
         $response->header('Cache-Control', 'private, no-store');
         return $response;
@@ -192,8 +401,13 @@ final class Shuzijun_App_Content_API {
         if (!$title) {
             return new WP_Error('portfolio_title_required', '请填写相册名称。', array('status' => 400));
         }
-        if (strlen($title) > 120 || strlen($subtitle) > 240 || strlen($eyebrow) > 120) {
+        if (self::text_length($title) > 120 || self::text_length($subtitle) > 240 || self::text_length($eyebrow) > 120) {
             return new WP_Error('portfolio_text_too_long', '相册名称或介绍过长。', array('status' => 400));
+        }
+
+        $counts = wp_count_posts('portfolio');
+        if ($counts && isset($counts->publish) && (int) $counts->publish >= 100) {
+            return new WP_Error('portfolio_limit_reached', '相册数量已达上限。', array('status' => 409));
         }
 
         $slug = sanitize_title($title);
@@ -220,7 +434,7 @@ final class Shuzijun_App_Content_API {
         $response = new WP_REST_Response(array(
             'ok' => true,
             'portfolioID' => (int) $portfolio_id,
-            'content' => self::manifest(),
+            'content' => self::manifest('admin'),
         ), 201);
         $response->header('Cache-Control', 'private, no-store');
         return $response;
@@ -237,7 +451,7 @@ final class Shuzijun_App_Content_API {
         update_option(self::OPTION_UPDATED, time(), false);
     }
 
-    private static function manifest() {
+    private static function manifest($audience = 'public') {
         $config = self::config();
         $updated = (int) get_option(self::OPTION_UPDATED, 0);
         if ($updated < 1) { $updated = time(); }
@@ -248,7 +462,7 @@ final class Shuzijun_App_Content_API {
             'launchPosters' => $config['launchPosters'],
             'showreel' => $config['showreel'],
             'dramas' => $config['dramas'],
-            'portfolios' => self::portfolios(),
+            'portfolios' => self::portfolios($audience),
         );
     }
 
@@ -312,7 +526,7 @@ final class Shuzijun_App_Content_API {
         );
     }
 
-    private static function portfolios() {
+    private static function portfolios($audience = 'public') {
         $posts = get_posts(array(
             'post_type' => 'portfolio',
             'post_status' => 'publish',
@@ -336,9 +550,10 @@ final class Shuzijun_App_Content_API {
             }
             $images = array();
             foreach (array_values(array_unique(array_filter(array_map('absint', (array) $gallery)))) as $media_id) {
+                if (!wp_attachment_is_image($media_id)) { continue; }
                 $full = wp_get_attachment_image_url($media_id, 'full');
                 $display = wp_get_attachment_image_url($media_id, 'large');
-                if (!$full) { continue; }
+                if (!$full || !self::trusted_media_url($full)) { continue; }
                 $attachment_meta = wp_get_attachment_metadata($media_id);
                 $attached_file = (string) get_post_meta($media_id, '_wp_attached_file', true);
                 $metadata_file = is_array($attachment_meta) && !empty($attachment_meta['file'])
@@ -364,10 +579,37 @@ final class Shuzijun_App_Content_API {
                 }
                 $images[] = array(
                     'id' => $media_id,
-                    'url' => $display ?: $full,
+                    'url' => self::trusted_media_url($display) ? $display : $full,
                     'fullSizeURL' => $full,
                     'altText' => get_post_meta($media_id, '_wp_attachment_image_alt', true) ?: get_the_title($post),
                 );
+            }
+            $total_image_count = count($images);
+            if ($audience === 'public') {
+                $images = array_slice($images, 0, self::FREE_PREVIEW_COUNT);
+            } elseif ($audience === 'premium') {
+                $protected_images = array();
+                foreach ($images as $image) {
+                    $display = apply_filters(
+                        'shuzijun_app_protected_media_url',
+                        '',
+                        $image['url'],
+                        $image['id'],
+                        'display'
+                    );
+                    $full = apply_filters(
+                        'shuzijun_app_protected_media_url',
+                        '',
+                        $image['fullSizeURL'],
+                        $image['id'],
+                        'full'
+                    );
+                    if (!self::trusted_media_url($display) || !self::trusted_media_url($full)) { continue; }
+                    $image['url'] = $display;
+                    $image['fullSizeURL'] = $full;
+                    $protected_images[] = $image;
+                }
+                $images = $protected_images;
             }
             $metadata = self::portfolio_metadata($post);
             $result[] = array(
@@ -378,6 +620,7 @@ final class Shuzijun_App_Content_API {
                 'slug' => $post->post_name,
                 'websiteURL' => get_permalink($post),
                 'coverURL' => $images ? $images[0]['url'] : null,
+                'totalImageCount' => $total_image_count,
                 'images' => $images,
             );
         }
@@ -403,18 +646,26 @@ final class Shuzijun_App_Content_API {
     }
 
     private static function sanitize_showreel($value, $fallback) {
-        $video = self::https_url(isset($value['videoURL']) ? $value['videoURL'] : '');
-        $poster = self::https_url(isset($value['posterURL']) ? $value['posterURL'] : '');
+        $video = self::trusted_media_url(isset($value['videoURL']) ? $value['videoURL'] : '');
+        $poster = self::trusted_media_url(isset($value['posterURL']) ? $value['posterURL'] : '');
         if (!$video || !$poster) {
-            return new WP_Error('invalid_showreel_url', 'Showreel 和海报必须使用有效 HTTPS 地址。', array('status' => 400));
+            return new WP_Error('invalid_showreel_url', 'Showreel 和海报必须使用受信任的 HTTPS 媒体地址。', array('status' => 400));
         }
         $tags = isset($value['tags']) && is_array($value['tags']) ? $value['tags'] : $fallback['tags'];
         $tags = array_slice(array_values(array_filter(array_map('sanitize_text_field', $tags))), 0, 8);
+        $eyebrow = sanitize_text_field(isset($value['eyebrow']) ? $value['eyebrow'] : $fallback['eyebrow']);
+        $title = sanitize_text_field(isset($value['title']) ? $value['title'] : $fallback['title']);
+        $summary = sanitize_text_field(isset($value['summary']) ? $value['summary'] : $fallback['summary']);
+        $duration = sanitize_text_field(isset($value['durationLabel']) ? $value['durationLabel'] : $fallback['durationLabel']);
+        if (self::text_length($eyebrow) > 120 || self::text_length($title) > 160
+            || self::text_length($summary) > 500 || self::text_length($duration) > 20) {
+            return new WP_Error('showreel_text_too_long', 'Showreel 文案过长。', array('status' => 400));
+        }
         return array(
-            'eyebrow' => sanitize_text_field(isset($value['eyebrow']) ? $value['eyebrow'] : $fallback['eyebrow']),
-            'title' => sanitize_text_field(isset($value['title']) ? $value['title'] : $fallback['title']),
-            'summary' => sanitize_text_field(isset($value['summary']) ? $value['summary'] : $fallback['summary']),
-            'durationLabel' => sanitize_text_field(isset($value['durationLabel']) ? $value['durationLabel'] : $fallback['durationLabel']),
+            'eyebrow' => $eyebrow,
+            'title' => $title,
+            'summary' => $summary,
+            'durationLabel' => $duration,
             'videoURL' => $video,
             'posterURL' => $poster,
             'tags' => $tags,
@@ -422,14 +673,18 @@ final class Shuzijun_App_Content_API {
     }
 
     private static function sanitize_launch_posters($values) {
+        if (count($values) > 12) {
+            return new WP_Error('too_many_launch_posters', '开屏海报最多 12 张。', array('status' => 400));
+        }
         $result = array();
         foreach (array_slice(array_values($values), 0, 12) as $index => $value) {
             if (!is_array($value)) { continue; }
-            $image = self::https_url(isset($value['imageURL']) ? $value['imageURL'] : '');
+            $image = self::trusted_media_url(isset($value['imageURL']) ? $value['imageURL'] : '');
             $title = sanitize_text_field(isset($value['title']) ? $value['title'] : '');
             $starts_at = isset($value['startsAt']) ? strtotime((string) $value['startsAt']) : false;
             $ends_at = isset($value['endsAt']) ? strtotime((string) $value['endsAt']) : false;
-            if (!$image || !$title || $starts_at === false || $ends_at === false || $starts_at >= $ends_at) {
+            if (!$image || !$title || self::text_length($title) > 160
+                || $starts_at === false || $ends_at === false || $starts_at >= $ends_at) {
                 return new WP_Error(
                     'invalid_launch_poster',
                     '每张开屏海报都需要图片、标题和有效的起止日期。',
@@ -455,14 +710,17 @@ final class Shuzijun_App_Content_API {
     }
 
     private static function sanitize_dramas($values) {
+        if (count($values) > 50) {
+            return new WP_Error('too_many_dramas', '影视履历最多 50 条。', array('status' => 400));
+        }
         $result = array();
         foreach (array_slice(array_values($values), 0, 50) as $index => $value) {
             if (!is_array($value)) { continue; }
             $title = sanitize_text_field(isset($value['title']) ? $value['title'] : '');
-            $image = self::https_url(isset($value['imageURL']) ? $value['imageURL'] : '');
-            $destination = self::https_url(isset($value['destinationURL']) ? $value['destinationURL'] : '');
-            if (!$title || !$image || !$destination) {
-                return new WP_Error('invalid_drama', '每部短剧都需要标题、HTTPS 海报和跳转地址。', array('status' => 400));
+            $image = self::trusted_media_url(isset($value['imageURL']) ? $value['imageURL'] : '');
+            $destination = self::trusted_destination_url(isset($value['destinationURL']) ? $value['destinationURL'] : '');
+            if (!$title || self::text_length($title) > 200 || !$image || !$destination) {
+                return new WP_Error('invalid_drama', '每部短剧都需要合规标题、受信任海报和 HTTPS 跳转地址。', array('status' => 400));
             }
             $id = sanitize_key(isset($value['id']) ? $value['id'] : '');
             if (!$id) { $id = 'drama-' . ($index + 1); }
@@ -472,11 +730,14 @@ final class Shuzijun_App_Content_API {
     }
 
     private static function sanitize_image_urls($values, $maximum) {
+        if (count($values) > $maximum) {
+            return new WP_Error('too_many_image_urls', '主页封面数量超过上限。', array('status' => 400));
+        }
         $result = array();
         foreach (array_slice(array_values($values), 0, $maximum) as $value) {
-            $url = self::https_url($value);
+            $url = self::trusted_media_url($value);
             if (!$url) {
-                return new WP_Error('invalid_image_url', '主页封面必须使用有效 HTTPS 地址。', array('status' => 400));
+                return new WP_Error('invalid_image_url', '主页封面必须使用受信任的 HTTPS 媒体地址。', array('status' => 400));
             }
             $result[] = $url;
         }
@@ -487,8 +748,50 @@ final class Shuzijun_App_Content_API {
     }
 
     private static function https_url($value) {
+        if (strlen((string) $value) > 2048) { return ''; }
         $url = esc_url_raw((string) $value, array('https'));
-        return wp_parse_url($url, PHP_URL_SCHEME) === 'https' ? $url : '';
+        if (wp_parse_url($url, PHP_URL_SCHEME) !== 'https') { return ''; }
+        if (wp_parse_url($url, PHP_URL_USER) || wp_parse_url($url, PHP_URL_PASS)) { return ''; }
+        $port = wp_parse_url($url, PHP_URL_PORT);
+        return !$port || (int) $port === 443 ? $url : '';
+    }
+
+    private static function trusted_media_url($value) {
+        $url = self::https_url($value);
+        if (!$url) { return ''; }
+        $host = strtolower((string) wp_parse_url($url, PHP_URL_HOST));
+        $home_host = strtolower((string) wp_parse_url(home_url('/'), PHP_URL_HOST));
+        $hosts = array_filter(array_unique(array(
+            $home_host,
+            'shuzijun.com.cn',
+            'www.shuzijun.com.cn',
+            'img.shuzijun.com.cn',
+        )));
+        $hosts = apply_filters('shuzijun_app_allowed_media_hosts', $hosts);
+        $hosts = array_map('strtolower', array_map('strval', (array) $hosts));
+        return in_array($host, $hosts, true) ? $url : '';
+    }
+
+    private static function trusted_destination_url($value) {
+        $url = self::https_url($value);
+        if (!$url) { return ''; }
+        $host = strtolower((string) wp_parse_url($url, PHP_URL_HOST));
+        $hosts = array(
+            'novelquickapp.com',
+            'www.novelquickapp.com',
+            'xhslink.com',
+            'www.xhslink.com',
+            'v.douyin.com',
+            'www.douyin.com',
+            'www.xiaohongshu.com',
+        );
+        $hosts = apply_filters('shuzijun_app_allowed_destination_hosts', $hosts);
+        $hosts = array_map('strtolower', array_map('strval', (array) $hosts));
+        return in_array($host, $hosts, true) ? $url : '';
+    }
+
+    private static function text_length($value) {
+        return function_exists('mb_strlen') ? mb_strlen((string) $value, 'UTF-8') : strlen((string) $value);
     }
 }
 

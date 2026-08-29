@@ -138,8 +138,10 @@ final class LocalWeatherStore: NSObject, ObservableObject {
             string: "https://api.met.no/weatherapi/locationforecast/2.0/compact"
         )!
         components.queryItems = [
-            URLQueryItem(name: "lat", value: String(format: "%.4f", location.coordinate.latitude)),
-            URLQueryItem(name: "lon", value: String(format: "%.4f", location.coordinate.longitude)),
+            // Weather does not need street-level coordinates. Quantize before
+            // anything leaves the device (roughly 1 km at this latitude).
+            URLQueryItem(name: "lat", value: String(format: "%.2f", location.coordinate.latitude)),
+            URLQueryItem(name: "lon", value: String(format: "%.2f", location.coordinate.longitude)),
         ]
         guard let url = components.url else { throw URLError(.badURL) }
 
@@ -157,6 +159,7 @@ final class LocalWeatherStore: NSObject, ObservableObject {
               (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
+        guard data.count <= 2 * 1024 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
 
         let forecast = try JSONDecoder().decode(MetWeatherResponse.self, from: data)
         guard let point = forecast.properties.timeseries.first else {

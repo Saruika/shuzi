@@ -10,7 +10,6 @@ private enum AppTab: Hashable {
 
 struct RootView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
-    @EnvironmentObject private var favorites: FavoritesStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
     @EnvironmentObject private var adminSession: AdminSessionStore
     @EnvironmentObject private var subscription: SubscriptionStore
@@ -85,16 +84,23 @@ struct RootView: View {
             async let sessionRestore: Void = adminSession.restoreSession()
             async let subscriptionRefresh: Void = subscription.refresh()
             _ = await (contentRefresh, sessionRestore, subscriptionRefresh)
-            favorites.retainAvailableImages(in: portfolioStore.portfolios)
+            await refreshProtectedContentIfAllowed(reloadPublicIfLocked: false)
             recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
+            prefetchUnlockedPhotosIfAllowed()
             if let visualPortfolioTitle,
                let portfolio = portfolioStore.portfolios.first(where: { $0.title == visualPortfolioTitle }) {
                 portfolioPath = [portfolio]
             }
         }
         .onChange(of: portfolioStore.portfolios) { _, portfolios in
-            favorites.retainAvailableImages(in: portfolios)
             recentlyViewed.retainAvailablePortfolios(in: portfolios)
+            prefetchUnlockedPhotosIfAllowed()
+        }
+        .onChange(of: subscription.entitlementJWS) { _, _ in
+            Task { await refreshProtectedContentIfAllowed() }
+        }
+        .onChange(of: adminSession.isAuthenticated) { _, _ in
+            Task { await refreshProtectedContentIfAllowed() }
         }
     }
 
@@ -114,5 +120,26 @@ struct RootView: View {
         launchPosterSnapshot = portfolioStore.activeLaunchPoster
         isLaunchPosterVisible = launchPosterSnapshot != nil
         hasPreparedLaunchPoster = true
+    }
+
+    private func prefetchUnlockedPhotosIfAllowed() {
+        guard subscription.hasFullPhotoAccess || adminSession.isAuthenticated else { return }
+        portfolioStore.prefetchUnlockedPortfolioImages()
+    }
+
+    private func refreshProtectedContentIfAllowed(reloadPublicIfLocked: Bool = true) async {
+        if adminSession.isAuthenticated {
+            if let manifest = try? await adminSession.fetchContent() {
+                portfolioStore.applyPublishedManifest(manifest)
+            }
+        } else if let entitlementJWS = subscription.entitlementJWS {
+            await portfolioStore.refreshPremiumContent(with: entitlementJWS)
+        } else {
+            portfolioStore.discardProtectedContent()
+            if reloadPublicIfLocked {
+                await portfolioStore.refresh()
+            }
+        }
+        prefetchUnlockedPhotosIfAllowed()
     }
 }

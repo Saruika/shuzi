@@ -368,25 +368,48 @@ struct ScreenshotProtectedContent: UIViewRepresentable {
         self.content = AnyView(content())
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(rootView: content)
+    func makeUIView(context: Context) -> SecureHostingContainerView {
+        SecureHostingContainerView(rootView: content)
     }
 
-    func makeUIView(context: Context) -> UIView {
-        let secureTextField = UITextField(frame: .zero)
+    func updateUIView(_ view: SecureHostingContainerView, context: Context) {
+        view.update(rootView: content)
+    }
+}
+
+final class SecureHostingContainerView: UIView {
+    private let secureTextField = NonFocusingSecureTextField(frame: .zero)
+    private let hostingController: UIHostingController<AnyView>
+
+    init(rootView: AnyView) {
+        hostingController = UIHostingController(rootView: rootView)
+        super.init(frame: .zero)
+
+        backgroundColor = .black
         secureTextField.isSecureTextEntry = true
         secureTextField.text = " "
         secureTextField.textColor = .clear
         secureTextField.tintColor = .clear
         secureTextField.backgroundColor = .clear
-        secureTextField.layoutIfNeeded()
+        secureTextField.borderStyle = .none
+        secureTextField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(secureTextField)
+        NSLayoutConstraint.activate([
+            secureTextField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            secureTextField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            secureTextField.topAnchor.constraint(equalTo: topAnchor),
+            secureTextField.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
 
+        // The secure canvas must remain inside its text field. Detaching and
+        // returning the canvas loses capture protection on newer iOS versions.
+        secureTextField.layoutIfNeeded()
         guard let secureCanvas = secureTextField.layer.sublayers?.first?.delegate as? UIView else {
-            return context.coordinator.hostingController.view
+            // Fail closed if UIKit changes its secure rendering hierarchy.
+            return
         }
 
-        secureCanvas.subviews.forEach { $0.removeFromSuperview() }
-        let hostedView = context.coordinator.hostingController.view!
+        let hostedView = hostingController.view!
         hostedView.backgroundColor = .clear
         hostedView.translatesAutoresizingMaskIntoConstraints = false
         secureCanvas.addSubview(hostedView)
@@ -394,21 +417,23 @@ struct ScreenshotProtectedContent: UIViewRepresentable {
             hostedView.leadingAnchor.constraint(equalTo: secureCanvas.leadingAnchor),
             hostedView.trailingAnchor.constraint(equalTo: secureCanvas.trailingAnchor),
             hostedView.topAnchor.constraint(equalTo: secureCanvas.topAnchor),
-            hostedView.bottomAnchor.constraint(equalTo: secureCanvas.bottomAnchor)
+            hostedView.bottomAnchor.constraint(equalTo: secureCanvas.bottomAnchor),
         ])
-        return secureCanvas
     }
 
-    func updateUIView(_ view: UIView, context: Context) {
-        context.coordinator.hostingController.rootView = content
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 
-    final class Coordinator {
-        let hostingController: UIHostingController<AnyView>
+    func update(rootView: AnyView) {
+        hostingController.rootView = rootView
+    }
+}
 
-        init(rootView: AnyView) {
-            hostingController = UIHostingController(rootView: rootView)
-        }
+private final class NonFocusingSecureTextField: UITextField {
+    override var canBecomeFirstResponder: Bool {
+        false
     }
 }
 

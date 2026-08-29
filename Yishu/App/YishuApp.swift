@@ -12,7 +12,10 @@ struct YishuApp: App {
     init() {
         let cache = URLCache(
             memoryCapacity: 64 * 1024 * 1024,
-            diskCapacity: 256 * 1024 * 1024
+            // Keep protected artwork out of persistent URL caches. Images may
+            // remain in memory while the app is running, but are discarded on
+            // termination instead of being written to the app container.
+            diskCapacity: 0
         )
         URLCache.shared = cache
 

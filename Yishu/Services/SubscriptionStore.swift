@@ -7,6 +7,7 @@ final class SubscriptionStore: ObservableObject {
 
     @Published private(set) var monthlyProduct: Product?
     @Published private(set) var hasActiveSubscription = false
+    @Published private(set) var entitlementJWS: String?
     @Published private(set) var isLoading = false
     @Published private(set) var isPurchasing = false
     @Published var statusMessage: String?
@@ -129,6 +130,7 @@ final class SubscriptionStore: ObservableObject {
 
     private func refreshEntitlement() async {
         var isEntitled = false
+        var activeEntitlementJWS: String?
         let now = Date()
 
         for await result in Transaction.currentEntitlements {
@@ -143,10 +145,12 @@ final class SubscriptionStore: ObservableObject {
             }
 
             isEntitled = true
+            activeEntitlementJWS = result.jwsRepresentation
             break
         }
 
         hasActiveSubscription = isEntitled
+        entitlementJWS = activeEntitlementJWS
     }
 }
 

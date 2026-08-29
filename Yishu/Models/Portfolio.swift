@@ -9,6 +9,11 @@ struct Portfolio: Identifiable, Hashable, Codable {
     let websiteURL: URL
     let coverURL: URL?
     let images: [PortfolioImage]
+    var totalImageCount: Int? = nil
+
+    var displayImageCount: Int {
+        max(images.count, totalImageCount ?? images.count)
+    }
 }
 
 struct PortfolioImage: Identifiable, Hashable, Codable {
@@ -63,6 +68,7 @@ struct AppContentManifest: Codable {
 
 enum ContentCatalog {
     static let appContentURL = URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-content")!
+    static let premiumAppContentURL = URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-content/premium")!
     static let heroImages = [
         URL(string: "https://img.shuzijun.com.cn/images/hero-mobile-1.webp")!,
         URL(string: "https://img.shuzijun.com.cn/images/hero-mobile-2.webp")!,

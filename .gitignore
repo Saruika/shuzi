@@ -12,3 +12,11 @@ xcuserdata/
 *.ipa
 *.dSYM/
 .swiftpm/
+.env
+.env.*
+*.p8
+*.p12
+*.cer
+*.mobileprovision
+Secrets.xcconfig
+AuthKey_*.p8

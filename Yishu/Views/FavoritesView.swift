@@ -37,9 +37,13 @@ struct FavoritesView: View {
         let groups = store.portfolios.compactMap { portfolio -> String? in
             let count = portfolio.images.filter(favorites.contains).count
             guard count > 0 else { return nil }
-            return "\(portfolio.title) · \(count) 张\n\(portfolio.websiteURL.absoluteString)"
+            return "\(portfolio.title) · \(count) 张"
         }
-        return (["我收藏了易姝的 \(entries.count) 张影像："] + groups).joined(separator: "\n\n")
+        return (
+            ["我收藏了易姝的 \(entries.count) 张影像："]
+                + groups
+                + ["更多作品请在易姝 App 内浏览。"]
+        ).joined(separator: "\n\n")
     }
 
     var body: some View {
