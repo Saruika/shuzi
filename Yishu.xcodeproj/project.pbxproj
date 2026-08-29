@@ -1,0 +1,389 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		100000000000000000000001 /* YishuApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* YishuApp.swift */; };
+		100000000000000000000002 /* AppTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* AppTheme.swift */; };
+		100000000000000000000003 /* Portfolio.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* Portfolio.swift */; };
+		100000000000000000000004 /* PortfolioStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* PortfolioStore.swift */; };
+		100000000000000000000005 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* FavoritesStore.swift */; };
+		100000000000000000000006 /* ArtworkImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* ArtworkImage.swift */; };
+		100000000000000000000007 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* RootView.swift */; };
+		100000000000000000000008 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000008 /* HomeView.swift */; };
+		100000000000000000000009 /* PortfolioViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* PortfolioViews.swift */; };
+		10000000000000000000000A /* FavoritesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000A /* FavoritesView.swift */; };
+		10000000000000000000000B /* AboutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* AboutView.swift */; };
+		10000000000000000000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* Assets.xcassets */; };
+		10000000000000000000000D /* RecentlyViewedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* RecentlyViewedStore.swift */; };
+		10000000000000000000000E /* CreditsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000E /* CreditsView.swift */; };
+		10000000000000000000000F /* AdminSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000F /* AdminSessionStore.swift */; };
+		100000000000000000000010 /* AdminView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* AdminView.swift */; };
+		100000000000000000000011 /* LocalWeatherStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* LocalWeatherStore.swift */; };
+		100000000000000000000012 /* CollaborationInquiryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* CollaborationInquiryView.swift */; };
+		100000000000000000000013 /* LaunchPosterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* LaunchPosterView.swift */; };
+		100000000000000000000014 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* LaunchScreen.storyboard */; };
+		100000000000000000000015 /* SubscriptionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* SubscriptionStore.swift */; };
+		100000000000000000000016 /* SubscriptionPaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* SubscriptionPaywallView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		200000000000000000000001 /* YishuApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YishuApp.swift; sourceTree = "<group>"; };
+		200000000000000000000002 /* AppTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTheme.swift; sourceTree = "<group>"; };
+		200000000000000000000003 /* Portfolio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Portfolio.swift; sourceTree = "<group>"; };
+		200000000000000000000004 /* PortfolioStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortfolioStore.swift; sourceTree = "<group>"; };
+		200000000000000000000005 /* FavoritesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesStore.swift; sourceTree = "<group>"; };
+		200000000000000000000006 /* ArtworkImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtworkImage.swift; sourceTree = "<group>"; };
+		200000000000000000000007 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		200000000000000000000008 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		200000000000000000000009 /* PortfolioViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortfolioViews.swift; sourceTree = "<group>"; };
+		20000000000000000000000A /* FavoritesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesView.swift; sourceTree = "<group>"; };
+		20000000000000000000000B /* AboutView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutView.swift; sourceTree = "<group>"; };
+		20000000000000000000000C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		20000000000000000000000D /* RecentlyViewedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentlyViewedStore.swift; sourceTree = "<group>"; };
+		20000000000000000000000E /* CreditsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreditsView.swift; sourceTree = "<group>"; };
+		20000000000000000000000F /* AdminSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSessionStore.swift; sourceTree = "<group>"; };
+		200000000000000000000010 /* AdminView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminView.swift; sourceTree = "<group>"; };
+		200000000000000000000011 /* LocalWeatherStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalWeatherStore.swift; sourceTree = "<group>"; };
+		200000000000000000000012 /* CollaborationInquiryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollaborationInquiryView.swift; sourceTree = "<group>"; };
+		200000000000000000000013 /* LaunchPosterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchPosterView.swift; sourceTree = "<group>"; };
+		200000000000000000000014 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		200000000000000000000015 /* SubscriptionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStore.swift; sourceTree = "<group>"; };
+		200000000000000000000016 /* SubscriptionPaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionPaywallView.swift; sourceTree = "<group>"; };
+		200000000000000000000099 /* Yishu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yishu.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		400000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		300000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				300000000000000000000002 /* Yishu/App */,
+				300000000000000000000003 /* Yishu/Models */,
+				300000000000000000000004 /* Yishu/Services */,
+				300000000000000000000005 /* Yishu/Components */,
+				300000000000000000000006 /* Yishu/Views */,
+				300000000000000000000007 /* Yishu/Resources */,
+				300000000000000000000008 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		300000000000000000000002 /* Yishu/App */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000001 /* YishuApp.swift */,
+				200000000000000000000002 /* AppTheme.swift */,
+			);
+			path = Yishu/App;
+			sourceTree = "<group>";
+		};
+		300000000000000000000003 /* Yishu/Models */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000003 /* Portfolio.swift */,
+			);
+			path = Yishu/Models;
+			sourceTree = "<group>";
+		};
+		300000000000000000000004 /* Yishu/Services */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000004 /* PortfolioStore.swift */,
+				200000000000000000000005 /* FavoritesStore.swift */,
+				20000000000000000000000D /* RecentlyViewedStore.swift */,
+				20000000000000000000000F /* AdminSessionStore.swift */,
+				200000000000000000000011 /* LocalWeatherStore.swift */,
+				200000000000000000000015 /* SubscriptionStore.swift */,
+			);
+			path = Yishu/Services;
+			sourceTree = "<group>";
+		};
+		300000000000000000000005 /* Yishu/Components */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000006 /* ArtworkImage.swift */,
+			);
+			path = Yishu/Components;
+			sourceTree = "<group>";
+		};
+		300000000000000000000006 /* Yishu/Views */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000007 /* RootView.swift */,
+				200000000000000000000008 /* HomeView.swift */,
+				200000000000000000000009 /* PortfolioViews.swift */,
+				20000000000000000000000A /* FavoritesView.swift */,
+				20000000000000000000000B /* AboutView.swift */,
+				20000000000000000000000E /* CreditsView.swift */,
+				200000000000000000000010 /* AdminView.swift */,
+				200000000000000000000012 /* CollaborationInquiryView.swift */,
+				200000000000000000000013 /* LaunchPosterView.swift */,
+				200000000000000000000016 /* SubscriptionPaywallView.swift */,
+			);
+			path = Yishu/Views;
+			sourceTree = "<group>";
+		};
+		300000000000000000000007 /* Yishu/Resources */ = {
+			isa = PBXGroup;
+			children = (
+				20000000000000000000000C /* Assets.xcassets */,
+				200000000000000000000014 /* LaunchScreen.storyboard */,
+			);
+			path = Yishu/Resources;
+			sourceTree = "<group>";
+		};
+		300000000000000000000008 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000099 /* Yishu.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		500000000000000000000001 /* Yishu */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 800000000000000000000002 /* Build configuration list for PBXNativeTarget "Yishu" */;
+			buildPhases = (
+				400000000000000000000002 /* Sources */,
+				400000000000000000000001 /* Frameworks */,
+				400000000000000000000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Yishu;
+			productName = Yishu;
+			productReference = 200000000000000000000099 /* Yishu.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		600000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					500000000000000000000001 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+				};
+			};
+			buildConfigurationList = 800000000000000000000001 /* Build configuration list for PBXProject "Yishu" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = zh_Hans;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+				zh_Hans,
+			);
+			mainGroup = 300000000000000000000001;
+			productRefGroup = 300000000000000000000008 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				500000000000000000000001 /* Yishu */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		400000000000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				10000000000000000000000C /* Assets.xcassets in Resources */,
+				100000000000000000000014 /* LaunchScreen.storyboard in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		400000000000000000000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000001 /* YishuApp.swift in Sources */,
+				100000000000000000000002 /* AppTheme.swift in Sources */,
+				100000000000000000000003 /* Portfolio.swift in Sources */,
+				100000000000000000000004 /* PortfolioStore.swift in Sources */,
+				100000000000000000000005 /* FavoritesStore.swift in Sources */,
+				100000000000000000000006 /* ArtworkImage.swift in Sources */,
+				100000000000000000000007 /* RootView.swift in Sources */,
+				100000000000000000000008 /* HomeView.swift in Sources */,
+				100000000000000000000009 /* PortfolioViews.swift in Sources */,
+				10000000000000000000000A /* FavoritesView.swift in Sources */,
+				10000000000000000000000B /* AboutView.swift in Sources */,
+				10000000000000000000000D /* RecentlyViewedStore.swift in Sources */,
+				10000000000000000000000E /* CreditsView.swift in Sources */,
+				10000000000000000000000F /* AdminSessionStore.swift in Sources */,
+				100000000000000000000010 /* AdminView.swift in Sources */,
+				100000000000000000000011 /* LocalWeatherStore.swift in Sources */,
+				100000000000000000000012 /* CollaborationInquiryView.swift in Sources */,
+				100000000000000000000013 /* LaunchPosterView.swift in Sources */,
+				100000000000000000000015 /* SubscriptionStore.swift in Sources */,
+				100000000000000000000016 /* SubscriptionPaywallView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		700000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		700000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		700000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6F34K54BYJ;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "易姝";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "用于在首页显示你所在城市的当地天气；近似坐标仅在前台发送给天气服务，不会持续定位。";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = NO;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIRequiresFullScreen = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		700000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 6F34K54BYJ;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "易姝";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "用于在首页显示你所在城市的当地天气；近似坐标仅在前台发送给天气服务，不会持续定位。";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = NO;
+				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
+				INFOPLIST_KEY_UIRequiresFullScreen = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		800000000000000000000001 /* Build configuration list for PBXProject "Yishu" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				700000000000000000000001 /* Debug */,
+				700000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		800000000000000000000002 /* Build configuration list for PBXNativeTarget "Yishu" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				700000000000000000000003 /* Debug */,
+				700000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 600000000000000000000001 /* Project object */;
+}

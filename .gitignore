@@ -1,0 +1,14 @@
+.DS_Store
+DerivedData/
+build/
+.deriveddata/
+.deriveddata-*/
+.typecheck-*/
+.typecheck*/
+.artifacts/
+*.xcuserstate
+xcuserdata/
+*.xcresult
+*.ipa
+*.dSYM/
+.swiftpm/
