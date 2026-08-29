@@ -295,9 +295,9 @@ struct CaptureProtectionCover: View {
             protectionPattern
 
             VStack(spacing: 0) {
-                Text("易 姝")
+                Text("狐狸姐姐温馨提示")
                     .font(.system(size: 12, weight: .semibold))
-                    .tracking(6)
+                    .tracking(2.4)
                     .foregroundStyle(AppTheme.gold)
 
                 ZStack {
@@ -340,7 +340,7 @@ struct CaptureProtectionCover: View {
         }
         .ignoresSafeArea()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("易姝影像内容已保护，此页面不支持截屏、录屏或保存")
+        .accessibilityLabel("狐狸姐姐温馨提示：影像内容已保护，此页面不支持截屏、录屏或保存")
     }
 
     private var protectionPattern: some View {

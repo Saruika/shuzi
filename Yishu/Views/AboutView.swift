@@ -123,7 +123,6 @@ struct AboutView: View {
             contactLink("小红书", detail: "一只梳子君", icon: "sparkles", url: ContentCatalog.xiaohongshuURL)
             contactLink("抖音", detail: "一只梳子君", icon: "play.circle", url: ContentCatalog.douyinURL)
             contactLink("红果短剧", detail: "易姝", icon: "film.stack", url: ContentCatalog.hongguoURL)
-            contactLink("官方网站", detail: "shuzijun.com.cn", icon: "globe.asia.australia", url: ContentCatalog.websiteURL)
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 8)

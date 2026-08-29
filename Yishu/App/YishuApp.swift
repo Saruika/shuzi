@@ -2,14 +2,23 @@ import SwiftUI
 
 @main
 struct YishuApp: App {
+    @UIApplicationDelegateAdaptor(YishuAppDelegate.self) private var appDelegate
     @StateObject private var portfolioStore = PortfolioStore()
     @StateObject private var favorites = FavoritesStore()
     @StateObject private var recentlyViewed = RecentlyViewedStore()
     @StateObject private var adminSession = AdminSessionStore()
     @StateObject private var localWeather = LocalWeatherStore()
     @StateObject private var subscription = SubscriptionStore()
+    @StateObject private var communityStore: FanCommunityStore
+    @StateObject private var notifications: NotificationStore
 
     init() {
+        let communityStore = FanCommunityStore()
+        let notifications = NotificationStore.shared
+        notifications.configure(communityStore: communityStore)
+        _communityStore = StateObject(wrappedValue: communityStore)
+        _notifications = StateObject(wrappedValue: notifications)
+
         let cache = URLCache(
             memoryCapacity: 64 * 1024 * 1024,
             // Keep protected artwork out of persistent URL caches. Images may
@@ -60,5 +69,7 @@ struct YishuApp: App {
             .environmentObject(adminSession)
             .environmentObject(localWeather)
             .environmentObject(subscription)
+            .environmentObject(communityStore)
+            .environmentObject(notifications)
     }
 }

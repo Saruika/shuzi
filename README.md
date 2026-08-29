@@ -2,15 +2,15 @@
 
 易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，内容由 WordPress 版本化 REST API 同步，不是 WebView 封装。
 
-> 当前版本：`1.1.0 (2)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前版本：`1.2.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
 - **首页**：人物主视觉轮播、身份表达和作品入口；可按需显示当地天气。
 - **作品**：按造型和拍摄主题分类的原生相册，支持搜索、收藏、最近浏览和下拉刷新。
 - **影视**：内嵌 Showreel 与公开影视履历，支持静音和暂停，不弹出系统全屏播放器。
-- **收藏**：作品收藏保存在本机，授权暂时失效时也不删除用户的收藏记录。
-- **关于**：艺人简介、社交平台、合作邀约和管理员入口。
+- **动态**：易姝动态、平台新作品、直播提醒、固定回应、投票与私密粉丝信。
+- **我的**：收藏、通知偏好、艺人简介、社交平台、合作邀约和管理员入口。
 - **内容工作台**：管理员可在 App 内更新首页封面、相册、视频和影视资料。
 
 ## 作品访问规则
@@ -59,8 +59,14 @@ xcodebuild -project Yishu.xcodeproj \
 - [`ADMIN_CONTENT.md`](ADMIN_CONTENT.md)：管理员入口、上传约束与内容发布流程。
 - [`SUBSCRIPTION_SETUP.md`](SUBSCRIPTION_SETUP.md)：人民币 3 元/月订阅商品、Sandbox 和 TestFlight 验收步骤。
 - [`Server/entitlement-verifier/README.md`](Server/entitlement-verifier/README.md)：Apple 订阅凭证校验服务。
+- [`FAN_COMMUNITY_PLAN.md`](FAN_COMMUNITY_PLAN.md)：粉丝互动、角色、审核与自动平台提醒方案。
+- [`Server/push-provider/README.md`](Server/push-provider/README.md)：APNs 设备登记与幂等推送服务。
 - [`Server/nginx/README.md`](Server/nginx/README.md)：REST 认证头转发配置。
 - [`Server/operations/README.md`](Server/operations/README.md)：线上运维修复记录。
+
+社交平台提醒不是由管理员重复手工发送。WordPress 定时同步器优先使用平台官方 API 或 Webhook：抖音使用创作者授权后的官方 `video.list` 接口；小红书和直播使用经过 HMAC 签名的合规数据适配器。新作品 ID 与直播场次 ID 都持久去重，数据源第一次接入只建立基线，不会把历史作品一次性推送给用户。
+
+正式启用推送前仍需在 Apple Developer 开启 Push Notifications、配置 APNs Key，并完成抖音创作者 OAuth 与 `video.list` 权限申请。小红书官方当前尚未开放 `read_notes`，因此项目不会用绕过登录、验证码或反爬机制的抓取代替授权接口。
 
 ## 安全与隐私
 
@@ -72,6 +78,14 @@ xcodebuild -project Yishu.xcodeproj \
 - App 明示照片与影像均已取得合法展示授权；相关版权和肖像权归各自权利人所有，未经许可不得下载、复制、传播、改编或商业使用。
 
 截图保护是 iOS 系统能力限制下的尽力防护，无法阻止另一台设备拍摄屏幕；已公开过的 WordPress 原图在迁移到私有对象存储前，也不能承诺绝对无法下载。完整安全边界和上线前 P0 清单见 [`SECURITY.md`](SECURITY.md)。
+
+## v1.2.0
+
+- 新增「动态」与「我的」栏目，支持固定回应、投票、私密粉丝信和分类通知偏好。
+- 新增抖音作品、小红书作品与直播状态的服务端自动识别、去重和 APNs 推送链路。
+- 新增狐狸姐姐粉丝互动工作台，可查看数据源健康、发布动态与投票、处理粉丝信和审核规则。
+- 推送设备令牌使用 AES-256-GCM 加密，自动同步使用平台官方 API/Webhook 或 HMAC 签名适配器。
+- 截屏保护页标题更新为「狐狸姐姐温馨提示」，并移除关于页的官网入口。
 
 ## v1.1.0
 
