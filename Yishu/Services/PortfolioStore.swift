@@ -453,7 +453,7 @@ final class PortfolioStore: ObservableObject {
             return ("新中式", "古意与当代表达之间的留白", "NEW CHINESE · EDITORIAL")
         }
         if rawTitle.contains("旗袍") {
-            return ("旗袍", "庭院、窗影与东方女性的克制", "QIPAO · STORY")
+            return ("旗袍", "庭院、窗影与东方美学", "QIPAO · STORY")
         }
         return (rawTitle, "易姝影像作品", "PORTFOLIO")
     }
@@ -606,7 +606,7 @@ private extension Portfolio {
         makeFallback(
             id: 39,
             title: "旗袍",
-            subtitle: "庭院、窗影与东方女性的克制",
+            subtitle: "庭院、窗影与东方美学",
             eyebrow: "QIPAO · STORY",
             slug: "qipao",
             mediaID: 40,

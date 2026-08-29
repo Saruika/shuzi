@@ -1,26 +1,85 @@
 # 易姝 iOS
 
-“易姝”是从现有演员 / 模特作品网站延伸出的原生 iPhone / iPad App。它不是 WebView：作品、Showreel 和影视履历会读取网站公开的版本化 WordPress 内容接口，收藏保存在本机，视频通过无系统控制条的内嵌播放界面播放 HLS 或 MP4。
+易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，内容由 WordPress 版本化 REST API 同步，不是 WebView 封装。
 
-## 第一版产品结构
+> 当前版本：`1.1.0 (2)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-- **首页**：只承担人物主视觉、身份表达和进入作品的主入口；右上角可按需显示用户所在城市与当地天气，不重复其他页面内容。
-- **作品**：婚纱、新中式、旗袍三组原生相册，支持搜索、收藏与下拉刷新。
-- **影视**：内嵌演员 Showreel 与公开出演短剧，不显示系统播放器或短剧分享按钮。
-- **收藏**：喜欢的照片保存在本机，无需账号。
-- **关于**：演员定位、合作标签、主页分享、合作邀约以及社交平台入口。
-- **内容工作台**：普通用户免登录；管理员可更新主页封面、相册、视频与影视资料。
+## 产品功能
 
-公开作品目录会在成功同步后以 iOS 文件保护形式保存到本机，每个相册仅含 3 张免费预览；图片只使用内存缓存。完整相册必须使用 StoreKit 签名交易或管理员凭据从受保护接口获取，并且不会落入目录缓存；授权失效时 App 会立即丢弃受保护 URL 和图片缓存。断网时优先展示上次同步的公开预览。App 还会在本机保存最近浏览记录，并尊重系统“减少动态效果”设置。录屏、投屏或 App 退到后台时，受保护内容会自动以黑色遮罩隐藏。
+- **首页**：人物主视觉轮播、身份表达和作品入口；可按需显示当地天气。
+- **作品**：按造型和拍摄主题分类的原生相册，支持搜索、收藏、最近浏览和下拉刷新。
+- **影视**：内嵌 Showreel 与公开影视履历，支持静音和暂停，不弹出系统全屏播放器。
+- **收藏**：作品收藏保存在本机，授权暂时失效时也不删除用户的收藏记录。
+- **关于**：艺人简介、社交平台、合作邀约和管理员入口。
+- **内容工作台**：管理员可在 App 内更新首页封面、相册、视频和影视资料。
 
-位置权限只在用户点击首页右上角后申请，并且只请求“使用 App 时”。App 使用约 3 公里精度的一次性定位，不在后台持续追踪；获取天气前会先在设备端把坐标降为两位小数的粗略精度，再发送给 MET Norway，天气结果 10 分钟内不会重复请求。数据来源与许可链接会显示在“关于”页。
+## 作品访问规则
 
-详细的 GitHub 对标、功能取舍和后续路线见 `PRODUCT_RESEARCH.md`，管理员操作见 `ADMIN_CONTENT.md`。
+| 身份 | 可见内容 | 获取方式 |
+| --- | --- | --- |
+| 普通用户 | 每个相册前 3 张 | 公开预览清单 |
+| 订阅用户 | 全部作品 | StoreKit 2 签名交易经服务端验证 |
+| 管理员 | 全部作品与内容编辑 | WordPress Application Password |
 
-## 运行
+公开清单只返回每个相册的 3 张预览图。完整清单只保存在内存，不写入持久化目录缓存；授权失效后，App 会立即清除受保护 URL 和图片缓存。当前线上已启用公开预览限制和管理员访问；正式收费前还需完成 App Store Connect 商品、Apple 凭证校验服务与私有对象存储。
 
-1. 用 Xcode 打开 `Yishu.xcodeproj`。
-2. 选择任意 iPhone 模拟器。
-3. 点击 Run。
+## 技术结构
 
-工程最低支持 iOS 17，使用 SwiftUI、AVKit 和公开 HTTPS 内容接口，不包含私钥或服务器凭据。
+```text
+iOS App (SwiftUI / StoreKit 2 / AVKit)
+        │
+        ├─ 公开预览── WordPress REST API
+        ├─ 管理员─── Application Password + 最小权限角色
+        └─ 订阅解锁── StoreKit JWS → Entitlement Verifier → 受保护清单
+```
+
+项目中不包含云 API 密钥、Apple 私钥、WordPress 管理员密码或签名证书。
+
+## 本地运行
+
+需要 Xcode 17 或兼容 iOS 17 SDK 的新版本 Xcode。
+
+1. 克隆仓库：`git clone git@github.com:Saruika/shuzi.git`
+2. 打开 `Yishu.xcodeproj`。
+3. 选择 iPhone / iPad 模拟器或已加入开发团队的真机。
+4. 运行 `Yishu` Scheme。
+
+命令行验证：
+
+```bash
+xcodebuild -project Yishu.xcodeproj \
+  -scheme Yishu \
+  -configuration Debug \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
+  build
+```
+
+## 内容与服务端
+
+- [`ADMIN_CONTENT.md`](ADMIN_CONTENT.md)：管理员入口、上传约束与内容发布流程。
+- [`SUBSCRIPTION_SETUP.md`](SUBSCRIPTION_SETUP.md)：人民币 3 元/月订阅商品、Sandbox 和 TestFlight 验收步骤。
+- [`Server/entitlement-verifier/README.md`](Server/entitlement-verifier/README.md)：Apple 订阅凭证校验服务。
+- [`Server/nginx/README.md`](Server/nginx/README.md)：REST 认证头转发配置。
+- [`Server/operations/README.md`](Server/operations/README.md)：线上运维修复记录。
+
+## 安全与隐私
+
+- 管理员凭据仅保存在 iOS Keychain，不随备份迁移。
+- 图片 URL 缓存仅使用内存，未授权用户不预取锁定内容。
+- 录屏、投屏或 App 失去活动状态时会显示黑色保护遮罩。
+- 位置仅在用户主动启用天气时请求，坐标会在设备上降低精度且不在后台持续定位。
+- 仓库忽略 `.env`、Apple 私钥、证书、描述文件和本地构建产物。
+
+截图保护是 iOS 系统能力限制下的尽力防护，无法阻止另一台设备拍摄屏幕；已公开过的 WordPress 原图在迁移到私有对象存储前，也不能承诺绝对无法下载。完整安全边界和上线前 P0 清单见 [`SECURITY.md`](SECURITY.md)。
+
+## v1.1.0
+
+- 公开相册收紧为每册 3 张预览，完整内容改用授权接口。
+- 管理员登录后可加载全量作品，授权失效后自动清除受保护缓存。
+- 增加 StoreKit 2 凭证传递、Apple 服务端校验框架和私有存储上线清单。
+- 收紧 WordPress 公开页面与 REST API，加强上传校验、授权头传递和缓存策略。
+- 旗袍主题文案更新为“庭院、窗影与东方美学”。
+
+## 更多文档
+
+产品对标与后续路线见 [`PRODUCT_RESEARCH.md`](PRODUCT_RESEARCH.md)。安全问题可按 [`SECURITY.md`](SECURITY.md) 中的流程进行报告。

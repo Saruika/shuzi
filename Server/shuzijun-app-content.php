@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned public content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.3.0
+ * Version: 1.3.1
  * Author: Shuzijun
  */
 
@@ -634,7 +634,7 @@ final class Shuzijun_App_Content_API {
         } elseif (strpos($title, '新中式') !== false) {
             $fallback = array('title'=>'新中式','subtitle'=>'古意与当代表达之间的留白','eyebrow'=>'NEW CHINESE · EDITORIAL');
         } elseif (strpos($title, '旗袍') !== false) {
-            $fallback = array('title'=>'旗袍','subtitle'=>'庭院、窗影与东方女性的克制','eyebrow'=>'QIPAO · STORY');
+            $fallback = array('title'=>'旗袍','subtitle'=>'庭院、窗影与东方美学','eyebrow'=>'QIPAO · STORY');
         } else {
             $fallback = array('title'=>$title,'subtitle'=>'易姝影像作品','eyebrow'=>'PORTFOLIO');
         }
