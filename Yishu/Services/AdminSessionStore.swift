@@ -263,58 +263,6 @@ final class AdminSessionStore: ObservableObject {
         return result
     }
 
-    func fetchFanCommunityDashboard() async throws -> FanCommunityAdminDashboard {
-        try await authorizedJSON(
-            path: "shuzijun/v1/app-admin/fan-community",
-            method: "GET"
-        )
-    }
-
-    func updateFanCommunitySettings(
-        features: FanFeatureFlags,
-        blockTerms: [String],
-        reviewTerms: [String]
-    ) async throws -> FanCommunityAdminDashboard {
-        let body = try JSONEncoder().encode(
-            FanCommunitySettingsUpdate(
-                features: features,
-                moderation: FanModerationUpdate(blockTerms: blockTerms, reviewTerms: reviewTerms)
-            )
-        )
-        return try await authorizedJSON(
-            path: "shuzijun/v1/app-admin/fan-community/settings",
-            method: "POST",
-            body: body
-        )
-    }
-
-    func createFanNote(text: String) async throws -> FanCommunityAdminDashboard {
-        let body = try JSONEncoder().encode(FanNoteRequest(text: text))
-        return try await authorizedJSON(
-            path: "shuzijun/v1/app-admin/fan-community/posts",
-            method: "POST",
-            body: body
-        )
-    }
-
-    func createFanPoll(question: String, options: [String]) async throws -> FanCommunityAdminDashboard {
-        let body = try JSONEncoder().encode(FanPollRequest(question: question, options: options))
-        return try await authorizedJSON(
-            path: "shuzijun/v1/app-admin/fan-community/polls",
-            method: "POST",
-            body: body
-        )
-    }
-
-    func updateFanLetterStatus(id: Int, status: String) async throws -> FanCommunityAdminDashboard {
-        let body = try JSONEncoder().encode(FanLetterStatusRequest(status: status))
-        return try await authorizedJSON(
-            path: "shuzijun/v1/app-admin/fan-community/letters/\(id)/status",
-            method: "POST",
-            body: body
-        )
-    }
-
     private func authorizedJSON<T: Decodable>(
         path: String,
         method: String,
@@ -415,29 +363,6 @@ private struct CreatePortfolioRequest: Encodable {
     let title: String
     let subtitle: String
     let eyebrow: String
-}
-
-private struct FanCommunitySettingsUpdate: Encodable {
-    let features: FanFeatureFlags
-    let moderation: FanModerationUpdate
-}
-
-private struct FanModerationUpdate: Encodable {
-    let blockTerms: [String]
-    let reviewTerms: [String]
-}
-
-private struct FanNoteRequest: Encodable {
-    let text: String
-}
-
-private struct FanPollRequest: Encodable {
-    let question: String
-    let options: [String]
-}
-
-private struct FanLetterStatusRequest: Encodable {
-    let status: String
 }
 
 private struct WordPressError: Decodable {

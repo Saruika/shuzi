@@ -148,7 +148,6 @@ struct AdminView: View {
     private var dashboard: some View {
         VStack(alignment: .leading, spacing: 34) {
             dashboardHeader
-            fanCommunityEntry
             launchPosterEditor
             heroEditor
             portfolioEditor
@@ -159,21 +158,6 @@ struct AdminView: View {
         .padding(.horizontal, 18)
         .padding(.top, 14)
         .padding(.bottom, 70)
-    }
-
-    private var fanCommunityEntry: some View {
-        AdminSection(title: "粉丝互动", subtitle: "自动平台同步、审核规则、投票与私密信箱") {
-            NavigationLink {
-                FanCommunityAdminView()
-            } label: {
-                Label("打开粉丝互动工作台", systemImage: "person.2.badge.gearshape")
-                    .adminPrimaryButton()
-            }
-
-            Text("抖音、小红书和直播动态由服务器自动识别；这里用于维护审核规则、发布易姝日常动态和处理粉丝信。")
-                .font(.caption2)
-                .foregroundStyle(AppTheme.muted)
-        }
     }
 
     private var dashboardHeader: some View {

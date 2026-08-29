@@ -2,10 +2,10 @@ import SwiftUI
 
 private enum AppTab: Hashable {
     case home
-    case community
     case portfolio
     case credits
-    case me
+    case favorites
+    case about
 }
 
 struct RootView: View {
@@ -21,26 +21,15 @@ struct RootView: View {
     private let visualPortfolioTitle: String?
 
     init() {
-        let arguments = ProcessInfo.processInfo.arguments
         let prefix = "-visual-portfolio-title="
-        let title = arguments
+        let title = ProcessInfo.processInfo.arguments
             .first { $0.hasPrefix(prefix) }
             .map { String($0.dropFirst(prefix.count)) }
         visualPortfolioTitle = title
-        let startsOnPortfolio = title != nil || arguments.contains(
+        let startsOnPortfolio = title != nil || ProcessInfo.processInfo.arguments.contains(
             "-open-portfolio-for-visual-testing"
         )
-        let initialTab: AppTab
-        if startsOnPortfolio {
-            initialTab = .portfolio
-        } else if arguments.contains("-open-community-for-visual-testing") {
-            initialTab = .community
-        } else if arguments.contains("-open-me-for-visual-testing") {
-            initialTab = .me
-        } else {
-            initialTab = .home
-        }
-        _selectedTab = State(initialValue: initialTab)
+        _selectedTab = State(initialValue: startsOnPortfolio ? .portfolio : .home)
     }
 
     var body: some View {
@@ -51,12 +40,6 @@ struct RootView: View {
                 }
                 .tag(AppTab.home)
                 .tabItem { Label("首页", systemImage: "play.rectangle") }
-
-                NavigationStack {
-                    FanCommunityView()
-                }
-                .tag(AppTab.community)
-                .tabItem { Label("动态", systemImage: "sparkles") }
 
                 NavigationStack(path: $portfolioPath) {
                     PortfolioGridView()
@@ -71,10 +54,16 @@ struct RootView: View {
                 .tabItem { Label("影视", systemImage: "film.stack") }
 
                 NavigationStack {
-                    MeView()
+                    FavoritesView()
                 }
-                .tag(AppTab.me)
-                .tabItem { Label("我的", systemImage: "person.crop.circle") }
+                .tag(AppTab.favorites)
+                .tabItem { Label("收藏", systemImage: "heart") }
+
+                NavigationStack {
+                    AboutView()
+                }
+                .tag(AppTab.about)
+                .tabItem { Label("关于", systemImage: "person.crop.rectangle") }
             }
 
             if isLaunchPosterVisible, let poster = displayedLaunchPoster {
@@ -122,7 +111,7 @@ struct RootView: View {
 
     private func prepareLaunchPosterIfNeeded() {
         guard !hasPreparedLaunchPoster else { return }
-        if visualPortfolioTitle != nil || selectedTab != .home {
+        if visualPortfolioTitle != nil || selectedTab == .portfolio {
             launchPosterSnapshot = nil
             isLaunchPosterVisible = false
             hasPreparedLaunchPoster = true
