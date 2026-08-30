@@ -358,6 +358,17 @@ enum ContentSecurityPolicy {
         isSecure(url) && trustedMediaHosts.contains(url.host?.lowercased() ?? "")
     }
 
+    static func matchesRequestedMediaURL(_ responseURL: URL?, requestedURL: URL) -> Bool {
+        guard let responseURL,
+              isTrustedMediaURL(requestedURL),
+              isTrustedMediaURL(responseURL) else { return false }
+        return responseURL.scheme?.lowercased() == requestedURL.scheme?.lowercased()
+            && responseURL.host?.lowercased() == requestedURL.host?.lowercased()
+            && (responseURL.port ?? 443) == (requestedURL.port ?? 443)
+            && responseURL.path == requestedURL.path
+            && responseURL.query == requestedURL.query
+    }
+
     static func isTrustedWebsiteURL(_ url: URL) -> Bool {
         isTrustedMediaURL(url)
     }
@@ -380,6 +391,7 @@ enum ContentSecurityPolicy {
             && url.user == nil
             && url.password == nil
             && (url.port == nil || url.port == 443)
+            && url.fragment == nil
     }
 }
 

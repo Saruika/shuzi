@@ -141,6 +141,51 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(AppNetworkSecurityPolicy.isJSONMIMEType(nil))
     }
 
+    func testImageResponsesRequireSafeMIMEAndBoundedLength() {
+        XCTAssertTrue(AppNetworkSecurityPolicy.isImageMIMEType("image/jpeg; charset=binary"))
+        XCTAssertTrue(AppNetworkSecurityPolicy.isImageMIMEType("IMAGE/WEBP"))
+        XCTAssertTrue(AppNetworkSecurityPolicy.isImageMIMEType("image/heic"))
+        XCTAssertFalse(AppNetworkSecurityPolicy.isImageMIMEType("image/svg+xml"))
+        XCTAssertFalse(AppNetworkSecurityPolicy.isImageMIMEType("text/html"))
+        XCTAssertFalse(AppNetworkSecurityPolicy.isImageMIMEType(nil))
+
+        let limit: Int64 = 20 * 1024 * 1024
+        XCTAssertTrue(AppNetworkSecurityPolicy.permitsResponseLength(limit, maximumBytes: limit))
+        XCTAssertTrue(
+            AppNetworkSecurityPolicy.permitsResponseLength(
+                NSURLSessionTransferSizeUnknown,
+                maximumBytes: limit
+            )
+        )
+        XCTAssertFalse(AppNetworkSecurityPolicy.permitsResponseLength(0, maximumBytes: limit))
+        XCTAssertFalse(AppNetworkSecurityPolicy.permitsResponseLength(limit + 1, maximumBytes: limit))
+    }
+
+    func testMediaResponseCannotChangeURLOrAddFragment() {
+        let requested = URL(string: "https://img.shuzijun.com.cn/images/portrait.webp?v=2")!
+
+        XCTAssertTrue(
+            ContentSecurityPolicy.matchesRequestedMediaURL(requested, requestedURL: requested)
+        )
+        XCTAssertFalse(
+            ContentSecurityPolicy.matchesRequestedMediaURL(
+                URL(string: "https://www.shuzijun.com.cn/images/portrait.webp?v=2"),
+                requestedURL: requested
+            )
+        )
+        XCTAssertFalse(
+            ContentSecurityPolicy.matchesRequestedMediaURL(
+                URL(string: "https://img.shuzijun.com.cn/images/portrait.webp?v=3"),
+                requestedURL: requested
+            )
+        )
+        XCTAssertFalse(
+            ContentSecurityPolicy.isTrustedMediaURL(
+                URL(string: "https://img.shuzijun.com.cn/images/portrait.webp#hidden")!
+            )
+        )
+    }
+
     func testUploadFilenameMustMatchItsMIMEType() throws {
         XCTAssertTrue(AdminUploadPolicy.isAllowed(filename: "portrait.JPG", mimeType: "image/jpeg"))
         XCTAssertTrue(AdminUploadPolicy.isAllowed(filename: "showreel.mov", mimeType: "video/quicktime"))

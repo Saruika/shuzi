@@ -5,6 +5,14 @@ import Foundation
 /// destination appears to use the same host name.
 enum AppNetworkSecurityPolicy {
     static let contentHost = "www.shuzijun.com.cn"
+    private static let allowedImageMIMETypes: Set<String> = [
+        "image/avif",
+        "image/heic",
+        "image/heif",
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    ]
 
     static func isTrustedHTTPSOrigin(_ url: URL?) -> Bool {
         guard let url else { return false }
@@ -30,13 +38,29 @@ enum AppNetworkSecurityPolicy {
     }
 
     static func isJSONMIMEType(_ rawValue: String?) -> Bool {
+        guard let normalized = normalizedMIMEType(rawValue) else { return false }
+        return normalized == "application/json" || normalized.hasSuffix("+json")
+    }
+
+    static func isImageMIMEType(_ rawValue: String?) -> Bool {
+        guard let normalized = normalizedMIMEType(rawValue) else { return false }
+        return allowedImageMIMETypes.contains(normalized)
+    }
+
+    static func permitsResponseLength(_ expectedLength: Int64, maximumBytes: Int64) -> Bool {
+        guard maximumBytes > 0 else { return false }
+        return expectedLength == NSURLSessionTransferSizeUnknown
+            || (expectedLength > 0 && expectedLength <= maximumBytes)
+    }
+
+    private static func normalizedMIMEType(_ rawValue: String?) -> String? {
         guard let normalized = rawValue?
             .split(separator: ";", maxSplits: 1)
             .first?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased(),
-              !normalized.isEmpty else { return false }
-        return normalized == "application/json" || normalized.hasSuffix("+json")
+              !normalized.isEmpty else { return nil }
+        return normalized
     }
 }
 

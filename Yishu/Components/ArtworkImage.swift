@@ -15,6 +15,9 @@ private enum ArtworkImageLoadError: Error {
 /// coalesces duplicate requests made by adjacent carousel/gallery views.
 private actor ArtworkImagePipeline {
     static let shared = ArtworkImagePipeline()
+    private static let maximumResponseBytes: Int64 = 20 * 1024 * 1024
+    private static let maximumPixelDimension: Int64 = 30_000
+    private static let maximumPixelCount: Int64 = 200_000_000
 
     private let cache: NSCache<NSString, UIImage> = {
         let cache = NSCache<NSString, UIImage>()
@@ -23,8 +26,15 @@ private actor ArtworkImagePipeline {
         return cache
     }()
     private var inFlight: [String: Task<UIImage, Error>] = [:]
+    private let session = SecureURLSessionFactory.make(
+        requestTimeout: 20,
+        resourceTimeout: 30
+    )
 
     func image(for url: URL, maxPixelSize: Int) async throws -> UIImage {
+        guard ContentSecurityPolicy.isTrustedMediaURL(url) else {
+            throw ArtworkImageLoadError.invalidResponse
+        }
         let bucket = min(2_200, max(320, ((maxPixelSize + 159) / 160) * 160))
         let key = "\(url.absoluteString)#\(bucket)"
         if let cached = cache.object(forKey: key as NSString) {
@@ -34,19 +44,36 @@ private actor ArtworkImagePipeline {
             return try await existing.value
         }
 
+        let imageSession = session
         let task = Task.detached(priority: .utility) {
             var request = URLRequest(url: url)
-            request.cachePolicy = .returnCacheDataElseLoad
+            request.cachePolicy = .reloadIgnoringLocalCacheData
             request.timeoutInterval = 20
-            let (data, response) = try await URLSession.shared.data(for: request)
+            request.setValue(
+                "image/avif,image/webp,image/heic,image/heif,image/jpeg,image/png",
+                forHTTPHeaderField: "Accept"
+            )
+            request.setValue("Yishu-iOS/2.1", forHTTPHeaderField: "User-Agent")
+
+            let (data, response) = try await imageSession.data(for: request)
             guard let http = response as? HTTPURLResponse,
+                  ContentSecurityPolicy.matchesRequestedMediaURL(http.url, requestedURL: url),
                   (200..<300).contains(http.statusCode) else {
                 throw ArtworkImageLoadError.invalidResponse
             }
-            guard data.count <= 20 * 1024 * 1024 else {
+            guard AppNetworkSecurityPolicy.isImageMIMEType(
+                http.value(forHTTPHeaderField: "Content-Type")
+            ), AppNetworkSecurityPolicy.permitsResponseLength(
+                http.expectedContentLength,
+                maximumBytes: Self.maximumResponseBytes
+            ) else {
+                throw ArtworkImageLoadError.invalidResponse
+            }
+            guard Int64(data.count) <= Self.maximumResponseBytes else {
                 throw ArtworkImageLoadError.payloadTooLarge
             }
             guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                  Self.hasSafePixelDimensions(source),
                   let cgImage = CGImageSourceCreateThumbnailAtIndex(
                     source,
                     0,
@@ -73,6 +100,17 @@ private actor ArtworkImagePipeline {
             inFlight[key] = nil
             throw error
         }
+    }
+
+    private static func hasSafePixelDimensions(_ source: CGImageSource) -> Bool {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.int64Value,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.int64Value,
+              width > 0,
+              height > 0,
+              width <= maximumPixelDimension,
+              height <= maximumPixelDimension else { return false }
+        return width * height <= maximumPixelCount
     }
 }
 
