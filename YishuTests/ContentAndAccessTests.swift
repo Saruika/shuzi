@@ -3,6 +3,13 @@ import WeatherKit
 @testable import Yishu
 
 final class ContentAndAccessTests: XCTestCase {
+    func testWeatherLocationAlwaysKeepsAConcisePlaceName() {
+        XCTAssertEqual(WeatherPresentation.conciseLocationText("杭州市"), "杭州")
+        XCTAssertEqual(WeatherPresentation.conciseLocationText("香港特别行政区"), "香港")
+        XCTAssertEqual(WeatherPresentation.conciseLocationText("浙江·杭州"), "浙江·杭州")
+        XCTAssertEqual(WeatherPresentation.conciseLocationText("  "), "当前位置")
+    }
+
     func testLoadedPortfolioExposesEveryImage() {
         let portfolio = makePortfolio(imageCount: 6)
 

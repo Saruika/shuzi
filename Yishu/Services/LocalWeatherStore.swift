@@ -172,6 +172,17 @@ final class LocalWeatherStore: NSObject, ObservableObject {
 }
 
 enum WeatherPresentation {
+    static func conciseLocationText(_ location: String) -> String {
+        let trimmed = location.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "当前位置" }
+
+        for suffix in ["特别行政区", "自治州", "地区", "市"] where trimmed.hasSuffix(suffix) {
+            let concise = String(trimmed.dropLast(suffix.count))
+            if !concise.isEmpty { return concise }
+        }
+        return trimmed
+    }
+
     static func conditionText(for condition: WeatherCondition) -> String {
         switch condition {
         case .blizzard: "暴风雪"

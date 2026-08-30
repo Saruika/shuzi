@@ -82,24 +82,20 @@ private struct HeroPager: View {
                     HStack {
                         Spacer()
                         Button { openWeatherOrSettings() } label: {
-                            ViewThatFits(in: .horizontal) {
-                                HStack(spacing: 6) {
-                                    weatherStatusIcon
-                                    Text(localWeather.locationText)
-                                    Text("·")
-                                        .foregroundStyle(.white.opacity(0.58))
-                                    Text(localWeather.weatherText)
-                                }
-
-                                HStack(spacing: 6) {
-                                    weatherStatusIcon
-                                    Text(localWeather.weatherText)
-                                }
+                            HStack(spacing: 6) {
+                                weatherStatusIcon
+                                    .fixedSize()
+                                Text(WeatherPresentation.conciseLocationText(localWeather.locationText))
+                                    .layoutPriority(2)
+                                Text("·")
+                                    .foregroundStyle(.white.opacity(0.58))
+                                Text(localWeather.weatherText)
+                                    .layoutPriority(1)
                             }
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.white.opacity(0.94))
                             .lineLimit(1)
-                            .minimumScaleFactor(0.86)
+                            .minimumScaleFactor(0.78)
                             .padding(.horizontal, 11)
                             .padding(.vertical, 7)
                             .background(.black.opacity(0.42), in: Capsule())
