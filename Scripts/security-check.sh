@@ -36,6 +36,7 @@ fi
 
 if command -v php >/dev/null 2>&1; then
   php -l Server/shuzijun-app-content.php >/dev/null
+  php Server/tests/plugin-contract-test.php
 fi
 
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/entitlement-verifier/app.py").read_text(encoding="utf-8"))'

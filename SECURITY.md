@@ -14,6 +14,7 @@
 - 天气功能只在用户主动开启后请求前台位置，定位精度设为约三公里；位置不持久化，也不进行后台定位。天气由 Apple WeatherKit 处理，工程包含 WeatherKit entitlement、法定署名入口与 Privacy Manifest。
 - GitHub 质量门禁使用最小读权限和固定 commit SHA 的 Action，不持有生产密钥；每次推送都扫描长期凭据、明文 HTTP、敏感文件、配置语法，并在 iPhone/iPad 执行关键页面回归。
 - MetricKit 与 Unified Logging 只保留版本、性能/诊断聚合数和数字网络错误类别，不记录 URL、账号、凭据或影像内容，不向第三方分析服务上传。
+- WordPress 内容插件在写入与读取两侧都执行相同的 URL、长度、数量和唯一 ID 校验；数据库旧值损坏时按模块回退安全默认值，并由无 WordPress 环境依赖的 PHP 合同测试持续验证。
 
 ## 恢复付费订阅前必须完成
 

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned public content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.4.0
+ * Version: 1.4.1
  * Author: Shuzijun
  */
 
@@ -320,11 +320,9 @@ final class Shuzijun_App_Content_API {
             if (is_wp_error($heroes)) { return $heroes; }
             $current['heroImages'] = $heroes;
         }
-        if (is_string($incoming_about_portrait) && $incoming_about_portrait !== '') {
-            $about_portrait = self::trusted_media_url($incoming_about_portrait);
-            if (!$about_portrait) {
-                return new WP_Error('invalid_about_portrait', '关于页照片必须使用受信任的 HTTPS 媒体地址。', array('status' => 400));
-            }
+        if ($request->has_param('aboutPortraitURL')) {
+            $about_portrait = self::sanitize_optional_media_url($incoming_about_portrait);
+            if (is_wp_error($about_portrait)) { return $about_portrait; }
             $current['aboutPortraitURL'] = $about_portrait;
         }
         if (is_array($incoming_launch_posters)) {
@@ -482,22 +480,43 @@ final class Shuzijun_App_Content_API {
         $stored = get_option(self::OPTION_CONFIG, array());
         if (!is_array($stored)) { $stored = array(); }
         $defaults = self::default_config();
+
+        // Options can outlive several plugin versions or be changed directly
+        // in the database. Revalidate every stored field before publishing it;
+        // an invalid section falls back independently instead of poisoning the
+        // complete manifest consumed by the App.
+        $heroes = isset($stored['heroImages']) && is_array($stored['heroImages'])
+            ? self::sanitize_image_urls($stored['heroImages'], 5)
+            : $defaults['heroImages'];
+        if (is_wp_error($heroes)) { $heroes = $defaults['heroImages']; }
+
+        $about_portrait = array_key_exists('aboutPortraitURL', $stored)
+            ? self::sanitize_optional_media_url($stored['aboutPortraitURL'])
+            : $defaults['aboutPortraitURL'];
+        if (is_wp_error($about_portrait)) { $about_portrait = $defaults['aboutPortraitURL']; }
+
+        $launch_posters = isset($stored['launchPosters']) && is_array($stored['launchPosters'])
+            ? self::sanitize_launch_posters($stored['launchPosters'])
+            : $defaults['launchPosters'];
+        if (is_wp_error($launch_posters)) { $launch_posters = $defaults['launchPosters']; }
+
+        $showreel_value = isset($stored['showreel']) && is_array($stored['showreel'])
+            ? array_merge($defaults['showreel'], $stored['showreel'])
+            : $defaults['showreel'];
+        $showreel = self::sanitize_showreel($showreel_value, $defaults['showreel']);
+        if (is_wp_error($showreel)) { $showreel = $defaults['showreel']; }
+
+        $dramas = isset($stored['dramas']) && is_array($stored['dramas'])
+            ? self::sanitize_dramas($stored['dramas'])
+            : $defaults['dramas'];
+        if (is_wp_error($dramas)) { $dramas = $defaults['dramas']; }
+
         return array(
-            'heroImages' => isset($stored['heroImages']) && is_array($stored['heroImages'])
-                ? array_values($stored['heroImages'])
-                : $defaults['heroImages'],
-            'aboutPortraitURL' => isset($stored['aboutPortraitURL'])
-                ? (self::trusted_media_url($stored['aboutPortraitURL']) ?: null)
-                : $defaults['aboutPortraitURL'],
-            'launchPosters' => isset($stored['launchPosters']) && is_array($stored['launchPosters'])
-                ? array_values($stored['launchPosters'])
-                : $defaults['launchPosters'],
-            'showreel' => isset($stored['showreel']) && is_array($stored['showreel'])
-                ? array_merge($defaults['showreel'], $stored['showreel'])
-                : $defaults['showreel'],
-            'dramas' => isset($stored['dramas']) && is_array($stored['dramas'])
-                ? array_values($stored['dramas'])
-                : $defaults['dramas'],
+            'heroImages' => $heroes,
+            'aboutPortraitURL' => $about_portrait,
+            'launchPosters' => $launch_posters,
+            'showreel' => $showreel,
+            'dramas' => $dramas,
         );
     }
 
@@ -671,7 +690,19 @@ final class Shuzijun_App_Content_API {
             return new WP_Error('invalid_showreel_url', 'Showreel 和海报必须使用受信任的 HTTPS 媒体地址。', array('status' => 400));
         }
         $tags = isset($value['tags']) && is_array($value['tags']) ? $value['tags'] : $fallback['tags'];
-        $tags = array_slice(array_values(array_filter(array_map('sanitize_text_field', $tags))), 0, 8);
+        $sanitized_tags = array();
+        foreach (array_slice(array_values($tags), 0, 8) as $tag) {
+            if (!is_scalar($tag)) {
+                return new WP_Error('invalid_showreel_tag', 'Showreel 标签格式无效。', array('status' => 400));
+            }
+            $tag = sanitize_text_field($tag);
+            if (self::text_length($tag) > 80) {
+                return new WP_Error('showreel_tag_too_long', 'Showreel 标签过长。', array('status' => 400));
+            }
+            if ($tag !== '' && !in_array($tag, $sanitized_tags, true)) {
+                $sanitized_tags[] = $tag;
+            }
+        }
         $eyebrow = sanitize_text_field(isset($value['eyebrow']) ? $value['eyebrow'] : $fallback['eyebrow']);
         $title = sanitize_text_field(isset($value['title']) ? $value['title'] : $fallback['title']);
         $summary = sanitize_text_field(isset($value['summary']) ? $value['summary'] : $fallback['summary']);
@@ -687,7 +718,7 @@ final class Shuzijun_App_Content_API {
             'durationLabel' => $duration,
             'videoURL' => $video,
             'posterURL' => $poster,
-            'tags' => $tags,
+            'tags' => $sanitized_tags,
         );
     }
 
@@ -696,13 +727,28 @@ final class Shuzijun_App_Content_API {
             return new WP_Error('too_many_launch_posters', '开屏海报最多 12 张。', array('status' => 400));
         }
         $result = array();
+        $seen_ids = array();
         foreach (array_slice(array_values($values), 0, 12) as $index => $value) {
-            if (!is_array($value)) { continue; }
+            if (!is_array($value)) {
+                return new WP_Error('invalid_launch_poster', '开屏海报格式无效。', array('status' => 400));
+            }
+            foreach (array('id', 'imageURL', 'eyebrow', 'title', 'subtitle', 'startsAt', 'endsAt') as $field) {
+                if (isset($value[$field]) && !is_scalar($value[$field])) {
+                    return new WP_Error('invalid_launch_poster', '开屏海报字段格式无效。', array('status' => 400));
+                }
+            }
+            if (isset($value['displaySeconds'])
+                && (!is_scalar($value['displaySeconds']) || !is_numeric($value['displaySeconds']))) {
+                return new WP_Error('invalid_launch_poster', '开屏海报展示时长格式无效。', array('status' => 400));
+            }
             $image = self::trusted_media_url(isset($value['imageURL']) ? $value['imageURL'] : '');
             $title = sanitize_text_field(isset($value['title']) ? $value['title'] : '');
+            $eyebrow = sanitize_text_field(isset($value['eyebrow']) ? $value['eyebrow'] : '');
+            $subtitle = sanitize_text_field(isset($value['subtitle']) ? $value['subtitle'] : '');
             $starts_at = isset($value['startsAt']) ? strtotime((string) $value['startsAt']) : false;
             $ends_at = isset($value['endsAt']) ? strtotime((string) $value['endsAt']) : false;
             if (!$image || !$title || self::text_length($title) > 160
+                || self::text_length($eyebrow) > 120 || self::text_length($subtitle) > 240
                 || $starts_at === false || $ends_at === false || $starts_at >= $ends_at) {
                 return new WP_Error(
                     'invalid_launch_poster',
@@ -712,14 +758,19 @@ final class Shuzijun_App_Content_API {
             }
             $id = sanitize_key(isset($value['id']) ? $value['id'] : '');
             if (!$id) { $id = 'launch-poster-' . ($index + 1); }
+            if (self::text_length($id) > 80 || isset($seen_ids[$id])) {
+                return new WP_Error('duplicate_launch_poster', '开屏海报 ID 必须唯一且不超过 80 个字符。', array('status' => 400));
+            }
+            $seen_ids[$id] = true;
             $display_seconds = isset($value['displaySeconds']) ? floatval($value['displaySeconds']) : 2.5;
+            if (!is_finite($display_seconds)) { $display_seconds = 2.5; }
             $result[] = array(
                 'id' => $id,
                 'isEnabled' => isset($value['isEnabled']) ? rest_sanitize_boolean($value['isEnabled']) : true,
                 'imageURL' => $image,
-                'eyebrow' => sanitize_text_field(isset($value['eyebrow']) ? $value['eyebrow'] : ''),
+                'eyebrow' => $eyebrow,
                 'title' => $title,
-                'subtitle' => sanitize_text_field(isset($value['subtitle']) ? $value['subtitle'] : ''),
+                'subtitle' => $subtitle,
                 'startsAt' => gmdate('c', $starts_at),
                 'endsAt' => gmdate('c', $ends_at),
                 'displaySeconds' => max(1.5, min(5.0, $display_seconds)),
@@ -733,8 +784,16 @@ final class Shuzijun_App_Content_API {
             return new WP_Error('too_many_dramas', '影视履历最多 50 条。', array('status' => 400));
         }
         $result = array();
+        $seen_ids = array();
         foreach (array_slice(array_values($values), 0, 50) as $index => $value) {
-            if (!is_array($value)) { continue; }
+            if (!is_array($value)) {
+                return new WP_Error('invalid_drama', '影视履历格式无效。', array('status' => 400));
+            }
+            foreach (array('id', 'title', 'imageURL', 'destinationURL') as $field) {
+                if (isset($value[$field]) && !is_scalar($value[$field])) {
+                    return new WP_Error('invalid_drama', '影视履历字段格式无效。', array('status' => 400));
+                }
+            }
             $title = sanitize_text_field(isset($value['title']) ? $value['title'] : '');
             $image = self::trusted_media_url(isset($value['imageURL']) ? $value['imageURL'] : '');
             $destination = self::trusted_destination_url(isset($value['destinationURL']) ? $value['destinationURL'] : '');
@@ -743,6 +802,10 @@ final class Shuzijun_App_Content_API {
             }
             $id = sanitize_key(isset($value['id']) ? $value['id'] : '');
             if (!$id) { $id = 'drama-' . ($index + 1); }
+            if (self::text_length($id) > 80 || isset($seen_ids[$id])) {
+                return new WP_Error('duplicate_drama', '影视履历 ID 必须唯一且不超过 80 个字符。', array('status' => 400));
+            }
+            $seen_ids[$id] = true;
             $result[] = array('id'=>$id, 'title'=>$title, 'imageURL'=>$image, 'destinationURL'=>$destination);
         }
         return $result;
@@ -758,7 +821,7 @@ final class Shuzijun_App_Content_API {
             if (!$url) {
                 return new WP_Error('invalid_image_url', '主页封面必须使用受信任的 HTTPS 媒体地址。', array('status' => 400));
             }
-            $result[] = $url;
+            if (!in_array($url, $result, true)) { $result[] = $url; }
         }
         if (!$result) {
             return new WP_Error('missing_hero_image', '至少保留一张主页封面。', array('status' => 400));
@@ -767,12 +830,26 @@ final class Shuzijun_App_Content_API {
     }
 
     private static function https_url($value) {
+        if (!is_string($value)) { return ''; }
         if (strlen((string) $value) > 2048) { return ''; }
         $url = esc_url_raw((string) $value, array('https'));
         if (wp_parse_url($url, PHP_URL_SCHEME) !== 'https') { return ''; }
         if (wp_parse_url($url, PHP_URL_USER) || wp_parse_url($url, PHP_URL_PASS)) { return ''; }
+        if (wp_parse_url($url, PHP_URL_FRAGMENT)) { return ''; }
         $port = wp_parse_url($url, PHP_URL_PORT);
         return !$port || (int) $port === 443 ? $url : '';
+    }
+
+    private static function sanitize_optional_media_url($value) {
+        if ($value === null || $value === '') { return null; }
+        if (!is_string($value)) {
+            return new WP_Error('invalid_about_portrait', '关于页照片格式无效。', array('status' => 400));
+        }
+        $url = self::trusted_media_url($value);
+        if (!$url) {
+            return new WP_Error('invalid_about_portrait', '关于页照片必须使用受信任的 HTTPS 媒体地址。', array('status' => 400));
+        }
+        return $url;
     }
 
     private static function trusted_media_url($value) {

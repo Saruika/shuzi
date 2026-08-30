@@ -2,7 +2,7 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前版本：`1.3.11 (22)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前版本：`1.3.12 (23)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
@@ -72,6 +72,12 @@ xcodebuild -project Yishu.xcodeproj \
 - App 明示照片与影像均已取得合法展示授权；相关版权和肖像权归各自权利人所有，未经许可不得下载、复制、传播、改编或商业使用。
 
 截图保护是 iOS 系统能力限制下的尽力防护，无法阻止另一台设备拍摄屏幕；已公开过的 WordPress 原图在迁移到私有对象存储前，也不能承诺绝对无法下载。完整安全边界和上线前 P0 清单见 [`SECURITY.md`](SECURITY.md)。
+
+## v1.3.12
+
+- WordPress 内容插件升级到 1.4.1，发布前与读取时都会验证内容配置；数据库旧值损坏时仅回退对应模块，不再拖垮整份 App 清单。
+- 拒绝重复或超长的开屏/影视 ID、过长文案、畸形数组和带片段的媒体 URL，主页重复图片自动去重。
+- 管理员现在可以清空关于页人物图；新增独立 PHP 合同回归并纳入本地与 GitHub 安全门禁。
 
 ## v1.3.11
 
