@@ -2,7 +2,7 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前版本：`1.3.12 (23)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前版本：`1.3.13 (24)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
@@ -72,6 +72,12 @@ xcodebuild -project Yishu.xcodeproj \
 - App 明示照片与影像均已取得合法展示授权；相关版权和肖像权归各自权利人所有，未经许可不得下载、复制、传播、改编或商业使用。
 
 截图保护是 iOS 系统能力限制下的尽力防护，无法阻止另一台设备拍摄屏幕；已公开过的 WordPress 原图在迁移到私有对象存储前，也不能承诺绝对无法下载。完整安全边界和上线前 P0 清单见 [`SECURITY.md`](SECURITY.md)。
+
+## v1.3.13
+
+- 修复主备数据库同步后备用节点 Redis 仍保留旧 WordPress options 的问题，避免故障切换时开屏图和更新时间回退。
+- 同步接收脚本在数据库导入与结构升级后显式清空对象缓存，再验证 Nginx 并重启 PHP-FPM。
+- 将线上接收脚本纳入仓库和自动合同测试，持续校验“校验包 → 备份 → 导入 → 清缓存 → 服务重载”的安全顺序。
 
 ## v1.3.12
 

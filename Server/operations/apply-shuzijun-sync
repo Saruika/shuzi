@@ -1,0 +1,45 @@
+#!/bin/bash
+set -euo pipefail
+
+SITE=/var/www/html/shuzijun.com.cn
+STAGE=/tmp/shuzijun-stage
+DATABASE="$STAGE/shuzijun-sync.sql.gz"
+MANIFEST="$STAGE/shuzijun-sync.sha256"
+LOG=/var/log/shuzijun-sync-receiver.log
+
+test "$SITE" = /var/www/html/shuzijun.com.cn
+test "$STAGE" = /tmp/shuzijun-stage
+for file in "$DATABASE" "$MANIFEST"; do test -f "$file"; done
+
+cd "$STAGE"
+sha256sum -c "$MANIFEST"
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+DEST=/var/backups/pre-sync-$STAMP
+install -d -m 700 "$DEST"
+cd "$SITE"
+wp db export "$DEST/wordpress.sql" --add-drop-table --allow-root >/dev/null
+gzip -9 "$DEST/wordpress.sql"
+cp -a wp-config.php "$DEST/wp-config.php"
+
+rsync -a --delete --exclude='cache/' --exclude='debug.log' \
+    "$STAGE/wp-content/" "$SITE/wp-content/"
+gunzip -c "$DATABASE" > "$STAGE/shuzijun-sync.sql"
+wp db import "$STAGE/shuzijun-sync.sql" --allow-root >/dev/null
+wp core update-db --allow-root >/dev/null
+
+# The backup node uses a persistent Redis object cache. A database import does
+# not invalidate cached `options`, so without this flush the API can keep
+# serving the previous launch poster and update timestamp indefinitely.
+wp cache flush --allow-root >/dev/null
+
+chown -R www-data:www-data "$SITE/wp-content"
+chown root:www-data "$SITE/wp-config.php"
+chmod 640 "$SITE/wp-config.php"
+nginx -t
+systemctl reload nginx
+systemctl restart php8.3-fpm
+
+rm -f "$DATABASE" "$MANIFEST" "$STAGE/shuzijun-sync.sql"
+printf '[%s] incremental sync applied; backup=%s\n' "$(date '+%F %T')" "$DEST" >> "$LOG"
+printf 'sync-applied backup=%s cache=flushed\n' "$DEST"
