@@ -81,7 +81,7 @@ enum ContentCatalog {
         heroAssetNames.indices.contains(index) ? heroAssetNames[index] : nil
     }
     private static let launchPosterFallbackURL = URL(
-        string: "https://img.shuzijun.com.cn/images/hero-mobile-1.webp"
+        string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-launch-qipao-ivory-20260830.jpg"
     )!
     static let launchPosters = [
         LaunchPosterContent(

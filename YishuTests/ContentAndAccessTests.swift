@@ -27,6 +27,15 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(ContentCatalog.heroAssetName(at: ContentCatalog.heroImages.count))
     }
 
+    func testBundledLaunchPosterDoesNotReuseAHomeHero() {
+        let homeHeroes = Set(ContentCatalog.heroImages)
+
+        XCTAssertFalse(ContentCatalog.launchPosters.isEmpty)
+        for poster in ContentCatalog.launchPosters {
+            XCTAssertFalse(homeHeroes.contains(poster.imageURL))
+        }
+    }
+
     func testInsecureOrUnknownMediaHostsAreRejected() {
         XCTAssertFalse(
             ContentSecurityPolicy.isTrustedMediaURL(

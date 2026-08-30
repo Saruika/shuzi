@@ -501,7 +501,7 @@ final class Shuzijun_App_Content_API {
                 array(
                     'id' => 'evergreen',
                     'isEnabled' => true,
-                    'imageURL' => 'https://img.shuzijun.com.cn/images/hero-mobile-1.webp',
+                    'imageURL' => 'https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-launch-qipao-ivory-20260830.jpg',
                     'eyebrow' => 'YI SHU',
                     'title' => '易姝',
                     'subtitle' => '镜头之内，自有叙事。',

@@ -8,7 +8,7 @@ enum ContentOrigin: Equatable {
 
 @MainActor
 final class PortfolioStore: ObservableObject {
-    private static let offlinePreviewImageCount = 3
+    nonisolated private static let offlinePreviewImageCount = 3
     @Published private(set) var portfolios: [Portfolio] = Portfolio.fallback
     @Published private(set) var heroImages: [URL] = ContentCatalog.heroImages
     @Published private(set) var launchPosters: [LaunchPosterContent] = ContentCatalog.launchPosters
