@@ -4,6 +4,10 @@ App 内订阅功能已经接入 StoreKit 2。正式收费前，需要由 Apple D
 
 ## App Store Connect 商品
 
+- App 名称：`易姝`
+- 主要语言：简体中文
+- Bundle ID：`cn.com.shuzijun.yishu`
+- SKU 建议：`yishu-ios-2026`
 - 类型：自动续期订阅
 - 订阅组参考名称：`易姝完整作品`
 - 商品参考名称：`完整作品月度订阅`
@@ -24,6 +28,8 @@ App 内订阅功能已经接入 StoreKit 2。正式收费前，需要由 Apple D
 4. 在审核备注中提供一个可直接打开作品页的方法，并说明每个相册前 3 张免费、其余照片需要订阅。
 5. 首个自动续期订阅须随一个新的 App 版本一并提交审核。
 6. 确认 App Store Connect 中的“付费 App 协议”、税务与收款资料均已生效。
+
+这些项目属于 Apple 后台数据，不能仅靠 Xcode 工程生成。完成后请不要把 App Store Connect 登录信息、双重认证码或 `.p8` 私钥提交到仓库。
 
 ## App 内规则
 

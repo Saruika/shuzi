@@ -70,6 +70,8 @@
 		200000000000000000000099 /* Yishu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yishu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000001 /* ContentAndAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentAndAccessTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000099 /* YishuTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YishuTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		EB2F1EB2304348AC0021BF61 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; name = Info.plist; path = Yishu/Info.plist; sourceTree = "<group>"; };
+		EB2F1EB3304348AC0021BF61 /* Yishu.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; name = Yishu.entitlements; path = Yishu/Yishu.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -93,6 +95,8 @@
 		300000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
+				EB2F1EB2304348AC0021BF61 /* Info.plist */,
+				EB2F1EB3304348AC0021BF61 /* Yishu.entitlements */,
 				300000000000000000000002 /* Yishu/App */,
 				300000000000000000000003 /* Yishu/Models */,
 				300000000000000000000004 /* Yishu/Services */,
@@ -341,8 +345,8 @@
 				CLANG_ENABLE_OBJC_ARC = YES;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
@@ -388,17 +392,18 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Yishu/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "易姝";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "用于在首页显示你所在城市的当地天气；近似坐标仅在前台发送给天气服务，不会持续定位。";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "用于在首页通过 Apple WeatherKit 显示所在城市的当地天气；仅在前台请求约三公里精度的位置。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = NO;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
@@ -406,7 +411,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.1;
+				MARKETING_VERSION = 1.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -421,17 +426,18 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 6;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Yishu/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "易姝";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "用于在首页显示你所在城市的当地天气；近似坐标仅在前台发送给天气服务，不会持续定位。";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "用于在首页通过 Apple WeatherKit 显示所在城市的当地天气；仅在前台请求约三公里精度的位置。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = NO;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIRequiresFullScreen = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
@@ -439,7 +445,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2.1;
+				MARKETING_VERSION = 1.3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

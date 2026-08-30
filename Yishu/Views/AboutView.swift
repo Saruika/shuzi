@@ -215,7 +215,7 @@ struct AboutView: View {
                         if case .success(let image) = phase {
                             image.resizable().scaledToFit()
                         } else {
-                            Text("MET Norway")
+                            Text(localWeather.weatherProviderName)
                                 .font(.system(size: 12, weight: .semibold))
                         }
                     }

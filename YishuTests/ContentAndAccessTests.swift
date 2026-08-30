@@ -1,4 +1,5 @@
 import XCTest
+import WeatherKit
 @testable import Yishu
 
 final class ContentAndAccessTests: XCTestCase {
@@ -65,6 +66,16 @@ final class ContentAndAccessTests: XCTestCase {
                 URL(string: "https://example.com/photo.jpg")!
             )
         )
+    }
+
+    func testWeatherKitConditionsHaveChinesePresentation() {
+        XCTAssertEqual(WeatherPresentation.conditionText(for: .clear), "晴")
+        XCTAssertEqual(WeatherPresentation.conditionText(for: .heavyRain), "大雨")
+        XCTAssertEqual(WeatherPresentation.conditionText(for: .wintryMix), "雨雪混合")
+
+        for condition in WeatherCondition.allCases {
+            XCTAssertFalse(WeatherPresentation.conditionText(for: condition).isEmpty)
+        }
     }
 
     private func makePortfolio(imageCount: Int) -> Portfolio {
