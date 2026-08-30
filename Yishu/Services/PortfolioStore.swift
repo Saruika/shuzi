@@ -209,6 +209,7 @@ final class PortfolioStore: ObservableObject {
         guard let url = cacheFileURL(createDirectory: true),
               let data = try? JSONEncoder().encode(
                 PortfolioCacheEnvelope(
+                    cacheSchemaVersion: ContentManifestPolicy.currentCacheSchemaVersion,
                     portfolios: cachedPortfolios,
                     heroImages: heroImages,
                     aboutPortraitURL: aboutPortraitURL,
@@ -336,7 +337,8 @@ enum ContentSecurityPolicy {
     ]
 
     static func isTrusted(_ manifest: AppContentManifest) -> Bool {
-        manifest.heroImages.allSatisfy(isTrustedMediaURL)
+        ContentManifestPolicy.isValid(manifest)
+            && manifest.heroImages.allSatisfy(isTrustedMediaURL)
             && (manifest.aboutPortraitURL.map(isTrustedMediaURL) ?? true)
             && (manifest.launchPosters ?? []).allSatisfy { isTrustedMediaURL($0.imageURL) }
             && isTrustedMediaURL(manifest.showreel.videoURL)
@@ -348,7 +350,16 @@ enum ContentSecurityPolicy {
     }
 
     fileprivate static func isTrusted(_ cache: PortfolioCacheEnvelope) -> Bool {
-        (cache.heroImages ?? []).allSatisfy(isTrustedMediaURL)
+        ContentManifestPolicy.isValidCache(
+            schemaVersion: cache.cacheSchemaVersion,
+            portfolios: cache.portfolios,
+            heroImages: cache.heroImages,
+            launchPosters: cache.launchPosters,
+            showreel: cache.showreel,
+            dramas: cache.dramas,
+            updatedAt: cache.updatedAt
+        )
+            && (cache.heroImages ?? []).allSatisfy(isTrustedMediaURL)
             && (cache.aboutPortraitURL.map(isTrustedMediaURL) ?? true)
             && (cache.launchPosters ?? []).allSatisfy { isTrustedMediaURL($0.imageURL) }
             && (cache.showreel.map {
@@ -361,7 +372,9 @@ enum ContentSecurityPolicy {
     }
 
     static func isTrustedMediaURL(_ url: URL) -> Bool {
-        isSecure(url) && trustedMediaHosts.contains(url.host?.lowercased() ?? "")
+        isSecure(url)
+            && url.absoluteString.utf8.count <= 2_048
+            && trustedMediaHosts.contains(url.host?.lowercased() ?? "")
     }
 
     static func matchesRequestedMediaURL(_ responseURL: URL?, requestedURL: URL) -> Bool {
@@ -380,11 +393,14 @@ enum ContentSecurityPolicy {
     }
 
     private static func isTrustedDestinationURL(_ url: URL) -> Bool {
-        isSecure(url) && trustedDestinationHosts.contains(url.host?.lowercased() ?? "")
+        isSecure(url)
+            && url.absoluteString.utf8.count <= 2_048
+            && trustedDestinationHosts.contains(url.host?.lowercased() ?? "")
     }
 
     private static func isTrusted(_ portfolio: Portfolio) -> Bool {
         isTrustedWebsiteURL(portfolio.websiteURL)
+            && portfolio.websiteURL.path.hasPrefix("/portfolio/")
             && (portfolio.totalImageCount.map { $0 >= portfolio.images.count && $0 <= 300 } ?? true)
             && (portfolio.coverURL.map(isTrustedMediaURL) ?? true)
             && portfolio.images.allSatisfy {
@@ -402,6 +418,7 @@ enum ContentSecurityPolicy {
 }
 
 fileprivate struct PortfolioCacheEnvelope: Codable {
+    let cacheSchemaVersion: Int?
     let portfolios: [Portfolio]
     let heroImages: [URL]?
     let aboutPortraitURL: URL?

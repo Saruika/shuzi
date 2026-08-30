@@ -30,5 +30,6 @@ UI 测试仅在 Debug 构建中使用参数关闭截屏保护，以便 XCTest �
 - 文本中是否出现高置信度的云密钥、私钥或 URL 内嵌密码。
 - iOS 生产 Swift 源码是否使用明文 HTTP。
 - Xcode/Privacy/Entitlement 配置、WordPress PHP 插件和 Python 订阅校验器是否通过基础语法检查。
+- 内容清单会用超量集合、重复 ID、异常时长、超长 URL 和未知缓存版本做负向单元回归。
 
 GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服务器密钥；外部 Action 固定到完整 commit SHA。失败时保留七天 `.xcresult` 供排查。

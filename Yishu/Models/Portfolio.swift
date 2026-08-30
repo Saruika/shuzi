@@ -67,6 +67,152 @@ struct AppContentManifest: Codable {
     let portfolios: [Portfolio]
 }
 
+/// Treats the CMS response as untrusted input even after TLS and host checks.
+/// These limits mirror the publishing API and keep a damaged or compromised
+/// manifest from creating unbounded SwiftUI collections or pathological text.
+enum ContentManifestPolicy {
+    static let currentSchemaVersion = 1
+    static let currentCacheSchemaVersion = 1
+
+    private static let maximumHeroCount = 5
+    private static let maximumLaunchPosterCount = 12
+    private static let maximumDramaCount = 50
+    private static let maximumPortfolioCount = 100
+    private static let maximumImagesPerPortfolio = 300
+    private static let maximumTotalImageCount = maximumPortfolioCount * maximumImagesPerPortfolio
+    private static let latestSupportedTimestamp: TimeInterval = 4_102_444_800 // 2100-01-01 UTC
+    private static let identifierCharacters = CharacterSet(
+        charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-_"
+    )
+
+    static func isValid(_ manifest: AppContentManifest) -> Bool {
+        manifest.schemaVersion == currentSchemaVersion
+            && isValidUpdateDate(manifest.updatedAt)
+            && isValidHeroes(manifest.heroImages)
+            && isValidLaunchPosters(manifest.launchPosters ?? [])
+            && isValidShowreel(manifest.showreel)
+            && isValidDramas(manifest.dramas)
+            && isValidPortfolios(manifest.portfolios)
+    }
+
+    static func isSupportedCacheSchemaVersion(_ version: Int?) -> Bool {
+        // v1.3.13 and earlier caches did not carry a schema marker. Accept one
+        // legacy generation, while rejecting any future format we do not know.
+        version == nil || version == currentCacheSchemaVersion
+    }
+
+    static func isValidCache(
+        schemaVersion: Int?,
+        portfolios: [Portfolio],
+        heroImages: [URL]?,
+        launchPosters: [LaunchPosterContent]?,
+        showreel: ShowreelContent?,
+        dramas: [DramaWork]?,
+        updatedAt: Date
+    ) -> Bool {
+        isSupportedCacheSchemaVersion(schemaVersion)
+            && isValidUpdateDate(updatedAt)
+            && isValidPortfolios(portfolios)
+            && (heroImages.map(isValidHeroes) ?? true)
+            && (launchPosters.map(isValidLaunchPosters) ?? true)
+            && (showreel.map(isValidShowreel) ?? true)
+            && (dramas.map(isValidDramas) ?? true)
+    }
+
+    private static func isValidUpdateDate(_ date: Date) -> Bool {
+        let timestamp = date.timeIntervalSince1970
+        return timestamp.isFinite && timestamp >= 0 && timestamp <= latestSupportedTimestamp
+    }
+
+    private static func isValidHeroes(_ heroes: [URL]) -> Bool {
+        (1...maximumHeroCount).contains(heroes.count)
+            && hasUniqueElements(heroes)
+    }
+
+    private static func isValidLaunchPosters(_ posters: [LaunchPosterContent]) -> Bool {
+        guard posters.count <= maximumLaunchPosterCount,
+              hasUniqueElements(posters.map(\.id)) else { return false }
+        return posters.allSatisfy { poster in
+            isValidIdentifier(poster.id)
+                && isValidText(poster.eyebrow, maximum: 120)
+                && isValidText(poster.title, maximum: 160, required: true)
+                && isValidText(poster.subtitle, maximum: 240)
+                && poster.startsAt.timeIntervalSince1970.isFinite
+                && poster.endsAt.timeIntervalSince1970.isFinite
+                && poster.startsAt < poster.endsAt
+                && poster.displaySeconds.isFinite
+                && (1.5...5.0).contains(poster.displaySeconds)
+        }
+    }
+
+    private static func isValidShowreel(_ showreel: ShowreelContent) -> Bool {
+        showreel.tags.count <= 8
+            && hasUniqueElements(showreel.tags)
+            && isValidText(showreel.eyebrow, maximum: 120)
+            && isValidText(showreel.title, maximum: 160)
+            && isValidText(showreel.summary, maximum: 500)
+            && isValidText(showreel.durationLabel, maximum: 20)
+            && showreel.tags.allSatisfy { isValidText($0, maximum: 80, required: true) }
+    }
+
+    private static func isValidDramas(_ dramas: [DramaWork]) -> Bool {
+        guard dramas.count <= maximumDramaCount,
+              hasUniqueElements(dramas.map(\.id)) else { return false }
+        return dramas.allSatisfy { drama in
+            isValidIdentifier(drama.id)
+                && isValidText(drama.title, maximum: 200, required: true)
+        }
+    }
+
+    private static func isValidPortfolios(_ portfolios: [Portfolio]) -> Bool {
+        guard (1...maximumPortfolioCount).contains(portfolios.count),
+              hasUniqueElements(portfolios.map(\.id)) else { return false }
+
+        var loadedImageCount = 0
+        for portfolio in portfolios {
+            guard portfolio.id > 0,
+                  isValidText(portfolio.title, maximum: 240, required: true),
+                  isValidText(portfolio.subtitle, maximum: 500),
+                  isValidText(portfolio.eyebrow, maximum: 160),
+                  isValidText(portfolio.slug, maximum: 200, required: true),
+                  portfolio.images.count <= maximumImagesPerPortfolio,
+                  hasUniqueElements(portfolio.images.map(\.id)),
+                  portfolio.images.allSatisfy({ image in
+                      image.id > 0 && isValidText(image.altText, maximum: 500)
+                  }) else { return false }
+
+            if let totalImageCount = portfolio.totalImageCount {
+                guard totalImageCount >= portfolio.images.count,
+                      totalImageCount <= maximumImagesPerPortfolio else { return false }
+            }
+            loadedImageCount += portfolio.images.count
+            guard loadedImageCount <= maximumTotalImageCount else { return false }
+        }
+        return true
+    }
+
+    private static func isValidIdentifier(_ identifier: String) -> Bool {
+        guard isValidText(identifier, maximum: 80, required: true) else { return false }
+        return identifier.unicodeScalars.allSatisfy(identifierCharacters.contains)
+    }
+
+    private static func isValidText(
+        _ value: String,
+        maximum: Int,
+        required: Bool = false
+    ) -> Bool {
+        guard value.count <= maximum,
+              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            return false
+        }
+        return !required || !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func hasUniqueElements<Element: Hashable>(_ values: [Element]) -> Bool {
+        Set(values).count == values.count
+    }
+}
+
 enum ContentCatalog {
     /// The App consumes this versioned manifest contract rather than any CMS-specific models.
     /// The compatibility endpoint can move to a CDN without changing the client data model.

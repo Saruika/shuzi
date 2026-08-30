@@ -64,6 +64,61 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertTrue(ContentSecurityPolicy.isTrusted(decoded))
     }
 
+    func testManifestPolicyRejectsOversizedAndDuplicateCollections() {
+        let base = makeManifest(aboutPortraitURL: nil)
+        XCTAssertTrue(ContentManifestPolicy.isValid(base))
+
+        let tooManyHeroes = (0..<6).map { index in
+            URL(string: "https://img.shuzijun.com.cn/test/hero-\(index).jpg")!
+        }
+        let oversized = AppContentManifest(
+            schemaVersion: base.schemaVersion,
+            updatedAt: base.updatedAt,
+            heroImages: tooManyHeroes,
+            aboutPortraitURL: base.aboutPortraitURL,
+            launchPosters: base.launchPosters,
+            showreel: base.showreel,
+            dramas: base.dramas,
+            portfolios: base.portfolios
+        )
+        XCTAssertFalse(ContentManifestPolicy.isValid(oversized))
+        XCTAssertFalse(ContentSecurityPolicy.isTrusted(oversized))
+
+        let duplicatePortfolios = AppContentManifest(
+            schemaVersion: base.schemaVersion,
+            updatedAt: base.updatedAt,
+            heroImages: base.heroImages,
+            aboutPortraitURL: base.aboutPortraitURL,
+            launchPosters: base.launchPosters,
+            showreel: base.showreel,
+            dramas: base.dramas,
+            portfolios: [base.portfolios[0], base.portfolios[0]]
+        )
+        XCTAssertFalse(ContentManifestPolicy.isValid(duplicatePortfolios))
+    }
+
+    func testManifestPolicyRejectsUnsafeTimingAndUnknownCacheVersions() {
+        let base = makeManifest(aboutPortraitURL: nil)
+        var invalidPoster = ContentCatalog.launchPosters[0]
+        invalidPoster.displaySeconds = .infinity
+        let invalidTiming = AppContentManifest(
+            schemaVersion: base.schemaVersion,
+            updatedAt: base.updatedAt,
+            heroImages: base.heroImages,
+            aboutPortraitURL: base.aboutPortraitURL,
+            launchPosters: [invalidPoster],
+            showreel: base.showreel,
+            dramas: base.dramas,
+            portfolios: base.portfolios
+        )
+
+        XCTAssertFalse(ContentManifestPolicy.isValid(invalidTiming))
+        XCTAssertTrue(ContentManifestPolicy.isSupportedCacheSchemaVersion(nil))
+        XCTAssertTrue(ContentManifestPolicy.isSupportedCacheSchemaVersion(1))
+        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(0))
+        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(2))
+    }
+
     func testInsecureOrUnknownMediaHostsAreRejected() {
         XCTAssertFalse(
             ContentSecurityPolicy.isTrustedMediaURL(
@@ -73,6 +128,13 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(
             ContentSecurityPolicy.isTrustedMediaURL(
                 URL(string: "https://example.com/photo.jpg")!
+            )
+        )
+        XCTAssertFalse(
+            ContentSecurityPolicy.isTrustedMediaURL(
+                URL(
+                    string: "https://img.shuzijun.com.cn/\(String(repeating: "a", count: 2_100)).jpg"
+                )!
             )
         )
     }
