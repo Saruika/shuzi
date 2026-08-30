@@ -68,33 +68,36 @@ private struct HeroPager: View {
                     HStack {
                         Spacer()
                         Button { openWeatherOrSettings() } label: {
-                            VStack(alignment: .trailing, spacing: 4) {
-                                Text(localWeather.locationText)
-                                    .font(.system(size: 12, weight: .semibold))
-                                HStack(spacing: 5) {
-                                    if localWeather.phase == .locating || localWeather.phase == .loading {
-                                        ProgressView()
-                                            .controlSize(.mini)
-                                            .tint(.white)
-                                    } else {
-                                        Image(systemName: localWeather.symbolName)
-                                            .font(.system(size: 11, weight: .semibold))
-                                    }
+                            ViewThatFits(in: .horizontal) {
+                                HStack(spacing: 6) {
+                                    weatherStatusIcon
+                                    Text(localWeather.locationText)
+                                    Text("·")
+                                        .foregroundStyle(.white.opacity(0.58))
                                     Text(localWeather.weatherText)
-                                        .font(.system(size: 11, weight: .semibold))
                                 }
-                                .foregroundStyle(.white.opacity(0.94))
+
+                                HStack(spacing: 6) {
+                                    weatherStatusIcon
+                                    Text(localWeather.weatherText)
+                                }
                             }
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.94))
                             .lineLimit(1)
-                            .frame(maxWidth: 150, alignment: .trailing)
-                            .padding(.horizontal, 13)
-                            .padding(.vertical, 9)
-                            .background(.black.opacity(0.46), in: Capsule())
+                            .minimumScaleFactor(0.86)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 7)
+                            .background(.black.opacity(0.42), in: Capsule())
                             .overlay {
                                 Capsule()
-                                    .stroke(.white.opacity(0.22), lineWidth: 0.5)
+                                    .stroke(.white.opacity(0.20), lineWidth: 0.5)
                             }
-                            .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
+                            .shadow(color: .black.opacity(0.20), radius: 6, y: 2)
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                            .animation(.easeInOut(duration: 0.22), value: localWeather.locationText)
+                            .animation(.easeInOut(duration: 0.22), value: localWeather.weatherText)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(localWeather.accessibilitySummary)
@@ -184,6 +187,17 @@ private struct HeroPager: View {
             openURL(settingsURL)
         } else {
             localWeather.activate()
+        }
+    }
+
+    @ViewBuilder
+    private var weatherStatusIcon: some View {
+        if localWeather.phase == .locating || localWeather.phase == .loading {
+            ProgressView()
+                .controlSize(.mini)
+                .tint(.white)
+        } else {
+            Image(systemName: localWeather.symbolName)
         }
     }
 }
