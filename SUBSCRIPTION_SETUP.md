@@ -4,7 +4,7 @@ App 内订阅功能已经接入 StoreKit 2。正式收费前，需要由 Apple D
 
 ## App Store Connect 商品
 
-- App 名称：`易姝`
+- App 名称：`Hi，梳子`
 - 主要语言：简体中文
 - Bundle ID：`cn.com.shuzijun.yishu`
 - SKU 建议：`yishu-ios-2026`
