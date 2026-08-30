@@ -1,8 +1,8 @@
 # Hi，梳子 iOS
 
-“Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，内容由 WordPress 版本化 REST API 同步，不是 WebView 封装。
+“Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前版本：`1.3.5 (16)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前版本：`1.3.6 (17)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
@@ -27,8 +27,8 @@ TestFlight 测试阶段已暂停付费订阅，App 全量展示已发布相册�
 ```text
 iOS App (SwiftUI / WeatherKit / AVKit)
         │
-        ├─ 完整展示── WordPress App REST API
-        └─ 管理员─── Application Password + 最小权限角色
+        ├─ 完整展示── 版本化 App Content Manifest
+        └─ 过渡期管理── WordPress Application Password + 最小权限角色
 ```
 
 项目中不包含云 API 密钥、Apple 私钥、WordPress 管理员密码或签名证书。
@@ -59,6 +59,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/entitlement-verifier/README.md`](Server/entitlement-verifier/README.md)：Apple 订阅凭证校验服务。
 - [`Server/nginx/README.md`](Server/nginx/README.md)：REST 认证头转发配置。
 - [`Server/operations/README.md`](Server/operations/README.md)：线上运维修复记录。
+- [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 
 ## 安全与隐私
 
@@ -70,6 +71,14 @@ xcodebuild -project Yishu.xcodeproj \
 - App 明示照片与影像均已取得合法展示授权；相关版权和肖像权归各自权利人所有，未经许可不得下载、复制、传播、改编或商业使用。
 
 截图保护是 iOS 系统能力限制下的尽力防护，无法阻止另一台设备拍摄屏幕；已公开过的 WordPress 原图在迁移到私有对象存储前，也不能承诺绝对无法下载。完整安全边界和上线前 P0 清单见 [`SECURITY.md`](SECURITY.md)。
+
+## v1.3.6
+
+- 重做开屏视觉：去掉照片左上角重复署名，改用单一清晰的信息层级、增强文字对比，并加入尊重“减少动态效果”设置的轻微镜头动画。
+- iPad 开屏采用完整画面加柔化背景，不再把竖版人物图强行横向裁切；手机继续使用沉浸式满屏构图。
+- 系统启动页统一为“Hi，梳子”，管理员预览与实际开屏共用同一套文字样式。
+- 普通用户数据层只读取版本化内容清单，删除通用 WordPress 相册/媒体列表回退，为后续切换 Payload 与 CDN 清单建立稳定边界。
+- 新增下一代内容平台架构与无停机迁移方案，现网 WordPress 暂时保留为发布源和回滚点。
 
 ## v1.3.5
 

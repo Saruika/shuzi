@@ -20,7 +20,6 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var statusMessage: String?
     @Published private(set) var contentOrigin: ContentOrigin = .bundled
 
-    private let baseURL = URL(string: "https://www.shuzijun.com.cn/wp-json/wp/v2")!
     init() {}
 
     /// Disk reads and JSON decoding stay off the main actor. The subsequent
@@ -132,27 +131,9 @@ final class PortfolioStore: ObservableObject {
                 updatedAt: manifest.updatedAt
             )
         } catch {
-            do {
-                let remotePortfolios = try await fetchPortfolios()
-                guard !remotePortfolios.isEmpty else { throw URLError(.zeroByteResource) }
-                portfolios = remotePortfolios
-                lastUpdated = Date()
-                contentOrigin = .network
-                statusMessage = "内容接口升级中，照片已同步"
-                Self.persistCacheInBackground(
-                    portfolios: remotePortfolios,
-                    heroImages: heroImages,
-                    aboutPortraitURL: aboutPortraitURL,
-                    launchPosters: launchPosters,
-                    showreel: showreel,
-                    dramas: dramas,
-                    updatedAt: lastUpdated ?? Date()
-                )
-            } catch {
-                statusMessage = contentOrigin == .bundled
-                    ? "网络不可用，当前显示离线基础内容"
-                    : "网络不可用，继续显示上次同步内容"
-            }
+            statusMessage = contentOrigin == .bundled
+                ? "网络不可用，当前显示离线基础内容"
+                : "网络不可用，继续显示上次同步内容"
         }
     }
 
@@ -258,66 +239,8 @@ final class PortfolioStore: ObservableObject {
         return directory.appending(path: "portfolio-cache.json")
     }
 
-    private func fetchPortfolios() async throws -> [Portfolio] {
-        let url = baseURL.appending(path: "portfolio").appending(
-            queryItems: [
-                URLQueryItem(name: "per_page", value: "20"),
-                URLQueryItem(name: "orderby", value: "date"),
-                URLQueryItem(name: "order", value: "asc")
-            ]
-        )
-        let posts: [WPPortfolio] = try await request(url)
-        var result: [Portfolio] = []
-
-        for post in posts {
-            let mediaURL = baseURL.appending(path: "media").appending(
-                queryItems: [
-                    URLQueryItem(name: "parent", value: String(post.id)),
-                    URLQueryItem(name: "per_page", value: "100"),
-                    URLQueryItem(name: "orderby", value: "id"),
-                    URLQueryItem(name: "order", value: "asc")
-                ]
-            )
-            let media: [WPMedia] = try await request(mediaURL)
-            let images = media.compactMap { item -> PortfolioImage? in
-                guard let full = URL(string: item.sourceURL),
-                      ContentSecurityPolicy.isTrustedMediaURL(full) else { return nil }
-                let preferred = item.mediaDetails?.sizes?["large"]?.sourceURL
-                    ?? item.mediaDetails?.sizes?["medium_large"]?.sourceURL
-                    ?? item.sourceURL
-                guard let display = URL(string: preferred),
-                      ContentSecurityPolicy.isTrustedMediaURL(display) else { return nil }
-                return PortfolioImage(
-                    id: item.id,
-                    url: display,
-                    fullSizeURL: full,
-                    altText: item.altText.isEmpty ? post.title.rendered : item.altText
-                )
-            }
-
-            guard let pageURL = URL(string: post.link),
-                  ContentSecurityPolicy.isTrustedWebsiteURL(pageURL) else { continue }
-            let metadata = Self.metadata(for: post.title.rendered)
-            result.append(
-                Portfolio(
-                    id: post.id,
-                    title: metadata.title,
-                    subtitle: metadata.subtitle,
-                    eyebrow: metadata.eyebrow,
-                    slug: post.slug,
-                    websiteURL: pageURL,
-                    coverURL: images.first?.url,
-                    images: images
-                )
-            )
-        }
-
-        let order = ["婚纱": 0, "新中式": 1, "旗袍": 2]
-        return result.sorted { order[$0.title, default: 99] < order[$1.title, default: 99] }
-    }
-
     private func fetchContentManifest(timeoutInterval: TimeInterval = 20) async throws -> AppContentManifest {
-        var request = URLRequest(url: ContentCatalog.appContentURL)
+        var request = URLRequest(url: ContentCatalog.publishedManifestURL)
         request.timeoutInterval = timeoutInterval
         request.cachePolicy = .reloadRevalidatingCacheData
         request.setValue("Yishu-iOS/2.0", forHTTPHeaderField: "User-Agent")
@@ -331,34 +254,6 @@ final class PortfolioStore: ObservableObject {
         let manifest = try decoder.decode(AppContentManifest.self, from: data)
         guard ContentSecurityPolicy.isTrusted(manifest) else { throw URLError(.secureConnectionFailed) }
         return manifest
-    }
-
-    private func request<T: Decodable>(_ url: URL) async throws -> T {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 20
-        // Revalidate on user-initiated refreshes while still benefiting from
-        // HTTP cache validation when the remote catalog has not changed.
-        request.cachePolicy = .reloadRevalidatingCacheData
-        request.setValue("Yishu-iOS/1.0", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-        guard data.count <= 5 * 1024 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
-        return try JSONDecoder().decode(T.self, from: data)
-    }
-
-    private static func metadata(for rawTitle: String) -> (title: String, subtitle: String, eyebrow: String) {
-        if rawTitle.contains("婚纱") {
-            return ("婚纱", "在柔光里，留下誓约般的静谧", "WEDDING · PORTRAIT")
-        }
-        if rawTitle.contains("新中式") {
-            return ("新中式", "古意与当代表达之间的留白", "NEW CHINESE · EDITORIAL")
-        }
-        if rawTitle.contains("旗袍") {
-            return ("旗袍", "庭院、窗影与东方美学", "QIPAO · STORY")
-        }
-        return (rawTitle, "易姝影像作品", "PORTFOLIO")
     }
 }
 
@@ -442,51 +337,6 @@ fileprivate struct PortfolioCacheEnvelope: Codable {
     let dramas: [DramaWork]?
     let updatedAt: Date
     let isPublicPreview: Bool
-}
-
-private struct WPPortfolio: Decodable {
-    let id: Int
-    let slug: String
-    let link: String
-    let title: RenderedText
-}
-
-private struct RenderedText: Decodable {
-    let rendered: String
-}
-
-private struct WPMedia: Decodable {
-    let id: Int
-    let sourceURL: String
-    let altText: String
-    let mediaDetails: MediaDetails?
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case sourceURL = "source_url"
-        case altText = "alt_text"
-        case mediaDetails = "media_details"
-    }
-}
-
-private struct MediaDetails: Decodable {
-    let sizes: [String: MediaSize]?
-}
-
-private struct MediaSize: Decodable {
-    let sourceURL: String
-
-    enum CodingKeys: String, CodingKey {
-        case sourceURL = "source_url"
-    }
-}
-
-private extension URL {
-    func appending(queryItems: [URLQueryItem]) -> URL {
-        var components = URLComponents(url: self, resolvingAgainstBaseURL: false)!
-        components.queryItems = queryItems
-        return components.url!
-    }
 }
 
 private extension Portfolio {

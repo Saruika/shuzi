@@ -917,18 +917,7 @@ private struct LaunchPosterAdminPreview: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
-            VStack(alignment: .leading, spacing: 7) {
-                Text(poster.eyebrow)
-                    .font(.system(size: 8, weight: .semibold))
-                    .tracking(2.5)
-                    .foregroundStyle(AppTheme.gold)
-                Text(poster.title)
-                    .font(.editorial(34))
-                    .foregroundStyle(.white)
-                Text(poster.subtitle)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.76))
-            }
+            LaunchPosterTextBlock(poster: poster, compact: true)
             .padding(18)
         }
         .aspectRatio(9 / 16, contentMode: .fill)

@@ -14,14 +14,14 @@
                         <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
                         <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
                         <subviews>
-                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="易 姝" textAlignment="natural" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" translatesAutoresizingMaskIntoConstraints="NO" id="launch-title">
-                                <rect key="frame" x="167" y="401" width="59" height="29"/>
-                                <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="24"/>
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="Hi，梳子" textAlignment="natural" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" translatesAutoresizingMaskIntoConstraints="NO" id="launch-title">
+                                <rect key="frame" x="157" y="405" width="79" height="27"/>
+                                <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="22"/>
                                 <color key="textColor" red="0.945" green="0.925" blue="0.875" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                 <nil key="highlightedColor"/>
                             </label>
-                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="YI SHU" textAlignment="natural" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" translatesAutoresizingMaskIntoConstraints="NO" id="launch-subtitle">
-                                <rect key="frame" x="176" y="443" width="41" height="12"/>
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" horizontalHuggingPriority="251" verticalHuggingPriority="251" text="影像 · 表演 · 叙事" textAlignment="natural" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" translatesAutoresizingMaskIntoConstraints="NO" id="launch-subtitle">
+                                <rect key="frame" x="155" y="445" width="83" height="12"/>
                                 <fontDescription key="fontDescription" type="system" weight="semibold" pointSize="9"/>
                                 <color key="textColor" red="0.72" green="0.58" blue="0.35" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                                 <nil key="highlightedColor"/>
@@ -31,7 +31,7 @@
                         <color key="backgroundColor" red="0.035" green="0.032" blue="0.028" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                         <constraints>
                             <constraint firstItem="launch-title" firstAttribute="centerX" secondItem="launch-view" secondAttribute="centerX" id="title-center-x"/>
-                            <constraint firstItem="launch-title" firstAttribute="centerY" secondItem="launch-view" secondAttribute="centerY" constant="-10" id="title-center-y"/>
+                            <constraint firstItem="launch-title" firstAttribute="centerY" secondItem="launch-view" secondAttribute="centerY" constant="-8" id="title-center-y"/>
                             <constraint firstItem="launch-subtitle" firstAttribute="centerX" secondItem="launch-view" secondAttribute="centerX" id="subtitle-center-x"/>
                             <constraint firstItem="launch-subtitle" firstAttribute="top" secondItem="launch-title" secondAttribute="bottom" constant="13" id="subtitle-top"/>
                         </constraints>

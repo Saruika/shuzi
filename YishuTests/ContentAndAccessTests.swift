@@ -77,6 +77,15 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
+    func testPublishedManifestUsesAStableTrustedHTTPSEndpoint() {
+        let endpoint = ContentCatalog.publishedManifestURL
+
+        XCTAssertEqual(endpoint.scheme, "https")
+        XCTAssertEqual(endpoint.host, "www.shuzijun.com.cn")
+        XCTAssertNil(endpoint.user)
+        XCTAssertNil(endpoint.password)
+    }
+
     func testWeatherKitConditionsHaveChinesePresentation() {
         XCTAssertEqual(WeatherPresentation.conditionText(for: .clear), "晴")
         XCTAssertEqual(WeatherPresentation.conditionText(for: .heavyRain), "大雨")
