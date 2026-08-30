@@ -70,23 +70,31 @@ private struct HeroPager: View {
                         Button { openWeatherOrSettings() } label: {
                             VStack(alignment: .trailing, spacing: 4) {
                                 Text(localWeather.locationText)
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(.system(size: 12, weight: .semibold))
                                 HStack(spacing: 5) {
                                     if localWeather.phase == .locating || localWeather.phase == .loading {
                                         ProgressView()
                                             .controlSize(.mini)
-                                            .tint(.white.opacity(0.72))
+                                            .tint(.white)
                                     } else {
                                         Image(systemName: localWeather.symbolName)
-                                            .font(.system(size: 9, weight: .medium))
+                                            .font(.system(size: 11, weight: .semibold))
                                     }
                                     Text(localWeather.weatherText)
-                                        .font(.system(size: 9, weight: .medium))
+                                        .font(.system(size: 11, weight: .semibold))
                                 }
-                                .foregroundStyle(.white.opacity(0.72))
+                                .foregroundStyle(.white.opacity(0.94))
                             }
                             .lineLimit(1)
-                            .frame(maxWidth: 120, alignment: .trailing)
+                            .frame(maxWidth: 150, alignment: .trailing)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 9)
+                            .background(.black.opacity(0.46), in: Capsule())
+                            .overlay {
+                                Capsule()
+                                    .stroke(.white.opacity(0.22), lineWidth: 0.5)
+                            }
+                            .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(localWeather.accessibilitySummary)
