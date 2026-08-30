@@ -110,6 +110,7 @@ struct AdminView: View {
                     .foregroundStyle(AppTheme.gold)
                 Text("管理员登录")
                     .font(.editorial(40))
+                    .accessibilityIdentifier("admin-login-heading")
                 Text("普通用户无需登录。这里仅用于照片、视频和影视资料的发布。")
                     .font(.subheadline)
                     .foregroundStyle(AppTheme.muted)

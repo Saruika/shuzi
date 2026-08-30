@@ -64,6 +64,7 @@ struct CreditsView: View {
                 .foregroundStyle(AppTheme.gold)
             Text("影视履历")
                 .font(.editorial(42))
+                .accessibilityIdentifier("credits-heading")
             Text("公开出演短剧与演员影像片段")
                 .font(.subheadline)
                 .foregroundStyle(AppTheme.muted)
@@ -136,6 +137,7 @@ struct CreditsView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("showreel-play")
                 .accessibilityLabel("在当前页播放易姝 2026 演员 Showreel，时长 21 秒")
             }
         }

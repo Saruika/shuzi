@@ -2,7 +2,7 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前版本：`1.3.7 (18)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前版本：`1.3.8 (19)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
@@ -60,6 +60,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/nginx/README.md`](Server/nginx/README.md)：REST 认证头转发配置。
 - [`Server/operations/README.md`](Server/operations/README.md)：线上运维修复记录。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
+- [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
 ## 安全与隐私
 
@@ -71,6 +72,14 @@ xcodebuild -project Yishu.xcodeproj \
 - App 明示照片与影像均已取得合法展示授权；相关版权和肖像权归各自权利人所有，未经许可不得下载、复制、传播、改编或商业使用。
 
 截图保护是 iOS 系统能力限制下的尽力防护，无法阻止另一台设备拍摄屏幕；已公开过的 WordPress 原图在迁移到私有对象存储前，也不能承诺绝对无法下载。完整安全边界和上线前 P0 清单见 [`SECURITY.md`](SECURITY.md)。
+
+## v1.3.8
+
+- 新增独立 UI 测试目标，在 iPhone 与 iPad 上自动验证五个主模块、相册全屏、合作邀约和管理员登录路径。
+- 关键界面增加稳定的无障碍标识，视觉不变，便于自动回归和 VoiceOver 识别。
+- 新增 GitHub Actions 质量门禁：每次推送后执行密钥扫描、配置/服务端语法检查、iPhone/iPad 全量测试与 Release 静态分析。
+- CI 仅有内容读权限，第三方 Action 固定完整 commit SHA；失败时保留 `.xcresult` 七天。
+- 配置 Dependabot 每周检查 GitHub Actions 与 Python 订阅校验服务依赖更新。
 
 ## v1.3.7
 

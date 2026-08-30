@@ -85,6 +85,7 @@ struct CollaborationInquiryView: View {
                 .foregroundStyle(AppTheme.gold)
             Text("合作邀约")
                 .font(.editorial(40))
+                .accessibilityIdentifier("collaboration-heading")
             Text("填写简要信息后，可以通过邮件或任意聊天应用发送。")
                 .font(.subheadline)
                 .foregroundStyle(AppTheme.muted)

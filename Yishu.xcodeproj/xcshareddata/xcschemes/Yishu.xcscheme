@@ -37,6 +37,15 @@
                ReferencedContainer = "container:Yishu.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference skipped = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "B50000000000000000000001"
+               BuildableName = "YishuUITests.xctest"
+               BlueprintName = "YishuUITests"
+               ReferencedContainer = "container:Yishu.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

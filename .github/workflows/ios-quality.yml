@@ -1,0 +1,47 @@
+name: iOS Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Security, iPhone and iPad
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate repository security boundary
+        run: Scripts/security-check.sh
+
+      - name: Test iPhone pages
+        run: Scripts/ci-ios-tests.sh iPhone
+
+      - name: Test iPad pages
+        run: Scripts/ci-ios-tests.sh iPad
+
+      - name: Analyze Release build
+        run: Scripts/ci-release-analyze.sh
+
+      - name: Preserve failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: yishu-xcresults-${{ github.run_id }}
+          path: ${{ runner.temp }}/yishu-results
+          if-no-files-found: ignore
+          retention-days: 7

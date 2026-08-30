@@ -93,6 +93,7 @@ struct FavoritesView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("收藏")
                     .font(.editorial(42))
+                    .accessibilityIdentifier("favorites-heading")
                 Spacer()
                 if selectedSection == .favorites, !entries.isEmpty {
                     ShareLink(item: favoritesShareText) {

@@ -35,6 +35,7 @@ struct PortfolioGridView: View {
                             .foregroundStyle(AppTheme.gold)
                         Text("作品")
                             .font(.editorial(42))
+                            .accessibilityIdentifier("portfolio-heading")
                         Text("每一组影像，都是一次人物叙事。")
                             .font(.subheadline)
                             .foregroundStyle(AppTheme.muted)
@@ -78,6 +79,7 @@ struct PortfolioGridView: View {
                                 PortfolioGridCard(portfolio: portfolio)
                             }
                             .buttonStyle(.plain)
+                            .accessibilityIdentifier("portfolio-card-\(portfolio.id)")
                         }
                     }
                     .padding(.horizontal, 14)
@@ -187,6 +189,7 @@ struct PortfolioDetailView: View {
                             .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("portfolio-open-image-\(firstImage.id)")
                         .accessibilityLabel("打开\(firstImage.altText)")
                     } else {
                         PortfolioEmptyArtwork(portfolio: currentPortfolio)
@@ -247,6 +250,7 @@ struct PortfolioDetailView: View {
             }
         }
         .dynamicTypeSize(...DynamicTypeSize.accessibility2)
+        .accessibilityIdentifier("portfolio-detail-\(currentPortfolio.id)")
         .navigationTitle(currentPortfolio.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
@@ -444,6 +448,7 @@ struct GalleryViewer: View {
             .padding(18)
         }
         .statusBarHidden()
+        .accessibilityIdentifier("gallery-viewer")
         .protectedFromScreenCapture()
         .onChange(of: accessibleImages.map(\.id)) { _, imageIDs in
             if !imageIDs.contains(selection), let firstID = imageIDs.first {

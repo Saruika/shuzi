@@ -110,6 +110,7 @@ private struct HeroPager: View {
                             .animation(.easeInOut(duration: 0.22), value: localWeather.weatherText)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("home-weather")
                         .accessibilityLabel(localWeather.accessibilitySummary)
                         .accessibilityHint(localWeather.needsSettings ? "打开系统设置" : "更新位置与天气")
                     }
@@ -144,6 +145,7 @@ private struct HeroPager: View {
                             .foregroundStyle(.black)
                             .clipShape(Capsule())
                         }
+                        .accessibilityIdentifier("home-open-portfolio")
 
                         HStack(spacing: 7) {
                             ForEach(slides.indices, id: \.self) { index in

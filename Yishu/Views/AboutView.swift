@@ -89,6 +89,7 @@ struct AboutView: View {
         VStack(alignment: .leading, spacing: 26) {
             Text("关于")
                 .font(.editorial(32))
+                .accessibilityIdentifier("about-heading")
             Text("专注于短剧表演、时尚摄影与艺术创作。希望通过克制而真实的情绪、东方气质与镜头表现，让每个角色留下属于自己的余韵。")
                 .font(.system(size: 16))
                 .lineSpacing(9)
@@ -160,6 +161,7 @@ struct AboutView: View {
                 .foregroundStyle(AppTheme.ink)
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("about-collaboration")
     }
 
     private var links: some View {
@@ -224,6 +226,7 @@ struct AboutView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("about-admin-entry")
         .padding(.horizontal, 20)
         .padding(.top, 2)
         .padding(.bottom, localWeather.attributionLegalURL == nil ? 70 : 12)

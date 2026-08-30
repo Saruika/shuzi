@@ -12,6 +12,7 @@
 - WordPress 保留最小权限内容角色，写接口按用户限流，并限制图片所有权、媒体类型、数量、文本长度和媒体域名。
 - TestFlight 测试阶段 App 内容清单返回全部已发布照片，但官网作品页、附件页及 WordPress 作品/媒体 REST 列表仍返回 404；完整目录不写入磁盘缓存，离线缓存每册只保留 3 张预览。
 - 天气功能只在用户主动开启后请求前台位置，定位精度设为约三公里；位置不持久化，也不进行后台定位。天气由 Apple WeatherKit 处理，工程包含 WeatherKit entitlement、法定署名入口与 Privacy Manifest。
+- GitHub 质量门禁使用最小读权限和固定 commit SHA 的 Action，不持有生产密钥；每次推送都扫描长期凭据、明文 HTTP、敏感文件、配置语法，并在 iPhone/iPad 执行关键页面回归。
 
 ## 恢复付费订阅前必须完成
 
