@@ -60,11 +60,13 @@ struct AboutView: View {
             if let portraitURL = portfolioStore.aboutPortraitURL {
                 ArtworkImage(url: portraitURL, contentMode: .fit)
                     .accessibilityLabel("易姝形象照")
+                    .accessibilityIdentifier("about-portrait")
             } else {
                 Image("AboutPortrait")
                     .resizable()
                     .scaledToFit()
                     .accessibilityLabel("易姝形象照")
+                    .accessibilityIdentifier("about-portrait")
             }
             LinearGradient(colors: [.clear, AppTheme.ink], startPoint: .center, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 8) {

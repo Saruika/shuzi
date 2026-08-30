@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 
 final class YishuUITests: XCTestCase {
@@ -78,6 +79,37 @@ final class YishuUITests: XCTestCase {
         assertExists("admin-login-heading", in: app)
         XCTAssertTrue(app.secureTextFields["管理员访问码"].waitForExistence(timeout: 5))
         attachScreenshot(named: "09-admin-login", app: app)
+    }
+
+    func testIPadSupportsLandscapeAndKeepsAdaptiveContentVisible() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("横屏窗口回归仅在 iPad 上执行")
+        }
+
+        let app = launchApp(arguments: ["-open-about-for-visual-testing"])
+        addTeardownBlock {
+            XCUIDevice.shared.orientation = .portrait
+        }
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let window = app.windows.firstMatch
+        let landscapeExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                let frame = window.frame
+                return window.exists && frame.width > frame.height
+            },
+            object: window
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [landscapeExpectation], timeout: 8),
+            .completed,
+            "iPad 窗口没有切换到横屏布局"
+        )
+
+        assertExists("about-heading", in: app)
+        assertExists("about-portrait", in: app)
+        XCTAssertTrue(tabButton("首页", in: app).isHittable, "横屏下主导航不可点击")
+        attachScreenshot(named: "10-ipad-landscape-about", app: app)
     }
 
     private func launchApp(arguments: [String] = []) -> XCUIApplication {
