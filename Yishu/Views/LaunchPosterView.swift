@@ -9,11 +9,14 @@ struct LaunchPosterView: View {
     var body: some View {
         ZStack {
             GeometryReader { proxy in
-                Image("LaunchPosterFallback")
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-                    .clipped()
+                AppTheme.ink
+                    .overlay {
+                        LinearGradient(
+                            colors: [.white.opacity(0.025), .clear, AppTheme.gold.opacity(0.08)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    }
 
                 DownsampledAsyncImage(
                     url: poster.imageURL,
@@ -89,11 +92,19 @@ struct LaunchPosterView: View {
         .ignoresSafeArea()
         .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .background(AppTheme.ink.ignoresSafeArea())
-        .task(id: poster.id) {
+        .task(id: remoteImageIsVisible) {
+            guard remoteImageIsVisible else { return }
             do {
                 let duration = min(max(poster.displaySeconds, 1.5), 5)
                 try await Task.sleep(for: .seconds(duration))
                 guard !Task.isCancelled else { return }
+                dismiss()
+            } catch { }
+        }
+        .task(id: poster.imageURL) {
+            do {
+                try await Task.sleep(for: .seconds(4))
+                guard !Task.isCancelled, !remoteImageIsVisible else { return }
                 dismiss()
             } catch { }
         }

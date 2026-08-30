@@ -111,25 +111,30 @@ struct DownsampledAsyncImage<Content: View>: View {
     }
 
     var body: some View {
-        content(phase)
-            .task(id: requestID) {
-                image = nil
-                error = nil
-                guard let url, maxPixelSize > 0 else { return }
-                do {
-                    let loaded = try await ArtworkImagePipeline.shared.image(
-                        for: url,
-                        maxPixelSize: maxPixelSize
-                    )
-                    guard !Task.isCancelled else { return }
-                    image = loaded
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    self.error = error
-                }
+        // Keep the loading task attached even when a caller intentionally
+        // renders no placeholder for the `.empty` phase.
+        ZStack {
+            content(phase)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: requestID) {
+            image = nil
+            error = nil
+            guard let url, maxPixelSize > 0 else { return }
+            do {
+                let loaded = try await ArtworkImagePipeline.shared.image(
+                    for: url,
+                    maxPixelSize: maxPixelSize
+                )
+                guard !Task.isCancelled else { return }
+                image = loaded
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.error = error
             }
+        }
     }
 
     private var phase: AsyncImagePhase {

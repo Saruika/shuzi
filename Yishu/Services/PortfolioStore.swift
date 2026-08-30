@@ -85,6 +85,22 @@ final class PortfolioStore: ObservableObject {
         )
     }
 
+    /// Fetch the versioned manifest before freezing the launch-poster snapshot.
+    /// A short timeout keeps cold starts responsive; cached content remains the
+    /// fallback when the device is offline.
+    func refreshLaunchContent() async -> Bool {
+        do {
+            let manifest = try await fetchContentManifest(timeoutInterval: 3)
+            guard manifest.schemaVersion == 1,
+                  !manifest.portfolios.isEmpty,
+                  ContentSecurityPolicy.isTrusted(manifest) else { return false }
+            applyPublishedManifest(manifest)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func refresh() async {
         guard !isRefreshing else { return }
         isRefreshing = true
@@ -300,9 +316,9 @@ final class PortfolioStore: ObservableObject {
         return result.sorted { order[$0.title, default: 99] < order[$1.title, default: 99] }
     }
 
-    private func fetchContentManifest() async throws -> AppContentManifest {
+    private func fetchContentManifest(timeoutInterval: TimeInterval = 20) async throws -> AppContentManifest {
         var request = URLRequest(url: ContentCatalog.appContentURL)
-        request.timeoutInterval = 20
+        request.timeoutInterval = timeoutInterval
         request.cachePolicy = .reloadRevalidatingCacheData
         request.setValue("Yishu-iOS/2.0", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)

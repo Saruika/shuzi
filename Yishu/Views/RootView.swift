@@ -21,7 +21,7 @@ struct RootView: View {
     @State private var portfolioPath: [Portfolio] = []
     @State private var launchPosterSnapshot: LaunchPosterContent?
     @State private var hasPreparedLaunchPoster = false
-    @State private var isLaunchPosterVisible = true
+    @State private var isLaunchPosterVisible = false
     private let visualPortfolioTitle: String?
     private let visualTestingDestination: VisualTestingDestination?
 
@@ -97,12 +97,17 @@ struct RootView: View {
                 .tag(AppTab.about)
                 .tabItem { Label("关于", systemImage: "person.crop.rectangle") }
             }
-            if isLaunchPosterVisible, let poster = displayedLaunchPoster {
+            if !hasPreparedLaunchPoster {
+                AppTheme.ink
+                    .ignoresSafeArea()
+                    .zIndex(19_999)
+            } else if isLaunchPosterVisible, let poster = displayedLaunchPoster {
                 LaunchPosterView(poster: poster) {
                     withAnimation(.easeOut(duration: 0.35)) {
                         isLaunchPosterVisible = false
                     }
                 }
+                .id(poster)
                 .transition(.opacity)
                 .zIndex(20_000)
             }
@@ -111,9 +116,14 @@ struct RootView: View {
         .protectedFromScreenCapture()
         .task {
             await portfolioStore.restoreCachedContent()
-            prepareLaunchPosterIfNeeded()
+            let refreshedForLaunch = shouldSkipLaunchPoster
+                ? false
+                : await portfolioStore.refreshLaunchContent()
+            prepareLaunchPosterIfNeeded(
+                allowBundledFallback: refreshedForLaunch || portfolioStore.contentOrigin != .bundled
+            )
             await adminSession.restoreSession()
-            await refreshAdministratorContentIfAllowed()
+            await refreshAdministratorContentIfAllowed(publicContentIsFresh: refreshedForLaunch)
             recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
             if let visualPortfolioTitle,
                let portfolio = portfolioStore.portfolios.first(where: { $0.title == visualPortfolioTitle }) {
@@ -125,6 +135,9 @@ struct RootView: View {
         }
         .onChange(of: adminSession.isAuthenticated) { _, _ in
             Task { await refreshAdministratorContentIfAllowed() }
+        }
+        .onChange(of: portfolioStore.launchPosters) { _, _ in
+            refreshVisibleLaunchPosterSnapshot()
         }
     }
 
@@ -145,12 +158,10 @@ struct RootView: View {
     }
 
     private var displayedLaunchPoster: LaunchPosterContent? {
-        if hasPreparedLaunchPoster { return launchPosterSnapshot }
-        return portfolioStore.activeLaunchPoster
+        launchPosterSnapshot
     }
 
-    private func prepareLaunchPosterIfNeeded() {
-        guard !hasPreparedLaunchPoster else { return }
+    private var shouldSkipLaunchPoster: Bool {
         let skipsPosterForTesting: Bool
 #if DEBUG
         skipsPosterForTesting = ProcessInfo.processInfo.arguments.contains(
@@ -159,7 +170,12 @@ struct RootView: View {
 #else
         skipsPosterForTesting = false
 #endif
-        if skipsPosterForTesting || visualPortfolioTitle != nil || selectedTab != .home {
+        return skipsPosterForTesting || visualPortfolioTitle != nil || selectedTab != .home
+    }
+
+    private func prepareLaunchPosterIfNeeded(allowBundledFallback: Bool) {
+        guard !hasPreparedLaunchPoster else { return }
+        if shouldSkipLaunchPoster || !allowBundledFallback {
             launchPosterSnapshot = nil
             isLaunchPosterVisible = false
             hasPreparedLaunchPoster = true
@@ -170,12 +186,20 @@ struct RootView: View {
         hasPreparedLaunchPoster = true
     }
 
-    private func refreshAdministratorContentIfAllowed() async {
+    private func refreshVisibleLaunchPosterSnapshot() {
+        guard hasPreparedLaunchPoster, isLaunchPosterVisible else { return }
+        let latest = portfolioStore.activeLaunchPoster
+        guard latest != launchPosterSnapshot else { return }
+        launchPosterSnapshot = latest
+        isLaunchPosterVisible = latest != nil
+    }
+
+    private func refreshAdministratorContentIfAllowed(publicContentIsFresh: Bool = false) async {
         if adminSession.isAuthenticated {
             if let manifest = try? await adminSession.fetchContent() {
                 portfolioStore.applyPublishedManifest(manifest)
             }
-        } else {
+        } else if !publicContentIsFresh {
             await portfolioStore.refresh()
         }
     }
