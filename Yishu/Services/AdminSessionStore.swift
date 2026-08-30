@@ -18,7 +18,9 @@ struct UploadedMedia: Decodable {
 
 enum AdminAPIError: LocalizedError {
     case invalidCredentials
+    case insufficientPermission
     case invalidResponse
+    case invalidFile
     case fileTooLarge
     case unsupportedFileType
     case networkUnavailable
@@ -28,8 +30,12 @@ enum AdminAPIError: LocalizedError {
         switch self {
         case .invalidCredentials:
             return "管理员账号或访问码不正确。"
+        case .insufficientPermission:
+            return "账号已验证，但没有内容管理权限。"
         case .invalidResponse:
             return "服务器返回了无法识别的数据。"
+        case .invalidFile:
+            return "文件为空、无法读取或不是普通文件。"
         case .fileTooLarge:
             return "文件不能超过 60 MB，请先压缩视频后再上传。"
         case .unsupportedFileType:
@@ -42,24 +48,53 @@ enum AdminAPIError: LocalizedError {
     }
 }
 
-private final class AdminURLSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        guard let url = request.url,
-              url.scheme?.lowercased() == "https",
-              url.host?.lowercased() == "www.shuzijun.com.cn",
-              url.user == nil,
-              url.password == nil,
-              url.port == nil || url.port == 443 else {
-            completionHandler(nil)
-            return
+enum AdminUploadPolicy {
+    static let maximumByteCount = 60 * 1024 * 1024
+
+    private static let extensionsByMIMEType: [String: Set<String>] = [
+        "image/jpeg": ["jpg", "jpeg"],
+        "image/png": ["png"],
+        "image/heic": ["heic"],
+        "image/heif": ["heif"],
+        "image/webp": ["webp"],
+        "video/mp4": ["mp4"],
+        "video/quicktime": ["mov"],
+    ]
+
+    static func normalizedMIMEType(_ mimeType: String) -> String? {
+        let normalized = mimeType
+            .split(separator: ";", maxSplits: 1)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() ?? ""
+        return extensionsByMIMEType[normalized] == nil ? nil : normalized
+    }
+
+    static func isAllowed(filename: String, mimeType: String) -> Bool {
+        guard let normalized = normalizedMIMEType(mimeType),
+              let allowedExtensions = extensionsByMIMEType[normalized] else { return false }
+        let basename = (filename as NSString).lastPathComponent
+        let fileExtension = (basename as NSString).pathExtension.lowercased()
+        return allowedExtensions.contains(fileExtension)
+    }
+
+    static func sanitizedFilename(_ filename: String, mimeType: String) throws -> String {
+        guard let normalized = normalizedMIMEType(mimeType),
+              isAllowed(filename: filename, mimeType: normalized) else {
+            throw AdminAPIError.unsupportedFileType
         }
-        completionHandler(request)
+
+        let basename = (filename as NSString).lastPathComponent
+        let fileExtension = (basename as NSString).pathExtension.lowercased()
+        let stem = (basename as NSString).deletingPathExtension
+        let allowedStem = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        let cleanedScalars = stem.unicodeScalars.map { scalar in
+            allowedStem.contains(scalar) ? Character(String(scalar)) : "_"
+        }
+        let cleanedStem = String(cleanedScalars)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "_-"))
+        let safeStem = cleanedStem.isEmpty ? "upload" : String(cleanedStem.prefix(96))
+        return "\(safeStem).\(fileExtension)"
     }
 }
 
@@ -74,35 +109,15 @@ final class AdminSessionStore: ObservableObject {
     private let apiRoot = URL(string: "https://www.shuzijun.com.cn/wp-json")!
     private let session: URLSession
 
-    private static let allowedUploadMIMETypes: Set<String> = [
-        "image/jpeg",
-        "image/png",
-        "image/heic",
-        "image/heif",
-        "image/webp",
-        "video/mp4",
-        "video/quicktime",
-    ]
-
     var isAuthenticated: Bool {
         if case .administrator = role { return true }
         return false
     }
 
     init() {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 120
-        configuration.timeoutIntervalForResource = 180
-        configuration.waitsForConnectivity = true
-        session = URLSession(
-            configuration: configuration,
-            delegate: AdminURLSessionDelegate(),
-            delegateQueue: nil
+        session = SecureURLSessionFactory.make(
+            requestTimeout: 120,
+            resourceTimeout: 180
         )
         credential = AdminKeychain.load()
         hasSavedCredential = credential != nil
@@ -132,7 +147,12 @@ final class AdminSessionStore: ObservableObject {
     func signIn(username: String, applicationPassword: String) async {
         let cleanUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanPassword = applicationPassword.components(separatedBy: .whitespacesAndNewlines).joined()
-        guard !cleanUsername.isEmpty, !cleanPassword.isEmpty else {
+        guard !cleanUsername.isEmpty,
+              cleanUsername.count <= 128,
+              !cleanUsername.contains(":"),
+              !cleanUsername.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+              !cleanPassword.isEmpty,
+              cleanPassword.count <= 512 else {
             errorMessage = "请输入管理员账号和访问码。"
             return
         }
@@ -140,6 +160,7 @@ final class AdminSessionStore: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         let candidate = AdminCredential(username: cleanUsername, applicationPassword: cleanPassword)
+        let previousCredential = credential
         credential = candidate
         do {
             let session: AdminSessionResponse = try await authorizedJSON(
@@ -151,7 +172,8 @@ final class AdminSessionStore: ObservableObject {
             role = .administrator(displayName: session.displayName)
             errorMessage = nil
         } catch {
-            credential = nil
+            credential = previousCredential
+            hasSavedCredential = previousCredential != nil
             role = .visitor
             errorMessage = (error as? AdminAPIError)?.errorDescription
                 ?? AdminAPIError.networkUnavailable.errorDescription
@@ -167,15 +189,25 @@ final class AdminSessionStore: ObservableObject {
     }
 
     func upload(data: Data, filename: String, mimeType: String) async throws -> UploadedMedia {
-        guard data.count <= 60 * 1024 * 1024 else { throw AdminAPIError.fileTooLarge }
-        let safeMIMEType = try validatedMIMEType(mimeType)
+        guard !data.isEmpty else { throw AdminAPIError.invalidFile }
+        guard data.count <= AdminUploadPolicy.maximumByteCount else { throw AdminAPIError.fileTooLarge }
+        guard let safeMIMEType = AdminUploadPolicy.normalizedMIMEType(mimeType) else {
+            throw AdminAPIError.unsupportedFileType
+        }
+        let safeFilename = try AdminUploadPolicy.sanitizedFilename(filename, mimeType: safeMIMEType)
         var request = try authorizedRequest(path: "wp/v2/media", method: "POST")
         request.setValue(safeMIMEType, forHTTPHeaderField: "Content-Type")
         request.setValue(
-            "attachment; filename=\"\(sanitizedFilename(filename))\"",
+            "attachment; filename=\"\(safeFilename)\"",
             forHTTPHeaderField: "Content-Disposition"
         )
-        let (responseData, response) = try await session.upload(for: request, from: data)
+        let responseData: Data
+        let response: URLResponse
+        do {
+            (responseData, response) = try await session.upload(for: request, from: data)
+        } catch {
+            throw AdminAPIError.networkUnavailable
+        }
         let media = try decodeResponse(UploadedMedia.self, data: responseData, response: response)
         guard ContentSecurityPolicy.isTrustedMediaURL(media.sourceURL) else {
             throw AdminAPIError.invalidResponse
@@ -184,16 +216,34 @@ final class AdminSessionStore: ObservableObject {
     }
 
     func upload(fileURL: URL, filename: String, mimeType: String) async throws -> UploadedMedia {
-        let values = try fileURL.resourceValues(forKeys: [.fileSizeKey])
-        guard (values.fileSize ?? 0) <= 60 * 1024 * 1024 else { throw AdminAPIError.fileTooLarge }
-        let safeMIMEType = try validatedMIMEType(mimeType)
+        guard fileURL.isFileURL, FileManager.default.isReadableFile(atPath: fileURL.path) else {
+            throw AdminAPIError.invalidFile
+        }
+        let values = try fileURL.resourceValues(
+            forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
+        )
+        guard values.isRegularFile == true,
+              values.isSymbolicLink != true,
+              let fileSize = values.fileSize,
+              fileSize > 0 else { throw AdminAPIError.invalidFile }
+        guard fileSize <= AdminUploadPolicy.maximumByteCount else { throw AdminAPIError.fileTooLarge }
+        guard let safeMIMEType = AdminUploadPolicy.normalizedMIMEType(mimeType) else {
+            throw AdminAPIError.unsupportedFileType
+        }
+        let safeFilename = try AdminUploadPolicy.sanitizedFilename(filename, mimeType: safeMIMEType)
         var request = try authorizedRequest(path: "wp/v2/media", method: "POST")
         request.setValue(safeMIMEType, forHTTPHeaderField: "Content-Type")
         request.setValue(
-            "attachment; filename=\"\(sanitizedFilename(filename))\"",
+            "attachment; filename=\"\(safeFilename)\"",
             forHTTPHeaderField: "Content-Disposition"
         )
-        let (responseData, response) = try await session.upload(for: request, fromFile: fileURL)
+        let responseData: Data
+        let response: URLResponse
+        do {
+            (responseData, response) = try await session.upload(for: request, fromFile: fileURL)
+        } catch {
+            throw AdminAPIError.networkUnavailable
+        }
         let media = try decodeResponse(UploadedMedia.self, data: responseData, response: response)
         guard ContentSecurityPolicy.isTrustedMediaURL(media.sourceURL) else {
             throw AdminAPIError.invalidResponse
@@ -275,20 +325,39 @@ final class AdminSessionStore: ObservableObject {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await session.data(for: request)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw AdminAPIError.networkUnavailable
+        }
         return try decodeResponse(T.self, data: data, response: response)
     }
 
     private func authorizedRequest(path: String, method: String) throws -> URLRequest {
         guard let credential else { throw AdminAPIError.invalidCredentials }
+        guard !path.isEmpty,
+              !path.hasPrefix("/"),
+              !path.contains(".."),
+              !path.contains("?"),
+              !path.contains("#"),
+              ["GET", "POST"].contains(method) else {
+            throw AdminAPIError.invalidResponse
+        }
         let token = Data("\(credential.username):\(credential.applicationPassword)".utf8).base64EncodedString()
-        var request = URLRequest(url: apiRoot.appending(path: path))
+        let endpoint = apiRoot.appending(path: path)
+        guard AppNetworkSecurityPolicy.isTrustedAdminAPIURL(endpoint) else {
+            throw AdminAPIError.invalidResponse
+        }
+        var request = URLRequest(url: endpoint)
         request.httpMethod = method
         request.timeoutInterval = 120
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("Yishu-iOS-Admin/1.0", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
         return request
@@ -296,39 +365,56 @@ final class AdminSessionStore: ObservableObject {
 
     private func decodeResponse<T: Decodable>(_ type: T.Type, data: Data, response: URLResponse) throws -> T {
         guard data.count <= 8 * 1024 * 1024 else { throw AdminAPIError.invalidResponse }
-        guard let http = response as? HTTPURLResponse else { throw AdminAPIError.invalidResponse }
+        guard let http = response as? HTTPURLResponse,
+              AppNetworkSecurityPolicy.isTrustedAdminAPIURL(http.url) else {
+            throw AdminAPIError.invalidResponse
+        }
         guard (200..<300).contains(http.statusCode) else {
-            if http.statusCode == 401 || http.statusCode == 403 {
+            if http.statusCode == 401 {
                 throw AdminAPIError.invalidCredentials
             }
-            let serverError = try? JSONDecoder().decode(WordPressError.self, from: data)
-            throw AdminAPIError.server(serverError?.message ?? "发布失败（HTTP \(http.statusCode)）。")
+            if http.statusCode == 403 {
+                throw AdminAPIError.insufficientPermission
+            }
+            let isJSON = AppNetworkSecurityPolicy.isJSONMIMEType(
+                http.value(forHTTPHeaderField: "Content-Type")
+            )
+            let serverError = isJSON ? try? JSONDecoder().decode(WordPressError.self, from: data) : nil
+            throw AdminAPIError.server(
+                safeServerMessage(serverError?.message, statusCode: http.statusCode)
+            )
         }
+        guard !data.isEmpty,
+              AppNetworkSecurityPolicy.isJSONMIMEType(
+                http.value(forHTTPHeaderField: "Content-Type")
+              ) else { throw AdminAPIError.invalidResponse }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(T.self, from: data)
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw AdminAPIError.invalidResponse
+        }
     }
 
-    private func validatedMIMEType(_ mimeType: String) throws -> String {
-        let normalized = mimeType
-            .split(separator: ";", maxSplits: 1)
-            .first?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() ?? ""
-        guard Self.allowedUploadMIMETypes.contains(normalized) else {
-            throw AdminAPIError.unsupportedFileType
+    private func safeServerMessage(_ rawMessage: String?, statusCode: Int) -> String {
+        guard (400..<500).contains(statusCode), let rawMessage else {
+            return "服务器暂时不可用（HTTP \(statusCode)）。"
         }
-        return normalized
-    }
-
-    private func sanitizedFilename(_ filename: String) -> String {
-        let basename = (filename as NSString).lastPathComponent
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-        let cleanedScalars = basename.unicodeScalars.map { scalar in
-            allowed.contains(scalar) ? Character(String(scalar)) : "_"
-        }
-        let cleaned = String(cleanedScalars).trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        return cleaned.isEmpty ? "upload.bin" : String(cleaned.prefix(120))
+        let limited = String(rawMessage.prefix(500))
+        let withoutHTML = limited.replacingOccurrences(
+            of: "<[^>]+>",
+            with: " ",
+            options: .regularExpression
+        )
+        let printable = withoutHTML.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        let normalized = String(String.UnicodeScalarView(printable))
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return normalized.isEmpty
+            ? "发布失败（HTTP \(statusCode)）。"
+            : String(normalized.prefix(180))
     }
 }
 

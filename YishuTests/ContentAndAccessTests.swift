@@ -86,6 +86,76 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(endpoint.password)
     }
 
+    func testPublishedManifestResponseMustMatchTheExactConfiguredEndpoint() {
+        let expected = ContentCatalog.publishedManifestURL
+
+        XCTAssertTrue(AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(expected, expected: expected))
+        XCTAssertFalse(
+            AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
+                URL(string: "http://www.shuzijun.com.cn\(expected.path)"),
+                expected: expected
+            )
+        )
+        XCTAssertFalse(
+            AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
+                URL(string: "https://www.shuzijun.com.cn.evil.example\(expected.path)"),
+                expected: expected
+            )
+        )
+        XCTAssertFalse(
+            AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
+                URL(string: "https://www.shuzijun.com.cn:444\(expected.path)"),
+                expected: expected
+            )
+        )
+        XCTAssertFalse(
+            AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
+                URL(string: "https://user:password@www.shuzijun.com.cn\(expected.path)"),
+                expected: expected
+            )
+        )
+    }
+
+    func testAdministratorRequestsStayInsideTheWordPressAPINamespace() {
+        XCTAssertTrue(
+            AppNetworkSecurityPolicy.isTrustedAdminAPIURL(
+                URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-admin/session")
+            )
+        )
+        XCTAssertFalse(
+            AppNetworkSecurityPolicy.isTrustedAdminAPIURL(
+                URL(string: "https://www.shuzijun.com.cn/wp-json-evil/session")
+            )
+        )
+        XCTAssertFalse(
+            AppNetworkSecurityPolicy.isTrustedAdminAPIURL(
+                URL(string: "https://img.shuzijun.com.cn/wp-json/shuzijun/v1/app-admin/session")
+            )
+        )
+    }
+
+    func testOnlyJSONResponseTypesAreAccepted() {
+        XCTAssertTrue(AppNetworkSecurityPolicy.isJSONMIMEType("application/json; charset=UTF-8"))
+        XCTAssertTrue(AppNetworkSecurityPolicy.isJSONMIMEType("application/problem+json"))
+        XCTAssertFalse(AppNetworkSecurityPolicy.isJSONMIMEType("text/html"))
+        XCTAssertFalse(AppNetworkSecurityPolicy.isJSONMIMEType(nil))
+    }
+
+    func testUploadFilenameMustMatchItsMIMEType() throws {
+        XCTAssertTrue(AdminUploadPolicy.isAllowed(filename: "portrait.JPG", mimeType: "image/jpeg"))
+        XCTAssertTrue(AdminUploadPolicy.isAllowed(filename: "showreel.mov", mimeType: "video/quicktime"))
+        XCTAssertFalse(AdminUploadPolicy.isAllowed(filename: "portrait.php", mimeType: "image/jpeg"))
+        XCTAssertFalse(AdminUploadPolicy.isAllowed(filename: "portrait.jpg", mimeType: "video/mp4"))
+
+        let sanitized = try AdminUploadPolicy.sanitizedFilename(
+            "../portrait\r\nInjected.php.jpg",
+            mimeType: "image/jpeg"
+        )
+        XCTAssertEqual(sanitized, "portrait__Injected_php.jpg")
+        XCTAssertFalse(sanitized.contains("\r"))
+        XCTAssertFalse(sanitized.contains("\n"))
+    }
+
     func testWeatherKitConditionsHaveChinesePresentation() {
         XCTAssertEqual(WeatherPresentation.conditionText(for: .clear), "晴")
         XCTAssertEqual(WeatherPresentation.conditionText(for: .heavyRain), "大雨")

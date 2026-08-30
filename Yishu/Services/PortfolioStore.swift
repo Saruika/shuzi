@@ -19,8 +19,14 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var statusMessage: String?
     @Published private(set) var contentOrigin: ContentOrigin = .bundled
+    private let contentSession: URLSession
 
-    init() {}
+    init() {
+        contentSession = SecureURLSessionFactory.make(
+            requestTimeout: 20,
+            resourceTimeout: 30
+        )
+    }
 
     /// Disk reads and JSON decoding stay off the main actor. The subsequent
     /// network refresh replaces this snapshot with the latest public content.
@@ -106,7 +112,7 @@ final class PortfolioStore: ObservableObject {
         defer { isRefreshing = false }
 
         do {
-            let manifest = try await fetchContentManifest()
+            let manifest = try await fetchContentManifest(maxAttempts: 2)
             guard manifest.schemaVersion == 1,
                   !manifest.portfolios.isEmpty,
                   ContentSecurityPolicy.isTrusted(manifest) else {
@@ -239,21 +245,70 @@ final class PortfolioStore: ObservableObject {
         return directory.appending(path: "portfolio-cache.json")
     }
 
-    private func fetchContentManifest(timeoutInterval: TimeInterval = 20) async throws -> AppContentManifest {
+    private func fetchContentManifest(
+        timeoutInterval: TimeInterval = 20,
+        maxAttempts: Int = 1
+    ) async throws -> AppContentManifest {
+        var latestError: Error = URLError(.unknown)
+
+        for attempt in 0..<max(1, maxAttempts) {
+            do {
+                return try await requestContentManifest(timeoutInterval: timeoutInterval)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                latestError = error
+                guard attempt + 1 < maxAttempts, Self.isRetryableNetworkError(error) else {
+                    throw error
+                }
+                try await Task.sleep(for: .milliseconds(350))
+            }
+        }
+        throw latestError
+    }
+
+    private func requestContentManifest(timeoutInterval: TimeInterval) async throws -> AppContentManifest {
         var request = URLRequest(url: ContentCatalog.publishedManifestURL)
         request.timeoutInterval = timeoutInterval
-        request.cachePolicy = .reloadRevalidatingCacheData
-        request.setValue("Yishu-iOS/2.0", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Yishu-iOS/2.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+
+        let (data, response) = try await contentSession.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
+                http.url,
+                expected: ContentCatalog.publishedManifestURL
+              ) else {
+            throw URLError(.secureConnectionFailed)
+        }
+        guard (200..<300).contains(http.statusCode) else {
             throw URLError(.badServerResponse)
         }
         guard data.count <= 5 * 1024 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
+        guard AppNetworkSecurityPolicy.isJSONMIMEType(http.value(forHTTPHeaderField: "Content-Type")) else {
+            throw URLError(.cannotDecodeContentData)
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let manifest = try decoder.decode(AppContentManifest.self, from: data)
         guard ContentSecurityPolicy.isTrusted(manifest) else { throw URLError(.secureConnectionFailed) }
         return manifest
+    }
+
+    nonisolated private static func isRetryableNetworkError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        return [
+            .timedOut,
+            .cannotFindHost,
+            .cannotConnectToHost,
+            .dnsLookupFailed,
+            .networkConnectionLost,
+            .notConnectedToInternet,
+            .resourceUnavailable,
+            .dataNotAllowed,
+        ].contains(urlError.code)
     }
 }
 
