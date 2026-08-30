@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned public content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.3.2
+ * Version: 1.4.0
  * Author: Shuzijun
  */
 
@@ -310,6 +310,7 @@ final class Shuzijun_App_Content_API {
     public static function update_content(WP_REST_Request $request) {
         $current = self::config();
         $incoming_heroes = $request->get_param('heroImages');
+        $incoming_about_portrait = $request->get_param('aboutPortraitURL');
         $incoming_launch_posters = $request->get_param('launchPosters');
         $incoming_showreel = $request->get_param('showreel');
         $incoming_dramas = $request->get_param('dramas');
@@ -318,6 +319,13 @@ final class Shuzijun_App_Content_API {
             $heroes = self::sanitize_image_urls($incoming_heroes, 5);
             if (is_wp_error($heroes)) { return $heroes; }
             $current['heroImages'] = $heroes;
+        }
+        if (is_string($incoming_about_portrait) && $incoming_about_portrait !== '') {
+            $about_portrait = self::trusted_media_url($incoming_about_portrait);
+            if (!$about_portrait) {
+                return new WP_Error('invalid_about_portrait', '关于页照片必须使用受信任的 HTTPS 媒体地址。', array('status' => 400));
+            }
+            $current['aboutPortraitURL'] = $about_portrait;
         }
         if (is_array($incoming_launch_posters)) {
             $launch_posters = self::sanitize_launch_posters($incoming_launch_posters);
@@ -462,6 +470,7 @@ final class Shuzijun_App_Content_API {
             'schemaVersion' => 1,
             'updatedAt' => gmdate('c', $updated),
             'heroImages' => $config['heroImages'],
+            'aboutPortraitURL' => $config['aboutPortraitURL'],
             'launchPosters' => $config['launchPosters'],
             'showreel' => $config['showreel'],
             'dramas' => $config['dramas'],
@@ -477,6 +486,9 @@ final class Shuzijun_App_Content_API {
             'heroImages' => isset($stored['heroImages']) && is_array($stored['heroImages'])
                 ? array_values($stored['heroImages'])
                 : $defaults['heroImages'],
+            'aboutPortraitURL' => isset($stored['aboutPortraitURL'])
+                ? (self::trusted_media_url($stored['aboutPortraitURL']) ?: null)
+                : $defaults['aboutPortraitURL'],
             'launchPosters' => isset($stored['launchPosters']) && is_array($stored['launchPosters'])
                 ? array_values($stored['launchPosters'])
                 : $defaults['launchPosters'],
@@ -497,6 +509,7 @@ final class Shuzijun_App_Content_API {
                 'https://img.shuzijun.com.cn/images/hero-mobile-2.webp',
                 'https://img.shuzijun.com.cn/images/hero-mobile-3.webp',
             ),
+            'aboutPortraitURL' => null,
             'launchPosters' => array(
                 array(
                     'id' => 'evergreen',

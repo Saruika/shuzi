@@ -67,9 +67,8 @@ struct RootView: View {
     var body: some View {
         ZStack {
             TabView(selection: $selectedTab) {
-                NavigationStack {
-                    HomeView(showPortfolio: { selectedTab = .portfolio })
-                }
+                HomeView(showPortfolio: { selectedTab = .portfolio })
+                .ignoresSafeArea(.container, edges: .top)
                 .tag(AppTab.home)
                 .tabItem { Label("首页", systemImage: "play.rectangle") }
 
@@ -94,10 +93,10 @@ struct RootView: View {
                 NavigationStack {
                     visualAboutContent
                 }
+                .ignoresSafeArea(.container, edges: .top)
                 .tag(AppTab.about)
                 .tabItem { Label("关于", systemImage: "person.crop.rectangle") }
             }
-
             if isLaunchPosterVisible, let poster = displayedLaunchPoster {
                 LaunchPosterView(poster: poster) {
                     withAnimation(.easeOut(duration: 0.35)) {
@@ -110,9 +109,9 @@ struct RootView: View {
         }
         .tint(AppTheme.gold)
         .protectedFromScreenCapture()
-        .onAppear { prepareLaunchPosterIfNeeded() }
         .task {
             await portfolioStore.restoreCachedContent()
+            prepareLaunchPosterIfNeeded()
             await adminSession.restoreSession()
             await refreshAdministratorContentIfAllowed()
             recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)

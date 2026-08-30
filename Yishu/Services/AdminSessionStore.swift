@@ -203,6 +203,7 @@ final class AdminSessionStore: ObservableObject {
 
     func publish(
         heroImages: [URL],
+        aboutPortraitURL: URL?,
         launchPosters: [LaunchPosterContent],
         showreel: ShowreelContent,
         dramas: [DramaWork]
@@ -212,6 +213,7 @@ final class AdminSessionStore: ObservableObject {
         let body = try encoder.encode(
             AppContentUpdate(
                 heroImages: heroImages,
+                aboutPortraitURL: aboutPortraitURL,
                 launchPosters: launchPosters,
                 showreel: showreel,
                 dramas: dramas
@@ -341,6 +343,7 @@ private struct AdminSessionResponse: Decodable {
 
 private struct AppContentUpdate: Encodable {
     let heroImages: [URL]
+    let aboutPortraitURL: URL?
     let launchPosters: [LaunchPosterContent]
     let showreel: ShowreelContent
     let dramas: [DramaWork]

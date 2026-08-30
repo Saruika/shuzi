@@ -39,14 +39,12 @@ struct LaunchPosterView: View {
                     }
                 }
             }
-            .ignoresSafeArea()
 
             LinearGradient(
                 colors: [.black.opacity(0.18), .clear, AppTheme.ink.opacity(0.92)],
                 startPoint: .top,
                 endPoint: .bottom
             )
-            .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
@@ -85,9 +83,10 @@ struct LaunchPosterView: View {
                     .padding(.top, 24)
             }
             .padding(.horizontal, 22)
-            .padding(.top, 12)
-            .padding(.bottom, 20)
+            .padding(.top, max(12, AppWindowMetrics.topInsetForLayout + 12))
+            .padding(.bottom, max(20, AppWindowMetrics.bottomInsetForLayout + 20))
         }
+        .ignoresSafeArea()
         .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .background(AppTheme.ink.ignoresSafeArea())
         .task(id: poster.id) {

@@ -14,6 +14,7 @@ struct HomeView: View {
                     .frame(width: proxy.size.width, height: proxy.size.height)
             }
         }
+        .ignoresSafeArea(.container, edges: .top)
         .toolbar(.hidden, for: .navigationBar)
         .onAppear { localWeather.refreshIfAuthorized() }
     }
@@ -56,9 +57,22 @@ private struct HeroPager: View {
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height)
                 .tabViewStyle(.page(indexDisplayMode: .never))
+                .overlay(alignment: .top) {
+                    LinearGradient(
+                        colors: [.black, .black.opacity(0.62), .clear],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 132)
+                    .allowsHitTesting(false)
+                }
 
                 LinearGradient(
-                    colors: [.black.opacity(0.08), .clear, AppTheme.ink.opacity(0.95)],
+                    gradient: Gradient(stops: [
+                        .init(color: .clear, location: 0),
+                        .init(color: .clear, location: 0.55),
+                        .init(color: AppTheme.ink.opacity(0.95), location: 1)
+                    ]),
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -147,7 +161,7 @@ private struct HeroPager: View {
                     .padding(.top, 26)
                 }
                 .padding(.horizontal, 22)
-                .padding(.top, 18)
+                .padding(.top, max(18, AppWindowMetrics.topInsetForLayout + 10))
                 .padding(.bottom, 32)
             }
         }

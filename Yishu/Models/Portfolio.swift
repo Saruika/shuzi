@@ -60,6 +60,7 @@ struct AppContentManifest: Codable {
     let schemaVersion: Int
     let updatedAt: Date
     let heroImages: [URL]
+    let aboutPortraitURL: URL?
     let launchPosters: [LaunchPosterContent]?
     let showreel: ShowreelContent
     let dramas: [DramaWork]
@@ -75,6 +76,7 @@ enum ContentCatalog {
         URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-04-nas-1942-20260829.jpg")!,
         URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-05-nas-1939-20260829.jpg")!,
     ]
+    static let aboutPortraitURL: URL? = nil
     private static let heroAssetNames = ["HeroOne", "HeroTwo", "HeroThree", "HeroFour", "HeroFive"]
 
     static func heroAssetName(at index: Int) -> String? {

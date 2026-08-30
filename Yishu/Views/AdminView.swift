@@ -8,6 +8,7 @@ struct AdminView: View {
     @State private var username = "yishu_app_manager"
     @State private var applicationPassword = ""
     @State private var heroImageURLs = ContentCatalog.heroImages
+    @State private var aboutPortraitURL = ContentCatalog.aboutPortraitURL
     @State private var launchPosterDrafts = ContentCatalog.launchPosters
     @State private var showreelDraft = ContentCatalog.showreel
     @State private var dramaDrafts: [DramaDraft] = ContentCatalog.dramas.map(DramaDraft.init)
@@ -20,6 +21,7 @@ struct AdminView: View {
     @State private var selectedPhotos: [PhotosPickerItem] = []
     @State private var selectedHero: PhotosPickerItem?
     @State private var selectedLaunchPoster: PhotosPickerItem?
+    @State private var selectedAboutPortrait: PhotosPickerItem?
     @State private var selectedPoster: PhotosPickerItem?
     @State private var showVideoImporter = false
     @State private var pendingRemoval: PortfolioImage?
@@ -65,6 +67,10 @@ struct AdminView: View {
         .onChange(of: selectedLaunchPoster) { _, item in
             guard let item else { return }
             Task { await uploadLaunchPoster(item) }
+        }
+        .onChange(of: selectedAboutPortrait) { _, item in
+            guard let item else { return }
+            Task { await uploadAboutPortrait(item) }
         }
         .onChange(of: selectedPoster) { _, item in
             guard let item else { return }
@@ -150,6 +156,7 @@ struct AdminView: View {
             dashboardHeader
             launchPosterEditor
             heroEditor
+            aboutPortraitEditor
             portfolioEditor
             showreelEditor
             dramaEditor
@@ -281,6 +288,18 @@ struct AdminView: View {
                                 Spacer()
 
                                 HStack {
+                                    PhotosPicker(
+                                        selection: replacementSelection { item in
+                                            Task { await replacePortfolioImage(item, image: image, in: portfolio) }
+                                        },
+                                        matching: .images
+                                    ) {
+                                        Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
+                                            .symbolRenderingMode(.palette)
+                                            .foregroundStyle(.white, .black.opacity(0.72))
+                                            .font(.title3)
+                                    }
+                                    .accessibilityLabel("替换这张照片")
                                     Spacer()
                                     Menu {
                                         Button {
@@ -316,7 +335,7 @@ struct AdminView: View {
                         }
                     }
                 }
-                Text("当前 \(portfolio.images.count) 张。第一张为封面；菜单可调整顺序，移出不会删除媒体库原文件。")
+                Text("当前 \(portfolio.images.count) 张。第一张为封面；可单张替换、调整顺序，移出不会删除媒体库原文件。")
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)
             }
@@ -325,7 +344,7 @@ struct AdminView: View {
     }
 
     private var heroEditor: some View {
-        AdminSection(title: "主页封面", subtitle: "最多 5 张；刘海安全区仍会自动保留") {
+        AdminSection(title: "主页轮播", subtitle: "最多 5 张；可直接替换并调整显示顺序") {
             PhotosPicker(selection: $selectedHero, matching: .images) {
                 Label("上传一张主页封面", systemImage: "photo.badge.plus")
                     .adminPrimaryButton()
@@ -334,25 +353,88 @@ struct AdminView: View {
 
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
                 ForEach(Array(heroImageURLs.enumerated()), id: \.offset) { index, url in
-                    ZStack(alignment: .topTrailing) {
+                    ZStack {
                         ArtworkImage(url: url)
                             .frame(height: 132)
                             .frame(maxWidth: .infinity)
                             .clipShape(RoundedRectangle(cornerRadius: 4))
-                        if heroImageURLs.count > 1 {
-                            Button { heroImageURLs.remove(at: index) } label: {
-                                Image(systemName: "minus.circle.fill")
-                                    .symbolRenderingMode(.palette)
-                                    .foregroundStyle(.white, .black.opacity(0.72))
-                                    .font(.title3)
-                                    .padding(6)
+
+                        VStack {
+                            HStack {
+                                Text("第 \(index + 1) 张")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 5)
+                                    .background(.black.opacity(0.68), in: Capsule())
+                                Spacer()
+                                if heroImageURLs.count > 1 {
+                                    Button { heroImageURLs.remove(at: index) } label: {
+                                        Image(systemName: "minus.circle.fill")
+                                            .symbolRenderingMode(.palette)
+                                            .foregroundStyle(.white, .black.opacity(0.72))
+                                            .font(.title3)
+                                    }
+                                    .accessibilityLabel("移除主页封面")
+                                }
                             }
-                            .accessibilityLabel("移除主页封面")
+
+                            Spacer()
+
+                            HStack(spacing: 8) {
+                                PhotosPicker(
+                                    selection: replacementSelection { item in
+                                        Task { await replaceHeroImage(item, at: index) }
+                                    },
+                                    matching: .images
+                                ) {
+                                    Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
+                                }
+                                .accessibilityLabel("替换第 \(index + 1) 张主页封面")
+                                Spacer()
+                                Button { moveHero(at: index, by: -1) } label: {
+                                    Image(systemName: "arrow.left.circle.fill")
+                                }
+                                .disabled(index == 0)
+                                Button { moveHero(at: index, by: 1) } label: {
+                                    Image(systemName: "arrow.right.circle.fill")
+                                }
+                                .disabled(index == heroImageURLs.count - 1)
+                            }
+                            .font(.title3)
+                            .foregroundStyle(.white)
                         }
+                        .padding(7)
                     }
                 }
             }
-            Text("上传或移除后，需要点击底部“保存并发布全部修改”。")
+            Text("替换会保留原来的轮播位置；全部修改需点击底部“保存并发布全部修改”。")
+                .font(.caption2)
+                .foregroundStyle(AppTheme.muted)
+        }
+    }
+
+    private var aboutPortraitEditor: some View {
+        AdminSection(title: "关于页人物图", subtitle: "替换后会同步到所有用户设备") {
+            Group {
+                if let aboutPortraitURL {
+                    ArtworkImage(url: aboutPortraitURL)
+                } else {
+                    Image("AboutPortrait")
+                        .resizable()
+                        .scaledToFill()
+                }
+            }
+            .frame(height: 300)
+            .frame(maxWidth: .infinity)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+
+            PhotosPicker(selection: $selectedAboutPortrait, matching: .images) {
+                Label("从手机相册替换人物图", systemImage: "person.crop.rectangle.badge.plus")
+                    .adminPrimaryButton()
+            }
+            .disabled(isPublishing)
+
+            Text("建议使用 9:16 竖版人像。未发布新图时继续使用 App 内置照片。")
                 .font(.caption2)
                 .foregroundStyle(AppTheme.muted)
         }
@@ -368,10 +450,21 @@ struct AdminView: View {
 
             ForEach($launchPosterDrafts) { $poster in
                 VStack(alignment: .leading, spacing: 13) {
-                    ArtworkImage(url: poster.imageURL)
-                        .frame(height: 240)
+                    LaunchPosterAdminPreview(poster: poster)
+                        .frame(height: 420)
                         .frame(maxWidth: .infinity)
                         .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                    PhotosPicker(
+                        selection: replacementSelection { item in
+                            Task { await replaceLaunchPoster(item, id: poster.id) }
+                        },
+                        matching: .images
+                    ) {
+                        Label("只替换这张海报图片", systemImage: "arrow.triangle.2.circlepath.camera")
+                            .adminSecondaryButton()
+                    }
+                    .disabled(isPublishing)
 
                     Toggle("启用这张海报", isOn: $poster.isEnabled)
                         .tint(AppTheme.gold)
@@ -406,7 +499,7 @@ struct AdminView: View {
                 .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
             }
 
-            Text("建议使用竖版照片。海报上传后可设置节日或季节日期，最后点击底部“保存并发布全部修改”。")
+            Text("上方预览采用与真实开屏一致的裁切和文案位置。建议使用 9:16 竖版照片，最后点击底部“保存并发布全部修改”。")
                 .font(.caption2)
                 .foregroundStyle(AppTheme.muted)
         }
@@ -415,6 +508,11 @@ struct AdminView: View {
 
     private var showreelEditor: some View {
         AdminSection(title: "Showreel", subtitle: "更换视频、海报和展示文案") {
+            ArtworkImage(url: showreelDraft.posterURL)
+                .frame(height: 190)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+
             TextField("栏目眉题", text: $showreelDraft.eyebrow)
             TextField("标题", text: $showreelDraft.title)
             TextField("一句话介绍", text: $showreelDraft.summary)
@@ -444,8 +542,25 @@ struct AdminView: View {
         AdminSection(title: "影视履历", subtitle: "修改剧名、海报与公开跳转") {
             ForEach($dramaDrafts) { $drama in
                 VStack(alignment: .leading, spacing: 10) {
+                    if let url = URL(string: drama.imageURL),
+                       ContentSecurityPolicy.isTrustedMediaURL(url) {
+                        ArtworkImage(url: url)
+                            .frame(height: 180)
+                            .frame(maxWidth: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                    }
+                    PhotosPicker(
+                        selection: replacementSelection { item in
+                            Task { await replaceDramaPoster(item, id: drama.id) }
+                        },
+                        matching: .images
+                    ) {
+                        Label("从手机相册替换海报", systemImage: "photo.badge.plus")
+                            .adminSecondaryButton()
+                    }
+                    .disabled(isPublishing)
                     TextField("剧名", text: $drama.title)
-                    TextField("海报 HTTPS 地址", text: $drama.imageURL)
+                    TextField("海报 HTTPS 地址（高级）", text: $drama.imageURL)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                     TextField("观看页 HTTPS 地址", text: $drama.destinationURL)
@@ -501,6 +616,7 @@ struct AdminView: View {
 
     private func loadDrafts() {
         heroImageURLs = store.heroImages
+        aboutPortraitURL = store.aboutPortraitURL
         launchPosterDrafts = store.launchPosters
         showreelDraft = store.showreel
         tagsText = store.showreel.tags.joined(separator: "、")
@@ -553,31 +669,37 @@ struct AdminView: View {
 
     private func uploadHeroImage(_ item: PhotosPickerItem) async {
         await performOperation(success: "主页封面已上传，等待发布") {
-            guard let data = try await item.loadTransferable(type: Data.self) else {
-                throw AdminAPIError.invalidResponse
-            }
-            let type = preferredType(for: item)
-            let media = try await admin.upload(
-                data: data,
-                filename: generatedFilename(prefix: "hero", type: type),
-                mimeType: type.preferredMIMEType ?? "image/jpeg"
-            )
+            let media = try await uploadImage(item, prefix: "hero")
             heroImageURLs.append(media.sourceURL)
         }
         selectedHero = nil
     }
 
+    private func replaceHeroImage(_ item: PhotosPickerItem, at index: Int) async {
+        await performOperation(success: "主页第 \(index + 1) 张封面已替换，等待发布") {
+            let media = try await uploadImage(item, prefix: "hero-replacement")
+            guard heroImageURLs.indices.contains(index) else { throw AdminAPIError.invalidResponse }
+            heroImageURLs[index] = media.sourceURL
+        }
+    }
+
+    private func moveHero(at index: Int, by offset: Int) {
+        let target = index + offset
+        guard heroImageURLs.indices.contains(index), heroImageURLs.indices.contains(target) else { return }
+        heroImageURLs.swapAt(index, target)
+    }
+
+    private func uploadAboutPortrait(_ item: PhotosPickerItem) async {
+        await performOperation(success: "关于页人物图已替换，等待发布") {
+            let media = try await uploadImage(item, prefix: "about-portrait")
+            aboutPortraitURL = media.sourceURL
+        }
+        selectedAboutPortrait = nil
+    }
+
     private func uploadLaunchPoster(_ item: PhotosPickerItem) async {
         await performOperation(success: "开屏海报已上传，设置日期后等待发布") {
-            guard let data = try await item.loadTransferable(type: Data.self) else {
-                throw AdminAPIError.invalidResponse
-            }
-            let type = preferredType(for: item)
-            let media = try await admin.upload(
-                data: data,
-                filename: generatedFilename(prefix: "launch-poster", type: type),
-                mimeType: type.preferredMIMEType ?? "image/jpeg"
-            )
+            let media = try await uploadImage(item, prefix: "launch-poster")
             let start = Calendar.current.startOfDay(for: .now)
             let end = Calendar.current.date(byAdding: .day, value: 30, to: start)
                 ?? start.addingTimeInterval(30 * 86_400)
@@ -596,6 +718,31 @@ struct AdminView: View {
             )
         }
         selectedLaunchPoster = nil
+    }
+
+    private func replaceLaunchPoster(_ item: PhotosPickerItem, id: String) async {
+        await performOperation(success: "开屏图片已替换，原文案和投放日期保持不变") {
+            let media = try await uploadImage(item, prefix: "launch-poster-replacement")
+            guard let index = launchPosterDrafts.firstIndex(where: { $0.id == id }) else {
+                throw AdminAPIError.invalidResponse
+            }
+            launchPosterDrafts[index].imageURL = media.sourceURL
+        }
+    }
+
+    private func replacePortfolioImage(
+        _ item: PhotosPickerItem,
+        image: PortfolioImage,
+        in portfolio: Portfolio
+    ) async {
+        await performOperation(success: "「\(portfolio.title)」中的照片已原位替换") {
+            let media = try await uploadImage(item, prefix: "portfolio-replacement")
+            var ids = portfolio.images.map(\.id)
+            guard let index = ids.firstIndex(of: image.id) else { throw AdminAPIError.invalidResponse }
+            ids[index] = media.id
+            let manifest = try await admin.updateGallery(portfolioID: portfolio.id, mediaIDs: ids)
+            store.applyPublishedManifest(manifest)
+        }
     }
 
     private func remove(_ image: PortfolioImage) async {
@@ -632,18 +779,20 @@ struct AdminView: View {
 
     private func uploadShowreelPoster(_ item: PhotosPickerItem) async {
         await performOperation(success: "新海报已上传，等待发布") {
-            guard let data = try await item.loadTransferable(type: Data.self) else {
-                throw AdminAPIError.invalidResponse
-            }
-            let type = preferredType(for: item)
-            let media = try await admin.upload(
-                data: data,
-                filename: generatedFilename(prefix: "showreel-poster", type: type),
-                mimeType: type.preferredMIMEType ?? "image/jpeg"
-            )
+            let media = try await uploadImage(item, prefix: "showreel-poster")
             showreelDraft.posterURL = media.sourceURL
         }
         selectedPoster = nil
+    }
+
+    private func replaceDramaPoster(_ item: PhotosPickerItem, id: String) async {
+        await performOperation(success: "影视海报已替换，等待发布") {
+            let media = try await uploadImage(item, prefix: "drama-poster")
+            guard let index = dramaDrafts.firstIndex(where: { $0.id == id }) else {
+                throw AdminAPIError.invalidResponse
+            }
+            dramaDrafts[index].imageURL = media.sourceURL.absoluteString
+        }
     }
 
     private func uploadShowreelVideo(_ url: URL) async {
@@ -699,6 +848,7 @@ struct AdminView: View {
         await performOperation(success: "内容已发布，普通用户下次刷新即可看到") {
             let manifest = try await admin.publish(
                 heroImages: heroImageURLs,
+                aboutPortraitURL: aboutPortraitURL,
                 launchPosters: launchPosterDrafts,
                 showreel: showreelDraft,
                 dramas: dramas
@@ -721,6 +871,29 @@ struct AdminView: View {
         }
     }
 
+    private func uploadImage(_ item: PhotosPickerItem, prefix: String) async throws -> UploadedMedia {
+        guard let data = try await item.loadTransferable(type: Data.self) else {
+            throw AdminAPIError.invalidResponse
+        }
+        let type = preferredType(for: item)
+        return try await admin.upload(
+            data: data,
+            filename: generatedFilename(prefix: prefix, type: type),
+            mimeType: type.preferredMIMEType ?? "image/jpeg"
+        )
+    }
+
+    private func replacementSelection(
+        _ action: @escaping (PhotosPickerItem) -> Void
+    ) -> Binding<PhotosPickerItem?> {
+        Binding(
+            get: { nil },
+            set: { item in
+                if let item { action(item) }
+            }
+        )
+    }
+
     private func preferredType(for item: PhotosPickerItem) -> UTType {
         item.supportedContentTypes.first { $0.preferredMIMEType != nil && $0.preferredFilenameExtension != nil }
             ?? .jpeg
@@ -730,6 +903,35 @@ struct AdminView: View {
         let stamp = Int(Date().timeIntervalSince1970)
         let suffix = UUID().uuidString.lowercased().prefix(8)
         return "\(prefix)-\(stamp)-\(suffix).\(type.preferredFilenameExtension ?? "bin")"
+    }
+}
+
+private struct LaunchPosterAdminPreview: View {
+    let poster: LaunchPosterContent
+
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            ArtworkImage(url: poster.imageURL)
+            LinearGradient(
+                colors: [.black.opacity(0.12), .clear, AppTheme.ink.opacity(0.92)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            VStack(alignment: .leading, spacing: 7) {
+                Text(poster.eyebrow)
+                    .font(.system(size: 8, weight: .semibold))
+                    .tracking(2.5)
+                    .foregroundStyle(AppTheme.gold)
+                Text(poster.title)
+                    .font(.editorial(34))
+                    .foregroundStyle(.white)
+                Text(poster.subtitle)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.76))
+            }
+            .padding(18)
+        }
+        .aspectRatio(9 / 16, contentMode: .fill)
     }
 }
 

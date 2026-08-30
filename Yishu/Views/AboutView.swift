@@ -3,33 +3,42 @@ import SwiftUI
 struct AboutView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var localWeather: LocalWeatherStore
+    @EnvironmentObject private var portfolioStore: PortfolioStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
         ZStack {
             AppTheme.ink.ignoresSafeArea()
-            ScrollView {
-                if horizontalSizeClass == .regular {
-                    HStack(alignment: .top, spacing: 24) {
-                        portrait
-                            .frame(maxWidth: 520)
-                        profileDetails
-                            .frame(maxWidth: 620)
-                    }
-                    .frame(maxWidth: 1_164)
-                    .padding(.horizontal, 24)
-                    .frame(maxWidth: .infinity)
-                } else {
-                    VStack(spacing: 0) {
-                        portrait
-                            .frame(maxWidth: 720)
-                            .frame(maxWidth: .infinity)
-                        profileDetails
+            GeometryReader { proxy in
+                ScrollView {
+                    if horizontalSizeClass == .regular, proxy.size.width >= 760 {
+                        let availableWidth = min(max(0, proxy.size.width - 48), 1_164)
+                        let portraitWidth = min(580, max(320, availableWidth * 0.52))
+                        let detailsWidth = max(300, availableWidth - portraitWidth - 24)
+
+                        HStack(alignment: .top, spacing: 24) {
+                            portrait
+                                .frame(width: portraitWidth)
+                            profileDetails
+                                .frame(width: detailsWidth)
+                                .padding(.top, 48)
+                        }
+                        .frame(width: availableWidth, alignment: .top)
+                        .frame(maxWidth: .infinity, alignment: .top)
+                        .padding(.horizontal, 24)
+                    } else {
+                        VStack(spacing: 0) {
+                            portrait
+                                .frame(maxWidth: 720)
+                                .frame(maxWidth: .infinity)
+                            profileDetails
+                        }
                     }
                 }
+                .scrollIndicators(.hidden)
+                .contentMargins(.bottom, 84, for: .scrollContent)
+                .ignoresSafeArea(.container, edges: .top)
             }
-            .scrollIndicators(.hidden)
-            .contentMargins(.bottom, 84, for: .scrollContent)
         }
         .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .toolbar(.hidden, for: .navigationBar)
@@ -48,12 +57,15 @@ struct AboutView: View {
 
     private var portrait: some View {
         ZStack(alignment: .bottomLeading) {
-            Image("AboutPortrait")
-                .resizable()
-                .scaledToFit()
-                .frame(maxWidth: .infinity)
-                .aspectRatio(9 / 16, contentMode: .fit)
-                .accessibilityLabel("易姝形象照")
+            if let portraitURL = portfolioStore.aboutPortraitURL {
+                ArtworkImage(url: portraitURL, contentMode: .fit)
+                    .accessibilityLabel("易姝形象照")
+            } else {
+                Image("AboutPortrait")
+                    .resizable()
+                    .scaledToFit()
+                    .accessibilityLabel("易姝形象照")
+            }
             LinearGradient(colors: [.clear, AppTheme.ink], startPoint: .center, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 8) {
                 Text("YI SHU")
@@ -82,7 +94,7 @@ struct AboutView: View {
                 .lineSpacing(9)
                 .foregroundStyle(.white.opacity(0.76))
 
-            ScrollView(.horizontal) {
+            ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) {
                     PillLabel(text: "短剧表演")
                     PillLabel(text: "古装造型")
@@ -90,8 +102,18 @@ struct AboutView: View {
                     PillLabel(text: "平面拍摄")
                     PillLabel(text: "品牌合作")
                 }
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        PillLabel(text: "短剧表演")
+                        PillLabel(text: "古装造型")
+                        PillLabel(text: "情绪表达")
+                    }
+                    HStack(spacing: 8) {
+                        PillLabel(text: "平面拍摄")
+                        PillLabel(text: "品牌合作")
+                    }
+                }
             }
-            .scrollIndicators(.hidden)
 
             HStack(spacing: 0) {
                 stat("演员", "身份")

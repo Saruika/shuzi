@@ -11,6 +11,7 @@ final class PortfolioStore: ObservableObject {
     nonisolated private static let offlinePreviewImageCount = 3
     @Published private(set) var portfolios: [Portfolio] = Portfolio.fallback
     @Published private(set) var heroImages: [URL] = ContentCatalog.heroImages
+    @Published private(set) var aboutPortraitURL: URL? = ContentCatalog.aboutPortraitURL
     @Published private(set) var launchPosters: [LaunchPosterContent] = ContentCatalog.launchPosters
     @Published private(set) var showreel: ShowreelContent = ContentCatalog.showreel
     @Published private(set) var dramas: [DramaWork] = ContentCatalog.dramas
@@ -34,6 +35,7 @@ final class PortfolioStore: ObservableObject {
               !cache.portfolios.isEmpty else { return }
         portfolios = cache.portfolios
         heroImages = cache.heroImages ?? ContentCatalog.heroImages
+        aboutPortraitURL = cache.aboutPortraitURL ?? ContentCatalog.aboutPortraitURL
         launchPosters = cache.launchPosters ?? ContentCatalog.launchPosters
         showreel = cache.showreel ?? ContentCatalog.showreel
         dramas = cache.dramas ?? ContentCatalog.dramas
@@ -65,12 +67,22 @@ final class PortfolioStore: ObservableObject {
               ContentSecurityPolicy.isTrusted(manifest) else { return }
         portfolios = manifest.portfolios
         heroImages = manifest.heroImages
+        aboutPortraitURL = manifest.aboutPortraitURL
         launchPosters = manifest.launchPosters ?? launchPosters
         showreel = manifest.showreel
         dramas = manifest.dramas
         lastUpdated = manifest.updatedAt
         contentOrigin = .network
         statusMessage = nil
+        Self.persistCacheInBackground(
+            portfolios: manifest.portfolios,
+            heroImages: manifest.heroImages,
+            aboutPortraitURL: manifest.aboutPortraitURL,
+            launchPosters: manifest.launchPosters ?? launchPosters,
+            showreel: manifest.showreel,
+            dramas: manifest.dramas,
+            updatedAt: manifest.updatedAt
+        )
     }
 
     func refresh() async {
@@ -87,6 +99,7 @@ final class PortfolioStore: ObservableObject {
             }
             portfolios = manifest.portfolios
             heroImages = manifest.heroImages
+            aboutPortraitURL = manifest.aboutPortraitURL
             launchPosters = manifest.launchPosters ?? launchPosters
             showreel = manifest.showreel
             dramas = manifest.dramas
@@ -96,6 +109,7 @@ final class PortfolioStore: ObservableObject {
             Self.persistCacheInBackground(
                 portfolios: manifest.portfolios,
                 heroImages: manifest.heroImages,
+                aboutPortraitURL: manifest.aboutPortraitURL,
                 launchPosters: manifest.launchPosters ?? launchPosters,
                 showreel: manifest.showreel,
                 dramas: manifest.dramas,
@@ -112,6 +126,7 @@ final class PortfolioStore: ObservableObject {
                 Self.persistCacheInBackground(
                     portfolios: remotePortfolios,
                     heroImages: heroImages,
+                    aboutPortraitURL: aboutPortraitURL,
                     launchPosters: launchPosters,
                     showreel: showreel,
                     dramas: dramas,
@@ -138,6 +153,7 @@ final class PortfolioStore: ObservableObject {
     private static func persistCacheInBackground(
         portfolios: [Portfolio],
         heroImages: [URL],
+        aboutPortraitURL: URL?,
         launchPosters: [LaunchPosterContent],
         showreel: ShowreelContent,
         dramas: [DramaWork],
@@ -147,6 +163,7 @@ final class PortfolioStore: ObservableObject {
             Self.persistCache(
                 portfolios: portfolios,
                 heroImages: heroImages,
+                aboutPortraitURL: aboutPortraitURL,
                 launchPosters: launchPosters,
                 showreel: showreel,
                 dramas: dramas,
@@ -158,6 +175,7 @@ final class PortfolioStore: ObservableObject {
     nonisolated private static func persistCache(
         portfolios: [Portfolio],
         heroImages: [URL],
+        aboutPortraitURL: URL?,
         launchPosters: [LaunchPosterContent],
         showreel: ShowreelContent,
         dramas: [DramaWork],
@@ -184,6 +202,7 @@ final class PortfolioStore: ObservableObject {
                 PortfolioCacheEnvelope(
                     portfolios: cachedPortfolios,
                     heroImages: heroImages,
+                    aboutPortraitURL: aboutPortraitURL,
                     launchPosters: launchPosters,
                     showreel: showreel,
                     dramas: dramas,
@@ -346,6 +365,7 @@ enum ContentSecurityPolicy {
 
     static func isTrusted(_ manifest: AppContentManifest) -> Bool {
         manifest.heroImages.allSatisfy(isTrustedMediaURL)
+            && (manifest.aboutPortraitURL.map(isTrustedMediaURL) ?? true)
             && (manifest.launchPosters ?? []).allSatisfy { isTrustedMediaURL($0.imageURL) }
             && isTrustedMediaURL(manifest.showreel.videoURL)
             && isTrustedMediaURL(manifest.showreel.posterURL)
@@ -357,6 +377,7 @@ enum ContentSecurityPolicy {
 
     fileprivate static func isTrusted(_ cache: PortfolioCacheEnvelope) -> Bool {
         (cache.heroImages ?? []).allSatisfy(isTrustedMediaURL)
+            && (cache.aboutPortraitURL.map(isTrustedMediaURL) ?? true)
             && (cache.launchPosters ?? []).allSatisfy { isTrustedMediaURL($0.imageURL) }
             && (cache.showreel.map {
                 isTrustedMediaURL($0.videoURL) && isTrustedMediaURL($0.posterURL)
@@ -399,6 +420,7 @@ enum ContentSecurityPolicy {
 fileprivate struct PortfolioCacheEnvelope: Codable {
     let portfolios: [Portfolio]
     let heroImages: [URL]?
+    let aboutPortraitURL: URL?
     let launchPosters: [LaunchPosterContent]?
     let showreel: ShowreelContent?
     let dramas: [DramaWork]?
