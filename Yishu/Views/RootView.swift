@@ -8,17 +8,22 @@ private enum AppTab: Hashable {
     case about
 }
 
+private enum VisualTestingDestination {
+    case admin
+    case collaboration
+}
+
 struct RootView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
     @EnvironmentObject private var adminSession: AdminSessionStore
-    @EnvironmentObject private var subscription: SubscriptionStore
     @State private var selectedTab: AppTab
     @State private var portfolioPath: [Portfolio] = []
     @State private var launchPosterSnapshot: LaunchPosterContent?
     @State private var hasPreparedLaunchPoster = false
     @State private var isLaunchPosterVisible = true
     private let visualPortfolioTitle: String?
+    private let visualTestingDestination: VisualTestingDestination?
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
@@ -27,11 +32,24 @@ struct RootView: View {
             .first { $0.hasPrefix(prefix) }
             .map { String($0.dropFirst(prefix.count)) }
         visualPortfolioTitle = title
+        let destination: VisualTestingDestination?
+#if DEBUG
+        if arguments.contains("-open-admin-for-visual-testing") {
+            destination = .admin
+        } else if arguments.contains("-open-collaboration-for-visual-testing") {
+            destination = .collaboration
+        } else {
+            destination = nil
+        }
+#else
+        destination = nil
+#endif
+        visualTestingDestination = destination
         let initialTab: AppTab
 #if DEBUG
         if title != nil || arguments.contains("-open-portfolio-for-visual-testing") {
             initialTab = .portfolio
-        } else if arguments.contains("-open-about-for-visual-testing") {
+        } else if arguments.contains("-open-about-for-visual-testing") || destination != nil {
             initialTab = .about
         } else if arguments.contains("-open-credits-for-visual-testing") {
             initialTab = .credits
@@ -74,7 +92,7 @@ struct RootView: View {
                 .tabItem { Label("收藏", systemImage: "heart") }
 
                 NavigationStack {
-                    AboutView()
+                    visualAboutContent
                 }
                 .tag(AppTab.about)
                 .tabItem { Label("关于", systemImage: "person.crop.rectangle") }
@@ -94,12 +112,9 @@ struct RootView: View {
         .protectedFromScreenCapture()
         .onAppear { prepareLaunchPosterIfNeeded() }
         .task {
-            async let sessionRestore: Void = adminSession.restoreSession()
-            async let subscriptionRefresh: Void = subscription.refresh()
             await portfolioStore.restoreCachedContent()
-            await portfolioStore.refresh()
-            _ = await (sessionRestore, subscriptionRefresh)
-            await refreshProtectedContentIfAllowed(reloadPublicIfLocked: false)
+            await adminSession.restoreSession()
+            await refreshAdministratorContentIfAllowed()
             recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
             if let visualPortfolioTitle,
                let portfolio = portfolioStore.portfolios.first(where: { $0.title == visualPortfolioTitle }) {
@@ -109,12 +124,25 @@ struct RootView: View {
         .onChange(of: portfolioStore.portfolios) { _, portfolios in
             recentlyViewed.retainAvailablePortfolios(in: portfolios)
         }
-        .onChange(of: subscription.entitlementJWS) { _, _ in
-            Task { await refreshProtectedContentIfAllowed() }
-        }
         .onChange(of: adminSession.isAuthenticated) { _, _ in
-            Task { await refreshProtectedContentIfAllowed() }
+            Task { await refreshAdministratorContentIfAllowed() }
         }
+    }
+
+    @ViewBuilder
+    private var visualAboutContent: some View {
+#if DEBUG
+        switch visualTestingDestination {
+        case .admin:
+            AdminView()
+        case .collaboration:
+            CollaborationInquiryView()
+        case nil:
+            AboutView()
+        }
+#else
+        AboutView()
+#endif
     }
 
     private var displayedLaunchPoster: LaunchPosterContent? {
@@ -143,18 +171,13 @@ struct RootView: View {
         hasPreparedLaunchPoster = true
     }
 
-    private func refreshProtectedContentIfAllowed(reloadPublicIfLocked: Bool = true) async {
+    private func refreshAdministratorContentIfAllowed() async {
         if adminSession.isAuthenticated {
             if let manifest = try? await adminSession.fetchContent() {
                 portfolioStore.applyPublishedManifest(manifest)
             }
-        } else if let entitlementJWS = subscription.entitlementJWS {
-            await portfolioStore.refreshPremiumContent(with: entitlementJWS)
         } else {
-            portfolioStore.discardProtectedContent()
-            if reloadPublicIfLocked {
-                await portfolioStore.refresh()
-            }
+            await portfolioStore.refresh()
         }
     }
 }

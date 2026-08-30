@@ -3,46 +3,18 @@ import WeatherKit
 @testable import Yishu
 
 final class ContentAndAccessTests: XCTestCase {
-    func testVisitorCanAccessOnlyFirstThreeImages() {
+    func testLoadedPortfolioExposesEveryImage() {
         let portfolio = makePortfolio(imageCount: 6)
 
-        XCTAssertEqual(
-            PhotoAccessPolicy.accessibleImages(
-                in: portfolio,
-                hasSubscription: false,
-                isAdministrator: false
-            ).map(\.id),
-            [1, 2, 3]
-        )
-        XCTAssertFalse(
-            PhotoAccessPolicy.canAccess(
-                portfolio.images[3],
-                in: portfolio,
-                hasSubscription: false,
-                isAdministrator: false
-            )
-        )
+        XCTAssertEqual(portfolio.images.map(\.id), [1, 2, 3, 4, 5, 6])
+        XCTAssertEqual(portfolio.displayImageCount, 6)
     }
 
-    func testSubscriberAndAdministratorCanAccessEveryImage() {
+    func testServerCountNeverHidesLoadedImages() {
         let portfolio = makePortfolio(imageCount: 6)
 
-        XCTAssertEqual(
-            PhotoAccessPolicy.accessibleImages(
-                in: portfolio,
-                hasSubscription: true,
-                isAdministrator: false
-            ).count,
-            6
-        )
-        XCTAssertTrue(
-            PhotoAccessPolicy.canAccess(
-                portfolio.images[5],
-                in: portfolio,
-                hasSubscription: false,
-                isAdministrator: true
-            )
-        )
+        XCTAssertEqual(portfolio.images.count, 6)
+        XCTAssertGreaterThanOrEqual(portfolio.displayImageCount, portfolio.images.count)
     }
 
     func testEveryBundledHeroHasAStableMatchingFallback() {

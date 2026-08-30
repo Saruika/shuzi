@@ -57,7 +57,7 @@
 
 ## 发布与安全
 
-- 公开 App 从 `/wp-json/shuzijun/v1/app-content` 自动同步；该接口每个相册只公开 3 张预览，不需要重新提交 App Store。
+- TestFlight App 从 `/wp-json/shuzijun/v1/app-content` 自动同步并全量展示已发布相册，不需要重新提交 App Store；官网作品页与通用 WordPress 媒体接口仍保持关闭。恢复付费前必须先恢复每册 3 张公开预览和服务端订阅鉴权。
 - CDN 只从上海内容主站回源，避免不同数据库副本导致首页或相册随机变化；新加坡服务器保留安全版本，但不再作为内容回源。
 - 管理员访问码为可独立吊销的 WordPress Application Password；主账号密码不会进入 App。
 - App 的管理请求不使用 Cookie 或磁盘缓存，且只允许访问主站 HTTPS API；单个相册最多 300 张图片。

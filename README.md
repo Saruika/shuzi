@@ -2,7 +2,7 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，内容由 WordPress 版本化 REST API 同步，不是 WebView 封装。
 
-> 当前版本：`1.3.1 (7)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前版本：`1.3.1 (11)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
@@ -17,20 +17,18 @@
 
 | 身份 | 可见内容 | 获取方式 |
 | --- | --- | --- |
-| 普通用户 | 每个相册前 3 张 | 公开预览清单 |
-| 订阅用户 | 全部作品 | StoreKit 2 签名交易经服务端验证 |
+| 普通用户 | 全部已发布作品 | App 专用内容清单 |
 | 管理员 | 全部作品与内容编辑 | WordPress Application Password |
 
-公开清单只返回每个相册的 3 张预览图。完整清单只保存在内存，不写入持久化目录缓存；授权失效后，App 会立即清除受保护 URL 和图片缓存。当前线上已启用公开预览限制和管理员访问；正式收费前还需完成 App Store Connect 商品、Apple 凭证校验服务与私有对象存储。
+TestFlight 测试阶段已暂停付费订阅，App 全量展示已发布相册。完整在线清单只在运行时使用，磁盘目录缓存仍只保留每册 3 张离线预览。官网作品页、附件页及通用 WordPress 媒体接口继续关闭，管理员编辑能力保持独立鉴权。
 
 ## 技术结构
 
 ```text
-iOS App (SwiftUI / StoreKit 2 / WeatherKit / AVKit)
+iOS App (SwiftUI / WeatherKit / AVKit)
         │
-        ├─ 公开预览── WordPress REST API
-        ├─ 管理员─── Application Password + 最小权限角色
-        └─ 订阅解锁── StoreKit JWS → Entitlement Verifier → 受保护清单
+        ├─ 完整展示── WordPress App REST API
+        └─ 管理员─── Application Password + 最小权限角色
 ```
 
 项目中不包含云 API 密钥、Apple 私钥、WordPress 管理员密码或签名证书。
@@ -65,7 +63,7 @@ xcodebuild -project Yishu.xcodeproj \
 ## 安全与隐私
 
 - 管理员凭据仅保存在 iOS Keychain，不随备份迁移。
-- 图片 URL 缓存仅使用内存，未授权用户不预取锁定内容。
+- 完整图片 URL 仅在运行时内存中使用，磁盘目录缓存每册只保留 3 张离线预览，不后台预取整册照片。
 - 录屏、投屏或 App 失去活动状态时会显示黑色保护遮罩。
 - 位置仅在用户主动启用天气时请求；定位管理器采用约三公里精度，不持久化位置，也不在后台持续定位。天气由 Apple WeatherKit 提供，并在“关于”页展示 Apple 要求的数据来源与许可入口。
 - 仓库忽略 `.env`、Apple 私钥、证书、描述文件和本地构建产物。
@@ -76,6 +74,9 @@ xcodebuild -project Yishu.xcodeproj \
 ## v1.3.1
 
 - App 对外名称更新为“Hi，梳子”，保留“易姝”作为艺人姓名与作品署名。
+- TestFlight 阶段暂停订阅入口并全量开放 8 个相册的 58 张已发布照片。
+- 更换“关于”页人物照，修复 iPad 分栏中人物图区未顶部对齐的问题。
+- 优化首页天气组件的动态宽度，并将截屏保护说明统一为“此 APP 不支持截屏、录屏或保存”。
 
 ## v1.3.0
 

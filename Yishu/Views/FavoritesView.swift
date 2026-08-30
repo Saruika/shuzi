@@ -4,13 +4,10 @@ struct FavoritesView: View {
     @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var favorites: FavoritesStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
-    @EnvironmentObject private var subscription: SubscriptionStore
-    @EnvironmentObject private var admin: AdminSessionStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selectedEntry: FavoriteEntry?
     @State private var selectedSection: LibrarySection = .favorites
     @State private var showClearHistoryConfirmation = false
-    @State private var showSubscription = false
 
     private var columns: [GridItem] {
         if horizontalSizeClass == .regular {
@@ -73,9 +70,6 @@ struct FavoritesView: View {
         }
         .fullScreenCover(item: $selectedEntry) { entry in
             GalleryViewer(portfolio: entry.portfolio, initialImage: entry.image)
-        }
-        .sheet(isPresented: $showSubscription) {
-            SubscriptionPaywallView()
         }
         .confirmationDialog(
             "清除最近浏览记录？",
@@ -163,22 +157,11 @@ struct FavoritesView: View {
         } else {
             LazyVGrid(columns: columns, spacing: 3) {
                 ForEach(entries) { entry in
-                    let canAccess = canAccess(entry)
-                    Button {
-                        if canAccess {
-                            selectedEntry = entry
-                        } else {
-                            showSubscription = true
-                        }
-                    } label: {
+                    Button { selectedEntry = entry } label: {
                         ZStack(alignment: .bottomLeading) {
-                            if canAccess {
-                                ArtworkImage(url: entry.image.url)
-                                    .aspectRatio(3 / 4, contentMode: .fit)
-                                    .frame(maxWidth: .infinity)
-                            } else {
-                                lockedFavoriteArtwork
-                            }
+                            ArtworkImage(url: entry.image.url)
+                                .aspectRatio(3 / 4, contentMode: .fit)
+                                .frame(maxWidth: .infinity)
                             LinearGradient(
                                 colors: [.clear, .black.opacity(0.72)],
                                 startPoint: .center,
@@ -187,10 +170,6 @@ struct FavoritesView: View {
                             HStack {
                                 Text(entry.portfolio.title)
                                 Spacer()
-                                if !canAccess {
-                                    Image(systemName: "lock.fill")
-                                        .foregroundStyle(AppTheme.gold)
-                                }
                             }
                             .font(.caption)
                             .foregroundStyle(.white)
@@ -198,7 +177,7 @@ struct FavoritesView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(canAccess ? entry.image.altText : "\(entry.portfolio.title)中的订阅照片")
+                    .accessibilityLabel(entry.image.altText)
                 }
             }
             .padding(.horizontal, 3)
@@ -262,34 +241,6 @@ struct FavoritesView: View {
         .padding(.vertical, 76)
     }
 
-    private func canAccess(_ entry: FavoriteEntry) -> Bool {
-        PhotoAccessPolicy.canAccess(
-            entry.image,
-            in: entry.portfolio,
-            hasSubscription: subscription.hasFullPhotoAccess,
-            isAdministrator: admin.isAuthenticated
-        )
-    }
-
-    private var lockedFavoriteArtwork: some View {
-        ZStack {
-            LinearGradient(
-                colors: [AppTheme.elevatedInk, AppTheme.ink, AppTheme.gold.opacity(0.1)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-            VStack(spacing: 10) {
-                Image(systemName: "lock.fill")
-                    .font(.title2)
-                    .foregroundStyle(AppTheme.gold)
-                Text("订阅后查看")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(AppTheme.warmWhite)
-            }
-        }
-        .aspectRatio(3 / 4, contentMode: .fit)
-        .frame(maxWidth: .infinity)
-    }
 }
 
 private enum LibrarySection: String, CaseIterable, Identifiable {

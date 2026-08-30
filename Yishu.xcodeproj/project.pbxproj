@@ -27,8 +27,6 @@
 		100000000000000000000012 /* CollaborationInquiryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* CollaborationInquiryView.swift */; };
 		100000000000000000000013 /* LaunchPosterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* LaunchPosterView.swift */; };
 		100000000000000000000014 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* LaunchScreen.storyboard */; };
-		100000000000000000000015 /* SubscriptionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* SubscriptionStore.swift */; };
-		100000000000000000000016 /* SubscriptionPaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* SubscriptionPaywallView.swift */; };
 		100000000000000000000017 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* PrivacyInfo.xcprivacy */; };
 		A10000000000000000000001 /* ContentAndAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* ContentAndAccessTests.swift */; };
 /* End PBXBuildFile section */
@@ -64,8 +62,6 @@
 		200000000000000000000012 /* CollaborationInquiryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollaborationInquiryView.swift; sourceTree = "<group>"; };
 		200000000000000000000013 /* LaunchPosterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchPosterView.swift; sourceTree = "<group>"; };
 		200000000000000000000014 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
-		200000000000000000000015 /* SubscriptionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStore.swift; sourceTree = "<group>"; };
-		200000000000000000000016 /* SubscriptionPaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionPaywallView.swift; sourceTree = "<group>"; };
 		200000000000000000000017 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		200000000000000000000099 /* Yishu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yishu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000001 /* ContentAndAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentAndAccessTests.swift; sourceTree = "<group>"; };
@@ -133,7 +129,6 @@
 				20000000000000000000000D /* RecentlyViewedStore.swift */,
 				20000000000000000000000F /* AdminSessionStore.swift */,
 				200000000000000000000011 /* LocalWeatherStore.swift */,
-				200000000000000000000015 /* SubscriptionStore.swift */,
 			);
 			path = Yishu/Services;
 			sourceTree = "<group>";
@@ -158,7 +153,6 @@
 				200000000000000000000010 /* AdminView.swift */,
 				200000000000000000000012 /* CollaborationInquiryView.swift */,
 				200000000000000000000013 /* LaunchPosterView.swift */,
-				200000000000000000000016 /* SubscriptionPaywallView.swift */,
 			);
 			path = Yishu/Views;
 			sourceTree = "<group>";
@@ -310,8 +304,6 @@
 				100000000000000000000011 /* LocalWeatherStore.swift in Sources */,
 				100000000000000000000012 /* CollaborationInquiryView.swift in Sources */,
 				100000000000000000000013 /* LaunchPosterView.swift in Sources */,
-				100000000000000000000015 /* SubscriptionStore.swift in Sources */,
-				100000000000000000000016 /* SubscriptionPaywallView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -394,7 +386,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -428,7 +420,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;

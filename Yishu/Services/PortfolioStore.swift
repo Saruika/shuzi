@@ -6,39 +6,9 @@ enum ContentOrigin: Equatable {
     case network
 }
 
-enum ProtectedContentState: Equatable {
-    case locked
-    case loading
-    case available
-    case unavailable
-}
-
-private enum PremiumContentError: Error {
-    case credentialRejected
-    case verifierUnavailable
-    case serverUnavailable
-}
-
-private final class ProtectedContentSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        willPerformHTTPRedirection response: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        guard request.url?.scheme?.lowercased() == "https",
-              request.url?.host?.lowercased() == "www.shuzijun.com.cn",
-              request.url?.port == nil || request.url?.port == 443 else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(request)
-    }
-}
-
 @MainActor
 final class PortfolioStore: ObservableObject {
+    private static let offlinePreviewImageCount = 3
     @Published private(set) var portfolios: [Portfolio] = Portfolio.fallback
     @Published private(set) var heroImages: [URL] = ContentCatalog.heroImages
     @Published private(set) var launchPosters: [LaunchPosterContent] = ContentCatalog.launchPosters
@@ -48,24 +18,8 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var statusMessage: String?
     @Published private(set) var contentOrigin: ContentOrigin = .bundled
-    @Published private(set) var protectedContentState: ProtectedContentState = .locked
 
     private let baseURL = URL(string: "https://www.shuzijun.com.cn/wp-json/wp/v2")!
-    private let protectedSession: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCache = nil
-        configuration.httpCookieStorage = nil
-        configuration.urlCredentialStorage = nil
-        configuration.httpShouldSetCookies = false
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.timeoutIntervalForRequest = 20
-        configuration.timeoutIntervalForResource = 30
-        return URLSession(
-            configuration: configuration,
-            delegate: ProtectedContentSessionDelegate(),
-            delegateQueue: nil
-        )
-    }()
     init() {}
 
     /// Disk reads and JSON decoding stay off the main actor. The subsequent
@@ -116,58 +70,7 @@ final class PortfolioStore: ObservableObject {
         dramas = manifest.dramas
         lastUpdated = manifest.updatedAt
         contentOrigin = .network
-        protectedContentState = .available
         statusMessage = nil
-    }
-
-    /// Premium manifests can contain short-lived signed URLs. They are applied
-    /// only in memory and are never written to the app cache or device backup.
-    func refreshPremiumContent(with transactionJWS: String) async {
-        guard (100...16_384).contains(transactionJWS.count) else {
-            protectedContentState = .unavailable
-            statusMessage = "Apple 订阅凭证不完整，请恢复购买后重试。"
-            return
-        }
-        protectedContentState = .loading
-        do {
-            let manifest = try await fetchPremiumContentManifest(transactionJWS: transactionJWS)
-            guard manifest.schemaVersion == 1,
-                  !manifest.portfolios.isEmpty,
-                  ContentSecurityPolicy.isTrusted(manifest) else {
-                throw URLError(.secureConnectionFailed)
-            }
-            applyPublishedManifest(manifest)
-        } catch PremiumContentError.verifierUnavailable {
-            protectedContentState = .unavailable
-            statusMessage = "订阅已确认，但完整内容服务尚未就绪。"
-        } catch PremiumContentError.credentialRejected {
-            protectedContentState = .unavailable
-            statusMessage = "Apple 订阅凭证未通过服务器校验，请恢复购买后重试。"
-        } catch {
-            protectedContentState = .unavailable
-            statusMessage = "订阅已确认，受保护照片暂时无法载入。"
-        }
-    }
-
-    /// Immediately removes protected URLs when a subscription expires or an
-    /// administrator signs out, before the public preview refresh completes.
-    func discardProtectedContent() {
-        protectedContentState = .locked
-        portfolios = portfolios.map { portfolio in
-            let preview = Array(portfolio.images.prefix(PhotoAccessPolicy.freePreviewCount))
-            return Portfolio(
-                id: portfolio.id,
-                title: portfolio.title,
-                subtitle: portfolio.subtitle,
-                eyebrow: portfolio.eyebrow,
-                slug: portfolio.slug,
-                websiteURL: portfolio.websiteURL,
-                coverURL: preview.first?.url ?? portfolio.coverURL,
-                images: preview,
-                totalImageCount: portfolio.displayImageCount
-            )
-        }
-        URLCache.shared.removeAllCachedResponses()
     }
 
     func refresh() async {
@@ -189,7 +92,6 @@ final class PortfolioStore: ObservableObject {
             dramas = manifest.dramas
             lastUpdated = manifest.updatedAt
             contentOrigin = .network
-            protectedContentState = .locked
             statusMessage = nil
             Self.persistCacheInBackground(
                 portfolios: manifest.portfolios,
@@ -261,10 +163,26 @@ final class PortfolioStore: ObservableObject {
         dramas: [DramaWork],
         updatedAt: Date
     ) {
+        // Keep only a small offline preview on disk. The complete live gallery
+        // remains an in-memory response and is refreshed whenever the App opens.
+        let cachedPortfolios = portfolios.map { portfolio in
+            let preview = Array(portfolio.images.prefix(offlinePreviewImageCount))
+            return Portfolio(
+                id: portfolio.id,
+                title: portfolio.title,
+                subtitle: portfolio.subtitle,
+                eyebrow: portfolio.eyebrow,
+                slug: portfolio.slug,
+                websiteURL: portfolio.websiteURL,
+                coverURL: preview.first?.url ?? portfolio.coverURL,
+                images: preview,
+                totalImageCount: portfolio.displayImageCount
+            )
+        }
         guard let url = cacheFileURL(createDirectory: true),
               let data = try? JSONEncoder().encode(
                 PortfolioCacheEnvelope(
-                    portfolios: portfolios,
+                    portfolios: cachedPortfolios,
                     heroImages: heroImages,
                     launchPosters: launchPosters,
                     showreel: showreel,
@@ -378,35 +296,6 @@ final class PortfolioStore: ObservableObject {
         let manifest = try decoder.decode(AppContentManifest.self, from: data)
         guard ContentSecurityPolicy.isTrusted(manifest) else { throw URLError(.secureConnectionFailed) }
         return manifest
-    }
-
-    private func fetchPremiumContentManifest(transactionJWS: String) async throws -> AppContentManifest {
-        var request = URLRequest(url: ContentCatalog.premiumAppContentURL)
-        request.timeoutInterval = 20
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("Bearer \(transactionJWS)", forHTTPHeaderField: "Authorization")
-        request.setValue("Yishu-iOS/2.0", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
-        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-        let (data, response) = try await protectedSession.data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw PremiumContentError.serverUnavailable
-        }
-        switch http.statusCode {
-        case 200..<300:
-            break
-        case 401, 403:
-            throw PremiumContentError.credentialRejected
-        case 503:
-            throw PremiumContentError.verifierUnavailable
-        default:
-            throw PremiumContentError.serverUnavailable
-        }
-        guard data.count <= 8 * 1024 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(AppContentManifest.self, from: data)
     }
 
     private func request<T: Decodable>(_ url: URL) async throws -> T {

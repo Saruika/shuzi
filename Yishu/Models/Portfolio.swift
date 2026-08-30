@@ -68,7 +68,6 @@ struct AppContentManifest: Codable {
 
 enum ContentCatalog {
     static let appContentURL = URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-content")!
-    static let premiumAppContentURL = URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-content/premium")!
     static let heroImages = [
         URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-01-nas-1943-20260829.jpg")!,
         URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-02-nas-1938-20260829.jpg")!,

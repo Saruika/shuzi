@@ -2,11 +2,9 @@ import SwiftUI
 
 struct PortfolioGridView: View {
     @EnvironmentObject private var store: PortfolioStore
-    @EnvironmentObject private var subscription: SubscriptionStore
     @EnvironmentObject private var admin: AdminSessionStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var searchText = ""
-    @State private var showSubscription = false
 
     private var columns: [GridItem] {
         if horizontalSizeClass == .regular {
@@ -52,27 +50,24 @@ struct PortfolioGridView: View {
                         .font(.caption2)
                         .foregroundStyle(AppTheme.gold)
 
-                        Button { showSubscription = true } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: hasFullAccess ? "checkmark.seal.fill" : "lock.open.fill")
-                                    .foregroundStyle(AppTheme.gold)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(hasFullAccess ? "全部作品已解锁" : "订阅解锁全部照片")
-                                        .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(AppTheme.warmWhite)
-                                    Text(hasFullAccess ? "可浏览所有相册内容" : "每个相册免费预览 3 张 · \(subscription.localizedMonthlyPrice)/月")
-                                        .font(.caption2)
-                                        .foregroundStyle(AppTheme.muted)
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.weight(.semibold))
+                        HStack(spacing: 10) {
+                            Image(systemName: "photo.stack.fill")
+                                .foregroundStyle(AppTheme.gold)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("全部作品开放浏览")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(AppTheme.warmWhite)
+                                Text("相册持续更新 · 影像内容受版权保护")
+                                    .font(.caption2)
                                     .foregroundStyle(AppTheme.muted)
                             }
-                            .padding(14)
-                            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 12))
+                            Spacer()
+                            Image(systemName: "checkmark.seal.fill")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(AppTheme.gold)
                         }
-                        .buttonStyle(.plain)
+                        .padding(14)
+                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 12))
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 8)
@@ -113,15 +108,7 @@ struct PortfolioGridView: View {
         }
         .searchable(text: $searchText, prompt: "搜索主题、风格或描述")
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
-        .sheet(isPresented: $showSubscription) {
-            SubscriptionPaywallView()
-        }
         .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-    }
-
-    private var hasFullAccess: Bool {
-        admin.isAuthenticated
-            || (subscription.hasActiveSubscription && store.protectedContentState == .available)
     }
 
     private func refreshContent() async {
@@ -130,17 +117,12 @@ struct PortfolioGridView: View {
             if let manifest = try? await admin.fetchContent() {
                 store.applyPublishedManifest(manifest)
             }
-        } else if let entitlementJWS = subscription.entitlementJWS {
-            await store.refreshPremiumContent(with: entitlementJWS)
         }
     }
 }
 
 private struct PortfolioGridCard: View {
     let portfolio: Portfolio
-    @EnvironmentObject private var store: PortfolioStore
-    @EnvironmentObject private var subscription: SubscriptionStore
-    @EnvironmentObject private var admin: AdminSessionStore
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
@@ -159,38 +141,9 @@ private struct PortfolioGridCard: View {
             .foregroundStyle(.white)
             .padding(14)
 
-            if !hasFullAccess,
-               portfolio.displayImageCount > PhotoAccessPolicy.freePreviewCount {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Label(badgeTitle, systemImage: badgeIcon)
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.88))
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 7)
-                            .background(.black.opacity(0.58), in: Capsule())
-                    }
-                    Spacer()
-                }
-                .padding(10)
-            }
         }
         .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 3))
-    }
-
-    private var hasFullAccess: Bool {
-        admin.isAuthenticated
-            || (subscription.hasActiveSubscription && store.protectedContentState == .available)
-    }
-
-    private var badgeTitle: String {
-        subscription.hasActiveSubscription ? "正在载入" : "3 张预览"
-    }
-
-    private var badgeIcon: String {
-        subscription.hasActiveSubscription ? "arrow.clockwise" : "lock.fill"
     }
 }
 
@@ -198,11 +151,8 @@ struct PortfolioDetailView: View {
     let portfolio: Portfolio
     @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
-    @EnvironmentObject private var subscription: SubscriptionStore
-    @EnvironmentObject private var admin: AdminSessionStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var selectedImage: PortfolioImage?
-    @State private var showSubscription = false
 
     private var columns: [GridItem] {
         let count = horizontalSizeClass == .regular ? 3 : 2
@@ -215,17 +165,6 @@ struct PortfolioDetailView: View {
 
     private var galleryImages: [PortfolioImage] {
         Array(currentPortfolio.images.dropFirst())
-    }
-
-    private var lockedImageNumbers: [Int] {
-        guard !hasFullAccess,
-              currentPortfolio.displayImageCount > currentPortfolio.images.count else { return [] }
-        return Array((currentPortfolio.images.count + 1)...currentPortfolio.displayImageCount)
-    }
-
-    private var hasFullAccess: Bool {
-        admin.isAuthenticated
-            || (subscription.hasActiveSubscription && store.protectedContentState == .available)
     }
 
     private var currentPortfolio: Portfolio {
@@ -262,22 +201,8 @@ struct PortfolioDetailView: View {
                                 .font(.caption2)
                         }
                         Spacer()
-                        if hasFullAccess {
-                            Label("已解锁", systemImage: "checkmark.seal.fill")
-                                .foregroundStyle(AppTheme.gold)
-                        } else if subscription.hasActiveSubscription {
-                            Button { showSubscription = true } label: {
-                                Label("重新载入", systemImage: "arrow.clockwise")
-                            }
-                            .buttonStyle(.plain)
+                        Label("完整展示", systemImage: "checkmark.seal.fill")
                             .foregroundStyle(AppTheme.gold)
-                        } else {
-                            Button { showSubscription = true } label: {
-                                Label("\(subscription.localizedMonthlyPrice)/月解锁", systemImage: "lock.fill")
-                            }
-                            .buttonStyle(.plain)
-                            .foregroundStyle(AppTheme.gold)
-                        }
                     }
                     .font(.caption)
                     .foregroundStyle(AppTheme.muted)
@@ -287,35 +212,11 @@ struct PortfolioDetailView: View {
                     LazyVGrid(columns: columns, spacing: 8) {
                         ForEach(Array(galleryImages.enumerated()), id: \.element.id) { offset, image in
                             let imageNumber = offset + 2
-                            let canAccess = PhotoAccessPolicy.canAccess(
-                                image,
-                                in: currentPortfolio,
-                                hasSubscription: hasFullAccess,
-                                isAdministrator: admin.isAuthenticated
-                            )
-                            Button {
-                                if canAccess {
-                                    selectedImage = image
-                                } else {
-                                    showSubscription = true
-                                }
-                            } label: {
-                                if canAccess {
-                                    PortfolioGalleryTile(image: image, number: imageNumber)
-                                } else {
-                                    LockedPortfolioGalleryTile(number: imageNumber)
-                                }
+                            Button { selectedImage = image } label: {
+                                PortfolioGalleryTile(image: image, number: imageNumber)
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel(canAccess ? image.altText : "第 \(imageNumber) 张照片，需要订阅")
-                        }
-
-                        ForEach(lockedImageNumbers, id: \.self) { imageNumber in
-                            Button { showSubscription = true } label: {
-                                LockedPortfolioGalleryTile(number: imageNumber)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("第 \(imageNumber) 张照片，需要订阅")
+                            .accessibilityLabel(image.altText)
                         }
                     }
                     .padding(.horizontal, 12)
@@ -350,19 +251,21 @@ struct PortfolioDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
-        .onAppear { recentlyViewed.record(currentPortfolio) }
+        .onAppear {
+            recentlyViewed.record(currentPortfolio)
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-open-gallery-for-visual-testing") {
+                selectedImage = currentPortfolio.images.first
+            }
+#endif
+        }
         .fullScreenCover(item: $selectedImage) { image in
             GalleryViewer(portfolio: currentPortfolio, initialImage: image)
-        }
-        .sheet(isPresented: $showSubscription) {
-            SubscriptionPaywallView()
         }
     }
 
     private var accessDescription: String {
-        if hasFullAccess { return "点击照片全屏浏览" }
-        if subscription.hasActiveSubscription { return "订阅已确认，完整作品待载入" }
-        return "前 3 张可免费预览"
+        "点击照片全屏浏览"
     }
 }
 
@@ -426,46 +329,6 @@ private struct PortfolioGalleryTile: View {
     }
 }
 
-private struct LockedPortfolioGalleryTile: View {
-    let number: Int
-
-    var body: some View {
-        ZStack {
-            LinearGradient(
-                colors: [AppTheme.elevatedInk, AppTheme.ink, AppTheme.gold.opacity(0.1)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-
-            VStack(spacing: 12) {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 24, weight: .light))
-                    .foregroundStyle(AppTheme.gold)
-                Text("订阅后查看")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(AppTheme.warmWhite)
-            }
-
-            VStack {
-                Spacer()
-                HStack {
-                    Spacer()
-                    Text(String(format: "%02d", number))
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.58))
-                        .padding(8)
-                }
-            }
-        }
-        .aspectRatio(2 / 3, contentMode: .fit)
-        .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 2, style: .continuous)
-                .stroke(AppTheme.gold.opacity(0.18), lineWidth: 0.5)
-        }
-    }
-}
-
 private struct EditorialArtworkImage: View {
     let url: URL
 
@@ -514,8 +377,6 @@ struct GalleryViewer: View {
     let portfolio: Portfolio
     @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var favorites: FavoritesStore
-    @EnvironmentObject private var subscription: SubscriptionStore
-    @EnvironmentObject private var admin: AdminSessionStore
     @Environment(\.dismiss) private var dismiss
     @State private var selection: Int
 
@@ -533,12 +394,7 @@ struct GalleryViewer: View {
     }
 
     private var accessibleImages: [PortfolioImage] {
-        PhotoAccessPolicy.accessibleImages(
-            in: portfolio,
-            hasSubscription: subscription.hasActiveSubscription
-                && store.protectedContentState == .available,
-            isAdministrator: admin.isAuthenticated
-        )
+        store.portfolios.first(where: { $0.id == portfolio.id })?.images ?? portfolio.images
     }
 
     var body: some View {

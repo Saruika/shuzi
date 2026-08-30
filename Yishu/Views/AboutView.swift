@@ -70,6 +70,7 @@ struct AboutView: View {
             }
             .padding(22)
         }
+        .aspectRatio(9 / 16, contentMode: .fit)
     }
 
     private var biography: some View {

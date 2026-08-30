@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned public content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.3.1
+ * Version: 1.3.2
  * Author: Shuzijun
  */
 
@@ -14,6 +14,7 @@ final class Shuzijun_App_Content_API {
     const CAPABILITY = 'manage_yishu_app_content';
     const ROLE = 'yishu_content_manager';
     const FREE_PREVIEW_COUNT = 3;
+    const FULL_GALLERY_FOR_APP = true;
 
     public static function init() {
         add_action('init', array(__CLASS__, 'ensure_roles'), 20);
@@ -287,13 +288,15 @@ final class Shuzijun_App_Content_API {
     }
 
     public static function get_content($request = null) {
-        $audience = self::authenticate_content_manager($request) ? 'admin' : 'public';
+        $audience = self::authenticate_content_manager($request)
+            ? 'admin'
+            : (self::FULL_GALLERY_FOR_APP ? 'app' : 'public');
         $response = rest_ensure_response(self::manifest($audience));
         $response->header(
             'Cache-Control',
-            $audience === 'admin'
-                ? 'private, no-store'
-                : 'public, max-age=60, stale-while-revalidate=300'
+            $audience === 'public'
+                ? 'public, max-age=60, stale-while-revalidate=300'
+                : 'private, no-store'
         );
         return $response;
     }
@@ -585,6 +588,9 @@ final class Shuzijun_App_Content_API {
                 );
             }
             $total_image_count = count($images);
+            // The public website and generic WordPress routes stay closed. The
+            // App feed currently exposes the complete gallery while paid
+            // subscriptions are paused for TestFlight product testing.
             if ($audience === 'public') {
                 $images = array_slice($images, 0, self::FREE_PREVIEW_COUNT);
             } elseif ($audience === 'premium') {

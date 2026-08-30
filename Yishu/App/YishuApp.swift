@@ -7,12 +7,11 @@ struct YishuApp: App {
     @StateObject private var recentlyViewed = RecentlyViewedStore()
     @StateObject private var adminSession = AdminSessionStore()
     @StateObject private var localWeather = LocalWeatherStore()
-    @StateObject private var subscription = SubscriptionStore()
 
     init() {
         let cache = URLCache(
             memoryCapacity: 32 * 1024 * 1024,
-            // Keep protected artwork out of persistent URL caches. Images may
+            // Keep gallery artwork out of persistent URL caches. Images may
             // remain in memory while the app is running, but are discarded on
             // termination instead of being written to the app container.
             diskCapacity: 0
@@ -59,6 +58,5 @@ struct YishuApp: App {
             .environmentObject(recentlyViewed)
             .environmentObject(adminSession)
             .environmentObject(localWeather)
-            .environmentObject(subscription)
     }
 }

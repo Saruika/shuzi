@@ -456,7 +456,7 @@ struct CaptureProtectionCover: View {
                     .foregroundStyle(AppTheme.warmWhite)
                     .padding(.top, 28)
 
-                Text("为尊重肖像权与作品版权\n此页面不支持截屏、录屏或保存")
+                Text("为尊重肖像权与作品版权\n此 APP 不支持截屏、录屏或保存")
                     .font(.system(size: 13, weight: .regular))
                     .multilineTextAlignment(.center)
                     .lineSpacing(7)
@@ -478,7 +478,7 @@ struct CaptureProtectionCover: View {
         }
         .ignoresSafeArea()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("狐狸姐姐温馨提示：影像内容已保护，此页面不支持截屏、录屏或保存")
+        .accessibilityLabel("狐狸姐姐温馨提示：影像内容已保护，此 APP 不支持截屏、录屏或保存")
     }
 
     private var protectionPattern: some View {

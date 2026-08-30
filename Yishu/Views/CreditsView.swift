@@ -27,6 +27,14 @@ struct CreditsView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .onAppear {
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-play-showreel-for-visual-testing"),
+               inlinePlayer == nil {
+                playInline()
+            }
+#endif
+        }
         .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { notification in
             guard notificationBelongsToInlinePlayer(notification) else { return }
             stopInlinePlayback()
