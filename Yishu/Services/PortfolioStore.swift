@@ -127,6 +127,11 @@ final class PortfolioStore: ObservableObject {
             lastUpdated = manifest.updatedAt
             contentOrigin = .network
             statusMessage = nil
+            AppDiagnostics.shared.recordCatalogRefresh(
+                succeeded: true,
+                portfolioCount: manifest.portfolios.count,
+                imageCount: manifest.portfolios.reduce(0) { $0 + $1.images.count }
+            )
             Self.persistCacheInBackground(
                 portfolios: manifest.portfolios,
                 heroImages: manifest.heroImages,
@@ -137,6 +142,7 @@ final class PortfolioStore: ObservableObject {
                 updatedAt: manifest.updatedAt
             )
         } catch {
+            AppDiagnostics.shared.recordCatalogRefresh(succeeded: false, error: error)
             statusMessage = contentOrigin == .bundled
                 ? "网络不可用，当前显示离线基础内容"
                 : "网络不可用，继续显示上次同步内容"

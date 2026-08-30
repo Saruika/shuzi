@@ -13,6 +13,7 @@
 - TestFlight 测试阶段 App 内容清单返回全部已发布照片，但官网作品页、附件页及 WordPress 作品/媒体 REST 列表仍返回 404；完整目录不写入磁盘缓存，离线缓存每册只保留 3 张预览。
 - 天气功能只在用户主动开启后请求前台位置，定位精度设为约三公里；位置不持久化，也不进行后台定位。天气由 Apple WeatherKit 处理，工程包含 WeatherKit entitlement、法定署名入口与 Privacy Manifest。
 - GitHub 质量门禁使用最小读权限和固定 commit SHA 的 Action，不持有生产密钥；每次推送都扫描长期凭据、明文 HTTP、敏感文件、配置语法，并在 iPhone/iPad 执行关键页面回归。
+- MetricKit 与 Unified Logging 只保留版本、性能/诊断聚合数和数字网络错误类别，不记录 URL、账号、凭据或影像内容，不向第三方分析服务上传。
 
 ## 恢复付费订阅前必须完成
 

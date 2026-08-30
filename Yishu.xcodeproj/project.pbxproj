@@ -29,6 +29,7 @@
 		100000000000000000000014 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* LaunchScreen.storyboard */; };
 		100000000000000000000017 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* PrivacyInfo.xcprivacy */; };
 		100000000000000000000018 /* SecureNetworkClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* SecureNetworkClient.swift */; };
+		100000000000000000000019 /* AppDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000019 /* AppDiagnostics.swift */; };
 		A10000000000000000000001 /* ContentAndAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* ContentAndAccessTests.swift */; };
 		B10000000000000000000001 /* YishuUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* YishuUITests.swift */; };
 /* End PBXBuildFile section */
@@ -73,6 +74,7 @@
 		200000000000000000000014 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		200000000000000000000017 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		200000000000000000000018 /* SecureNetworkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureNetworkClient.swift; sourceTree = "<group>"; };
+		200000000000000000000019 /* AppDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDiagnostics.swift; sourceTree = "<group>"; };
 		200000000000000000000099 /* Yishu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yishu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000001 /* ContentAndAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentAndAccessTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000099 /* YishuTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YishuTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -144,6 +146,7 @@
 		300000000000000000000004 /* Yishu/Services */ = {
 			isa = PBXGroup;
 			children = (
+				200000000000000000000019 /* AppDiagnostics.swift */,
 				200000000000000000000018 /* SecureNetworkClient.swift */,
 				200000000000000000000004 /* PortfolioStore.swift */,
 				200000000000000000000005 /* FavoritesStore.swift */,
@@ -346,6 +349,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				100000000000000000000019 /* AppDiagnostics.swift in Sources */,
 				100000000000000000000001 /* YishuApp.swift in Sources */,
 				100000000000000000000002 /* AppTheme.swift in Sources */,
 				100000000000000000000003 /* Portfolio.swift in Sources */,
@@ -460,7 +464,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 21;
+				CURRENT_PROJECT_VERSION = 22;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -477,7 +481,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.10;
+				MARKETING_VERSION = 1.3.11;
 				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -494,7 +498,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 21;
+				CURRENT_PROJECT_VERSION = 22;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -511,7 +515,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.10;
+				MARKETING_VERSION = 1.3.11;
 				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

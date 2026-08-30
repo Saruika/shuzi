@@ -186,6 +186,25 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
+    func testDiagnosticsReduceErrorsToNonSensitiveNumericCategories() {
+        let sensitiveURL = URL(string: "https://user:password@example.com/private.jpg")!
+        let networkError = URLError(
+            .timedOut,
+            userInfo: [NSURLErrorFailingURLErrorKey: sensitiveURL]
+        )
+        let applicationError = NSError(
+            domain: "private.account.name",
+            code: 42,
+            userInfo: [NSLocalizedDescriptionKey: "secret content"]
+        )
+
+        XCTAssertEqual(
+            DiagnosticsSanitizer.networkErrorCode(networkError),
+            URLError.Code.timedOut.rawValue
+        )
+        XCTAssertEqual(DiagnosticsSanitizer.networkErrorCode(applicationError), 0)
+    }
+
     func testUploadFilenameMustMatchItsMIMEType() throws {
         XCTAssertTrue(AdminUploadPolicy.isAllowed(filename: "portrait.JPG", mimeType: "image/jpeg"))
         XCTAssertTrue(AdminUploadPolicy.isAllowed(filename: "showreel.mov", mimeType: "video/quicktime"))

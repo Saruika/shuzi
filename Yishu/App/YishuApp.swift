@@ -9,6 +9,8 @@ struct YishuApp: App {
     @StateObject private var localWeather = LocalWeatherStore()
 
     init() {
+        AppDiagnostics.shared.start()
+
         let cache = URLCache(
             memoryCapacity: 32 * 1024 * 1024,
             // Keep gallery artwork out of persistent URL caches. Images may
