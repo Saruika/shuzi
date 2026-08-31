@@ -18,8 +18,6 @@ jobs:
     name: Security, iPhone and iPad
     runs-on: macos-15
     timeout-minutes: 40
-    env:
-      CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
 
     steps:
       - name: Check out source
@@ -35,12 +33,18 @@ jobs:
         run: Scripts/security-check.sh
 
       - name: Test iPhone pages
+        env:
+          CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
         run: Scripts/ci-ios-tests.sh iPhone
 
       - name: Test iPad pages
+        env:
+          CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
         run: Scripts/ci-ios-tests.sh iPad
 
       - name: Analyze and audit Release bundle
+        env:
+          CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
         run: Scripts/ci-release-analyze.sh
 
       - name: Preserve failure diagnostics
