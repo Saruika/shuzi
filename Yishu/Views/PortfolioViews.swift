@@ -223,6 +223,10 @@ private struct PortfolioSearchBar: View {
 private struct PortfolioGridCard: View {
     let portfolio: Portfolio
 
+    private var editorialEyebrow: String {
+        portfolio.eyebrow.replacingOccurrences(of: " · ", with: "\n")
+    }
+
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             ArtworkImage(url: portfolio.coverURL)
@@ -230,13 +234,14 @@ private struct PortfolioGridCard: View {
                 .frame(maxWidth: .infinity)
             LinearGradient(colors: [.clear, .black.opacity(0.82)], startPoint: .center, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 5) {
-                Text(portfolio.eyebrow)
+                Text(editorialEyebrow)
                     .font(.caption2.weight(.semibold))
-                    .tracking(0.7)
-                    .lineLimit(2)
+                    .lineLimit(nil)
+                    .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .layoutPriority(1)
                     .foregroundStyle(AppTheme.ink)
+                    .accessibilityLabel(portfolio.eyebrow)
                 Text(portfolio.title)
                     .font(.system(.title3, design: .serif))
                     .lineLimit(2)
@@ -245,6 +250,7 @@ private struct PortfolioGridCard: View {
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 AppTheme.warmWhite,
                 in: RoundedRectangle(cornerRadius: 8, style: .continuous)
