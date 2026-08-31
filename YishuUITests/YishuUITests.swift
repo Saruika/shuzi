@@ -478,11 +478,10 @@ final class YishuUITests: XCTestCase {
                 try XCTContext.runActivity(named: "审计框架暂时超时，2 秒后重试一次") { _ in
                     Thread.sleep(forTimeInterval: 2)
 
-                    // XCUI queries synchronize with the application before
-                    // evaluating, so this foreground/window probe gives the
-                    // UI a bounded opportunity to become idle before retrying.
+                    // Keep the recovery bounded. A window query can itself
+                    // enter XCTest's long snapshot timeout, so after checking
+                    // that the app is foregrounded we retry the audit directly.
                     _ = app.wait(for: .runningForeground, timeout: 2)
-                    _ = app.windows.firstMatch.exists
 
                     // Intentionally do not catch the retry: a second timeout
                     // or a real accessibility issue must fail unchanged.

@@ -1095,7 +1095,7 @@ expect_true(
 );
 expect_true(
     is_string($backup_proxy_source)
-        && strpos($backup_proxy_source, 'location ^~ /wp-json/shuzijun/v1/') !== false
+        && strpos($backup_proxy_source, 'location /wp-json/shuzijun/v1/') !== false
         && strpos($backup_proxy_source, 'proxy_pass https://101.43.79.80;') !== false,
     'Apple 在内的整个状态型 API namespace 在备用节点必须继续代理主节点'
 );

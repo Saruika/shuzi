@@ -7,7 +7,8 @@ Every mutable input has a caller-supplied expected SHA-256 so a node change
 between inspection and apply fails closed.
 
 Dry-run is the default.  Apply writes root-only backups, installs both reviewed
-snippets, writes a new canonical sites-available file, and finally atomically
+security snippets, migrates the active node's direct or included account API
+route, writes a new canonical sites-available file, and finally atomically
 replaces sites-enabled with a symlink to it.  Any validation, reload, or
 postcondition failure restores the exact pre-apply files and Nginx state.
 """
@@ -17,6 +18,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -35,10 +37,13 @@ WWW_HOST = "www.shuzijun.com.cn"
 IMG_HOST = "img.shuzijun.com.cn"
 SENSITIVE_INCLUDE = "/etc/nginx/snippets/shuzijun-sensitive-files-deny.conf"
 LEGACY_INCLUDE = "/etc/nginx/snippets/shuzijun-legacy-images-alias.conf"
+ACCOUNT_API_INCLUDE = "/etc/nginx/snippets/shuzijun-account-api-backup-proxy.conf"
+ACCOUNT_API_PATH = "/wp-json/shuzijun/v1/"
 DEFAULT_ACTIVE = Path("/etc/nginx/sites-enabled/shuzijun-ssl.conf")
 DEFAULT_AVAILABLE = Path("/etc/nginx/sites-available/shuzijun-ssl.conf")
 DEFAULT_SENSITIVE_TARGET = Path(SENSITIVE_INCLUDE)
 DEFAULT_LEGACY_TARGET = Path(LEGACY_INCLUDE)
+DEFAULT_ACCOUNT_API_TARGET = Path(ACCOUNT_API_INCLUDE)
 DEFAULT_BACKUP_ROOT = Path("/var/backups/shuzijun-nginx-build34")
 SITE_ROOT = "/var/www/html/shuzijun.com.cn"
 NGINX_TEST = ("/usr/sbin/nginx", "-t")
@@ -46,6 +51,39 @@ NGINX_RELOAD = ("/usr/bin/systemctl", "reload", "nginx")
 NGINX_ACTIVE = ("/usr/bin/systemctl", "is-active", "--quiet", "nginx")
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 BACKUP_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+DEFAULT_NGINX_ROOT = Path("/etc/nginx")
+EXPANDED_INCLUDE_MARKER = "__build34_reviewed_include__"
+SECURITY_INCLUDE = Path("/etc/nginx/snippets/shuzijun-security.conf")
+FASTCGI_PHP_INCLUDE = Path("/etc/nginx/snippets/fastcgi-php.conf")
+FASTCGI_BASE_INCLUDE = Path("/etc/nginx/fastcgi.conf")
+FASTCGI_ALLOWED_PARAMS = frozenset(
+    {
+        "AUTH_TYPE",
+        "CONTENT_LENGTH",
+        "CONTENT_TYPE",
+        "DOCUMENT_ROOT",
+        "DOCUMENT_URI",
+        "GATEWAY_INTERFACE",
+        "HTTPS",
+        "HTTP_PROXY",
+        "PATH_INFO",
+        "QUERY_STRING",
+        "REDIRECT_STATUS",
+        "REMOTE_ADDR",
+        "REMOTE_PORT",
+        "REMOTE_USER",
+        "REQUEST_METHOD",
+        "REQUEST_SCHEME",
+        "REQUEST_URI",
+        "SCRIPT_FILENAME",
+        "SCRIPT_NAME",
+        "SERVER_ADDR",
+        "SERVER_NAME",
+        "SERVER_PORT",
+        "SERVER_PROTOCOL",
+        "SERVER_SOFTWARE",
+    }
+)
 
 
 class InstallError(RuntimeError):
@@ -87,6 +125,238 @@ class RewriteResult:
     content: bytes
     state: str
     old_location_sha256: str | None
+    account_api_content: bytes | None = None
+    account_api_state: str = "unknown"
+    old_direct_account_api_sha256: str | None = None
+    old_snippet_account_api_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class AccountApiRewrite:
+    active_content: bytes
+    snippet_content: bytes | None
+    topology: str
+    state: str
+    old_direct_sha256: str | None
+    old_snippet_sha256: str | None
+
+
+@dataclass
+class IncludeExpansion:
+    filesystem: Filesystem
+    overlays: dict[Path, bytes]
+    root_source: Path
+    nginx_root: Path = DEFAULT_NGINX_ROOT
+    included_files: int = 0
+    included_bytes: int = 0
+
+    MAX_DEPTH = 32
+    MAX_FILES = 256
+    MAX_BYTES = 8 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        self.states: dict[Path, FileState] = {}
+
+    def expand_server(self, server: Directive) -> Directive:
+        children = self._expand_sequence(
+            server.children or (), self.root_source, (self.root_source,), 0
+        )
+        return Directive(
+            server.name,
+            server.args,
+            children,
+            server.start,
+            server.end,
+            server.line,
+        )
+
+    def _normalized_include(self, raw_path: str) -> Path:
+        if "$" in raw_path or "\x00" in raw_path or "\\" in raw_path:
+            raise InstallError("dynamic or escaped Nginx include path is not allowed")
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = self.nginx_root / candidate
+        candidate = Path(os.path.abspath(candidate))
+        if candidate != self.nginx_root and self.nginx_root not in candidate.parents:
+            raise InstallError("Nginx include escapes the reviewed root")
+        return candidate
+
+    def _expand_include(
+        self,
+        directive: Directive,
+        source: Path,
+        stack: tuple[Path, ...],
+        depth: int,
+    ) -> tuple[Directive, ...]:
+        if len(directive.args) != 1:
+            raise InstallError("include must have exactly one local path")
+        raw_path = directive.args[0]
+        normalized = self._normalized_include(raw_path)
+        overlay = self.overlays.get(normalized)
+        if overlay is not None:
+            if glob.has_magic(raw_path) or source != self.root_source or depth != 0:
+                raise InstallError("fixed snippet must be directly included by active config")
+            return (
+                Directive(
+                    "include",
+                    (str(normalized),),
+                    None,
+                    directive.start,
+                    directive.end,
+                    directive.line,
+                ),
+            )
+
+        if depth >= self.MAX_DEPTH:
+            raise InstallError("Nginx include nesting exceeds the reviewed limit")
+        expanded: list[Directive] = []
+        matches = self.filesystem.secure_include_matches(raw_path, self.nginx_root)
+        for path, state in matches.items():
+            if path in stack:
+                chain = " -> ".join(str(item) for item in (*stack, path))
+                raise InstallError(f"recursive Nginx include cycle: {chain}")
+            self.included_files += 1
+            self.included_bytes += len(state.data)
+            if self.included_files > self.MAX_FILES:
+                raise InstallError("Nginx include file count exceeds the reviewed limit")
+            if self.included_bytes > self.MAX_BYTES:
+                raise InstallError("Nginx include bytes exceed the reviewed limit")
+            previous = self.states.get(path)
+            if previous is not None and previous != state:
+                raise InstallError(f"included Nginx file changed during validation: {path}")
+            self.states[path] = state
+            try:
+                text = state.data.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise InstallError(f"included Nginx file is not valid UTF-8: {path}") from error
+            if "\x00" in text:
+                raise InstallError(f"included Nginx file contains a NUL byte: {path}")
+            document = parse(text, str(path))
+            if any(
+                item.name.lower() == EXPANDED_INCLUDE_MARKER
+                for item in all_directives(document)
+            ):
+                raise InstallError(
+                    f"included Nginx file uses reserved validator directive: {path}"
+                )
+            self._validate_reviewed_include_file(path, document)
+            expanded.append(
+                Directive(
+                    EXPANDED_INCLUDE_MARKER,
+                    (str(path),),
+                    None,
+                    directive.start,
+                    directive.end,
+                    directive.line,
+                )
+            )
+            expanded.extend(
+                self._expand_sequence(document, path, (*stack, path), depth + 1)
+            )
+        return tuple(expanded)
+
+    def _validate_reviewed_include_file(
+        self, path: Path, document: Sequence[Directive]
+    ) -> None:
+        """Fail closed on every non-versioned include used by selected TLS blocks."""
+
+        if path == SECURITY_INCLUDE:
+            if len(document) != 7 or any(
+                item.name.lower() != "add_header"
+                or item.children is not None
+                or len(item.args) not in (2, 3)
+                for item in document
+            ):
+                raise InstallError(
+                    f"security header include is not the reviewed seven-header profile: {path}"
+                )
+            return
+        if path == FASTCGI_PHP_INCLUDE:
+            if any(item.children is not None for item in document):
+                raise InstallError(f"FastCGI PHP include contains a block: {path}")
+            allowed = {
+                "fastcgi_split_path_info",
+                "try_files",
+                "set",
+                "fastcgi_param",
+                "fastcgi_index",
+                "include",
+            }
+            if any(item.name.lower() not in allowed for item in document):
+                raise InstallError(f"FastCGI PHP include contains an unreviewed directive: {path}")
+            includes = [item for item in document if item.name.lower() == "include"]
+            if len(includes) != 1 or includes[0].args != ("fastcgi.conf",):
+                raise InstallError(f"FastCGI PHP include must include fastcgi.conf once: {path}")
+            required = {
+                "fastcgi_split_path_info": 1,
+                "try_files": 1,
+                "set": 1,
+                "fastcgi_param": 1,
+                "fastcgi_index": 1,
+            }
+            counts = {
+                name: sum(item.name.lower() == name for item in document)
+                for name in required
+            }
+            if counts != required:
+                raise InstallError(f"FastCGI PHP include topology drifted: {path}")
+            if direct_args(document, "try_files") != [
+                ("$fastcgi_script_name", "=404")
+            ]:
+                raise InstallError(f"FastCGI PHP include try_files drifted: {path}")
+            if direct_args(document, "fastcgi_split_path_info") != [
+                (r"^(.+?\.php)(/.*)$",)
+            ]:
+                raise InstallError(f"FastCGI PHP include split-path rule drifted: {path}")
+            if direct_args(document, "set") != [("$path_info", "$fastcgi_path_info")]:
+                raise InstallError(f"FastCGI PHP include PATH_INFO state drifted: {path}")
+            if direct_args(document, "fastcgi_param") != [("PATH_INFO", "$path_info")]:
+                raise InstallError(f"FastCGI PHP include PATH_INFO parameter drifted: {path}")
+            if direct_args(document, "fastcgi_index") != [("index.php",)]:
+                raise InstallError(f"FastCGI PHP include index drifted: {path}")
+            return
+        if path == FASTCGI_BASE_INCLUDE:
+            if not document or any(
+                item.name.lower() != "fastcgi_param"
+                or item.children is not None
+                or len(item.args) < 2
+                or item.args[0].upper() not in FASTCGI_ALLOWED_PARAMS
+                for item in document
+            ):
+                raise InstallError(f"FastCGI base include semantic content drifted: {path}")
+            return
+        raise InstallError(f"selected TLS block includes an unreviewed file: {path}")
+
+    def _expand_sequence(
+        self,
+        directives: Sequence[Directive],
+        source: Path,
+        stack: tuple[Path, ...],
+        depth: int,
+    ) -> tuple[Directive, ...]:
+        expanded: list[Directive] = []
+        for directive in directives:
+            if directive.name.lower() == EXPANDED_INCLUDE_MARKER:
+                raise InstallError("active Nginx config uses a reserved validator directive")
+            if directive.name.lower() == "include":
+                expanded.extend(self._expand_include(directive, source, stack, depth))
+                continue
+            children = None
+            if directive.children is not None:
+                children = self._expand_sequence(
+                    directive.children, source, stack, depth
+                )
+            expanded.append(
+                Directive(
+                    directive.name,
+                    directive.args,
+                    children,
+                    directive.start,
+                    directive.end,
+                    directive.line,
+                )
+            )
+        return tuple(expanded)
 
 
 class Filesystem(Protocol):
@@ -108,6 +378,10 @@ class Filesystem(Protocol):
 
     def enabled_documents(self, path: Path) -> dict[Path, bytes]: ...
 
+    def secure_include_matches(
+        self, raw_path: str, nginx_root: Path
+    ) -> dict[Path, FileState]: ...
+
 
 class CommandRunner(Protocol):
     def run(self, command: Sequence[str]) -> None: ...
@@ -122,6 +396,15 @@ def validate_sha256(value: str, label: str) -> str:
     if not SHA256_PATTERN.fullmatch(lowered):
         raise InstallError(f"{label} must be exactly 64 hexadecimal characters")
     return lowered
+
+
+def nginx_escape_value(escaped: str) -> str:
+    translated = {"t": "\t", "r": "\r", "n": "\n"}
+    if escaped in translated:
+        return translated[escaped]
+    if escaped in ('"', "'", "\\"):
+        return escaped
+    return "\\" + escaped
 
 
 def tokenize(text: str, source: str) -> list[Token]:
@@ -164,7 +447,10 @@ def tokenize(text: str, source: str) -> list[Token]:
                     escaped = text[index + 1]
                     if escaped == "\n":
                         line += 1
-                    value.append(escaped)
+                    # Nginx preserves the backslash for non-special escapes.
+                    # Dropping it turns e.g. "\\.php$" into ".php$" and can
+                    # make semantic regex checks inspect a different pattern.
+                    value.append(nginx_escape_value(escaped))
                     index += 2
                     continue
                 if char == quote:
@@ -191,7 +477,10 @@ def tokenize(text: str, source: str) -> list[Token]:
                     raise InstallError(
                         f"{source}:{token_line}: unterminated unquoted escape"
                     )
-                value.extend((char, text[index + 1]))
+                escaped = text[index + 1]
+                if escaped == "\n":
+                    line += 1
+                value.append(nginx_escape_value(escaped))
                 index += 2
                 continue
             if char == "{" and value and value[-1] == "$":
@@ -203,12 +492,6 @@ def tokenize(text: str, source: str) -> list[Token]:
                 value.append(text[index : closing + 1])
                 index = closing + 1
                 continue
-            if char == "{" and value:
-                quantifier = re.match(r"\{[0-9]+(?:,[0-9]*)?\}", text[index:])
-                if quantifier:
-                    value.append(quantifier.group(0))
-                    index += len(quantifier.group(0))
-                    continue
             if char in "{}":
                 break
             value.append(char)
@@ -222,9 +505,14 @@ def tokenize(text: str, source: str) -> list[Token]:
 def parse(text: str, source: str) -> tuple[Directive, ...]:
     tokens = tokenize(text, source)
     position = 0
+    max_block_depth = 64
 
-    def parse_scope(expect_close: bool) -> tuple[tuple[Directive, ...], Token | None]:
+    def parse_scope(
+        expect_close: bool, depth: int = 0
+    ) -> tuple[tuple[Directive, ...], Token | None]:
         nonlocal position
+        if depth > max_block_depth:
+            raise InstallError(f"{source}: block nesting exceeds the reviewed limit")
         directives: list[Directive] = []
         while position < len(tokens):
             if tokens[position].value == "}":
@@ -267,7 +555,7 @@ def parse(text: str, source: str) -> tuple[Directive, ...]:
                     )
                 )
             else:
-                children, closing = parse_scope(True)
+                children, closing = parse_scope(True, depth + 1)
                 if closing is None:
                     raise InstallError(f"{source}:{start.line}: unclosed block")
                 directives.append(
@@ -296,6 +584,10 @@ def direct(node: Directive, name: str) -> list[Directive]:
         for child in (node.children or ())
         if child.name.lower() == name.lower()
     ]
+
+
+def direct_args(document: Sequence[Directive], name: str) -> list[tuple[str, ...]]:
+    return [item.args for item in document if item.name.lower() == name.lower()]
 
 
 def descendants(node: Directive) -> list[Directive]:
@@ -364,6 +656,10 @@ def validate_enabled_uniqueness(
         except UnicodeDecodeError as error:
             raise InstallError(f"enabled Nginx config is not valid UTF-8: {path}") from error
         parsed[path] = parse(text, str(path))
+        if any(node.name.lower() == "include" for node in parsed[path]):
+            raise InstallError(
+                f"enabled Nginx config must not contain a top-level include: {path}"
+            )
     for hostname in (WWW_HOST, IMG_HOST):
         matches = [
             (path, node)
@@ -466,12 +762,601 @@ def exact_location_is_sensitive(path: str) -> bool:
     return any(pattern.search(path) for pattern in SENSITIVE_EXACT_LOCATION_PATTERNS)
 
 
+def all_directives(document: Sequence[Directive]) -> list[Directive]:
+    result: list[Directive] = []
+    for node in document:
+        result.append(node)
+        result.extend(descendants(node))
+    return result
+
+
+def reject_nested_locations(document: Sequence[Directive], label: str) -> None:
+    def walk(nodes: Sequence[Directive], inside_location: bool) -> None:
+        for node in nodes:
+            is_location = node.name.lower() == "location"
+            if is_location and inside_location:
+                raise InstallError(f"{label} contains a nested location")
+            if node.children is not None:
+                walk(node.children, inside_location or is_location)
+
+    walk(document, False)
+
+
+COMMON_PHP_LOCATION_REGEXES = frozenset(
+    (
+        r"\.php$",
+        r"[^/]\.php(/|$)",
+        r"[^/]\.php(?:/|$)",
+        r"^(.+\.php)(/.+)$",
+        r"^(.+\.php)(/.*)$",
+    )
+)
+
+
+def anchored_regex_first_segment(pattern: str) -> str | None:
+    """Return a proven literal first URI segment, otherwise fail closed."""
+
+    normalized = pattern.replace(r"\/", "/")
+    if not normalized.startswith("^/"):
+        return None
+    segment: list[str] = []
+    index = 2
+    while index < len(normalized):
+        char = normalized[index]
+        if char == "/" or char == "$":
+            return "".join(segment) if segment else None
+        if char == "\\":
+            if index + 1 >= len(normalized):
+                return None
+            escaped = normalized[index + 1]
+            # PCRE gives alphanumeric escapes semantics (\x69, octal,
+            # backreferences, character classes, ...).  Only escaped literal
+            # punctuation is safe to fold into a proven path segment.
+            if escaped not in "._~-":
+                return None
+            segment.append(escaped)
+            index += 2
+            continue
+        if char.isalnum() or char in "._~-":
+            segment.append(char)
+            index += 1
+            continue
+        return None
+    return "".join(segment) if segment else None
+
+
+def application_regex_is_proven_safe_for_images(pattern: str) -> bool:
+    normalized = pattern.replace(r"\/", "/")
+    if normalized in COMMON_PHP_LOCATION_REGEXES:
+        # The reviewed sensitive snippet is textually before all application
+        # locations and independently denies PHP below /images and wp-content.
+        return True
+    segment = anchored_regex_first_segment(normalized)
+    return segment is not None and segment.casefold() != "images"
+
+
+def compile_location_regex(modifier: str, pattern: str, label: str) -> re.Pattern[str]:
+    flags = re.IGNORECASE if modifier == "~*" else 0
+    try:
+        return re.compile(pattern, flags)
+    except re.error as error:
+        raise InstallError(f"{label} contains an unsupported location regex") from error
+
+
+def parse_snippet(content: bytes, label: str) -> tuple[Directive, ...]:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InstallError(f"{label} is not valid UTF-8") from error
+    if "\x00" in text:
+        raise InstallError(f"{label} contains a NUL byte")
+    document = parse(text, label)
+    reject_nested_locations(document, label)
+    if any(item.name.lower() == "include" for item in all_directives(document)):
+        raise InstallError(f"{label} must not contain another include")
+    return document
+
+
+def directive_signature(directive: Directive) -> tuple[object, ...]:
+    """Return the semantic AST used to pin reviewed fixed snippets."""
+
+    return (
+        directive.name,
+        directive.args,
+        None
+        if directive.children is None
+        else tuple(directive_signature(child) for child in directive.children),
+    )
+
+
+DENY_404_BODY = (
+    ("access_log", ("off",), None),
+    ("log_not_found", ("off",), None),
+    ("return", ("404",), None),
+)
+
+EXPECTED_SENSITIVE_SIGNATURE = (
+    (
+        "location",
+        (
+            "~*",
+            r"(?:^|/)(?:wp-config\.php(?:$|[^/]+)|[^/]+\.php[^/]+$|"
+            r"[^/]+\.(?:bak|backup|old|orig|save|swp|tmp|copy|disabled|"
+            r"corrupt|corrupted|fixbak)(?:$|[._~-])|[^/]+\.before-[^/]+$|"
+            r"[^/]+~$)",
+        ),
+        DENY_404_BODY,
+    ),
+    ("location", ("~*", r"^/wp-content/.*\.php(?:$|/)"), DENY_404_BODY),
+    ("location", ("~*", r"^/images/.*\.php(?:$|/)"), DENY_404_BODY),
+    (
+        "location",
+        (
+            "~*",
+            r"(?:^|/)(?:\.env(?:\.[^/]*)?|\.(?:git|svn|hg)(?:/|$)|"
+            r"(?:composer\.(?:json|lock)|auth\.json|package(?:-lock)?\.json|"
+            r"yarn\.lock|pnpm-lock\.yaml)$|[^/]+\.(?:sql(?:\.gz)?|dump|pem|"
+            r"key|p8|p12|pfx|jks|log|zip|tar|tar\.gz|tgz|7z|rar)$|"
+            r"(?:credentials|service-account)[^/]*\.json$)",
+        ),
+        DENY_404_BODY,
+    ),
+)
+
+EXPECTED_LEGACY_SIGNATURE = (
+    ("location", ("=", "/images"), (("return", ("308", "/images/"), None),)),
+    (
+        "location",
+        (
+            "~*",
+            r"^/images/([A-Za-z0-9][A-Za-z0-9._-]*\."
+            r"(?:jpg|jpeg|png|gif|webp|avif|ico|svg))$",
+        ),
+        (
+            (
+                "alias",
+                (f"{SITE_ROOT}/wp-content/uploads/hero-images/$1",),
+                None,
+            ),
+            ("expires", ("365d",), None),
+            (
+                "add_header",
+                ("Cache-Control", "public, max-age=31536000, immutable"),
+                None,
+            ),
+            ("add_header", ("X-Content-Type-Options", "nosniff", "always"), None),
+            ("add_header", ("Timing-Allow-Origin", "*", "always"), None),
+            (
+                "add_header",
+                ("Cross-Origin-Resource-Policy", "cross-origin", "always"),
+                None,
+            ),
+            ("access_log", ("off",), None),
+        ),
+    ),
+    (
+        "location",
+        ("/images/",),
+        (
+            ("access_log", ("off",), None),
+            ("log_not_found", ("off",), None),
+            ("return", ("404",), None),
+        ),
+    ),
+)
+
+
+def direct_return(node: Directive, arguments: tuple[str, ...]) -> bool:
+    returns = direct(node, "return")
+    return len(returns) == 1 and returns[0].args == arguments
+
+
+def validate_sensitive_snippet(content: bytes) -> None:
+    label = "sensitive snippet candidate"
+    document = parse_snippet(content, label)
+    if tuple(directive_signature(node) for node in document) != EXPECTED_SENSITIVE_SIGNATURE:
+        raise InstallError(f"{label} semantic content drifted")
+    if not document or any(
+        node.name.lower() != "location" or node.children is None for node in document
+    ):
+        raise InstallError(f"{label} must contain only top-level deny locations")
+
+    compiled: list[re.Pattern[str]] = []
+    for node in document:
+        if len(node.args) != 2 or node.args[0] != "~*":
+            raise InstallError(f"{label} locations must be case-insensitive regexes")
+        if not direct_return(node, ("404",)):
+            raise InstallError(f"{label} locations must return exactly 404")
+        for child in node.children or ():
+            if child.children is not None or child.name.lower() not in (
+                "access_log",
+                "log_not_found",
+                "return",
+            ):
+                raise InstallError(f"{label} contains a content or redirect handler")
+        compiled.append(compile_location_regex(node.args[0], node.args[1], label))
+
+    required_denials = (
+        "/wp-config.php",
+        "/copy.php.bak",
+        "/wp-content/mu-plugins/app.php",
+        "/images/payload.php",
+        "/.env.production",
+        "/.git/config",
+        "/composer.json",
+        "/exports/database.sql",
+        "/private/credentials.json",
+        "/WP-CONFIG.PHP",
+        "/IMAGES/PAYLOAD.PHP",
+        "/PRIVATE/CREDENTIALS.JSON",
+    )
+    for uri in required_denials:
+        if not any(pattern.search(uri) for pattern in compiled):
+            raise InstallError(f"{label} does not deny required URI family: {uri}")
+
+
+def validate_legacy_snippet(content: bytes) -> None:
+    label = "legacy images snippet candidate"
+    document = parse_snippet(content, label)
+    if tuple(directive_signature(node) for node in document) != EXPECTED_LEGACY_SIGNATURE:
+        raise InstallError(f"{label} semantic content drifted")
+    if len(document) != 3 or any(
+        node.name.lower() != "location" or node.children is None for node in document
+    ):
+        raise InstallError(f"{label} must contain exactly three top-level locations")
+
+    exact = [node for node in document if node.args == ("=", "/images")]
+    fallback = [node for node in document if node.args == ("/images/",)]
+    regexes = [
+        node
+        for node in document
+        if len(node.args) == 2 and node.args[0] in ("~", "~*")
+    ]
+    if len(exact) != 1 or len(fallback) != 1 or len(regexes) != 1:
+        raise InstallError(f"{label} route topology is not the reviewed flat-image API")
+    if not direct_return(exact[0], ("308", "/images/")):
+        raise InstallError(f"{label} exact route must redirect to /images/")
+    if not direct_return(fallback[0], ("404",)):
+        raise InstallError(f"{label} fallback route must return 404")
+
+    image_route = regexes[0]
+    expected_image_regex = (
+        r"^/images/([A-Za-z0-9][A-Za-z0-9._-]*\."
+        r"(?:jpg|jpeg|png|gif|webp|avif|ico|svg))$"
+    )
+    if image_route.args != ("~*", expected_image_regex):
+        raise InstallError(f"{label} regex is not the reviewed flat-image allowlist")
+    pattern = compile_location_regex(image_route.args[0], image_route.args[1], label)
+    accepted = ("/images/portrait.jpg", "/images/ICON.SVG")
+    rejected = (
+        "/images/",
+        "/images/nested/portrait.jpg",
+        "/images/payload.php",
+        "/images/.env",
+        "/images/archive.zip",
+    )
+    if not all(pattern.search(uri) for uri in accepted) or any(
+        pattern.search(uri) for uri in rejected
+    ):
+        raise InstallError(f"{label} regex does not enforce a flat image allowlist")
+    aliases = direct(image_route, "alias")
+    expected_alias = f"{SITE_ROOT}/wp-content/uploads/hero-images/$1"
+    if len(aliases) != 1 or aliases[0].args != (expected_alias,):
+        raise InstallError(f"{label} alias is not the reviewed upload directory")
+
+    route_allowlists = (
+        (exact[0], {"return"}),
+        (fallback[0], {"access_log", "log_not_found", "return"}),
+        (image_route, {"access_log", "add_header", "alias", "expires"}),
+    )
+    for node, allowed in route_allowlists:
+        for child in node.children or ():
+            if child.children is not None or child.name.lower() not in allowed:
+                raise InstallError(f"{label} contains a content or redirect handler")
+
+
+def validate_fixed_snippet_candidates(sensitive: bytes, legacy: bytes) -> None:
+    validate_sensitive_snippet(sensitive)
+    validate_legacy_snippet(legacy)
+
+
+def account_api_location_like(node: Directive) -> bool:
+    parsed = location_path(node)
+    if parsed is None:
+        return False
+    modifier, path = parsed
+    normalized = path.lower().replace(r"\/", "/")
+    namespace = ACCOUNT_API_PATH.lower()
+    if modifier in ("~", "~*"):
+        return namespace.rstrip("/") in normalized
+    return (
+        normalized.rstrip("/") == namespace.rstrip("/")
+        or normalized.startswith(namespace)
+    )
+
+
+def account_api_locations(document: Sequence[Directive]) -> list[Directive]:
+    return [node for node in all_directives(document) if account_api_location_like(node)]
+
+
+def remove_caret_location_modifier(text: str, node: Directive, source: str) -> str:
+    tokens = tokenize(text, source)
+    try:
+        index = next(index for index, token in enumerate(tokens) if token.start == node.start)
+    except StopIteration as error:
+        raise InstallError(f"{source}: account API location token is missing") from error
+    header = tokens[index : index + 4]
+    if (
+        len(header) != 4
+        or header[0].value.lower() != "location"
+        or header[1].value != "^~"
+        or header[2].value != ACCOUNT_API_PATH
+        or header[3].value != "{"
+    ):
+        raise InstallError(f"{source}: account API location header is malformed")
+    return text[: header[1].start] + text[header[2].start :]
+
+
+def validate_old_block_expectation(
+    observed: str | None,
+    expected: str | None,
+    label: str,
+    apply: bool,
+) -> None:
+    if observed is None:
+        if expected not in (None, "absent"):
+            raise InstallError(f"{label} drifted: expected no old block")
+        if apply and expected != "absent":
+            raise InstallError(f"{label}=absent is mandatory with --apply")
+        return
+    if expected is None:
+        if apply:
+            raise InstallError(f"{label} SHA-256 is mandatory with --apply")
+        return
+    if expected == "absent":
+        raise InstallError(f"{label} drifted: an old block is present")
+    expected_hash = validate_sha256(expected, f"{label} SHA-256")
+    if observed != expected_hash:
+        raise InstallError(f"{label} drifted: expected {expected_hash}, observed {observed}")
+
+
+def reject_internal_redirect_controls(
+    document: Sequence[Directive], label: str
+) -> None:
+    redirect_controls = {
+        "error_page",
+        "if",
+        "internal_redirect",
+        "recursive_error_pages",
+        "rewrite",
+    }
+    if any(
+        item.name.lower() in redirect_controls for item in all_directives(document)
+    ):
+        raise InstallError(f"{label} contains an internal redirect mechanism")
+
+
+def validate_location_security(document: Sequence[Directive], label: str) -> None:
+    reject_nested_locations(document, label)
+    if any(item.name.lower() == "include" for item in all_directives(document)):
+        raise InstallError(f"{label} must not contain another include")
+    reject_internal_redirect_controls(document, label)
+    for item in all_directives(document):
+        parsed = location_path(item)
+        if parsed is None:
+            continue
+        modifier, path = parsed
+        if modifier == "^~":
+            raise InstallError(f"{label} has a ^~ location that bypasses security regex rules")
+        if modifier == "=" and exact_location_is_sensitive(path):
+            raise InstallError(
+                f"{label} has an exact location that bypasses sensitive-file rules"
+            )
+        if is_images_location(modifier, path):
+            raise InstallError(f"{label} contains an inline /images location")
+        if modifier in ("~", "~*") and not application_regex_is_proven_safe_for_images(
+            path
+        ):
+            raise InstallError(
+                f"{label} has a regex location that may bypass legacy /images routing"
+            )
+
+
+def rewrite_account_api_routes(
+    active_content: bytes,
+    snippet_state: FileState,
+    expected_direct_old_sha256: str | None,
+    expected_snippet_old_sha256: str | None,
+    *,
+    apply: bool,
+    source: str,
+) -> AccountApiRewrite:
+    try:
+        active_text = active_content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InstallError(f"{source} is not valid UTF-8") from error
+    active_document = parse(active_text, source)
+    www = unique_tls_server(active_document, WWW_HOST)
+
+    all_account_includes = [
+        node
+        for node in all_directives(active_document)
+        if node.name.lower() == "include" and node.args == (ACCOUNT_API_INCLUDE,)
+    ]
+    direct_account_includes = [
+        node
+        for node in direct(www, "include")
+        if node.args == (ACCOUNT_API_INCLUDE,)
+    ]
+    all_active_locations = account_api_locations(active_document)
+    direct_active_locations = [
+        node for node in (www.children or ()) if account_api_location_like(node)
+    ]
+    if len(all_active_locations) != len(direct_active_locations):
+        raise InstallError("account API location must be a direct child of the www TLS block")
+
+    direct_topology = (
+        len(direct_active_locations) == 1
+        and not all_account_includes
+    )
+    snippet_topology = (
+        not direct_active_locations
+        and len(all_account_includes) == 1
+        and len(direct_account_includes) == 1
+    )
+    if direct_topology == snippet_topology:
+        raise InstallError(
+            "account API routing must use exactly one direct block or one reviewed snippet include"
+        )
+
+    if direct_topology:
+        node = direct_active_locations[0]
+        reject_nested_locations((node,), "direct account API block")
+        if any(
+            item.name.lower() == "include" for item in [node, *descendants(node)]
+        ):
+            raise InstallError("direct account API block must not contain another include")
+        parsed = location_path(node)
+        if node.args not in ((ACCOUNT_API_PATH,), ("^~", ACCOUNT_API_PATH)):
+            raise InstallError("direct account API location is malformed")
+        reject_internal_redirect_controls((node,), "direct account API block")
+        old_hash = (
+            sha256(active_text[node.start : node.end].encode("utf-8"))
+            if parsed[0] == "^~"
+            else None
+        )
+        validate_old_block_expectation(
+            old_hash,
+            expected_direct_old_sha256,
+            "direct account API old block",
+            apply,
+        )
+        validate_old_block_expectation(
+            None,
+            expected_snippet_old_sha256,
+            "snippet account API old block",
+            apply,
+        )
+        if old_hash is None:
+            return AccountApiRewrite(
+                active_content,
+                None,
+                "direct",
+                "direct-already-current",
+                None,
+                None,
+            )
+        candidate_text = remove_caret_location_modifier(active_text, node, source)
+        candidate = candidate_text.encode("utf-8")
+        verified = rewrite_account_api_routes(
+            candidate,
+            snippet_state,
+            "absent",
+            "absent",
+            apply=True,
+            source=source,
+        )
+        if verified.state != "direct-already-current":
+            raise InstallError("direct account API candidate verification failed")
+        return AccountApiRewrite(
+            candidate,
+            None,
+            "direct",
+            "direct-rewrite-required",
+            old_hash,
+            None,
+        )
+
+    if snippet_state.kind != "file":
+        raise InstallError("included account API snippet must be a regular file")
+    try:
+        snippet_text = snippet_state.data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InstallError("account API snippet is not valid UTF-8") from error
+    snippet_document = parse(snippet_text, ACCOUNT_API_INCLUDE)
+    reject_nested_locations(snippet_document, "account API snippet")
+    if any(
+        item.name.lower() == "include" for item in all_directives(snippet_document)
+    ):
+        raise InstallError("account API snippet must not contain another include")
+    snippet_locations = account_api_locations(snippet_document)
+    if (
+        len(snippet_document) != 1
+        or len(snippet_locations) != 1
+        or snippet_document[0] is not snippet_locations[0]
+    ):
+        raise InstallError("account API snippet must contain exactly one top-level API location")
+    snippet_node = snippet_locations[0]
+    parsed = location_path(snippet_node)
+    if snippet_node.args not in ((ACCOUNT_API_PATH,), ("^~", ACCOUNT_API_PATH)):
+        raise InstallError("account API snippet location is malformed")
+    reject_internal_redirect_controls((snippet_node,), "account API snippet")
+    old_hash = (
+        sha256(snippet_text[snippet_node.start : snippet_node.end].encode("utf-8"))
+        if parsed[0] == "^~"
+        else None
+    )
+    validate_old_block_expectation(
+        None,
+        expected_direct_old_sha256,
+        "direct account API old block",
+        apply,
+    )
+    validate_old_block_expectation(
+        old_hash,
+        expected_snippet_old_sha256,
+        "snippet account API old block",
+        apply,
+    )
+    if old_hash is None:
+        validate_location_security(snippet_document, "account API snippet")
+        return AccountApiRewrite(
+            active_content,
+            snippet_state.data,
+            "snippet",
+            "snippet-already-current",
+            None,
+            None,
+        )
+    candidate_text = remove_caret_location_modifier(
+        snippet_text, snippet_node, ACCOUNT_API_INCLUDE
+    )
+    candidate_bytes = candidate_text.encode("utf-8")
+    candidate_state = FileState(
+        "file",
+        candidate_bytes,
+        snippet_state.mode,
+        snippet_state.uid,
+        snippet_state.gid,
+        nlink=snippet_state.nlink,
+    )
+    verified = rewrite_account_api_routes(
+        active_content,
+        candidate_state,
+        "absent",
+        "absent",
+        apply=True,
+        source=source,
+    )
+    if verified.state != "snippet-already-current":
+        raise InstallError("snippet account API candidate verification failed")
+    return AccountApiRewrite(
+        active_content,
+        candidate_bytes,
+        "snippet",
+        "snippet-rewrite-required",
+        None,
+        old_hash,
+    )
+
+
 def validate_candidate_server(
     node: Directive,
     sensitive: Directive,
     legacy: Directive,
     hostname: str,
 ) -> None:
+    reject_nested_locations((node,), hostname)
     roots = direct(node, "root")
     if len(roots) != 1 or roots[0].args != (SITE_ROOT,):
         raise InstallError(f"{hostname} must have exactly one fixed root {SITE_ROOT}")
@@ -485,11 +1370,41 @@ def validate_candidate_server(
     ]
     if locations and legacy_index >= min(locations):
         raise InstallError(f"{hostname} security includes must precede every location")
+    redirect_controls = {
+        "error_page",
+        "if",
+        "internal_redirect",
+        "recursive_error_pages",
+        "return",
+        "rewrite",
+        "try_files",
+    }
+    for child in node.children or ():
+        if child.name.lower() in redirect_controls:
+            raise InstallError(
+                f"{hostname} has a server-scope redirect mechanism that can bypass deny 404"
+            )
+    forbidden_any_scope = {
+        "error_page",
+        "if",
+        "internal_redirect",
+        "recursive_error_pages",
+        "rewrite",
+    }
+    for item in descendants(node):
+        if item.name.lower() in forbidden_any_scope:
+            raise InstallError(
+                f"{hostname} has an internal redirect mechanism that can bypass deny 404"
+            )
     for item in descendants(node):
         parsed = location_path(item)
         if parsed is None:
             continue
         modifier, path = parsed
+        if modifier == "" and path.startswith("@"):
+            raise InstallError(
+                f"{hostname} has a named location that can receive an internal redirect"
+            )
         if modifier == "^~":
             raise InstallError(
                 f"{hostname} has a ^~ location that bypasses security regex rules"
@@ -502,6 +1417,139 @@ def validate_candidate_server(
             raise InstallError(
                 f"{hostname} contains an inline /images location after transformation"
             )
+        if modifier in ("~", "~*") and not application_regex_is_proven_safe_for_images(
+            path
+        ):
+            raise InstallError(
+                f"{hostname} has a regex location that may bypass legacy /images routing"
+            )
+
+
+def validate_fastcgi_handler(location: Directive, hostname: str) -> None:
+    children = tuple(location.children or ())
+    passes = [item for item in children if item.name.lower() == "fastcgi_pass"]
+    if len(passes) != 1 or passes[0].children is not None or len(passes[0].args) != 1:
+        raise InstallError(f"{hostname} PHP handler must have exactly one fastcgi_pass")
+    markers = [
+        Path(item.args[0])
+        for item in children
+        if item.name.lower() == EXPANDED_INCLUDE_MARKER and len(item.args) == 1
+    ]
+    if markers != [FASTCGI_PHP_INCLUDE, FASTCGI_BASE_INCLUDE]:
+        raise InstallError(
+            f"{hostname} PHP handler must use the reviewed fastcgi-php.conf to fastcgi.conf chain"
+        )
+    allowed = {
+        EXPANDED_INCLUDE_MARKER,
+        "fastcgi_index",
+        "fastcgi_param",
+        "fastcgi_pass",
+        "fastcgi_split_path_info",
+        "set",
+        "try_files",
+    }
+    if any(item.name.lower() not in allowed for item in children):
+        raise InstallError(f"{hostname} PHP handler contains an unreviewed directive")
+    params = [item for item in children if item.name.lower() == "fastcgi_param"]
+    by_name: dict[str, list[Directive]] = {}
+    for item in params:
+        if item.children is not None or len(item.args) < 2:
+            raise InstallError(f"{hostname} PHP handler has a malformed fastcgi_param")
+        name = item.args[0].upper()
+        if name not in FASTCGI_ALLOWED_PARAMS:
+            raise InstallError(f"{hostname} PHP handler sets an unreviewed FastCGI parameter")
+        by_name.setdefault(name, []).append(item)
+    duplicates = [name for name, items in by_name.items() if len(items) != 1]
+    if duplicates:
+        raise InstallError(
+            f"{hostname} PHP handler has duplicate FastCGI parameters: {', '.join(duplicates)}"
+        )
+    required_params = {
+        "SCRIPT_FILENAME": ("$document_root$fastcgi_script_name",),
+        "DOCUMENT_ROOT": ("$document_root",),
+        "SCRIPT_NAME": ("$fastcgi_script_name",),
+        "PATH_INFO": ("$path_info",),
+    }
+    for name, expected in required_params.items():
+        matches = by_name.get(name, [])
+        if len(matches) != 1 or matches[0].args[1:] != expected:
+            raise InstallError(
+                f"{hostname} PHP handler {name} is not the reviewed execution target"
+            )
+    if "PATH_TRANSLATED" in by_name:
+        raise InstallError(f"{hostname} PHP handler must not set PATH_TRANSLATED")
+    try_files = [item for item in children if item.name.lower() == "try_files"]
+    if len(try_files) != 1 or try_files[0].args != (
+        "$fastcgi_script_name",
+        "=404",
+    ):
+        raise InstallError(f"{hostname} PHP handler try_files is not reviewed")
+
+
+def validate_expanded_include_context(node: Directive, hostname: str) -> None:
+    children = tuple(node.children or ())
+    server_markers = [
+        item for item in children if item.name.lower() == EXPANDED_INCLUDE_MARKER
+    ]
+    if any(item.args != (str(SECURITY_INCLUDE),) for item in server_markers):
+        raise InstallError(f"{hostname} has an unreviewed server-scope include")
+    if len(server_markers) > 1:
+        raise InstallError(f"{hostname} includes the security-header profile more than once")
+
+    accounted = set(server_markers)
+    for location in direct(node, "location"):
+        markers = [
+            item
+            for item in (location.children or ())
+            if item.name.lower() == EXPANDED_INCLUDE_MARKER
+        ]
+        passes = [
+            item
+            for item in (location.children or ())
+            if item.name.lower() == "fastcgi_pass"
+        ]
+        if markers or passes:
+            validate_fastcgi_handler(location, hostname)
+        accounted.update(markers)
+    all_markers = {
+        item
+        for item in descendants(node)
+        if item.name.lower() == EXPANDED_INCLUDE_MARKER
+    }
+    if all_markers != accounted:
+        raise InstallError(f"{hostname} has an include in an unreviewed Nginx scope")
+
+
+def validate_candidate_with_includes(
+    content: bytes,
+    filesystem: Filesystem,
+    source: Path,
+    sensitive: bytes,
+    legacy: bytes,
+    account_api: bytes | None,
+) -> dict[Path, FileState]:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InstallError(f"candidate config is not valid UTF-8: {source}") from error
+    document = parse(text, str(source))
+    overlays = {
+        Path(SENSITIVE_INCLUDE): sensitive,
+        Path(LEGACY_INCLUDE): legacy,
+    }
+    if account_api is not None:
+        overlays[Path(ACCOUNT_API_INCLUDE)] = account_api
+    expansion = IncludeExpansion(filesystem, overlays, source)
+    for hostname in (WWW_HOST, IMG_HOST):
+        raw = unique_tls_server(document, hostname)
+        expanded = expansion.expand_server(raw)
+        sensitive_include = require_direct_include(expanded, SENSITIVE_INCLUDE, hostname)
+        legacy_include = require_direct_include(expanded, LEGACY_INCLUDE, hostname)
+        validate_candidate_server(
+            expanded, sensitive_include, legacy_include, hostname
+        )
+        validate_expanded_include_context(expanded, hostname)
+    return expansion.states
 
 
 def require_security_order(node: Directive, sensitive: Directive, hostname: str) -> None:
@@ -858,19 +1906,75 @@ class RealFilesystem:
             except FileNotFoundError:
                 continue
             if stat.S_ISDIR(metadata.st_mode):
-                continue
+                raise InstallError(f"unexpected directory in sites-enabled: {entry}")
             state = self.snapshot(entry, allow_absent=True)
             if state.kind == "absent":
                 continue
             if state.kind == "symlink":
-                try:
-                    resolved = self.resolve(entry)
-                except OSError as error:
-                    raise InstallError(f"broken enabled Nginx symlink: {entry}") from error
-                state = self.snapshot(resolved)
-            if state.kind != "file":
-                continue
+                if state.uid != 0 or state.gid != 0 or state.nlink != 1:
+                    raise InstallError(
+                        f"enabled Nginx symlink must be root:root with one link: {entry}"
+                    )
+                sites_available = path.parent / "sites-available"
+                direct_target = lexical_symlink_target(entry, state)
+                if direct_target.parent != sites_available:
+                    raise InstallError(
+                        f"enabled Nginx symlink target is outside sites-available: {entry}"
+                    )
+                self.require_secure_directory(
+                    sites_available, 0, "sites-available symlink target directory"
+                )
+                state = self.snapshot(direct_target)
+                require_root_config(state, direct_target, "enabled Nginx symlink target")
+            else:
+                require_root_config(state, entry, "enabled Nginx config")
             result[entry] = state.data
+        return result
+
+    def secure_include_matches(
+        self, raw_path: str, nginx_root: Path
+    ) -> dict[Path, FileState]:
+        if "$" in raw_path or "\x00" in raw_path or "\\" in raw_path:
+            raise InstallError("dynamic or escaped Nginx include path is not allowed")
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = nginx_root / candidate
+        candidate = Path(os.path.abspath(candidate))
+
+        def within_root(path: Path) -> bool:
+            return path == nginx_root or nginx_root in path.parents
+
+        if not within_root(candidate):
+            raise InstallError("Nginx include escapes the reviewed root")
+        matches: set[Path] = set()
+        for match in glob.iglob(str(candidate)):
+            matches.add(Path(match))
+            if len(matches) > 256:
+                raise InstallError("Nginx include glob exceeds the reviewed file limit")
+        if not matches:
+            raise InstallError(f"Nginx include matched no files: {raw_path}")
+
+        result: dict[Path, FileState] = {}
+        checked_directories: set[Path] = set()
+        for match in sorted(matches):
+            normalized = Path(os.path.abspath(match))
+            if not within_root(normalized):
+                raise InstallError(f"included Nginx file escapes reviewed root: {match}")
+            parent = normalized.parent
+            while True:
+                if parent not in checked_directories:
+                    self.require_secure_directory(parent, 0, "included config directory")
+                    checked_directories.add(parent)
+                if parent == nginx_root:
+                    break
+                if parent == parent.parent or not within_root(parent):
+                    raise InstallError(
+                        f"included Nginx path escapes reviewed root: {match}"
+                    )
+                parent = parent.parent
+            state = self.snapshot(normalized)
+            require_root_config(state, normalized, "included Nginx file")
+            result[normalized] = state
         return result
 
 
@@ -902,6 +2006,15 @@ def require_root_config(state: FileState, path: Path, label: str) -> None:
     require_root_owned_file(state, path, label)
     if state.gid != 0 or state.mode != 0o644:
         raise InstallError(f"{label} must be root:root mode 0644: {path}")
+
+
+def lexical_symlink_target(path: Path, state: FileState) -> Path:
+    if state.kind != "symlink":
+        raise InstallError(f"expected a symlink state for {path}")
+    target = Path(state.target)
+    if not target.is_absolute():
+        target = path.parent / target
+    return Path(os.path.abspath(target))
 
 
 def expected_state_hash(state: FileState, expected: str, label: str) -> None:
@@ -944,13 +2057,17 @@ class Installer:
         legacy_source: Path,
         sensitive_target: Path,
         legacy_target: Path,
+        account_api_target: Path,
         expected_active_sha256: str,
         expected_available_sha256: str,
         expected_sensitive_target: str,
         expected_legacy_target: str,
+        expected_account_api_snippet: str,
         sensitive_source_sha256: str,
         legacy_source_sha256: str,
         expected_old_location_sha256: str | None,
+        expected_old_direct_account_api_sha256: str | None,
+        expected_old_snippet_account_api_sha256: str | None,
         backup_dir: Path,
         apply: bool,
     ) -> RewriteResult:
@@ -961,11 +2078,12 @@ class Installer:
             (legacy_source, "legacy snippet input"),
             (sensitive_target, "sensitive snippet target"),
             (legacy_target, "legacy snippet target"),
+            (account_api_target, "account API snippet target"),
             (backup_dir, "backup transaction"),
         ):
             if not path.is_absolute():
                 raise InstallError(f"{label} path must be absolute")
-        if active == available or sensitive_target == legacy_target:
+        if len({active, available, sensitive_target, legacy_target, account_api_target}) != 5:
             raise InstallError("configuration and snippet target paths must be distinct")
         for directory, label in (
             (active.parent, "sites-enabled directory"),
@@ -977,6 +2095,10 @@ class Installer:
             self.fs.require_secure_directory(
                 legacy_target.parent, self.owner_uid, "legacy snippet directory"
             )
+        if account_api_target.parent != sensitive_target.parent:
+            self.fs.require_secure_directory(
+                account_api_target.parent, self.owner_uid, "account API snippet directory"
+            )
 
         active_state = self.fs.snapshot(active)
         available_state = self.fs.snapshot(available)
@@ -984,6 +2106,7 @@ class Installer:
         legacy_input = self.fs.snapshot(legacy_source)
         sensitive_before = self.fs.snapshot(sensitive_target, allow_absent=True)
         legacy_before = self.fs.snapshot(legacy_target, allow_absent=True)
+        account_api_before = self.fs.snapshot(account_api_target, allow_absent=True)
 
         require_root_config(available_state, available, "sites-available config")
         require_root_owned_file(sensitive_input, sensitive_source, "sensitive snippet input")
@@ -991,15 +2114,18 @@ class Installer:
         for state, path, label in (
             (sensitive_before, sensitive_target, "sensitive snippet target"),
             (legacy_before, legacy_target, "legacy snippet target"),
+            (account_api_before, account_api_target, "account API snippet target"),
         ):
             if state.kind != "absent":
-                require_root_owned_file(state, path, label)
+                require_root_config(state, path, label)
         if active_state.kind == "file":
             require_root_config(active_state, active, "active config")
             active_data = active_state.data
         elif active_state.kind == "symlink":
             if active_state.uid != 0 or active_state.gid != 0 or active_state.nlink != 1:
                 raise InstallError("active symlink must be root:root with one link")
+            if lexical_symlink_target(active, active_state) != available:
+                raise InstallError("active symlink does not directly target sites-available")
             if self.fs.resolve(active) != self.fs.resolve(available):
                 raise InstallError("active symlink does not resolve to canonical sites-available")
             active_data = available_state.data
@@ -1024,6 +2150,11 @@ class Installer:
             sensitive_before, expected_sensitive_target, "sensitive snippet target"
         )
         expected_state_hash(legacy_before, expected_legacy_target, "legacy snippet target")
+        expected_state_hash(
+            account_api_before,
+            expected_account_api_snippet,
+            "account API snippet target",
+        )
         sensitive_source_sha256 = validate_sha256(
             sensitive_source_sha256, "sensitive snippet input SHA-256"
         )
@@ -1034,6 +2165,7 @@ class Installer:
             raise InstallError("sensitive snippet input SHA-256 mismatch")
         if sha256(legacy_input.data) != legacy_source_sha256:
             raise InstallError("legacy snippet input SHA-256 mismatch")
+        validate_fixed_snippet_candidates(sensitive_input.data, legacy_input.data)
         if expected_old_location_sha256 is not None:
             expected_old_location_sha256 = validate_sha256(
                 expected_old_location_sha256, "old /images/ location SHA-256"
@@ -1042,8 +2174,58 @@ class Installer:
             raise InstallError(
                 "--expected-old-images-location-sha256 is mandatory with --apply"
             )
-        rewrite = rewrite_active_config(
-            active_data, expected_old_location_sha256, str(active)
+        account_rewrite = rewrite_account_api_routes(
+            active_data,
+            account_api_before,
+            expected_old_direct_account_api_sha256,
+            expected_old_snippet_account_api_sha256,
+            apply=apply,
+            source=str(active),
+        )
+        base_rewrite = rewrite_active_config(
+            account_rewrite.active_content, expected_old_location_sha256, str(active)
+        )
+        rewrite = RewriteResult(
+            base_rewrite.content,
+            base_rewrite.state,
+            base_rewrite.old_location_sha256,
+            account_rewrite.snippet_content,
+            account_rewrite.state,
+            account_rewrite.old_direct_sha256,
+            account_rewrite.old_snippet_sha256,
+        )
+        candidate_account_state = (
+            FileState(
+                "file",
+                account_rewrite.snippet_content,
+                account_api_before.mode,
+                account_api_before.uid,
+                account_api_before.gid,
+                nlink=account_api_before.nlink,
+            )
+            if account_rewrite.snippet_content is not None
+            else account_api_before
+        )
+        rewrite_account_api_routes(
+            rewrite.content,
+            candidate_account_state,
+            "absent",
+            "absent",
+            apply=True,
+            source=str(active),
+        )
+        candidate_account_bytes = (
+            candidate_account_state.data
+            if candidate_account_state.kind == "file"
+            else None
+        )
+        include_states = validate_candidate_with_includes(
+            rewrite.content,
+            self.fs,
+            active,
+            sensitive_input.data,
+            legacy_input.data,
+            candidate_account_bytes,
         )
         validate_enabled_uniqueness(
             self.fs.enabled_documents(active.parent), active, rewrite.content
@@ -1054,6 +2236,7 @@ class Installer:
             "available": available_state,
             "sensitive-snippet": sensitive_before,
             "legacy-snippet": legacy_before,
+            "account-api-snippet": account_api_before,
         }
         if not apply:
             return rewrite
@@ -1066,10 +2249,13 @@ class Installer:
                 legacy_source=legacy_source,
                 sensitive_target=sensitive_target,
                 legacy_target=legacy_target,
+                account_api_target=account_api_target,
                 sensitive_input=sensitive_input,
                 legacy_input=legacy_input,
                 rewrite=rewrite,
                 originals=originals,
+                include_states=include_states,
+                candidate_account_bytes=candidate_account_bytes,
                 backup_dir=backup_dir,
             )
 
@@ -1082,16 +2268,20 @@ class Installer:
         legacy_source: Path,
         sensitive_target: Path,
         legacy_target: Path,
+        account_api_target: Path,
         sensitive_input: FileState,
         legacy_input: FileState,
         rewrite: RewriteResult,
         originals: dict[str, FileState],
+        include_states: dict[Path, FileState],
+        candidate_account_bytes: bytes | None,
         backup_dir: Path,
     ) -> RewriteResult:
         active_state = originals["active"]
         available_state = originals["available"]
         sensitive_before = originals["sensitive-snippet"]
         legacy_before = originals["legacy-snippet"]
+        account_api_before = originals["account-api-snippet"]
 
         # The lock coordinates all copies of this installer.  Re-read every
         # byte under the lock before creating the backup or modifying a path.
@@ -1103,10 +2293,22 @@ class Installer:
             raise InstallError("sensitive snippet target changed after validation")
         if self.fs.snapshot(legacy_target, allow_absent=True) != legacy_before:
             raise InstallError("legacy snippet target changed after validation")
+        if self.fs.snapshot(account_api_target, allow_absent=True) != account_api_before:
+            raise InstallError("account API snippet target changed after validation")
         if self.fs.snapshot(sensitive_source) != sensitive_input:
             raise InstallError("sensitive snippet input changed after validation")
         if self.fs.snapshot(legacy_source) != legacy_input:
             raise InstallError("legacy snippet input changed after validation")
+        locked_include_states = validate_candidate_with_includes(
+            rewrite.content,
+            self.fs,
+            active,
+            sensitive_input.data,
+            legacy_input.data,
+            candidate_account_bytes,
+        )
+        if locked_include_states != include_states:
+            raise InstallError("included Nginx files changed after validation")
         validate_enabled_uniqueness(
             self.fs.enabled_documents(active.parent), active, rewrite.content
         )
@@ -1124,6 +2326,24 @@ class Installer:
             self.fs.atomic_write(
                 legacy_target, legacy_input.data, 0o644, self.owner_uid, 0
             )
+            expected_account_api = account_api_before
+            if rewrite.account_api_state == "snippet-rewrite-required":
+                if rewrite.account_api_content is None:
+                    raise InstallError("account API snippet candidate is missing")
+                self.fs.atomic_write(
+                    account_api_target,
+                    rewrite.account_api_content,
+                    0o644,
+                    self.owner_uid,
+                    0,
+                )
+                expected_account_api = FileState(
+                    "file",
+                    rewrite.account_api_content,
+                    0o644,
+                    self.owner_uid,
+                    0,
+                )
             self.fs.atomic_write(
                 available,
                 rewrite.content,
@@ -1138,10 +2358,38 @@ class Installer:
                 available,
                 sensitive_target,
                 legacy_target,
+                account_api_target,
                 rewrite.content,
                 sensitive_input.data,
                 legacy_input.data,
+                expected_account_api,
             )
+            rewrite_account_api_routes(
+                rewrite.content,
+                self.fs.snapshot(account_api_target, allow_absent=True),
+                "absent",
+                "absent",
+                apply=True,
+                source=str(active),
+            )
+            validate_fixed_snippet_candidates(
+                self.fs.snapshot(sensitive_target).data,
+                self.fs.snapshot(legacy_target).data,
+            )
+            post_include_states = validate_candidate_with_includes(
+                rewrite.content,
+                self.fs,
+                active,
+                self.fs.snapshot(sensitive_target).data,
+                self.fs.snapshot(legacy_target).data,
+                (
+                    expected_account_api.data
+                    if expected_account_api.kind == "file"
+                    else None
+                ),
+            )
+            if post_include_states != include_states:
+                raise InstallError("included Nginx files changed during deployment")
             validate_enabled_uniqueness(
                 self.fs.enabled_documents(active.parent), active, rewrite.content
             )
@@ -1153,9 +2401,11 @@ class Installer:
                 available,
                 sensitive_target,
                 legacy_target,
+                account_api_target,
                 rewrite.content,
                 sensitive_input.data,
                 legacy_input.data,
+                expected_account_api,
             )
         except BaseException as deployment_error:
             try:
@@ -1166,6 +2416,7 @@ class Installer:
                     ("available", available),
                     ("sensitive-snippet", sensitive_target),
                     ("legacy-snippet", legacy_target),
+                    ("account-api-snippet", account_api_target),
                 ):
                     self.fs.restore(path, originals[label])
                 self.runner.run(self.nginx_test)
@@ -1176,6 +2427,7 @@ class Installer:
                     ("available", available),
                     ("sensitive-snippet", sensitive_target),
                     ("legacy-snippet", legacy_target),
+                    ("account-api-snippet", account_api_target),
                 ):
                     if self.fs.snapshot(path, allow_absent=True) != originals[label]:
                         raise InstallError(f"rollback did not exactly restore {label}")
@@ -1195,9 +2447,11 @@ class Installer:
         available: Path,
         sensitive_target: Path,
         legacy_target: Path,
+        account_api_target: Path,
         expected_config: bytes,
         expected_sensitive: bytes,
         expected_legacy: bytes,
+        expected_account_api: FileState,
     ) -> None:
         active_state = self.fs.snapshot(active)
         if active_state.kind != "symlink":
@@ -1210,6 +2464,8 @@ class Installer:
             raise InstallError("active symlink postcondition ownership is unsafe")
         if self.fs.resolve(active) != self.fs.resolve(available):
             raise InstallError("active symlink does not resolve to sites-available after reload")
+        if lexical_symlink_target(active, active_state) != available:
+            raise InstallError("active symlink does not directly target sites-available after reload")
         checks = (
             (self.fs.snapshot(available), expected_config, "sites-available"),
             (
@@ -1229,6 +2485,9 @@ class Installer:
                 or state.nlink != 1
             ):
                 raise InstallError(f"{label} postcondition permissions are unsafe")
+        actual_account_api = self.fs.snapshot(account_api_target, allow_absent=True)
+        if actual_account_api != expected_account_api:
+            raise InstallError("account API snippet postcondition mismatch")
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1250,11 +2509,31 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--expected-legacy-target", required=True, metavar="SHA256|absent"
     )
+    result.add_argument(
+        "--expected-account-api-snippet",
+        required=True,
+        metavar="SHA256|absent",
+        help="expected state of the fixed account API snippet target",
+    )
     result.add_argument("--sensitive-source-sha256", required=True)
     result.add_argument("--legacy-source-sha256", required=True)
     result.add_argument(
         "--expected-old-images-location-sha256",
         help="required for --apply; omit once in dry-run to inventory the exact old block",
+    )
+    result.add_argument(
+        "--expected-old-direct-account-api-location-sha256",
+        help=(
+            "SHA256 or absent; required for --apply and must match the direct www "
+            "account API topology"
+        ),
+    )
+    result.add_argument(
+        "--expected-old-snippet-account-api-location-sha256",
+        help=(
+            "SHA256 or absent; required for --apply and must match the included "
+            "account API snippet topology"
+        ),
     )
     result.add_argument("--backup-dir", type=Path)
     return result
@@ -1295,13 +2574,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             legacy_source=arguments.legacy_source,
             sensitive_target=DEFAULT_SENSITIVE_TARGET,
             legacy_target=DEFAULT_LEGACY_TARGET,
+            account_api_target=DEFAULT_ACCOUNT_API_TARGET,
             expected_active_sha256=arguments.expected_active_sha256,
             expected_available_sha256=arguments.expected_available_sha256,
             expected_sensitive_target=arguments.expected_sensitive_target,
             expected_legacy_target=arguments.expected_legacy_target,
+            expected_account_api_snippet=arguments.expected_account_api_snippet,
             sensitive_source_sha256=arguments.sensitive_source_sha256,
             legacy_source_sha256=arguments.legacy_source_sha256,
             expected_old_location_sha256=arguments.expected_old_images_location_sha256,
+            expected_old_direct_account_api_sha256=(
+                arguments.expected_old_direct_account_api_location_sha256
+            ),
+            expected_old_snippet_account_api_sha256=(
+                arguments.expected_old_snippet_account_api_location_sha256
+            ),
             backup_dir=backup_dir,
             apply=arguments.apply,
         )
@@ -1312,12 +2599,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         "install-build34-nginx-routing: "
         f"{mode} passed state={outcome.state} "
+        f"account_api_state={outcome.account_api_state} "
         f"candidate_sha256={sha256(outcome.content)}"
     )
     if outcome.old_location_sha256 is not None:
         print(
             "install-build34-nginx-routing: "
             f"old_images_location_sha256={outcome.old_location_sha256}"
+        )
+    if outcome.old_direct_account_api_sha256 is not None:
+        print(
+            "install-build34-nginx-routing: "
+            "old_direct_account_api_location_sha256="
+            f"{outcome.old_direct_account_api_sha256}"
+        )
+    if outcome.old_snippet_account_api_sha256 is not None:
+        print(
+            "install-build34-nginx-routing: "
+            "old_snippet_account_api_location_sha256="
+            f"{outcome.old_snippet_account_api_sha256}"
         )
     if arguments.apply:
         print(f"install-build34-nginx-routing: backup={backup_dir}")

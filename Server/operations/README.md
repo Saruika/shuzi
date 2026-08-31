@@ -2,28 +2,45 @@
 
 ## Build 34 Nginx 路由事务安装器
 
-`install-build34-nginx-routing` 把两个审核过的 snippet 与 www/img 路由作为
-一个事务安装。生产 CLI 固定使用以下四个目标，不接受改路参数：
+`install-build34-nginx-routing` 把两个审核过的安全 snippet、账号 API
+路由与 www/img 路由作为一个事务安装。生产 CLI 固定使用以下
+五个目标，不接受改路参数：
 
 - `/etc/nginx/sites-enabled/shuzijun-ssl.conf`
 - `/etc/nginx/sites-available/shuzijun-ssl.conf`
 - `/etc/nginx/snippets/shuzijun-sensitive-files-deny.conf`
 - `/etc/nginx/snippets/shuzijun-legacy-images-alias.conf`
+- `/etc/nginx/snippets/shuzijun-account-api-backup-proxy.conf`
 
 现场的 enabled/available 可以是内容不同的 root:root 0644 普通文件。安装器只以
 **enabled 字节**为候选配置模板，不会把陈旧 available 内容合并回来，所以
 上海/新加坡节点特有的 apex、proxy 与 header 会原样保留。它严格解析
 唯一的 www/img 443 TLS block：在 www 的 sensitive include 后直接插入 legacy
 include，在 img 中只替换已审核且哈希一致的
-`location ^~ /images/ { ... }` block。候选配置还必须通过固定 Web root、
-include 层级/顺序、内联 `/images` 与受保护 `^~` 路径的完整语义门禁。
+`location ^~ /images/ { ... }` block。它同时识别两种已知账号 API
+拓扑：主节点 www 内的 direct block，或备节点 www 直接 include 的
+`shuzijun-account-api-backup-proxy.conf`。两者只会把精确
+`location ^~ /wp-json/shuzijun/v1/` 头改成普通前缀 location，block 体、
+注释和节点差异保持不变；同时出现、重复、嵌套或畸形路由都会拒绝。
+候选配置还必须通过固定 Web root、include 层级/顺序、内联
+`/images`、全部 `^~` 和敏感文件 exact location 的语义门禁。
+`sites-enabled` 文档中的顶层 include 也会被拒绝，防止隐藏重复的
+canonical TLS server block。www/img 中的普通 include 会在 root:root 0644、
+无硬链接且可信父目录的门禁下递归展开；只允许现网的七项 security header
+snippet 与 `fastcgi-php.conf -> fastcgi.conf` 执行链。嵌套 location、可能匹配
+`/images` 的未知 regex、named location、rewrite/error_page/internal redirect、
+重复或改写 `SCRIPT_FILENAME` 等 FastCGI 执行参数都会拒绝。sensitive、legacy
+与 account 固定 snippet 也不是不透明输入：前两者必须与版本化 AST 完全一致，
+account block 则接受节点体差异但执行同一重定向与 location 安全门禁。
 
 默认是无写入 dry-run。调用者必须从已记录的只读巡检取得 active、available
-与两个旧 target 的 SHA-256（target 不存在时明确传 `absent`），并单独
+与三个旧 target 的 SHA-256（target 不存在时明确传 `absent`），并单独
 提供 root 所有、非链接、无硬链接的 snippet 输入与可信哈希。第一次
-dry-run 可暂时省略 `--expected-old-images-location-sha256`，它会输出旧
-location 精确 directive 字节（不含行首缩进）的哈希；审核 block 后必须带该
-哈希重跑 dry-run，`--apply` 缺少它会直接拒绝。
+dry-run 可暂时省略三个旧 block 哈希参数，它会输出现场实际存在的
+`/images` 及 direct/snippet account API location 精确 directive 字节（不含行首
+缩进）的哈希。审核 block 后必须带哈希重跑 dry-run。`--apply` 时
+实际存在的旧 account block 必须传精确哈希，另一拓扑以及已迁移的
+block 必须显式传 `absent`。
 
 ```bash
 sudo /usr/local/sbin/install-build34-nginx-routing \
@@ -33,6 +50,7 @@ sudo /usr/local/sbin/install-build34-nginx-routing \
   --expected-available-sha256 <巡检记录的-available-哈希> \
   --expected-sensitive-target <旧-sensitive-哈希或-absent> \
   --expected-legacy-target <旧-legacy-哈希或-absent> \
+  --expected-account-api-snippet <旧-account-snippet-哈希或-absent> \
   --sensitive-source-sha256 <版本发布记录的-sensitive-哈希> \
   --legacy-source-sha256 <版本发布记录的-legacy-哈希> \
   --dry-run
@@ -40,6 +58,8 @@ sudo /usr/local/sbin/install-build34-nginx-routing \
 sudo /usr/local/sbin/install-build34-nginx-routing \
   <与上面完全相同的输入与预期哈希> \
   --expected-old-images-location-sha256 <审核过的-location-哈希> \
+  --expected-old-direct-account-api-location-sha256 <主节点-location-哈希或-absent> \
+  --expected-old-snippet-account-api-location-sha256 <备节点-location-哈希或-absent> \
   --backup-dir /var/backups/shuzijun-nginx-build34/<节点-唯一事务名> \
   --apply
 ```
@@ -47,11 +67,16 @@ sudo /usr/local/sbin/install-build34-nginx-routing \
 Apply 只允许 backup 位于
 `/var/backups/shuzijun-nginx-build34` 的立即子目录，不能指向 Web root。它在
 sites-enabled 目录上持有互斥锁，在第一次 backup/写入前重新比对全部字节，
-并先确认旧 `nginx -t` 与 nginx service 都正常。备份目录为 root-only，包含
-enabled、available、旧 snippets 的原始字节/类型/元数据清单。新 available 与 snippets
+包括所有递归 include 的文件身份与字节，并先确认旧 `nginx -t` 与 nginx
+service 都正常。enabled symlink 必须直接指向安全 sites-available 普通文件，
+不能借助二级 symlink。备份目录为 root-only，包含
+enabled、available、三个旧 snippet target 的原始字节/类型/元数据清单。
+只有 active 确实 include 账号 API snippet 时才改写它；direct 拓扑中未被引用的
+节点文件会原样保留。新 available 与需要变更的 snippets
 是同目录原子替换，enabled 最后原子切换为指向 canonical available 的相对
 symlink。候选 `nginx -t`、reload、service active 或任何后置条件失败时，
-会恢复四个目标的精确原状态，重验旧 Nginx 并 reload。
+会恢复五个目标的精确原状态，重验旧 Nginx 并 reload；写完后还会从实际磁盘
+重新展开同一 include 图并比对锁前状态，拒绝检查与 reload 之间的漂移。
 
 安装器故意**不删除** Web root 中的旧 `images` symlink。路由安装成功后，先运行
 本机 TLS smoke 并验证真实图片；只有该步通过后才由独立、精确目标的运维操作
