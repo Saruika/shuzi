@@ -27,6 +27,8 @@ readonly HEALTH_HOST=www.shuzijun.com.cn
 # The query-form REST route deliberately misses the backup node's pretty-URL
 # proxy location and therefore exercises that node's local WordPress/plugin.
 readonly HEALTH_URL="https://$HEALTH_HOST/?rest_route=%2Fshuzijun%2Fv1%2Fapp-content"
+readonly DIRECT_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/shuzijun-app-content.php"
+readonly DIRECT_VENDOR_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/vendor/autoload.php"
 readonly MANIFEST_NAME=release.sha256
 readonly JWT_README=vendor/firebase/php-jwt/README.md
 readonly JWT_README_SHA256=8e2392c48204a21ad0d73068fb273b7ec1f79ccf13eab3fe6f256382f741dc39
@@ -43,6 +45,7 @@ BACKUP_MANIFEST=
 ROLLBACK_READY=0
 CODE_MUTATED=0
 FPM_WAS_ACTIVE=0
+FPM_BOOT_GUARD_ACTIVE=0
 MODE_SEEN=0
 BUNDLE_SEEN=0
 MANIFEST_SHA_SEEN=0
@@ -51,11 +54,15 @@ usage() {
     cat <<'EOF'
 Usage:
   deploy-app-content-release --bundle ABSOLUTE_PATH \
-      --manifest-sha256 SHA256 [--dry-run|--apply]
+      --manifest-sha256 SHA256 [--bundle-preflight|--dry-run|--apply]
 
-The default mode is --dry-run. The bundle must be a canonical, root-owned
-directory immediately below /var/lib/shuzijun-app-content/releases and contain
-only these release entries plus release.sha256:
+The default mode is --dry-run. --bundle-preflight performs only the immutable
+bundle, manifest, PHP, Composer and dependency checks; it does not inspect the
+currently installed release unit, issue production-origin health probes,
+create a backup, stop a service or write the webroot. Composer security audit
+may use its configured public advisory source. The bundle must be a canonical,
+root-owned directory immediately below /var/lib/shuzijun-app-content/releases
+and contain only these release entries plus release.sha256:
   shuzijun-app-content.php
   composer.json
   composer.lock
@@ -500,6 +507,33 @@ verify_current_webroot() {
     validate_current_release_unit
 }
 
+probe_direct_php_blocked() {
+    local attempt status headers url blocked
+    for url in "$DIRECT_PHP_URL" "$DIRECT_VENDOR_PHP_URL"; do
+        blocked=0
+        for attempt in 1 2 3 4 5; do
+            headers=
+            if headers=$(curl -q --silent --show-error --dump-header - --output /dev/null \
+                --request GET --proto '=https' --tlsv1.2 --max-redirs 0 \
+                --connect-timeout 5 --max-time 15 --noproxy '*' \
+                --resolve "$HEALTH_HOST:443:127.0.0.1" "$url"); then
+                status=$(printf '%s\n' "$headers" | awk \
+                    'toupper($1) ~ /^HTTP\// { code=$2 } END { print code }')
+                if [[ "$status" == 404 ]]; then
+                    blocked=1
+                    break
+                fi
+            fi
+            sleep 1
+        done
+        if [[ "$blocked" -ne 1 ]]; then
+            fail 'Nginx does not return 404 for direct wp-content PHP access'
+            return 1
+        fi
+    done
+    return 0
+}
+
 probe_unauthorized_api() {
     local attempt status headers
     for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -650,6 +684,52 @@ install_release_unit() {
         "$BUNDLE/shuzijun-app-content.php" "$TARGET_DIR/shuzijun-app-content.php"
 }
 
+require_fpm_enabled_policy() {
+    local unit_state
+    unit_state=$(systemctl is-enabled "$FPM_SERVICE" 2>/dev/null || true)
+    [[ "$unit_state" == enabled ]] \
+        || fail 'PHP-FPM must be enabled before deployment writes or service policy changes'
+}
+
+protect_fpm_from_incomplete_boot() {
+    local unit_state
+    require_fpm_enabled_policy
+
+    if ! systemctl mask "$FPM_SERVICE" >/dev/null; then
+        unit_state=$(systemctl is-enabled "$FPM_SERVICE" 2>/dev/null || true)
+        [[ "$unit_state" == masked ]] && FPM_BOOT_GUARD_ACTIVE=1
+        fail 'PHP-FPM persistent deployment boot guard could not be installed'
+        return 1
+    fi
+    # Set the flag immediately after the write. A later verification failure
+    # must still take the guarded rollback path rather than attempting an
+    # ordinary start against a masked unit.
+    FPM_BOOT_GUARD_ACTIVE=1
+    unit_state=$(systemctl is-enabled "$FPM_SERVICE" 2>/dev/null || true)
+    [[ "$unit_state" == masked ]] \
+        || fail 'PHP-FPM persistent deployment boot guard was not installed'
+}
+
+release_fpm_boot_guard() {
+    local unit_state
+    [[ "$FPM_BOOT_GUARD_ACTIVE" -eq 1 ]] || return 0
+    systemctl unmask "$FPM_SERVICE" >/dev/null
+    unit_state=$(systemctl is-enabled "$FPM_SERVICE" 2>/dev/null || true)
+    [[ "$unit_state" == enabled ]] \
+        || fail 'PHP-FPM persistent deployment boot guard could not be removed'
+    FPM_BOOT_GUARD_ACTIVE=0
+}
+
+is_fpm_persistently_masked() {
+    local unit_state
+    unit_state=$(systemctl is-enabled "$FPM_SERVICE" 2>/dev/null || true)
+    if [[ "$unit_state" == masked ]]; then
+        FPM_BOOT_GUARD_ACTIVE=1
+        return 0
+    fi
+    return 1
+}
+
 restore_code_backup() {
     local restore_status=0
     [[ "$ROLLBACK_READY" -eq 1 && -n "$BACKUP_DIR" ]] || return 0
@@ -664,6 +744,12 @@ restore_code_backup() {
     ) >/dev/null 2>&1 || return 1
 
     if [[ "$CODE_MUTATED" -eq 1 ]]; then
+        # The flag can lag behind systemd if unmask changed state immediately
+        # before a status query failed. Reconcile the real state before any
+        # rollback write and do not mutate the backup target without a mask.
+        if ! is_fpm_persistently_masked; then
+            protect_fpm_from_incomplete_boot >/dev/null 2>&1 || return 1
+        fi
         systemctl stop "$FPM_SERVICE" >/dev/null 2>&1 || true
         if systemctl is-active --quiet "$FPM_SERVICE"; then
             return 1
@@ -690,10 +776,35 @@ restore_code_backup() {
     # stopped is the fail-closed state and prevents mismatched plugin/vendor
     # code from serving requests while an operator restores the known backup.
     if [[ "$restore_status" -eq 0 && "$FPM_WAS_ACTIVE" -eq 1 ]]; then
+        release_fpm_boot_guard >/dev/null 2>&1 || restore_status=1
+    fi
+    if [[ "$restore_status" -eq 0 && "$FPM_WAS_ACTIVE" -eq 1 ]]; then
         systemctl start "$FPM_SERVICE" >/dev/null 2>&1 || restore_status=1
         systemctl is-active --quiet "$FPM_SERVICE" || restore_status=1
     fi
+    # Keep a restored, running unit persistently masked until every online
+    # rollback check in handle_failure has passed. Masking an active unit does
+    # not stop it, but prevents a reboot or dependency start from reviving an
+    # unverified rollback after this process is interrupted.
+    if [[ "$restore_status" -eq 0 && "$FPM_WAS_ACTIVE" -eq 1 ]]; then
+        protect_fpm_from_incomplete_boot >/dev/null 2>&1 || restore_status=1
+    fi
     return "$restore_status"
+}
+
+isolate_failed_fpm() {
+    local guard_status=0 stop_status=0
+
+    # Reconcile against systemd's real state instead of trusting the in-memory
+    # flag: a partially completed unmask can make those two states diverge.
+    if ! is_fpm_persistently_masked; then
+        protect_fpm_from_incomplete_boot >/dev/null 2>&1 || guard_status=1
+    fi
+    systemctl stop "$FPM_SERVICE" >/dev/null 2>&1 || stop_status=1
+    systemctl is-active --quiet "$FPM_SERVICE" && stop_status=1
+    is_fpm_persistently_masked || guard_status=1
+
+    [[ "$guard_status" -eq 0 && "$stop_status" -eq 0 ]]
 }
 
 handle_failure() {
@@ -708,18 +819,19 @@ handle_failure() {
             && "$VERIFY" "$SITE" >/dev/null 2>&1 \
             && nginx -t >/dev/null 2>&1 \
             && systemctl is-active --quiet "$FPM_SERVICE" \
-            && probe_unauthorized_api; then
+            && probe_direct_php_blocked \
+            && probe_unauthorized_api \
+            && release_fpm_boot_guard; then
             printf 'app-content-release: previous code release restored; backup=%s\n' "$BACKUP_DIR" >&2
         else
             # A restored tree is not safe to serve until every post-rollback
-            # check succeeds.  This also covers a probe/verifier failure that
-            # happens after restore_code_backup already restarted the service.
-            systemctl stop "$FPM_SERVICE" >/dev/null 2>&1
-            if systemctl is-active --quiet "$FPM_SERVICE"; then
-                printf 'app-content-release: rollback was not fully verified and PHP-FPM could not be stopped; immediate manual isolation required; backup=%s\n' \
+            # check succeeds. The safe failure state requires both an inactive
+            # service and an independently verified persistent systemd mask.
+            if isolate_failed_fpm; then
+                printf 'app-content-release: rollback was not fully verified; PHP-FPM left stopped and persistently masked; manual recovery required from %s\n' \
                     "$BACKUP_DIR" >&2
             else
-                printf 'app-content-release: rollback was not fully verified; PHP-FPM left stopped; manual recovery required from %s\n' \
+                printf 'app-content-release: rollback was not fully verified and PHP-FPM isolation could not be confirmed; immediate manual isolation required; backup=%s\n' \
                     "$BACKUP_DIR" >&2
             fi
         fi
@@ -752,6 +864,12 @@ while [[ $# -gt 0 ]]; do
         --dry-run)
             [[ "$MODE_SEEN" -eq 0 ]] || fail 'release mode may be specified only once'
             MODE=dry-run
+            MODE_SEEN=1
+            shift
+            ;;
+        --bundle-preflight)
+            [[ "$MODE_SEEN" -eq 0 ]] || fail 'release mode may be specified only once'
+            MODE=bundle-preflight
             MODE_SEEN=1
             shift
             ;;
@@ -792,6 +910,13 @@ validate_manifest
 validate_secret_content
 resolve_runtime_tools
 preflight_release
+
+if [[ "$MODE" == bundle-preflight ]]; then
+    printf 'app-content-release: bundle preflight passed manifest=%s\n' \
+        "$EXPECTED_MANIFEST_SHA256"
+    exit 0
+fi
+
 verify_current_webroot
 
 if [[ "$MODE" == dry-run ]]; then
@@ -802,14 +927,17 @@ fi
 # HTTP itself can update access logs, caches, schedules or role metadata, so it
 # is deliberately outside the no-persistent-write dry-run branch.  Apply checks
 # the local route both before mutation and after FPM returns.
-probe_unauthorized_api
 systemctl is-active --quiet "$FPM_SERVICE" || fail 'PHP-FPM must be active before deployment'
+require_fpm_enabled_policy
 FPM_WAS_ACTIVE=1
+probe_direct_php_blocked
+probe_unauthorized_api
 # Close the last validation-to-use gap before any live or backup write.
 validate_bundle_path
 validate_bundle_tree
 validate_manifest
 create_code_backup
+protect_fpm_from_incomplete_boot
 systemctl stop "$FPM_SERVICE"
 if systemctl is-active --quiet "$FPM_SERVICE"; then
     fail 'PHP-FPM did not stop; live code was not modified'
@@ -817,12 +945,18 @@ fi
 install_release_unit
 verify_live_release_hashes
 verify_installed_jwt_autoload
+release_fpm_boot_guard
 systemctl start "$FPM_SERVICE"
 systemctl is-active --quiet "$FPM_SERVICE"
+# Keep the running unit persistently masked until all online validation passes.
+# Masking an active unit does not stop it, so the local probes still execute.
+protect_fpm_from_incomplete_boot
 
 "$VERIFY" "$SITE"
 nginx -t >/dev/null
+probe_direct_php_blocked
 probe_unauthorized_api
+release_fpm_boot_guard
 
 ROLLBACK_READY=0
 trap - ERR INT TERM HUP

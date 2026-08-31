@@ -466,10 +466,36 @@ final class YishuUITests: XCTestCase {
         in app: XCUIApplication
     ) throws {
         try XCTContext.runActivity(named: "\(pageName)辅助功能审计") { _ in
-            try app.performAccessibilityAudit(
-                for: [.contrast, .hitRegion, .textClipped, .trait]
-            )
+            do {
+                try performAppleAccessibilityAudit(in: app)
+            } catch {
+                let auditError = error as NSError
+                guard auditError.domain == "com.apple.xcode.xctest.accessibilityAudit",
+                      auditError.code == -56 else {
+                    throw error
+                }
+
+                try XCTContext.runActivity(named: "审计框架暂时超时，2 秒后重试一次") { _ in
+                    Thread.sleep(forTimeInterval: 2)
+
+                    // XCUI queries synchronize with the application before
+                    // evaluating, so this foreground/window probe gives the
+                    // UI a bounded opportunity to become idle before retrying.
+                    _ = app.wait(for: .runningForeground, timeout: 2)
+                    _ = app.windows.firstMatch.exists
+
+                    // Intentionally do not catch the retry: a second timeout
+                    // or a real accessibility issue must fail unchanged.
+                    try performAppleAccessibilityAudit(in: app)
+                }
+            }
         }
+    }
+
+    private func performAppleAccessibilityAudit(in app: XCUIApplication) throws {
+        try app.performAccessibilityAudit(
+            for: [.contrast, .hitRegion, .textClipped, .trait]
+        )
     }
 
     private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication) {

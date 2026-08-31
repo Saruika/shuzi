@@ -149,6 +149,17 @@ def main() -> None:
         assert boundary in current_unit
     assert "|| return 1" in current_unit
 
+    direct_probe_body = function_body(
+        lines, "probe_direct_php_blocked", "probe_unauthorized_api"
+    )
+    assert "wp-content/mu-plugins/shuzijun-app-content.php" in text
+    assert "wp-content/mu-plugins/vendor/autoload.php" in text
+    for direct_guard in (
+        '--resolve "$HEALTH_HOST:443:127.0.0.1"',
+        '[[ "$status" == 404 ]]',
+    ):
+        assert direct_guard in direct_probe_body
+
     probe_body = function_body(lines, "probe_unauthorized_api", "verify_live_release_hashes")
     assert "?rest_route=%2Fshuzijun%2Fv1%2Fapp-content" in text
     for probe_guard in (
@@ -205,44 +216,68 @@ def main() -> None:
     assert vendor_install < composer_json_install < composer_lock_install < plugin_install
     assert plugin_install < install_end
 
-    rollback_body = function_body(lines, "restore_code_backup", "handle_failure")
+    rollback_body = function_body(lines, "restore_code_backup", "isolate_failed_fpm")
+    assert "protect_fpm_from_incomplete_boot" in rollback_body
+    assert "is_fpm_persistently_masked" in rollback_body
+    assert "release_fpm_boot_guard" in rollback_body
     assert 'systemctl stop "$FPM_SERVICE"' in rollback_body
     assert "sha256sum --strict --quiet --check" in rollback_body
     assert '[[ "$restore_status" -eq 0 && "$FPM_WAS_ACTIVE" -eq 1 ]]' in rollback_body
     assert 'systemctl start "$FPM_SERVICE"' in rollback_body
+    assert rollback_body.count("protect_fpm_from_incomplete_boot") >= 2
     assert "Never restart PHP-FPM with a partial or unverified rollback" in rollback_body
     assert 'rm -rf -- "$TARGET_DIR"' not in rollback_body
     handle_start = line_number(lines, "handle_failure() {")
     trap_start = line_number(lines, "trap 'handle_failure $?'", handle_start + 1)
     handle_body = "\n".join(lines[handle_start:trap_start])
     assert "trap '' INT TERM HUP" in handle_body
-    assert 'systemctl stop "$FPM_SERVICE"' in handle_body
-    assert "PHP-FPM left stopped" in handle_body
-    assert "PHP-FPM could not be stopped" in handle_body
+    assert "probe_direct_php_blocked" in handle_body
+    assert "isolate_failed_fpm" in handle_body
+    assert "release_fpm_boot_guard" in handle_body
+    assert "PHP-FPM left stopped and persistently masked" in handle_body
+    assert "PHP-FPM isolation could not be confirmed" in handle_body
     assert 'systemctl is-active --quiet "$FPM_SERVICE"' in handle_body
 
+    isolation_body = function_body(lines, "isolate_failed_fpm", "handle_failure")
+    assert "is_fpm_persistently_masked" in isolation_body
+    assert "protect_fpm_from_incomplete_boot" in isolation_body
+    assert 'systemctl stop "$FPM_SERVICE"' in isolation_body
+    assert isolation_body.count("is_fpm_persistently_masked") >= 2
+
     dry_run = line_number(lines, 'if [[ "$MODE" == dry-run ]]')
-    first_apply_probe = line_number(lines, "probe_unauthorized_api", dry_run + 1)
+    enabled_policy = line_number(lines, "require_fpm_enabled_policy", dry_run + 1)
+    first_direct_probe = line_number(lines, "probe_direct_php_blocked", enabled_policy + 1)
+    first_apply_probe = line_number(lines, "probe_unauthorized_api", first_direct_probe + 1)
     backup = line_number(lines, "create_code_backup", first_apply_probe + 1)
-    fpm_stop = line_number(lines, 'systemctl stop "$FPM_SERVICE"', backup + 1)
+    boot_guard = line_number(lines, "protect_fpm_from_incomplete_boot", backup + 1)
+    fpm_stop = line_number(lines, 'systemctl stop "$FPM_SERVICE"', boot_guard + 1)
     install = line_number(lines, "install_release_unit", fpm_stop + 1)
     live_hash = line_number(lines, "verify_live_release_hashes", install + 1)
     autoload = line_number(lines, "verify_installed_jwt_autoload", live_hash + 1)
-    fpm_start = line_number(lines, 'systemctl start "$FPM_SERVICE"', autoload + 1)
-    post_verify = line_number(lines, '"$VERIFY" "$SITE"', fpm_start + 1)
+    guard_release = line_number(lines, "release_fpm_boot_guard", autoload + 1)
+    fpm_start = line_number(lines, 'systemctl start "$FPM_SERVICE"', guard_release + 1)
+    online_guard = line_number(lines, "protect_fpm_from_incomplete_boot", fpm_start + 1)
+    post_verify = line_number(lines, '"$VERIFY" "$SITE"', online_guard + 1)
     nginx_check = line_number(lines, "nginx -t", post_verify + 1)
-    final_probe = line_number(lines, "probe_unauthorized_api", nginx_check + 1)
-    rollback_disarm = line_number(lines, "ROLLBACK_READY=0", final_probe + 1)
-    assert dry_run < first_apply_probe < backup < fpm_stop < install < live_hash
-    assert live_hash < autoload < fpm_start < post_verify < nginx_check
-    assert nginx_check < final_probe < rollback_disarm
+    final_direct_probe = line_number(lines, "probe_direct_php_blocked", nginx_check + 1)
+    final_probe = line_number(lines, "probe_unauthorized_api", final_direct_probe + 1)
+    final_guard_release = line_number(lines, "release_fpm_boot_guard", final_probe + 1)
+    rollback_disarm = line_number(lines, "ROLLBACK_READY=0", final_guard_release + 1)
+    assert dry_run < enabled_policy < first_direct_probe < first_apply_probe < backup
+    assert backup < boot_guard < fpm_stop < install < live_hash
+    assert live_hash < autoload < guard_release < fpm_start < online_guard < post_verify
+    assert post_verify < nginx_check < final_direct_probe < final_probe
+    assert final_probe < final_guard_release < rollback_disarm
 
     # No main-path call that can create backups, stop services, install code or
     # issue HTTP is allowed before the early dry-run exit.
     main_pre_dry_run = "\n".join(lines[fixed_validation:dry_run])
     assert "create_code_backup\n" not in main_pre_dry_run
+    assert "protect_fpm_from_incomplete_boot\n" not in main_pre_dry_run
+    assert "release_fpm_boot_guard\n" not in main_pre_dry_run
     assert 'systemctl stop "$FPM_SERVICE"\n' not in main_pre_dry_run
     assert "install_release_unit\n" not in main_pre_dry_run
+    assert "probe_direct_php_blocked\n" not in main_pre_dry_run
     assert "probe_unauthorized_api\n" not in main_pre_dry_run
 
     for duplicate_guard in (

@@ -5,11 +5,31 @@ site_root=${1:-/var/www/html/shuzijun.com.cn}
 nginx_site=${2:-/etc/nginx/sites-available/shuzijun-ssl.conf}
 deny_snippet=${3:-/etc/nginx/snippets/shuzijun-sensitive-files-deny.conf}
 legacy_images_snippet=${4:-/etc/nginx/snippets/shuzijun-legacy-images-alias.conf}
+nginx_enabled_site=${5:-/etc/nginx/sites-enabled/shuzijun-ssl.conf}
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+nginx_contract_checker=${6:-$script_dir/verify-nginx-server-block-contract.py}
+nginx_config_owner=${7:-root:root}
+site_root_owner=${8:-root:www-data}
 
 test -d "$site_root"
 test -f "$nginx_site"
 test -f "$deny_snippet"
 test -f "$legacy_images_snippet"
+test -e "$nginx_enabled_site"
+test -f "$nginx_contract_checker"
+
+# Parse the active server blocks before relying on any textual snippet checks.
+# This is a local-filesystem contract check only: it deliberately performs no
+# HTTP requests, including when the release deployer invokes this verifier from
+# a dry-run.
+python3 "$nginx_contract_checker" \
+    --site-root "$site_root" \
+    --site-config "$nginx_site" \
+    --enabled-entry "$nginx_enabled_site" \
+    --sensitive-snippet "$deny_snippet" \
+    --legacy-snippet "$legacy_images_snippet" \
+    --config-owner "$nginx_config_owner" \
+    --site-root-owner "$site_root_owner"
 
 if find "$site_root" -xdev -type f \
     \( -iname '*.php?*' -o -name '*.php.*' -o -name '*.php_*' -o -name '*.php-*' \
@@ -105,19 +125,47 @@ for runtime_dir in uploads cache; do
     fi
 done
 
-grep -qF 'include /etc/nginx/snippets/shuzijun-sensitive-files-deny.conf;' "$nginx_site"
 grep -qF 'wp-config\.php' "$deny_snippet"
 grep -qF '\.php[^/]+$' "$deny_snippet"
-grep -qF 'wp-content/(?:uploads|cache)' "$deny_snippet"
 grep -qF '^/images/.*\.php' "$deny_snippet"
 grep -qF '\.env' "$deny_snippet"
 grep -qF '|p8|' "$deny_snippet"
 grep -qF 'return 404;' "$deny_snippet"
 
+# The exact all-of-wp-content rule is a release boundary: vendor PHP is placed
+# below mu-plugins and must never fall through to the server's generic PHP
+# handler. Checking the complete location header makes the older uploads/cache
+# only snippet fail rather than silently passing on a shared substring.
+wp_content_php_rule='location ~* ^/wp-content/.*\.php(?:$|/) {'
+if [[ "$(grep -cFx "$wp_content_php_rule" "$deny_snippet")" != 1 ]]; then
+    printf 'webroot-security: direct wp-content PHP deny rule is missing\n' >&2
+    exit 1
+fi
+wp_content_php_rule_line=$(grep -nFx "$wp_content_php_rule" "$deny_snippet")
+wp_content_php_rule_line=${wp_content_php_rule_line%%:*}
+if ! awk -v rule_line="$wp_content_php_rule_line" '
+    NR == rule_line {
+        in_rule = 1
+        next
+    }
+    in_rule && /^[[:space:]]*return 404;[[:space:]]*$/ {
+        denied = 1
+    }
+    in_rule && /^}[[:space:]]*$/ {
+        closed = 1
+        in_rule = 0
+    }
+    END {
+        exit !(closed && denied)
+    }
+' "$deny_snippet"; then
+    printf 'webroot-security: direct wp-content PHP deny rule is missing\n' >&2
+    exit 1
+fi
+
 # The old root-level /images symlink is both unnecessary and unsafe once this
 # constrained alias is installed. Require the versioned include in both www
 # and img TLS server blocks and reject a partially migrated configuration.
-test "$(grep -cF 'include /etc/nginx/snippets/shuzijun-legacy-images-alias.conf;' "$nginx_site")" -ge 2
 grep -qF 'location ~* ^/images/' "$legacy_images_snippet"
 grep -qF 'wp-content/uploads/hero-images/$1;' "$legacy_images_snippet"
 grep -qF 'location /images/' "$legacy_images_snippet"

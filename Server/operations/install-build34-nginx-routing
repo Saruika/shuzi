@@ -1,0 +1,1328 @@
+#!/usr/bin/env python3
+"""Transactionally install the Build 34 Nginx security/image routing.
+
+The active sites-enabled file is deliberately the only configuration source.
+The sites-available copy may be stale and is never merged into the candidate.
+Every mutable input has a caller-supplied expected SHA-256 so a node change
+between inspection and apply fails closed.
+
+Dry-run is the default.  Apply writes root-only backups, installs both reviewed
+snippets, writes a new canonical sites-available file, and finally atomically
+replaces sites-enabled with a symlink to it.  Any validation, reload, or
+postcondition failure restores the exact pre-apply files and Nginx state.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import stat
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import ContextManager, Protocol, Sequence
+
+
+WWW_HOST = "www.shuzijun.com.cn"
+IMG_HOST = "img.shuzijun.com.cn"
+SENSITIVE_INCLUDE = "/etc/nginx/snippets/shuzijun-sensitive-files-deny.conf"
+LEGACY_INCLUDE = "/etc/nginx/snippets/shuzijun-legacy-images-alias.conf"
+DEFAULT_ACTIVE = Path("/etc/nginx/sites-enabled/shuzijun-ssl.conf")
+DEFAULT_AVAILABLE = Path("/etc/nginx/sites-available/shuzijun-ssl.conf")
+DEFAULT_SENSITIVE_TARGET = Path(SENSITIVE_INCLUDE)
+DEFAULT_LEGACY_TARGET = Path(LEGACY_INCLUDE)
+DEFAULT_BACKUP_ROOT = Path("/var/backups/shuzijun-nginx-build34")
+SITE_ROOT = "/var/www/html/shuzijun.com.cn"
+NGINX_TEST = ("/usr/sbin/nginx", "-t")
+NGINX_RELOAD = ("/usr/bin/systemctl", "reload", "nginx")
+NGINX_ACTIVE = ("/usr/bin/systemctl", "is-active", "--quiet", "nginx")
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
+BACKUP_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+
+
+class InstallError(RuntimeError):
+    """A fail-closed installation error."""
+
+
+@dataclass(frozen=True)
+class Token:
+    value: str
+    start: int
+    end: int
+    line: int
+    symbol: bool = False
+
+
+@dataclass(frozen=True)
+class Directive:
+    name: str
+    args: tuple[str, ...]
+    children: tuple["Directive", ...] | None
+    start: int
+    end: int
+    line: int
+
+
+@dataclass(frozen=True)
+class FileState:
+    kind: str
+    data: bytes = b""
+    mode: int = 0
+    uid: int = 0
+    gid: int = 0
+    target: str = ""
+    nlink: int = 1
+
+
+@dataclass(frozen=True)
+class RewriteResult:
+    content: bytes
+    state: str
+    old_location_sha256: str | None
+
+
+class Filesystem(Protocol):
+    def require_secure_directory(self, path: Path, owner_uid: int, label: str) -> None: ...
+
+    def snapshot(self, path: Path, allow_absent: bool = False) -> FileState: ...
+
+    def atomic_write(self, path: Path, data: bytes, mode: int, uid: int, gid: int) -> None: ...
+
+    def atomic_symlink(self, path: Path, target: str, uid: int, gid: int) -> None: ...
+
+    def restore(self, path: Path, state: FileState) -> None: ...
+
+    def create_backup(self, path: Path, states: dict[str, FileState]) -> None: ...
+
+    def resolve(self, path: Path) -> Path: ...
+
+    def lock(self, path: Path) -> ContextManager[None]: ...
+
+    def enabled_documents(self, path: Path) -> dict[Path, bytes]: ...
+
+
+class CommandRunner(Protocol):
+    def run(self, command: Sequence[str]) -> None: ...
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def validate_sha256(value: str, label: str) -> str:
+    lowered = value.lower()
+    if not SHA256_PATTERN.fullmatch(lowered):
+        raise InstallError(f"{label} must be exactly 64 hexadecimal characters")
+    return lowered
+
+
+def tokenize(text: str, source: str) -> list[Token]:
+    """Tokenize structural Nginx syntax while ignoring comments and quotes."""
+
+    tokens: list[Token] = []
+    index = 0
+    line = 1
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char in " \t\r":
+            index += 1
+            continue
+        if char == "\n":
+            line += 1
+            index += 1
+            continue
+        if char == "#":
+            newline = text.find("\n", index)
+            if newline == -1:
+                break
+            index = newline
+            continue
+        if char in ";{}":
+            tokens.append(Token(char, index, index + 1, line, True))
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+            token_start = index
+            token_line = line
+            index += 1
+            value: list[str] = []
+            while index < length:
+                char = text[index]
+                if char == "\\":
+                    if index + 1 >= length:
+                        raise InstallError(f"{source}:{token_line}: unterminated quote escape")
+                    escaped = text[index + 1]
+                    if escaped == "\n":
+                        line += 1
+                    value.append(escaped)
+                    index += 2
+                    continue
+                if char == quote:
+                    index += 1
+                    break
+                if char == "\n":
+                    line += 1
+                value.append(char)
+                index += 1
+            else:
+                raise InstallError(f"{source}:{token_line}: unterminated quote")
+            tokens.append(Token("".join(value), token_start, index, token_line))
+            continue
+
+        token_start = index
+        token_line = line
+        value: list[str] = []
+        while index < length:
+            char = text[index]
+            if char in " \t\r\n;#":
+                break
+            if char == "\\":
+                if index + 1 >= length:
+                    raise InstallError(
+                        f"{source}:{token_line}: unterminated unquoted escape"
+                    )
+                value.extend((char, text[index + 1]))
+                index += 2
+                continue
+            if char == "{" and value and value[-1] == "$":
+                closing = text.find("}", index + 1)
+                if closing == -1:
+                    raise InstallError(
+                        f"{source}:{token_line}: unterminated variable expansion"
+                    )
+                value.append(text[index : closing + 1])
+                index = closing + 1
+                continue
+            if char == "{" and value:
+                quantifier = re.match(r"\{[0-9]+(?:,[0-9]*)?\}", text[index:])
+                if quantifier:
+                    value.append(quantifier.group(0))
+                    index += len(quantifier.group(0))
+                    continue
+            if char in "{}":
+                break
+            value.append(char)
+            index += 1
+        if not value:
+            raise InstallError(f"{source}:{line}: cannot tokenize input")
+        tokens.append(Token("".join(value), token_start, index, token_line))
+    return tokens
+
+
+def parse(text: str, source: str) -> tuple[Directive, ...]:
+    tokens = tokenize(text, source)
+    position = 0
+
+    def parse_scope(expect_close: bool) -> tuple[tuple[Directive, ...], Token | None]:
+        nonlocal position
+        directives: list[Directive] = []
+        while position < len(tokens):
+            if tokens[position].value == "}":
+                if not expect_close:
+                    raise InstallError(
+                        f"{source}:{tokens[position].line}: unexpected closing brace"
+                    )
+                closing = tokens[position]
+                position += 1
+                return tuple(directives), closing
+            start = tokens[position]
+            if start.symbol:
+                raise InstallError(
+                    f"{source}:{start.line}: expected directive, got {start.value!r}"
+                )
+            position += 1
+            args: list[str] = []
+            while position < len(tokens) and tokens[position].value not in (";", "{", "}"):
+                args.append(tokens[position].value)
+                position += 1
+            if position >= len(tokens):
+                raise InstallError(
+                    f"{source}:{start.line}: unterminated directive {start.value}"
+                )
+            terminator = tokens[position]
+            if terminator.value == "}":
+                raise InstallError(
+                    f"{source}:{start.line}: directive {start.value} lacks ';' or '{{'"
+                )
+            position += 1
+            if terminator.value == ";":
+                directives.append(
+                    Directive(
+                        start.value,
+                        tuple(args),
+                        None,
+                        start.start,
+                        terminator.end,
+                        start.line,
+                    )
+                )
+            else:
+                children, closing = parse_scope(True)
+                if closing is None:
+                    raise InstallError(f"{source}:{start.line}: unclosed block")
+                directives.append(
+                    Directive(
+                        start.value,
+                        tuple(args),
+                        children,
+                        start.start,
+                        closing.end,
+                        start.line,
+                    )
+                )
+        if expect_close:
+            raise InstallError(f"{source}: unclosed block")
+        return tuple(directives), None
+
+    document, _ = parse_scope(False)
+    if position != len(tokens):
+        raise InstallError(f"{source}: trailing parser state")
+    return document
+
+
+def direct(node: Directive, name: str) -> list[Directive]:
+    return [
+        child
+        for child in (node.children or ())
+        if child.name.lower() == name.lower()
+    ]
+
+
+def descendants(node: Directive) -> list[Directive]:
+    result: list[Directive] = []
+    for child in node.children or ():
+        result.append(child)
+        result.extend(descendants(child))
+    return result
+
+
+def is_tls_listener(node: Directive) -> bool:
+    for listener in direct(node, "listen"):
+        lowered = [argument.lower() for argument in listener.args]
+        endpoint_443 = any(
+            argument == "443"
+            or argument.endswith(":443")
+            for argument in lowered
+        )
+        if endpoint_443 and "ssl" in lowered:
+            return True
+    return False
+
+
+def unique_tls_server(document: Sequence[Directive], hostname: str) -> Directive:
+    candidates: list[Directive] = []
+    for node in document:
+        if node.name.lower() != "server" or node.children is None:
+            continue
+        names = {
+            argument.lower()
+            for directive in direct(node, "server_name")
+            for argument in directive.args
+        }
+        if hostname.lower() in names and is_tls_listener(node):
+            candidates.append(node)
+    if len(candidates) != 1:
+        raise InstallError(f"active config must contain exactly one TLS block for {hostname}")
+    return candidates[0]
+
+
+def tls_servers(document: Sequence[Directive], hostname: str) -> list[Directive]:
+    result: list[Directive] = []
+    for node in document:
+        if node.name.lower() != "server" or node.children is None:
+            continue
+        names = {
+            argument.lower()
+            for directive in direct(node, "server_name")
+            for argument in directive.args
+        }
+        if hostname.lower() in names and is_tls_listener(node):
+            result.append(node)
+    return result
+
+
+def validate_enabled_uniqueness(
+    documents: dict[Path, bytes], active: Path, candidate: bytes
+) -> None:
+    if active not in documents:
+        raise InstallError("active config is not present in sites-enabled inventory")
+    parsed: dict[Path, tuple[Directive, ...]] = {}
+    for path, content in documents.items():
+        selected = candidate if path == active else content
+        try:
+            text = selected.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise InstallError(f"enabled Nginx config is not valid UTF-8: {path}") from error
+        parsed[path] = parse(text, str(path))
+    for hostname in (WWW_HOST, IMG_HOST):
+        matches = [
+            (path, node)
+            for path, document in parsed.items()
+            for node in tls_servers(document, hostname)
+        ]
+        if len(matches) != 1 or matches[0][0] != active:
+            raise InstallError(
+                f"{hostname} must appear in exactly one enabled TLS block from {active}"
+            )
+
+
+def matching_include(node: Directive, include_path: str) -> list[Directive]:
+    all_nodes = [node, *descendants(node)]
+    return [
+        item
+        for item in all_nodes
+        if item.name.lower() == "include" and item.args == (include_path,)
+    ]
+
+
+def require_direct_include(node: Directive, include_path: str, hostname: str) -> Directive:
+    matches = matching_include(node, include_path)
+    direct_matches = [
+        item for item in direct(node, "include") if item.args == (include_path,)
+    ]
+    if len(matches) != 1 or len(direct_matches) != 1:
+        raise InstallError(
+            f"{hostname} must contain exactly one direct {include_path} include"
+        )
+    return direct_matches[0]
+
+
+def line_indentation(text: str, offset: int, source: str) -> str:
+    line_start = text.rfind("\n", 0, offset) + 1
+    prefix = text[line_start:offset]
+    if prefix.strip():
+        raise InstallError(f"{source}: security directive must begin on its own line")
+    return prefix
+
+
+def insertion_after_directive_line(
+    text: str, directive: Directive, indentation: str, source: str
+) -> tuple[int, str]:
+    newline = text.find("\n", directive.end)
+    line_end = len(text) if newline == -1 else newline
+    trailer = text[directive.end:line_end].lstrip()
+    if trailer and not trailer.startswith("#"):
+        raise InstallError(f"{source}: sensitive include must be alone on its line")
+    rendered = f"{indentation}include {LEGACY_INCLUDE};"
+    if newline == -1:
+        return line_end, "\n" + rendered
+    return newline + 1, rendered + "\n"
+
+
+def images_location(node: Directive) -> list[Directive]:
+    return [
+        child
+        for child in (node.children or ())
+        if child.name.lower() == "location" and child.args == ("^~", "/images/")
+    ]
+
+
+def location_path(node: Directive) -> tuple[str, str] | None:
+    if node.name.lower() != "location" or not node.args:
+        return None
+    if node.args[0] in ("=", "~", "~*", "^~"):
+        return (node.args[0], node.args[1] if len(node.args) > 1 else "")
+    return "", node.args[0]
+
+
+def is_images_location(modifier: str, path: str) -> bool:
+    lowered = path.lower().replace(r"\/", "/")
+    if modifier in ("~", "~*"):
+        return "/images" in lowered
+    return lowered == "/images" or lowered.startswith("/images/")
+
+
+SENSITIVE_EXACT_LOCATION_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        # Keep these expressions equivalent to
+        # shuzijun-sensitive-files-deny.conf.  Exact Nginx locations outrank
+        # regex locations, so every exact sensitive URI must be rejected.
+        r"(?:^|/)(?:wp-config\.php(?:$|[^/]+)|[^/]+\.php[^/]+$|"
+        r"[^/]+\.(?:bak|backup|old|orig|save|swp|tmp|copy|disabled|corrupt|"
+        r"corrupted|fixbak)(?:$|[._~-])|[^/]+\.before-[^/]+$|[^/]+~$)",
+        r"^/wp-content/.*\.php(?:$|/)",
+        r"^/images/.*\.php(?:$|/)",
+        r"(?:^|/)(?:\.env(?:\.[^/]*)?|\.(?:git|svn|hg)(?:/|$)|"
+        r"(?:composer\.(?:json|lock)|auth\.json|package(?:-lock)?\.json|"
+        r"yarn\.lock|pnpm-lock\.yaml)$|[^/]+\.(?:sql(?:\.gz)?|dump|pem|"
+        r"key|p8|p12|pfx|jks|log|zip|tar|tar\.gz|tgz|7z|rar)$|"
+        r"(?:credentials|service-account)[^/]*\.json$)",
+    )
+)
+
+
+def exact_location_is_sensitive(path: str) -> bool:
+    return any(pattern.search(path) for pattern in SENSITIVE_EXACT_LOCATION_PATTERNS)
+
+
+def validate_candidate_server(
+    node: Directive,
+    sensitive: Directive,
+    legacy: Directive,
+    hostname: str,
+) -> None:
+    roots = direct(node, "root")
+    if len(roots) != 1 or roots[0].args != (SITE_ROOT,):
+        raise InstallError(f"{hostname} must have exactly one fixed root {SITE_ROOT}")
+    children = list(node.children or ())
+    sensitive_index = children.index(sensitive)
+    legacy_index = children.index(legacy)
+    if sensitive_index >= legacy_index:
+        raise InstallError(f"{hostname} sensitive include must precede legacy include")
+    locations = [
+        index for index, child in enumerate(children) if child.name.lower() == "location"
+    ]
+    if locations and legacy_index >= min(locations):
+        raise InstallError(f"{hostname} security includes must precede every location")
+    for item in descendants(node):
+        parsed = location_path(item)
+        if parsed is None:
+            continue
+        modifier, path = parsed
+        if modifier == "^~":
+            raise InstallError(
+                f"{hostname} has a ^~ location that bypasses security regex rules"
+            )
+        if modifier == "=" and exact_location_is_sensitive(path):
+            raise InstallError(
+                f"{hostname} has an exact location that bypasses sensitive-file rules"
+            )
+        if is_images_location(modifier, path):
+            raise InstallError(
+                f"{hostname} contains an inline /images location after transformation"
+            )
+
+
+def require_security_order(node: Directive, sensitive: Directive, hostname: str) -> None:
+    children = list(node.children or ())
+    sensitive_index = children.index(sensitive)
+    location_indexes = [
+        index for index, child in enumerate(children) if child.name.lower() == "location"
+    ]
+    if location_indexes and sensitive_index >= min(location_indexes):
+        raise InstallError(f"{hostname} sensitive include must precede every location")
+
+
+def rewrite_active_config(
+    content: bytes,
+    expected_old_location_sha256: str | None,
+    source: str = "active config",
+) -> RewriteResult:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InstallError(f"{source} is not valid UTF-8") from error
+    if "\x00" in text:
+        raise InstallError(f"{source} contains a NUL byte")
+
+    document = parse(text, source)
+    www = unique_tls_server(document, WWW_HOST)
+    img = unique_tls_server(document, IMG_HOST)
+    if www is img:
+        raise InstallError("www and img must use distinct TLS server blocks")
+
+    www_sensitive = require_direct_include(www, SENSITIVE_INCLUDE, WWW_HOST)
+    img_sensitive = require_direct_include(img, SENSITIVE_INCLUDE, IMG_HOST)
+    require_security_order(www, www_sensitive, WWW_HOST)
+    require_security_order(img, img_sensitive, IMG_HOST)
+
+    www_legacy = matching_include(www, LEGACY_INCLUDE)
+    img_legacy = matching_include(img, LEGACY_INCLUDE)
+    old_images = images_location(img)
+    all_legacy = [
+        item
+        for node in document
+        for item in ([node, *descendants(node)])
+        if item.name.lower() == "include" and item.args == (LEGACY_INCLUDE,)
+    ]
+    all_old_images = [
+        item
+        for node in document
+        for item in ([node, *descendants(node)])
+        if item.name.lower() == "location" and item.args == ("^~", "/images/")
+    ]
+
+    desired_state = len(www_legacy) == 1 and len(img_legacy) == 1
+    old_state = not www_legacy and not img_legacy
+    if desired_state:
+        www_direct = [
+            item for item in direct(www, "include") if item.args == (LEGACY_INCLUDE,)
+        ]
+        img_direct = [
+            item for item in direct(img, "include") if item.args == (LEGACY_INCLUDE,)
+        ]
+        if (
+            len(all_legacy) != 2
+            or len(www_direct) != 1
+            or len(img_direct) != 1
+            or all_old_images
+        ):
+            raise InstallError("active config has a partial or nested Build 34 routing state")
+        for node, sensitive, legacy, hostname in (
+            (www, www_sensitive, www_direct[0], WWW_HOST),
+            (img, img_sensitive, img_direct[0], IMG_HOST),
+        ):
+            children = list(node.children or ())
+            sensitive_index = children.index(sensitive)
+            legacy_index = children.index(legacy)
+            if hostname == WWW_HOST and legacy_index != sensitive_index + 1:
+                raise InstallError(f"{hostname} legacy include is not immediately after sensitive")
+            validate_candidate_server(node, sensitive, legacy, hostname)
+        return RewriteResult(content, "already-current", None)
+
+    if not old_state:
+        raise InstallError("active config has a partial Build 34 routing state")
+    if len(old_images) != 1 or len(all_old_images) != 1:
+        raise InstallError("img TLS block must contain exactly one old location ^~ /images/")
+    old_location = old_images[0]
+    old_location_bytes = text[old_location.start : old_location.end].encode("utf-8")
+    observed_old_hash = sha256(old_location_bytes)
+    if (
+        expected_old_location_sha256 is not None
+        and observed_old_hash != expected_old_location_sha256
+    ):
+        raise InstallError(
+            "old /images/ location drifted: "
+            f"expected {expected_old_location_sha256}, observed {observed_old_hash}"
+        )
+
+    img_children = list(img.children or ())
+    old_index = img_children.index(old_location)
+    img_sensitive_index = img_children.index(img_sensitive)
+    first_location_index = min(
+        index
+        for index, child in enumerate(img_children)
+        if child.name.lower() == "location"
+    )
+    if old_index != first_location_index or img_sensitive_index >= old_index:
+        raise InstallError(
+            "old img /images/ block must be the first location after the sensitive include"
+        )
+
+    www_indent = line_indentation(text, www_sensitive.start, source)
+    line_indentation(text, old_location.start, source)
+    insert_at, inserted_include = insertion_after_directive_line(
+        text, www_sensitive, www_indent, source
+    )
+    edits = [
+        (
+            insert_at,
+            insert_at,
+            inserted_include,
+        ),
+        (
+            old_location.start,
+            old_location.end,
+            f"include {LEGACY_INCLUDE};",
+        ),
+    ]
+    rewritten = text
+    for start, end, replacement in sorted(edits, reverse=True):
+        rewritten = rewritten[:start] + replacement + rewritten[end:]
+
+    # Parse the exact candidate again and require the idempotent branch to
+    # accept it.  This also catches offset/whitespace mistakes in the rewrite.
+    candidate = rewritten.encode("utf-8")
+    verified = rewrite_active_config(candidate, expected_old_location_sha256, source)
+    if verified.state != "already-current" or verified.content != candidate:
+        raise InstallError("internal candidate verification failed")
+    return RewriteResult(candidate, "rewrite-required", observed_old_hash)
+
+
+class RealFilesystem:
+    def require_secure_directory(self, path: Path, owner_uid: int, label: str) -> None:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError as error:
+            raise InstallError(f"{label} is missing: {path}") from error
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise InstallError(f"{label} must be a real directory: {path}")
+        if metadata.st_uid != owner_uid or stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise InstallError(f"{label} has unsafe ownership or permissions: {path}")
+
+    @staticmethod
+    def require_root_only_directory(path: Path, label: str) -> None:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError as error:
+            raise InstallError(f"{label} is missing: {path}") from error
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or stat.S_ISLNK(metadata.st_mode)
+            or metadata.st_uid != 0
+            or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise InstallError(f"{label} must be a root:root mode 0700 directory: {path}")
+
+    def snapshot(self, path: Path, allow_absent: bool = False) -> FileState:
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            if allow_absent:
+                return FileState("absent")
+            raise InstallError(f"required path is missing: {path}")
+        if stat.S_ISLNK(metadata.st_mode):
+            return FileState(
+                "symlink",
+                mode=stat.S_IMODE(metadata.st_mode),
+                uid=metadata.st_uid,
+                gid=metadata.st_gid,
+                target=os.readlink(path),
+                nlink=metadata.st_nlink,
+            )
+        if not stat.S_ISREG(metadata.st_mode):
+            raise InstallError(f"path must be a regular file or reviewed symlink: {path}")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            closed = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        ) != (
+            closed.st_dev,
+            closed.st_ino,
+            closed.st_size,
+            closed.st_mtime_ns,
+        ):
+            raise InstallError(f"file changed while it was being read: {path}")
+        return FileState(
+            "file",
+            b"".join(chunks),
+            stat.S_IMODE(opened.st_mode),
+            opened.st_uid,
+            opened.st_gid,
+            nlink=opened.st_nlink,
+        )
+
+    @staticmethod
+    def _temporary(path: Path, suffix: str) -> Path:
+        return path.parent / f".{path.name}.{suffix}.{os.getpid()}.{secrets.token_hex(8)}"
+
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def atomic_write(self, path: Path, data: bytes, mode: int, uid: int, gid: int) -> None:
+        temporary = self._temporary(path, "new")
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise InstallError(f"short write while creating {path}")
+                view = view[written:]
+            os.fsync(descriptor)
+            os.fchmod(descriptor, mode)
+            os.fchown(descriptor, uid, gid)
+            os.fsync(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+            raise
+        else:
+            os.close(descriptor)
+        try:
+            os.replace(temporary, path)
+            self._sync_directory(path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def atomic_symlink(self, path: Path, target: str, uid: int, gid: int) -> None:
+        temporary = self._temporary(path, "link")
+        os.symlink(target, temporary)
+        try:
+            os.lchown(temporary, uid, gid)
+            os.replace(temporary, path)
+            self._sync_directory(path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def restore(self, path: Path, state: FileState) -> None:
+        if state.kind == "file":
+            self.atomic_write(path, state.data, state.mode, state.uid, state.gid)
+        elif state.kind == "symlink":
+            self.atomic_symlink(path, state.target, state.uid, state.gid)
+        elif state.kind == "absent":
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                return
+            self._sync_directory(path.parent)
+        else:
+            raise InstallError(f"cannot restore unknown state for {path}")
+
+    def create_backup(self, path: Path, states: dict[str, FileState]) -> None:
+        parent = path.parent
+        if not parent.exists():
+            grandparent = parent.parent
+            self.require_secure_directory(grandparent, 0, "backup grandparent")
+            os.mkdir(parent, 0o700)
+            os.chown(parent, 0, 0)
+            self._sync_directory(grandparent)
+        self.require_root_only_directory(parent, "backup root")
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError as error:
+            raise InstallError(f"backup transaction already exists: {path}") from error
+        os.chown(path, 0, 0)
+        self.require_root_only_directory(path, "backup transaction")
+        self._sync_directory(parent)
+        manifest: dict[str, dict[str, object]] = {}
+        for label, state in states.items():
+            manifest[label] = {
+                "kind": state.kind,
+                "mode": state.mode,
+                "uid": state.uid,
+                "gid": state.gid,
+                "target": state.target,
+                "nlink": state.nlink,
+                "sha256": sha256(state.data) if state.kind == "file" else None,
+            }
+            if state.kind == "file":
+                self.atomic_write(path / f"{label}.file", state.data, 0o600, 0, 0)
+            elif state.kind == "symlink":
+                self.atomic_write(
+                    path / f"{label}.symlink-target",
+                    (state.target + "\n").encode("utf-8"),
+                    0o600,
+                    0,
+                    0,
+                )
+            else:
+                self.atomic_write(path / f"{label}.absent", b"\n", 0o600, 0, 0)
+        manifest_data = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
+        self.atomic_write(path / "manifest.json", manifest_data, 0o600, 0, 0)
+        self._sync_directory(path)
+        self._sync_directory(parent)
+
+    def resolve(self, path: Path) -> Path:
+        return path.resolve(strict=True)
+
+    @contextlib.contextmanager
+    def lock(self, path: Path):
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise InstallError("another Build 34 Nginx installation is running") from error
+            yield
+        finally:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+    def enabled_documents(self, path: Path) -> dict[Path, bytes]:
+        result: dict[Path, bytes] = {}
+        try:
+            entries = sorted(path.iterdir(), key=lambda item: item.name)
+        except OSError as error:
+            raise InstallError(f"cannot inventory sites-enabled: {path}") from error
+        for entry in entries:
+            try:
+                metadata = entry.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(metadata.st_mode):
+                continue
+            state = self.snapshot(entry, allow_absent=True)
+            if state.kind == "absent":
+                continue
+            if state.kind == "symlink":
+                try:
+                    resolved = self.resolve(entry)
+                except OSError as error:
+                    raise InstallError(f"broken enabled Nginx symlink: {entry}") from error
+                state = self.snapshot(resolved)
+            if state.kind != "file":
+                continue
+            result[entry] = state.data
+        return result
+
+
+class SubprocessRunner:
+    def run(self, command: Sequence[str]) -> None:
+        completed = subprocess.run(
+            list(command),
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"},
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.strip().splitlines()
+            suffix = f": {detail[-1]}" if detail else ""
+            raise InstallError(f"command failed ({' '.join(command)}){suffix}")
+
+
+def require_root_owned_file(state: FileState, path: Path, label: str) -> None:
+    if state.kind != "file":
+        raise InstallError(f"{label} must be a regular non-symlink file: {path}")
+    if state.uid != 0 or state.mode & 0o022 or state.nlink != 1:
+        raise InstallError(f"{label} must be root-owned and not group/other writable: {path}")
+
+
+def require_root_config(state: FileState, path: Path, label: str) -> None:
+    require_root_owned_file(state, path, label)
+    if state.gid != 0 or state.mode != 0o644:
+        raise InstallError(f"{label} must be root:root mode 0644: {path}")
+
+
+def expected_state_hash(state: FileState, expected: str, label: str) -> None:
+    if expected == "absent":
+        if state.kind != "absent":
+            raise InstallError(f"{label} drifted: expected absent")
+        return
+    expected = validate_sha256(expected, f"{label} expected SHA-256")
+    if state.kind != "file":
+        raise InstallError(f"{label} drifted: expected a regular file")
+    observed = sha256(state.data)
+    if observed != expected:
+        raise InstallError(f"{label} drifted: expected {expected}, observed {observed}")
+
+
+class Installer:
+    def __init__(
+        self,
+        filesystem: Filesystem,
+        runner: CommandRunner,
+        *,
+        owner_uid: int = 0,
+        nginx_test: Sequence[str] = NGINX_TEST,
+        nginx_reload: Sequence[str] = NGINX_RELOAD,
+        nginx_active: Sequence[str] = NGINX_ACTIVE,
+    ) -> None:
+        self.fs = filesystem
+        self.runner = runner
+        self.owner_uid = owner_uid
+        self.nginx_test = tuple(nginx_test)
+        self.nginx_reload = tuple(nginx_reload)
+        self.nginx_active = tuple(nginx_active)
+
+    def install(
+        self,
+        *,
+        active: Path,
+        available: Path,
+        sensitive_source: Path,
+        legacy_source: Path,
+        sensitive_target: Path,
+        legacy_target: Path,
+        expected_active_sha256: str,
+        expected_available_sha256: str,
+        expected_sensitive_target: str,
+        expected_legacy_target: str,
+        sensitive_source_sha256: str,
+        legacy_source_sha256: str,
+        expected_old_location_sha256: str | None,
+        backup_dir: Path,
+        apply: bool,
+    ) -> RewriteResult:
+        for path, label in (
+            (active, "active config"),
+            (available, "sites-available config"),
+            (sensitive_source, "sensitive snippet input"),
+            (legacy_source, "legacy snippet input"),
+            (sensitive_target, "sensitive snippet target"),
+            (legacy_target, "legacy snippet target"),
+            (backup_dir, "backup transaction"),
+        ):
+            if not path.is_absolute():
+                raise InstallError(f"{label} path must be absolute")
+        if active == available or sensitive_target == legacy_target:
+            raise InstallError("configuration and snippet target paths must be distinct")
+        for directory, label in (
+            (active.parent, "sites-enabled directory"),
+            (available.parent, "sites-available directory"),
+            (sensitive_target.parent, "snippet directory"),
+        ):
+            self.fs.require_secure_directory(directory, self.owner_uid, label)
+        if legacy_target.parent != sensitive_target.parent:
+            self.fs.require_secure_directory(
+                legacy_target.parent, self.owner_uid, "legacy snippet directory"
+            )
+
+        active_state = self.fs.snapshot(active)
+        available_state = self.fs.snapshot(available)
+        sensitive_input = self.fs.snapshot(sensitive_source)
+        legacy_input = self.fs.snapshot(legacy_source)
+        sensitive_before = self.fs.snapshot(sensitive_target, allow_absent=True)
+        legacy_before = self.fs.snapshot(legacy_target, allow_absent=True)
+
+        require_root_config(available_state, available, "sites-available config")
+        require_root_owned_file(sensitive_input, sensitive_source, "sensitive snippet input")
+        require_root_owned_file(legacy_input, legacy_source, "legacy snippet input")
+        for state, path, label in (
+            (sensitive_before, sensitive_target, "sensitive snippet target"),
+            (legacy_before, legacy_target, "legacy snippet target"),
+        ):
+            if state.kind != "absent":
+                require_root_owned_file(state, path, label)
+        if active_state.kind == "file":
+            require_root_config(active_state, active, "active config")
+            active_data = active_state.data
+        elif active_state.kind == "symlink":
+            if active_state.uid != 0 or active_state.gid != 0 or active_state.nlink != 1:
+                raise InstallError("active symlink must be root:root with one link")
+            if self.fs.resolve(active) != self.fs.resolve(available):
+                raise InstallError("active symlink does not resolve to canonical sites-available")
+            active_data = available_state.data
+        else:
+            raise InstallError("active config must be a regular file or canonical symlink")
+
+        expected_active_sha256 = validate_sha256(
+            expected_active_sha256, "active config expected SHA-256"
+        )
+        expected_available_sha256 = validate_sha256(
+            expected_available_sha256, "sites-available expected SHA-256"
+        )
+        if sha256(active_data) != expected_active_sha256:
+            raise InstallError(
+                "active config drifted: "
+                f"expected {expected_active_sha256}, observed {sha256(active_data)}"
+            )
+        expected_state_hash(
+            available_state, expected_available_sha256, "sites-available config"
+        )
+        expected_state_hash(
+            sensitive_before, expected_sensitive_target, "sensitive snippet target"
+        )
+        expected_state_hash(legacy_before, expected_legacy_target, "legacy snippet target")
+        sensitive_source_sha256 = validate_sha256(
+            sensitive_source_sha256, "sensitive snippet input SHA-256"
+        )
+        legacy_source_sha256 = validate_sha256(
+            legacy_source_sha256, "legacy snippet input SHA-256"
+        )
+        if sha256(sensitive_input.data) != sensitive_source_sha256:
+            raise InstallError("sensitive snippet input SHA-256 mismatch")
+        if sha256(legacy_input.data) != legacy_source_sha256:
+            raise InstallError("legacy snippet input SHA-256 mismatch")
+        if expected_old_location_sha256 is not None:
+            expected_old_location_sha256 = validate_sha256(
+                expected_old_location_sha256, "old /images/ location SHA-256"
+            )
+        elif apply:
+            raise InstallError(
+                "--expected-old-images-location-sha256 is mandatory with --apply"
+            )
+        rewrite = rewrite_active_config(
+            active_data, expected_old_location_sha256, str(active)
+        )
+        validate_enabled_uniqueness(
+            self.fs.enabled_documents(active.parent), active, rewrite.content
+        )
+
+        originals = {
+            "active": active_state,
+            "available": available_state,
+            "sensitive-snippet": sensitive_before,
+            "legacy-snippet": legacy_before,
+        }
+        if not apply:
+            return rewrite
+
+        with self.fs.lock(active.parent):
+            return self._apply_transaction(
+                active=active,
+                available=available,
+                sensitive_source=sensitive_source,
+                legacy_source=legacy_source,
+                sensitive_target=sensitive_target,
+                legacy_target=legacy_target,
+                sensitive_input=sensitive_input,
+                legacy_input=legacy_input,
+                rewrite=rewrite,
+                originals=originals,
+                backup_dir=backup_dir,
+            )
+
+    def _apply_transaction(
+        self,
+        *,
+        active: Path,
+        available: Path,
+        sensitive_source: Path,
+        legacy_source: Path,
+        sensitive_target: Path,
+        legacy_target: Path,
+        sensitive_input: FileState,
+        legacy_input: FileState,
+        rewrite: RewriteResult,
+        originals: dict[str, FileState],
+        backup_dir: Path,
+    ) -> RewriteResult:
+        active_state = originals["active"]
+        available_state = originals["available"]
+        sensitive_before = originals["sensitive-snippet"]
+        legacy_before = originals["legacy-snippet"]
+
+        # The lock coordinates all copies of this installer.  Re-read every
+        # byte under the lock before creating the backup or modifying a path.
+        if self.fs.snapshot(active) != active_state:
+            raise InstallError("active config changed after validation")
+        if self.fs.snapshot(available) != available_state:
+            raise InstallError("sites-available changed after validation")
+        if self.fs.snapshot(sensitive_target, allow_absent=True) != sensitive_before:
+            raise InstallError("sensitive snippet target changed after validation")
+        if self.fs.snapshot(legacy_target, allow_absent=True) != legacy_before:
+            raise InstallError("legacy snippet target changed after validation")
+        if self.fs.snapshot(sensitive_source) != sensitive_input:
+            raise InstallError("sensitive snippet input changed after validation")
+        if self.fs.snapshot(legacy_source) != legacy_input:
+            raise InstallError("legacy snippet input changed after validation")
+        validate_enabled_uniqueness(
+            self.fs.enabled_documents(active.parent), active, rewrite.content
+        )
+
+        # Establish a healthy, reloadable baseline before the first backup or
+        # write.  A pre-existing invalid configuration is not a deployment
+        # rollback failure and must be reported without mutating disk.
+        self.runner.run(self.nginx_test)
+        self.runner.run(self.nginx_active)
+        self.fs.create_backup(backup_dir, originals)
+        try:
+            self.fs.atomic_write(
+                sensitive_target, sensitive_input.data, 0o644, self.owner_uid, 0
+            )
+            self.fs.atomic_write(
+                legacy_target, legacy_input.data, 0o644, self.owner_uid, 0
+            )
+            self.fs.atomic_write(
+                available,
+                rewrite.content,
+                0o644,
+                self.owner_uid,
+                0,
+            )
+            relative_target = os.path.relpath(available, active.parent)
+            self.fs.atomic_symlink(active, relative_target, self.owner_uid, 0)
+            self._confirm(
+                active,
+                available,
+                sensitive_target,
+                legacy_target,
+                rewrite.content,
+                sensitive_input.data,
+                legacy_input.data,
+            )
+            validate_enabled_uniqueness(
+                self.fs.enabled_documents(active.parent), active, rewrite.content
+            )
+            self.runner.run(self.nginx_test)
+            self.runner.run(self.nginx_reload)
+            self.runner.run(self.nginx_active)
+            self._confirm(
+                active,
+                available,
+                sensitive_target,
+                legacy_target,
+                rewrite.content,
+                sensitive_input.data,
+                legacy_input.data,
+            )
+        except BaseException as deployment_error:
+            try:
+                # Restore the active entry first so subsequent file restores
+                # cannot leave a new symlink observing stale available bytes.
+                for label, path in (
+                    ("active", active),
+                    ("available", available),
+                    ("sensitive-snippet", sensitive_target),
+                    ("legacy-snippet", legacy_target),
+                ):
+                    self.fs.restore(path, originals[label])
+                self.runner.run(self.nginx_test)
+                self.runner.run(self.nginx_reload)
+                self.runner.run(self.nginx_active)
+                for label, path in (
+                    ("active", active),
+                    ("available", available),
+                    ("sensitive-snippet", sensitive_target),
+                    ("legacy-snippet", legacy_target),
+                ):
+                    if self.fs.snapshot(path, allow_absent=True) != originals[label]:
+                        raise InstallError(f"rollback did not exactly restore {label}")
+            except BaseException as rollback_error:
+                raise InstallError(
+                    f"deployment failed ({deployment_error}); rollback failed "
+                    f"({rollback_error}); recover from {backup_dir}"
+                ) from rollback_error
+            raise InstallError(
+                f"deployment failed and exact rollback completed: {deployment_error}"
+            ) from deployment_error
+        return rewrite
+
+    def _confirm(
+        self,
+        active: Path,
+        available: Path,
+        sensitive_target: Path,
+        legacy_target: Path,
+        expected_config: bytes,
+        expected_sensitive: bytes,
+        expected_legacy: bytes,
+    ) -> None:
+        active_state = self.fs.snapshot(active)
+        if active_state.kind != "symlink":
+            raise InstallError("active entry is not the canonical symlink after reload")
+        if (
+            active_state.uid != self.owner_uid
+            or active_state.gid != 0
+            or active_state.nlink != 1
+        ):
+            raise InstallError("active symlink postcondition ownership is unsafe")
+        if self.fs.resolve(active) != self.fs.resolve(available):
+            raise InstallError("active symlink does not resolve to sites-available after reload")
+        checks = (
+            (self.fs.snapshot(available), expected_config, "sites-available"),
+            (
+                self.fs.snapshot(sensitive_target),
+                expected_sensitive,
+                "sensitive snippet",
+            ),
+            (self.fs.snapshot(legacy_target), expected_legacy, "legacy snippet"),
+        )
+        for state, expected, label in checks:
+            if state.kind != "file" or state.data != expected:
+                raise InstallError(f"{label} postcondition mismatch")
+            if (
+                state.uid != self.owner_uid
+                or state.gid != 0
+                or state.mode != 0o644
+                or state.nlink != 1
+            ):
+                raise InstallError(f"{label} postcondition permissions are unsafe")
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description="Install Build 34 Nginx routing from the active config transactionally"
+    )
+    mode = result.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="validate only (default)")
+    mode.add_argument("--apply", action="store_true", help="back up and apply changes")
+    result.add_argument("--sensitive-source", type=Path, required=True)
+    result.add_argument("--legacy-source", type=Path, required=True)
+    result.add_argument("--expected-active-sha256", required=True)
+    result.add_argument("--expected-available-sha256", required=True)
+    result.add_argument(
+        "--expected-sensitive-target",
+        required=True,
+        metavar="SHA256|absent",
+    )
+    result.add_argument(
+        "--expected-legacy-target", required=True, metavar="SHA256|absent"
+    )
+    result.add_argument("--sensitive-source-sha256", required=True)
+    result.add_argument("--legacy-source-sha256", required=True)
+    result.add_argument(
+        "--expected-old-images-location-sha256",
+        help="required for --apply; omit once in dry-run to inventory the exact old block",
+    )
+    result.add_argument("--backup-dir", type=Path)
+    return result
+
+
+def require_backup_transaction_path(path: Path) -> None:
+    if (
+        not path.is_absolute()
+        or path.parent != DEFAULT_BACKUP_ROOT
+        or not BACKUP_NAME_PATTERN.fullmatch(path.name)
+    ):
+        raise InstallError(
+            f"--backup-dir must be a direct child of {DEFAULT_BACKUP_ROOT}"
+        )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    arguments = parser().parse_args(argv)
+    if os.geteuid() != 0:
+        print("install-build34-nginx-routing: must run as root", file=sys.stderr)
+        return 1
+    backup_dir = arguments.backup_dir
+    if backup_dir is None:
+        backup_dir = DEFAULT_BACKUP_ROOT / (
+            time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
+        )
+    try:
+        require_backup_transaction_path(backup_dir)
+    except (InstallError, OSError) as error:
+        print(f"install-build34-nginx-routing: {error}", file=sys.stderr)
+        return 1
+    installer = Installer(RealFilesystem(), SubprocessRunner())
+    try:
+        outcome = installer.install(
+            active=DEFAULT_ACTIVE,
+            available=DEFAULT_AVAILABLE,
+            sensitive_source=arguments.sensitive_source,
+            legacy_source=arguments.legacy_source,
+            sensitive_target=DEFAULT_SENSITIVE_TARGET,
+            legacy_target=DEFAULT_LEGACY_TARGET,
+            expected_active_sha256=arguments.expected_active_sha256,
+            expected_available_sha256=arguments.expected_available_sha256,
+            expected_sensitive_target=arguments.expected_sensitive_target,
+            expected_legacy_target=arguments.expected_legacy_target,
+            sensitive_source_sha256=arguments.sensitive_source_sha256,
+            legacy_source_sha256=arguments.legacy_source_sha256,
+            expected_old_location_sha256=arguments.expected_old_images_location_sha256,
+            backup_dir=backup_dir,
+            apply=arguments.apply,
+        )
+    except (InstallError, OSError) as error:
+        print(f"install-build34-nginx-routing: {error}", file=sys.stderr)
+        return 1
+    mode = "apply" if arguments.apply else "dry-run"
+    print(
+        "install-build34-nginx-routing: "
+        f"{mode} passed state={outcome.state} "
+        f"candidate_sha256={sha256(outcome.content)}"
+    )
+    if outcome.old_location_sha256 is not None:
+        print(
+            "install-build34-nginx-routing: "
+            f"old_images_location_sha256={outcome.old_location_sha256}"
+        )
+    if arguments.apply:
+        print(f"install-build34-nginx-routing: backup={backup_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

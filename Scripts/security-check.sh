@@ -55,16 +55,23 @@ fi
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/entitlement-verifier/app.py").read_text(encoding="utf-8"))'
 python3 -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8")) for path in pathlib.Path("Server/operations").glob("*.py")]'
 python3 Server/tests/app-content-release-contract-test.py
+python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py
+python3 Server/tests/bootstrap-legacy-app-content-release-contract-test.py
 python3 Server/tests/sync-script-contract-test.py
+python3 Server/tests/nginx-server-block-contract-test.py
+python3 Server/tests/install-build34-nginx-routing-contract-test.py
+python3 Server/tests/nginx-sensitive-routing-smoke-contract-test.py
 bash -n Server/operations/deploy-app-content-release
+bash -n Server/operations/bootstrap-legacy-app-content-release
 bash -n Server/operations/apply-shuzijun-sync
 bash -n Server/operations/sync-to-backup
 bash -n Server/operations/verify-webroot-security
 bash -n Server/tests/fan-api-smoke.sh
+bash -n Server/tests/nginx-sensitive-routing-smoke.sh
 
 grep -qF 'wp-config\.php' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF '\.php[^/]+$' Server/nginx/shuzijun-sensitive-files-deny.conf
-grep -qF 'wp-content/(?:uploads|cache)' Server/nginx/shuzijun-sensitive-files-deny.conf
+grep -qF 'location ~* ^/wp-content/.*\.php(?:$|/) {' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF '^/images/.*\.php' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF '\.env' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF '|p8|' Server/nginx/shuzijun-sensitive-files-deny.conf
