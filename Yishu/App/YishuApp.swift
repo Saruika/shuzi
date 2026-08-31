@@ -6,6 +6,7 @@ struct YishuApp: App {
     @StateObject private var favorites = FavoritesStore()
     @StateObject private var recentlyViewed = RecentlyViewedStore()
     @StateObject private var adminSession = AdminSessionStore()
+    @StateObject private var fanAccount = FanAccountStore()
     @State private var localWeather = LocalWeatherStore()
 
     init() {
@@ -59,6 +60,7 @@ struct YishuApp: App {
             .environmentObject(favorites)
             .environmentObject(recentlyViewed)
             .environmentObject(adminSession)
+            .environmentObject(fanAccount)
             .environment(localWeather)
     }
 }

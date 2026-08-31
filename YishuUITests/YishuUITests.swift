@@ -72,13 +72,31 @@ final class YishuUITests: XCTestCase {
         app.navigationBars.buttons.firstMatch.tap()
         assertExists("about-heading", in: app)
 
+        let fanEntry = element("about-fan-account", in: app)
+        scrollToElement(fanEntry, in: app)
+        XCTAssertTrue(fanEntry.isHittable, "粉丝账号入口不可点击")
+        fanEntry.tap()
+        assertExists("fan-account-heading", in: app)
+        assertExists("fan-register-douyin-id", in: app)
+        let privacyPolicy = element("fan-register-privacy-policy", in: app)
+        scrollToElement(privacyPolicy, in: app)
+        XCTAssertTrue(privacyPolicy.isHittable, "注册前隐私政策入口不可点击")
+        privacyPolicy.tap()
+        assertExists("privacy-policy-heading", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        assertExists("fan-account-heading", in: app)
+        attachScreenshot(named: "09-fan-registration", app: app)
+
+        app.navigationBars.buttons.firstMatch.tap()
+        assertExists("about-heading", in: app)
+
         let adminEntry = element("about-admin-entry", in: app)
         scrollToElement(adminEntry, in: app)
         XCTAssertTrue(adminEntry.isHittable, "管理员入口不可点击")
         adminEntry.tap()
         assertExists("admin-login-heading", in: app)
         XCTAssertTrue(app.secureTextFields["管理员访问码"].waitForExistence(timeout: 5))
-        attachScreenshot(named: "09-admin-login", app: app)
+        attachScreenshot(named: "10-admin-login", app: app)
     }
 
     func testIPadSupportsLandscapeAndKeepsAdaptiveContentVisible() throws {
@@ -117,6 +135,7 @@ final class YishuUITests: XCTestCase {
         app.launchArguments = [
             "-skip-launch-poster-for-visual-testing",
             "-disable-screen-protection-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
         ] + arguments
         app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
         app.launch()

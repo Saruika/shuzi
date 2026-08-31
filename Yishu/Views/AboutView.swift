@@ -4,6 +4,7 @@ struct AboutView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @Environment(LocalWeatherStore.self) private var localWeather
     @EnvironmentObject private var portfolioStore: PortfolioStore
+    @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
@@ -49,7 +50,9 @@ struct AboutView: View {
             biography
             profileActions
             links
+            fanAccountAccess
             copyrightNotice
+            privacyAccess
             adminAccess
             weatherAttribution
         }
@@ -213,6 +216,40 @@ struct AboutView: View {
         .padding(.bottom, 8)
     }
 
+    private var fanAccountAccess: some View {
+        NavigationLink {
+            FanAccountView()
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: fanAccount.isAuthenticated
+                      ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.plus")
+                    .font(.system(size: 19))
+                    .foregroundStyle(AppTheme.gold)
+                    .frame(width: 38, height: 38)
+                    .background(.white.opacity(0.055), in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(fanAccount.profile?.displayName ?? "粉丝账号")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(fanAccount.profile?.identityCode ?? "注册身份码 · 获取远程权限")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.muted)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.38))
+            }
+            .foregroundStyle(AppTheme.warmWhite)
+            .padding(15)
+            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("about-fan-account")
+        .padding(.horizontal, 16)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+    }
+
     private var adminAccess: some View {
         NavigationLink {
             AdminView()
@@ -232,6 +269,39 @@ struct AboutView: View {
         .padding(.horizontal, 20)
         .padding(.top, 2)
         .padding(.bottom, localWeather.attributionLegalURL == nil ? 70 : 12)
+    }
+
+    private var privacyAccess: some View {
+        NavigationLink {
+            PrivacyPolicyView()
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "hand.raised")
+                    .font(.system(size: 16))
+                    .foregroundStyle(AppTheme.gold)
+                    .frame(width: 34, height: 34)
+                    .background(.white.opacity(0.055), in: Circle())
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("隐私政策与数据选择")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("查看数据用途 · 账号可在 App 内永久删除")
+                        .font(.caption2)
+                        .foregroundStyle(AppTheme.muted)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.35))
+            }
+            .foregroundStyle(AppTheme.warmWhite)
+            .padding(14)
+            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("about-privacy-policy")
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 8)
     }
 
     @ViewBuilder

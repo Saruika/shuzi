@@ -2,7 +2,7 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前版本：`1.3.15 (26)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前版本：`1.3.16 (27)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
@@ -11,13 +11,16 @@
 - **影视**：内嵌 Showreel 与公开影视履历，支持静音和暂停，不弹出系统全屏播放器。
 - **收藏**：作品收藏保存在本机，授权暂时失效时也不删除用户的收藏记录。
 - **关于**：艺人简介、社交平台、合作邀约和管理员入口。
+- **粉丝账号**：可选注册，必填抖音 ID，生成独立身份码和安装记录码；用户可在 App 内永久删除账号与个人资料。
 - **内容工作台**：管理员可直接在手机内替换开屏、首页轮播、关于页人物图、相册照片、Showreel 与影视海报，并调整轮播和相册顺序。
+- **用户权限**：管理员可按昵称、抖音 ID 或身份码查找粉丝，远程分配白名单内的 App 权限或暂停账号。
 
 ## 作品访问规则
 
 | 身份 | 可见内容 | 获取方式 |
 | --- | --- | --- |
-| 普通用户 | 全部已发布作品 | App 专用内容清单 |
+| 游客 | 全部已发布作品（TestFlight 开放策略） | App 专用内容清单 |
+| 注册粉丝 | 全部已发布作品、粉丝身份和定向权限 | 可选粉丝账号 |
 | 管理员 | 全部作品与内容编辑 | WordPress Application Password |
 
 TestFlight 测试阶段已暂停付费订阅，App 全量展示已发布相册。完整在线清单只在运行时使用，磁盘目录缓存仍只保留每册 3 张离线预览。官网作品页、附件页及通用 WordPress 媒体接口继续关闭，管理员编辑能力保持独立鉴权。
@@ -55,6 +58,7 @@ xcodebuild -project Yishu.xcodeproj \
 ## 内容与服务端
 
 - [`ADMIN_CONTENT.md`](ADMIN_CONTENT.md)：管理员入口、上传约束与内容发布流程。
+- [`FAN_ACCOUNTS.md`](FAN_ACCOUNTS.md)：粉丝注册、必填抖音 ID、身份/安装码、远程权限、会话和数据删除说明。
 - [`SUBSCRIPTION_SETUP.md`](SUBSCRIPTION_SETUP.md)：人民币 3 元/月订阅商品、Sandbox 和 TestFlight 验收步骤。
 - [`Server/entitlement-verifier/README.md`](Server/entitlement-verifier/README.md)：Apple 订阅凭证校验服务。
 - [`Server/nginx/README.md`](Server/nginx/README.md)：REST 认证头转发配置。
@@ -65,6 +69,8 @@ xcodebuild -project Yishu.xcodeproj \
 ## 安全与隐私
 
 - 管理员凭据仅保存在 iOS Keychain，不随备份迁移。
+- 粉丝密码只保存标准哈希；原会话令牌仅在 ThisDeviceOnly Keychain，服务器只保存令牌和随机安装标识的 SHA-256 哈希。
+- 粉丝注册是可选的；注册前显示数据用途并获取明示确认，关于页提供隐私政策，账号页提供无需联系客服的完整账号删除。
 - 完整图片 URL 仅在运行时内存中使用，磁盘目录缓存每册只保留 3 张离线预览，不后台预取整册照片。
 - 录屏、投屏或 App 失去活动状态时会显示黑色保护遮罩。
 - 位置仅在用户主动启用天气时请求；定位管理器采用约三公里精度，不持久化位置，也不在后台持续定位。天气由 Apple WeatherKit 提供，并在“关于”页展示 Apple 要求的数据来源与许可入口。
@@ -72,6 +78,15 @@ xcodebuild -project Yishu.xcodeproj \
 - App 明示照片与影像均已取得合法展示授权；相关版权和肖像权归各自权利人所有，未经许可不得下载、复制、传播、改编或商业使用。
 
 截图保护是 iOS 系统能力限制下的尽力防护，无法阻止另一台设备拍摄屏幕；已公开过的 WordPress 原图在迁移到私有对象存储前，也不能承诺绝对无法下载。完整安全边界和上线前 P0 清单见 [`SECURITY.md`](SECURITY.md)。
+
+## v1.3.16
+
+- 新增可选粉丝注册/登录：昵称、密码和抖音 ID（必填），每个账号拥有服务器 UUID、粉丝身份码和稳定的本机安装记录码。
+- 管理工作台新增用户搜索、账号暂停/恢复和白名单权限分配，粉丝权限无法提权到 WordPress 或内容管理员。
+- 账号会话使用 256-bit 随机令牌、安装绑定、Keychain 本机保护、服务器哈希、登录/注册限流和最大会话数限制。
+- 会话哈希从 Redis 临时缓存改为非自加载数据库记录，缓存重启不会让用户意外掉线；退出、暂停、过期或删除会撤销会话。
+- 按 Apple 要求在 App 内提供易于找到的隐私政策，注册前明示同意，并允许用户一键永久删除账号、抖音 ID、身份码、权限、安装记录和全部会话。
+- Privacy Manifest 增加用户 ID 与设备级随机标识声明，均用于 App 功能、与账号关联且不用于跟踪。
 
 ## v1.3.15
 

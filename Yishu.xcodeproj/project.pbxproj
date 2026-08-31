@@ -30,6 +30,9 @@
 		100000000000000000000017 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* PrivacyInfo.xcprivacy */; };
 		100000000000000000000018 /* SecureNetworkClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* SecureNetworkClient.swift */; };
 		100000000000000000000019 /* AppDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000019 /* AppDiagnostics.swift */; };
+		10000000000000000000001A /* FanAccountStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001A /* FanAccountStore.swift */; };
+		10000000000000000000001B /* FanAccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001B /* FanAccountView.swift */; };
+		10000000000000000000001C /* PrivacyPolicyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001C /* PrivacyPolicyView.swift */; };
 		A10000000000000000000001 /* ContentAndAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* ContentAndAccessTests.swift */; };
 		B10000000000000000000001 /* YishuUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* YishuUITests.swift */; };
 /* End PBXBuildFile section */
@@ -75,6 +78,9 @@
 		200000000000000000000017 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		200000000000000000000018 /* SecureNetworkClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureNetworkClient.swift; sourceTree = "<group>"; };
 		200000000000000000000019 /* AppDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDiagnostics.swift; sourceTree = "<group>"; };
+		20000000000000000000001A /* FanAccountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FanAccountStore.swift; sourceTree = "<group>"; };
+		20000000000000000000001B /* FanAccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FanAccountView.swift; sourceTree = "<group>"; };
+		20000000000000000000001C /* PrivacyPolicyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyPolicyView.swift; sourceTree = "<group>"; };
 		200000000000000000000099 /* Yishu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yishu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000001 /* ContentAndAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentAndAccessTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000099 /* YishuTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YishuTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -152,6 +158,7 @@
 				200000000000000000000005 /* FavoritesStore.swift */,
 				20000000000000000000000D /* RecentlyViewedStore.swift */,
 				20000000000000000000000F /* AdminSessionStore.swift */,
+				20000000000000000000001A /* FanAccountStore.swift */,
 				200000000000000000000011 /* LocalWeatherStore.swift */,
 			);
 			path = Yishu/Services;
@@ -175,6 +182,8 @@
 				20000000000000000000000B /* AboutView.swift */,
 				20000000000000000000000E /* CreditsView.swift */,
 				200000000000000000000010 /* AdminView.swift */,
+				20000000000000000000001B /* FanAccountView.swift */,
+				20000000000000000000001C /* PrivacyPolicyView.swift */,
 				200000000000000000000012 /* CollaborationInquiryView.swift */,
 				200000000000000000000013 /* LaunchPosterView.swift */,
 			);
@@ -350,6 +359,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				100000000000000000000019 /* AppDiagnostics.swift in Sources */,
+				10000000000000000000001A /* FanAccountStore.swift in Sources */,
+				10000000000000000000001B /* FanAccountView.swift in Sources */,
+				10000000000000000000001C /* PrivacyPolicyView.swift in Sources */,
 				100000000000000000000001 /* YishuApp.swift in Sources */,
 				100000000000000000000002 /* AppTheme.swift in Sources */,
 				100000000000000000000003 /* Portfolio.swift in Sources */,
@@ -464,7 +476,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 26;
+				CURRENT_PROJECT_VERSION = 27;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -481,7 +493,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.15;
+				MARKETING_VERSION = 1.3.16;
 				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -498,7 +510,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 26;
+				CURRENT_PROJECT_VERSION = 27;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -515,7 +527,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.15;
+				MARKETING_VERSION = 1.3.16;
 				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

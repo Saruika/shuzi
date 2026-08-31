@@ -69,6 +69,8 @@ function rest_sanitize_boolean($value): bool {
 
 require dirname(__DIR__) . '/shuzijun-app-content.php';
 
+$plugin_source = file_get_contents(dirname(__DIR__) . '/shuzijun-app-content.php');
+
 function invoke_plugin_method(string $name, array $arguments = array()) {
     $method = new ReflectionMethod(Shuzijun_App_Content_API::class, $name);
     $method->setAccessible(true);
@@ -113,6 +115,51 @@ function valid_drama(string $id): array {
         'destinationURL' => 'https://novelquickapp.com/s/example/',
     );
 }
+
+expect_same(
+    'HS-ABCD-2345',
+    invoke_plugin_method('normalize_identity_code', array(' hs-abcd-2345 ')),
+    '粉丝身份码必须稳定归一化'
+);
+expect_same(
+    '',
+    invoke_plugin_method('normalize_identity_code', array('HS-ABCI-2345')),
+    '粉丝身份码必须排除容易混淆的字符'
+);
+expect_same(
+    'yishu_2026',
+    invoke_plugin_method('normalize_douyin_id', array(' @YiShu_2026 ')),
+    '抖音 ID 必须归一化并移除 @'
+);
+expect_same(
+    '',
+    invoke_plugin_method('normalize_douyin_id', array('https://v.douyin.com/test')),
+    '抖音 ID 必须拒绝链接'
+);
+
+$valid_permissions = invoke_plugin_method(
+    'sanitize_fan_permissions',
+    array(array('gallery_full', 'video_view', 'gallery_full'))
+);
+expect_same(array('gallery_full', 'video_view'), $valid_permissions, '粉丝权限必须去重');
+$unknown_permission = invoke_plugin_method(
+    'sanitize_fan_permissions',
+    array(array('manage_yishu_app_content'))
+);
+expect_error_code('fan_permission_unknown', $unknown_permission, '粉丝权限不得提权到内容管理');
+expect_true(
+    is_string($plugin_source)
+        && strpos($plugin_source, 'FAN_SESSION_OPTION_PREFIX') !== false
+        && strpos($plugin_source, 'get_option(self::FAN_SESSION_OPTION_PREFIX') !== false
+        && strpos($plugin_source, "get_transient('yishu_fan_session_") === false,
+    '粉丝会话哈希必须持久化，不能仅依赖 Redis 临时缓存'
+);
+expect_true(
+    is_string($plugin_source)
+        && strpos($plugin_source, 'FAN_META_INSTALLATIONS') !== false
+        && strpos($plugin_source, 'resolve_install_code') !== false,
+    '同一安装的记录码必须稳定保存'
+);
 
 $fragment_url = invoke_plugin_method(
     'trusted_media_url',

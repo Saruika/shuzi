@@ -315,6 +315,61 @@ final class AdminSessionStore: ObservableObject {
         return result
     }
 
+    func fetchFanDirectory() async throws -> AdminFanDirectory {
+        let directory: AdminFanDirectory = try await authorizedJSON(
+            path: "shuzijun/v1/app-admin/fans",
+            method: "GET"
+        )
+        guard directory.users.count <= 100,
+              directory.permissionCatalog.count <= 20,
+              Set(directory.users.map(\.userID)).count == directory.users.count,
+              Set(directory.permissionCatalog.map(\.code)).count
+                == directory.permissionCatalog.count,
+              directory.users.allSatisfy({ user in
+                  UUID(uuidString: user.userID) != nil
+                      && FanAccountValidation.normalizedIdentityCode(user.identityCode)
+                        == user.identityCode
+                      && FanAccountValidation.normalizedDouyinID(user.douyinID)
+                        == user.douyinID
+                      && ["active", "suspended"].contains(user.status)
+              }) else {
+            throw AdminAPIError.invalidResponse
+        }
+        return directory
+    }
+
+    func updateFanAccess(
+        userID: String,
+        permissions: [String],
+        status: String
+    ) async throws -> AdminFanUser {
+        guard let uuid = UUID(uuidString: userID)?.uuidString.lowercased(),
+              uuid == userID.lowercased(),
+              permissions.count <= 20,
+              Set(permissions).count == permissions.count,
+              permissions.allSatisfy({ permission in
+                  permission.range(
+                    of: #"^[a-z][a-z0-9_]{0,63}$"#,
+                    options: .regularExpression
+                  ) != nil
+              }),
+              ["active", "suspended"].contains(status) else {
+            throw AdminAPIError.invalidResponse
+        }
+        let body = try JSONEncoder().encode(
+            AdminFanAccessUpdate(permissions: permissions, status: status)
+        )
+        let response: AdminFanAccessUpdateResponse = try await authorizedJSON(
+            path: "shuzijun/v1/app-admin/fans/\(uuid)",
+            method: "POST",
+            body: body
+        )
+        guard response.user.userID.lowercased() == uuid else {
+            throw AdminAPIError.invalidResponse
+        }
+        return response.user
+    }
+
     private func authorizedJSON<T: Decodable>(
         path: String,
         method: String,
@@ -452,6 +507,15 @@ private struct CreatePortfolioRequest: Encodable {
     let title: String
     let subtitle: String
     let eyebrow: String
+}
+
+private struct AdminFanAccessUpdate: Encodable {
+    let permissions: [String]
+    let status: String
+}
+
+private struct AdminFanAccessUpdateResponse: Decodable {
+    let user: AdminFanUser
 }
 
 private struct WordPressError: Decodable {

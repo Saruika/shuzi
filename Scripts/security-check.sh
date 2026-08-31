@@ -44,6 +44,7 @@ python3 Server/tests/sync-script-contract-test.py
 bash -n Server/operations/apply-shuzijun-sync
 bash -n Server/operations/sync-to-backup
 bash -n Server/operations/verify-webroot-security
+bash -n Server/tests/fan-api-smoke.sh
 
 grep -qF 'wp-config\.php' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF '\.php[^/]+$' Server/nginx/shuzijun-sensitive-files-deny.conf

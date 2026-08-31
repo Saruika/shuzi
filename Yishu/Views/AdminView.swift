@@ -155,6 +155,7 @@ struct AdminView: View {
     private var dashboard: some View {
         VStack(alignment: .leading, spacing: 34) {
             dashboardHeader
+            fanAccessEditor
             launchPosterEditor
             heroEditor
             aboutPortraitEditor
@@ -342,6 +343,23 @@ struct AdminView: View {
             }
         }
         .textFieldStyle(AdminTextFieldStyle())
+    }
+
+    private var fanAccessEditor: some View {
+        AdminSection(title: "粉丝用户", subtitle: "按昵称、抖音 ID 或身份码远程分配权限") {
+            NavigationLink {
+                FanAccessAdminView()
+            } label: {
+                Label("打开用户与权限管理", systemImage: "person.2.badge.gearshape")
+                    .adminPrimaryButton()
+            }
+            .buttonStyle(.plain)
+
+            Text("粉丝密码使用 WordPress 标准强哈希保存，管理端无法读取；粉丝权限不会获得内容发布权。")
+                .font(.caption2)
+                .lineSpacing(4)
+                .foregroundStyle(AppTheme.muted)
+        }
     }
 
     private var heroEditor: some View {

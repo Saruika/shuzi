@@ -17,6 +17,8 @@ struct RootView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
     @EnvironmentObject private var adminSession: AdminSessionStore
+    @EnvironmentObject private var fanAccount: FanAccountStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: AppTab
     @State private var portfolioPath: [Portfolio] = []
     @State private var launchPosterSnapshot: LaunchPosterContent?
@@ -123,6 +125,7 @@ struct RootView: View {
                 allowBundledFallback: refreshedForLaunch || portfolioStore.contentOrigin != .bundled
             )
             await adminSession.restoreSession()
+            await fanAccount.restoreSession()
             await refreshAdministratorContentIfAllowed(publicContentIsFresh: refreshedForLaunch)
             recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
             if let visualPortfolioTitle,
@@ -138,6 +141,10 @@ struct RootView: View {
         }
         .onChange(of: portfolioStore.launchPosters) { _, _ in
             refreshVisibleLaunchPosterSnapshot()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await fanAccount.refreshIfNeeded() }
         }
     }
 

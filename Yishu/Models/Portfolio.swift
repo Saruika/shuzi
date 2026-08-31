@@ -257,6 +257,7 @@ enum ContentCatalog {
     )
     static let showreelURL = showreel.videoURL
     static let websiteURL = URL(string: "https://www.shuzijun.com.cn/")!
+    static let privacyPolicyURL = URL(string: "https://www.shuzijun.com.cn/app-privacy/")!
     static let collaborationEmailAddress = "369476120@qq.com"
     static let emailURL = URL(string: "mailto:369476120@qq.com")!
     static let collaborationEmailURL = URL(

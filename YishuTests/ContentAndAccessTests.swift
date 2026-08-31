@@ -148,6 +148,11 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(endpoint.password)
     }
 
+    func testPrivacyPolicyUsesTheOfficialHTTPSOrigin() {
+        XCTAssertTrue(AppNetworkSecurityPolicy.isTrustedHTTPSOrigin(ContentCatalog.privacyPolicyURL))
+        XCTAssertEqual(ContentCatalog.privacyPolicyURL.path, "/app-privacy")
+    }
+
     func testPublishedManifestResponseMustMatchTheExactConfiguredEndpoint() {
         let expected = ContentCatalog.publishedManifestURL
 
@@ -194,6 +199,68 @@ final class ContentAndAccessTests: XCTestCase {
                 URL(string: "https://img.shuzijun.com.cn/wp-json/shuzijun/v1/app-admin/session")
             )
         )
+    }
+
+    func testFanIdentityCodesAreNormalizedWithoutAmbiguousCharacters() {
+        XCTAssertEqual(
+            FanAccountValidation.normalizedIdentityCode("hs-abcd-2345"),
+            "HS-ABCD-2345"
+        )
+        XCTAssertEqual(
+            FanAccountValidation.normalizedIdentityCode(" ABCD 2345 "),
+            "HS-ABCD-2345"
+        )
+        XCTAssertNil(FanAccountValidation.normalizedIdentityCode("HS-ABCI-2345"))
+        XCTAssertNil(FanAccountValidation.normalizedIdentityCode("HS-ABCD-1234"))
+        XCTAssertNil(FanAccountValidation.normalizedIdentityCode("HS-ABCD-234"))
+    }
+
+    func testFanRegistrationRequiresASafeDouyinID() {
+        XCTAssertEqual(FanAccountValidation.normalizedDouyinID(" @YiShu_2026 "), "yishu_2026")
+        XCTAssertEqual(FanAccountValidation.normalizedDouyinID("一只梳子君"), "一只梳子君")
+        XCTAssertNil(FanAccountValidation.normalizedDouyinID("https://v.douyin.com/example"))
+        XCTAssertNil(FanAccountValidation.normalizedDouyinID("a b"))
+        XCTAssertNil(FanAccountValidation.normalizedDouyinID("@"))
+    }
+
+    func testFanPasswordPolicyRequiresLengthAndTwoCharacterCategories() {
+        XCTAssertTrue(FanAccountValidation.isValidPassword("fansafety2026"))
+        XCTAssertTrue(FanAccountValidation.isValidPassword("乖乖影像安全2026"))
+        XCTAssertTrue(FanAccountValidation.isValidPassword("long-password"))
+        XCTAssertFalse(FanAccountValidation.isValidPassword("onlyletters"))
+        XCTAssertFalse(FanAccountValidation.isValidPassword("short1"))
+        XCTAssertFalse(FanAccountValidation.isValidPassword(" fansafety2026"))
+    }
+
+    func testFanPermissionsAreExplicitAndUnknownValuesStayInactive() {
+        let profile = FanProfile(
+            userID: UUID().uuidString.lowercased(),
+            identityCode: "HS-ABCD-2345",
+            displayName: "测试粉丝",
+            douyinID: "test_fan",
+            installationCode: "IN-ABC-234",
+            permissions: [FanPermission.galleryFull.rawValue, "future_permission"],
+            status: "active",
+            sessionExpiresAt: Date().addingTimeInterval(3_600)
+        )
+
+        XCTAssertTrue(profile.hasPermission(.galleryFull))
+        XCTAssertFalse(profile.hasPermission(.videoView))
+        XCTAssertFalse(profile.hasPermission(.earlyAccess))
+
+        let suspendedProfile = FanProfile(
+            userID: profile.userID,
+            identityCode: profile.identityCode,
+            displayName: profile.displayName,
+            douyinID: profile.douyinID,
+            installationCode: profile.installationCode,
+            permissions: FanPermission.allCases.map(\.rawValue),
+            status: "suspended",
+            sessionExpiresAt: profile.sessionExpiresAt
+        )
+        XCTAssertFalse(suspendedProfile.hasPermission(.galleryFull))
+        XCTAssertFalse(suspendedProfile.hasPermission(.videoView))
+        XCTAssertFalse(suspendedProfile.hasPermission(.earlyAccess))
     }
 
     func testOnlyJSONResponseTypesAreAccepted() {
