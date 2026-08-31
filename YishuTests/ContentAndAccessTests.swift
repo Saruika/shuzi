@@ -267,6 +267,30 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(DiagnosticsSanitizer.networkErrorCode(applicationError), 0)
     }
 
+    func testArtworkImageRetryPolicyOnlyRetriesTransientFailures() {
+        XCTAssertTrue(ArtworkImageRetryPolicy.shouldRetry(URLError(.timedOut)))
+        XCTAssertTrue(ArtworkImageRetryPolicy.shouldRetry(URLError(.secureConnectionFailed)))
+        XCTAssertTrue(ArtworkImageRetryPolicy.shouldRetry(ArtworkImageLoadError.httpStatus(503)))
+        XCTAssertFalse(ArtworkImageRetryPolicy.shouldRetry(ArtworkImageLoadError.httpStatus(404)))
+        XCTAssertFalse(ArtworkImageRetryPolicy.shouldRetry(ArtworkImageLoadError.invalidResponse))
+        XCTAssertFalse(ArtworkImageRetryPolicy.shouldRetry(ArtworkImageLoadError.decodeFailed))
+    }
+
+    func testArtworkImageDiagnosticsUseStableNonSensitiveCategories() {
+        XCTAssertEqual(
+            ArtworkImageRetryPolicy.diagnosticCode(for: URLError(.timedOut)),
+            10_000 + abs(URLError.Code.timedOut.rawValue)
+        )
+        XCTAssertEqual(
+            ArtworkImageRetryPolicy.diagnosticCode(for: ArtworkImageLoadError.httpStatus(503)),
+            20_503
+        )
+        XCTAssertEqual(
+            ArtworkImageRetryPolicy.diagnosticCode(for: ArtworkImageLoadError.decodeFailed),
+            30_002
+        )
+    }
+
     func testUploadFilenameMustMatchItsMIMEType() throws {
         XCTAssertTrue(AdminUploadPolicy.isAllowed(filename: "portrait.JPG", mimeType: "image/jpeg"))
         XCTAssertTrue(AdminUploadPolicy.isAllowed(filename: "showreel.mov", mimeType: "video/quicktime"))
@@ -290,6 +314,29 @@ final class ContentAndAccessTests: XCTestCase {
         for condition in WeatherCondition.allCases {
             XCTAssertFalse(WeatherPresentation.conditionText(for: condition).isEmpty)
         }
+    }
+
+    func testWeatherFailuresHaveStableNonSensitiveCategories() {
+        XCTAssertEqual(
+            WeatherFailurePresentation.diagnosticCode(for: WeatherError.permissionDenied),
+            WeatherFailureCategory.permissionDenied.rawValue
+        )
+        XCTAssertEqual(
+            WeatherFailurePresentation.diagnosticCode(for: WeatherError.unknown),
+            WeatherFailureCategory.weatherUnknown.rawValue
+        )
+        XCTAssertEqual(
+            WeatherFailurePresentation.diagnosticCode(for: URLError(.timedOut)),
+            WeatherFailureCategory.urlLoadingBase.rawValue + abs(URLError.Code.timedOut.rawValue)
+        )
+        XCTAssertEqual(
+            WeatherFailurePresentation.message(for: WeatherError.permissionDenied),
+            "天气服务未授权"
+        )
+        XCTAssertEqual(
+            WeatherFailurePresentation.message(for: URLError(.notConnectedToInternet)),
+            "网络未连接"
+        )
     }
 
     private func makePortfolio(imageCount: Int) -> Portfolio {

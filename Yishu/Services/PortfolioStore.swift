@@ -95,7 +95,10 @@ final class PortfolioStore: ObservableObject {
     /// fallback when the device is offline.
     func refreshLaunchContent() async -> Bool {
         do {
-            let manifest = try await fetchContentManifest(timeoutInterval: 3)
+            let manifest = try await fetchContentManifest(
+                timeoutInterval: 3,
+                maxAttempts: 2
+            )
             guard manifest.schemaVersion == 1,
                   !manifest.portfolios.isEmpty,
                   ContentSecurityPolicy.isTrusted(manifest) else { return false }
@@ -314,7 +317,9 @@ final class PortfolioStore: ObservableObject {
             .networkConnectionLost,
             .notConnectedToInternet,
             .resourceUnavailable,
+            .secureConnectionFailed,
             .dataNotAllowed,
+            .cannotLoadFromNetwork,
         ].contains(urlError.code)
     }
 }

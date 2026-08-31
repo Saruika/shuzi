@@ -1,5 +1,6 @@
 import CoreLocation
 import MapKit
+import Observation
 import WeatherKit
 
 enum LocalWeatherPhase: Equatable {
@@ -12,20 +13,26 @@ enum LocalWeatherPhase: Equatable {
 }
 
 @MainActor
-final class LocalWeatherStore: NSObject, ObservableObject {
-    @Published private(set) var locationText = "位置与天气"
-    @Published private(set) var weatherText = "轻点开启"
-    @Published private(set) var symbolName = "location.fill"
-    @Published private(set) var phase: LocalWeatherPhase = .idle
-    @Published private(set) var attributionMarkURL: URL?
-    @Published private(set) var attributionLegalURL: URL?
-    @Published private(set) var weatherProviderName = "Apple Weather"
+@Observable
+final class LocalWeatherStore: NSObject {
+    private(set) var locationText = "位置与天气"
+    private(set) var weatherText = "轻点开启"
+    private(set) var symbolName = "location.fill"
+    private(set) var phase: LocalWeatherPhase = .idle
+    private(set) var attributionMarkURL: URL?
+    private(set) var attributionLegalURL: URL?
+    private(set) var weatherProviderName = "Apple Weather"
 
-    private let locationManager = CLLocationManager()
-    private let weatherService = WeatherService.shared
-    private var weatherTask: Task<Void, Never>?
-    private var lastLocation: CLLocation?
-    private var lastUpdated: Date?
+    @ObservationIgnored private let locationManager = CLLocationManager()
+    @ObservationIgnored private let weatherService = WeatherService.shared
+    @ObservationIgnored private var weatherTask: Task<Void, Never>?
+    @ObservationIgnored private var locationNameTask: Task<Void, Never>?
+    @ObservationIgnored private var locationWatchdogTask: Task<Void, Never>?
+    @ObservationIgnored private var weatherWatchdogTask: Task<Void, Never>?
+    @ObservationIgnored private var attributionTask: Task<Void, Never>?
+    @ObservationIgnored private var lastLocation: CLLocation?
+    @ObservationIgnored private var lastUpdated: Date?
+    @ObservationIgnored private var activeRequestID = 0
 
     var needsSettings: Bool {
         phase == .denied
@@ -43,6 +50,10 @@ final class LocalWeatherStore: NSObject, ObservableObject {
 
     deinit {
         weatherTask?.cancel()
+        locationNameTask?.cancel()
+        locationWatchdogTask?.cancel()
+        weatherWatchdogTask?.cancel()
+        attributionTask?.cancel()
     }
 
     func activate() {
@@ -55,7 +66,9 @@ final class LocalWeatherStore: NSObject, ObservableObject {
         case .notDetermined:
             locationManager.requestWhenInUseAuthorization()
         case .authorizedAlways, .authorizedWhenInUse:
-            requestLocation()
+            // A tap is an explicit retry. It must also recover a request whose
+            // callback was lost while the app or network changed state.
+            requestLocation(force: true)
         case .denied, .restricted:
             showDenied()
         @unknown default:
@@ -75,13 +88,44 @@ final class LocalWeatherStore: NSObject, ObservableObject {
         requestLocation()
     }
 
-    private func requestLocation() {
-        guard phase != .locating, phase != .loading else { return }
+    private func requestLocation(force: Bool = false) {
+        guard force || (phase != .locating && phase != .loading) else { return }
+        beginNewRequest()
+        let requestID = activeRequestID
         phase = .locating
         locationText = "正在定位"
         weatherText = "获取天气"
         symbolName = "location.fill"
         locationManager.requestLocation()
+
+        locationWatchdogTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(4))
+                guard let self,
+                      !Task.isCancelled,
+                      self.activeRequestID == requestID,
+                      self.phase == .locating else { return }
+
+                if let cachedLocation = self.locationManager.location,
+                   Self.isUsable(cachedLocation) {
+                    self.loadWeather(for: cachedLocation)
+                    return
+                }
+
+                self.weatherText = "正在重试"
+                self.locationManager.requestLocation()
+
+                try await Task.sleep(for: .seconds(8))
+                guard !Task.isCancelled,
+                      self.activeRequestID == requestID,
+                      self.phase == .locating else { return }
+                AppDiagnostics.shared.recordWeatherUpdate(
+                    succeeded: false,
+                    errorCode: WeatherFailureCategory.locationTimedOut.rawValue
+                )
+                self.showUnavailableLocation()
+            } catch { }
+        }
     }
 
     private func loadWeather(for location: CLLocation) {
@@ -93,35 +137,95 @@ final class LocalWeatherStore: NSObject, ObservableObject {
             return
         }
 
-        weatherTask?.cancel()
+        beginNewRequest()
+        let requestID = activeRequestID
         phase = .loading
+        locationText = "当前位置"
+        weatherText = "获取天气"
+
+        // Reverse geocoding is helpful context, but it must never block the
+        // forecast. MapKit and WeatherKit therefore run independently.
+        locationNameTask = Task { [weak self] in
+            guard let self else { return }
+            let resolvedLocation = await self.locationName(for: location)
+            guard !Task.isCancelled,
+                  self.activeRequestID == requestID else { return }
+            self.locationText = resolvedLocation
+        }
+
+        weatherWatchdogTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(15))
+                guard let self,
+                      !Task.isCancelled,
+                      self.activeRequestID == requestID,
+                      self.phase == .loading else { return }
+                self.weatherTask?.cancel()
+                self.weatherText = "天气连接超时"
+                self.symbolName = "arrow.clockwise"
+                self.phase = .unavailable
+                AppDiagnostics.shared.recordWeatherUpdate(
+                    succeeded: false,
+                    errorCode: WeatherFailureCategory.weatherTimedOut.rawValue
+                )
+            } catch { }
+        }
+
         weatherTask = Task { [weak self] in
             guard let self else { return }
-            let resolvedLocation = await locationName(for: location)
-            guard !Task.isCancelled else { return }
-            locationText = resolvedLocation
-
             do {
-                async let currentWeather = weatherService.weather(for: location, including: .current)
-                async let weatherAttribution = weatherService.attribution
-                let (current, attribution) = try await (currentWeather, weatherAttribution)
-                guard !Task.isCancelled else { return }
+                let current = try await self.currentWeatherWithRetry(for: location)
+                guard !Task.isCancelled else {
+                    return
+                }
+                guard self.activeRequestID == requestID else {
+                    return
+                }
 
                 let temperature = current.temperature.converted(to: .celsius).value
-                weatherText = "\(WeatherPresentation.conditionText(for: current.condition)) \(Int(temperature.rounded()))°"
-                symbolName = current.symbolName
-                weatherProviderName = attribution.serviceName
-                attributionMarkURL = attribution.combinedMarkDarkURL
-                attributionLegalURL = attribution.legalPageURL
-                lastLocation = location
-                lastUpdated = Date()
-                phase = .ready
+                self.weatherText = "\(WeatherPresentation.conditionText(for: current.condition)) \(Int(temperature.rounded()))°"
+                self.symbolName = current.symbolName
+                self.lastLocation = location
+                self.lastUpdated = Date()
+                self.phase = .ready
+                self.weatherWatchdogTask?.cancel()
+                self.loadAttribution(for: requestID)
+                AppDiagnostics.shared.recordWeatherUpdate(succeeded: true)
             } catch {
-                guard !Task.isCancelled else { return }
-                weatherText = "天气暂不可用"
-                symbolName = "exclamationmark.triangle"
-                phase = .unavailable
+                guard !Task.isCancelled,
+                      self.activeRequestID == requestID else { return }
+                self.weatherWatchdogTask?.cancel()
+                self.weatherText = WeatherFailurePresentation.message(for: error)
+                self.symbolName = "arrow.clockwise"
+                self.phase = .unavailable
+                AppDiagnostics.shared.recordWeatherUpdate(
+                    succeeded: false,
+                    errorCode: WeatherFailurePresentation.diagnosticCode(for: error)
+                )
             }
+        }
+    }
+
+    private func currentWeatherWithRetry(for location: CLLocation) async throws -> CurrentWeather {
+        do {
+            return try await weatherService.weather(for: location, including: .current)
+        } catch {
+            guard !Task.isCancelled else { throw CancellationError() }
+            try await Task.sleep(for: .milliseconds(700))
+            return try await weatherService.weather(for: location, including: .current)
+        }
+    }
+
+    private func loadAttribution(for requestID: Int) {
+        attributionTask?.cancel()
+        attributionTask = Task { [weak self] in
+            guard let self else { return }
+            guard let attribution = try? await self.weatherService.attribution,
+                  !Task.isCancelled,
+                  self.activeRequestID == requestID else { return }
+            self.weatherProviderName = attribution.serviceName
+            self.attributionMarkURL = attribution.combinedMarkDarkURL
+            self.attributionLegalURL = attribution.legalPageURL
         }
     }
 
@@ -155,7 +259,7 @@ final class LocalWeatherStore: NSObject, ObservableObject {
     }
 
     private func showDenied() {
-        weatherTask?.cancel()
+        beginNewRequest()
         phase = .denied
         locationText = "位置未开启"
         weatherText = "前往设置"
@@ -163,11 +267,76 @@ final class LocalWeatherStore: NSObject, ObservableObject {
     }
 
     private func showUnavailableLocation() {
-        weatherTask?.cancel()
+        beginNewRequest()
         phase = .unavailable
         locationText = "无法定位"
         weatherText = "轻点重试"
         symbolName = "location.slash"
+    }
+
+    private func beginNewRequest() {
+        activeRequestID &+= 1
+        weatherTask?.cancel()
+        locationNameTask?.cancel()
+        locationWatchdogTask?.cancel()
+        weatherWatchdogTask?.cancel()
+        attributionTask?.cancel()
+        weatherTask = nil
+        locationNameTask = nil
+        locationWatchdogTask = nil
+        weatherWatchdogTask = nil
+        attributionTask = nil
+    }
+
+    private static func isUsable(_ location: CLLocation) -> Bool {
+        location.horizontalAccuracy >= 0
+            && location.horizontalAccuracy <= 100_000
+            && abs(location.timestamp.timeIntervalSinceNow) <= 30 * 60
+    }
+}
+
+enum WeatherFailureCategory: Int {
+    case unknown = 0
+    case permissionDenied = 101
+    case weatherUnknown = 102
+    case locationTimedOut = 201
+    case weatherTimedOut = 202
+    case urlLoadingBase = 1_000
+}
+
+enum WeatherFailurePresentation {
+    static func message(for error: Error) -> String {
+        if let weatherError = error as? WeatherError {
+            switch weatherError {
+            case .permissionDenied:
+                return "天气服务未授权"
+            case .unknown:
+                break
+            @unknown default:
+                break
+            }
+        }
+        if let urlError = error as? URLError, urlError.code == .notConnectedToInternet {
+            return "网络未连接"
+        }
+        return "天气暂不可用"
+    }
+
+    static func diagnosticCode(for error: Error) -> Int {
+        if let weatherError = error as? WeatherError {
+            switch weatherError {
+            case .permissionDenied:
+                return WeatherFailureCategory.permissionDenied.rawValue
+            case .unknown:
+                return WeatherFailureCategory.weatherUnknown.rawValue
+            @unknown default:
+                return WeatherFailureCategory.unknown.rawValue
+            }
+        }
+        if let urlError = error as? URLError {
+            return WeatherFailureCategory.urlLoadingBase.rawValue + abs(urlError.code.rawValue)
+        }
+        return WeatherFailureCategory.unknown.rawValue
     }
 }
 
@@ -240,9 +409,10 @@ extension LocalWeatherStore: @preconcurrency CLLocationManagerDelegate {
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
         guard let location = locations
-            .filter({ $0.horizontalAccuracy >= 0 })
+            .filter(Self.isUsable)
             .max(by: { $0.timestamp < $1.timestamp }) else {
-            showUnavailableLocation()
+            guard phase == .locating else { return }
+            weatherText = "正在重试"
             return
         }
         loadWeather(for: location)
@@ -253,11 +423,11 @@ extension LocalWeatherStore: @preconcurrency CLLocationManagerDelegate {
         case .denied:
             showDenied()
         case .locationUnknown:
-            // Core Location can emit this temporary error immediately after a
-            // valid update. Do not replace an in-flight or completed forecast.
-            guard phase != .loading, phase != .ready else { return }
+            // Core Location reports this as a transient condition. Keep the
+            // watchdog alive so it can retry and eventually leave loading.
+            guard phase == .locating else { return }
             locationText = "正在定位"
-            weatherText = "请稍候"
+            weatherText = "正在重试"
             symbolName = "location.fill"
         default:
             showUnavailableLocation()

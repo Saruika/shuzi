@@ -46,6 +46,10 @@ struct LaunchPosterView: View {
                                     }
                                 }
                             }
+                    } else if case .empty = phase {
+                        ProgressView()
+                            .tint(AppTheme.gold)
+                            .frame(width: proxy.size.width, height: proxy.size.height)
                     }
                 }
             }
@@ -102,7 +106,10 @@ struct LaunchPosterView: View {
         }
         .task(id: poster.imageURL) {
             do {
-                try await Task.sleep(for: .seconds(4))
+                // Leave enough room for the image pipeline's bounded TLS/network
+                // retry. A cold CDN connection can occasionally take more than
+                // four seconds even though the image succeeds immediately next time.
+                try await Task.sleep(for: .seconds(10))
                 guard !Task.isCancelled, !remoteImageIsVisible else { return }
                 dismiss()
             } catch { }

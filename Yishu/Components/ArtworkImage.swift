@@ -3,10 +3,56 @@ import ImageIO
 import SwiftUI
 import UIKit
 
-private enum ArtworkImageLoadError: Error {
+enum ArtworkImageLoadError: Error, Equatable {
     case invalidResponse
+    case httpStatus(Int)
     case payloadTooLarge
     case decodeFailed
+}
+
+enum ArtworkImageRetryPolicy {
+    static let maximumAttempts = 3
+
+    static func shouldRetry(_ error: Error) -> Bool {
+        if case let ArtworkImageLoadError.httpStatus(statusCode) = error {
+            return [408, 425, 429, 500, 502, 503, 504].contains(statusCode)
+        }
+        guard let urlError = error as? URLError else { return false }
+        return [
+            .timedOut,
+            .cannotFindHost,
+            .cannotConnectToHost,
+            .dnsLookupFailed,
+            .networkConnectionLost,
+            .notConnectedToInternet,
+            .resourceUnavailable,
+            .secureConnectionFailed,
+            .dataNotAllowed,
+            .cannotLoadFromNetwork,
+        ].contains(urlError.code)
+    }
+
+    static func retryDelayNanoseconds(afterAttempt attempt: Int) -> UInt64 {
+        attempt <= 1 ? 350_000_000 : 850_000_000
+    }
+
+    static func diagnosticCode(for error: Error) -> Int {
+        if let urlError = error as? URLError {
+            return 10_000 + abs(urlError.code.rawValue)
+        }
+        switch error as? ArtworkImageLoadError {
+        case .httpStatus(let statusCode):
+            return 20_000 + max(0, statusCode)
+        case .payloadTooLarge:
+            return 30_001
+        case .decodeFailed:
+            return 30_002
+        case .invalidResponse:
+            return 30_003
+        case nil:
+            return 30_000
+        }
+    }
 }
 
 /// A small, size-aware image pipeline. `AsyncImage` decodes the original file
@@ -27,7 +73,7 @@ private actor ArtworkImagePipeline {
     }()
     private var inFlight: [String: Task<UIImage, Error>] = [:]
     private let session = SecureURLSessionFactory.make(
-        requestTimeout: 20,
+        requestTimeout: 8,
         resourceTimeout: 30
     )
 
@@ -45,48 +91,73 @@ private actor ArtworkImagePipeline {
         }
 
         let imageSession = session
-        let task = Task.detached(priority: .utility) {
-            var request = URLRequest(url: url)
-            request.cachePolicy = .reloadIgnoringLocalCacheData
-            request.timeoutInterval = 20
-            request.setValue(
-                "image/avif,image/webp,image/heic,image/heif,image/jpeg,image/png",
-                forHTTPHeaderField: "Accept"
-            )
-            request.setValue("Yishu-iOS/2.1", forHTTPHeaderField: "User-Agent")
+        let task = Task.detached(priority: .utility) { () throws -> UIImage in
+            var latestError: Error = URLError(.unknown)
+            for attempt in 1...ArtworkImageRetryPolicy.maximumAttempts {
+                do {
+                    var request = URLRequest(url: url)
+                    request.cachePolicy = .reloadIgnoringLocalCacheData
+                    // Fail a stalled handshake quickly enough for the bounded
+                    // retry to recover while a launch poster is still visible.
+                    // Active downloads retain the longer resource deadline.
+                    request.timeoutInterval = 8
+                    request.setValue(
+                        "image/avif,image/webp,image/heic,image/heif,image/jpeg,image/png",
+                        forHTTPHeaderField: "Accept"
+                    )
+                    request.setValue("Yishu-iOS/2.1", forHTTPHeaderField: "User-Agent")
 
-            let (data, response) = try await imageSession.data(for: request)
-            guard let http = response as? HTTPURLResponse,
-                  ContentSecurityPolicy.matchesRequestedMediaURL(http.url, requestedURL: url),
-                  (200..<300).contains(http.statusCode) else {
-                throw ArtworkImageLoadError.invalidResponse
+                    let (data, response) = try await imageSession.data(for: request)
+                    guard let http = response as? HTTPURLResponse,
+                          ContentSecurityPolicy.matchesRequestedMediaURL(http.url, requestedURL: url) else {
+                        throw ArtworkImageLoadError.invalidResponse
+                    }
+                    guard (200..<300).contains(http.statusCode) else {
+                        throw ArtworkImageLoadError.httpStatus(http.statusCode)
+                    }
+                    guard AppNetworkSecurityPolicy.isImageMIMEType(
+                        http.value(forHTTPHeaderField: "Content-Type")
+                    ), AppNetworkSecurityPolicy.permitsResponseLength(
+                        http.expectedContentLength,
+                        maximumBytes: Self.maximumResponseBytes
+                    ) else {
+                        throw ArtworkImageLoadError.invalidResponse
+                    }
+                    guard Int64(data.count) <= Self.maximumResponseBytes else {
+                        throw ArtworkImageLoadError.payloadTooLarge
+                    }
+                    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                          Self.hasSafePixelDimensions(source),
+                          let cgImage = CGImageSourceCreateThumbnailAtIndex(
+                            source,
+                            0,
+                            [
+                                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                                kCGImageSourceCreateThumbnailWithTransform: true,
+                                kCGImageSourceThumbnailMaxPixelSize: bucket,
+                                kCGImageSourceShouldCacheImmediately: true,
+                            ] as CFDictionary
+                          ) else {
+                        throw ArtworkImageLoadError.decodeFailed
+                    }
+                    return UIImage(cgImage: cgImage)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    if Task.isCancelled { throw CancellationError() }
+                    latestError = error
+                    guard attempt < ArtworkImageRetryPolicy.maximumAttempts,
+                          ArtworkImageRetryPolicy.shouldRetry(error) else {
+                        throw error
+                    }
+                    try await Task.sleep(
+                        nanoseconds: ArtworkImageRetryPolicy.retryDelayNanoseconds(
+                            afterAttempt: attempt
+                        )
+                    )
+                }
             }
-            guard AppNetworkSecurityPolicy.isImageMIMEType(
-                http.value(forHTTPHeaderField: "Content-Type")
-            ), AppNetworkSecurityPolicy.permitsResponseLength(
-                http.expectedContentLength,
-                maximumBytes: Self.maximumResponseBytes
-            ) else {
-                throw ArtworkImageLoadError.invalidResponse
-            }
-            guard Int64(data.count) <= Self.maximumResponseBytes else {
-                throw ArtworkImageLoadError.payloadTooLarge
-            }
-            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-                  Self.hasSafePixelDimensions(source),
-                  let cgImage = CGImageSourceCreateThumbnailAtIndex(
-                    source,
-                    0,
-                    [
-                        kCGImageSourceCreateThumbnailFromImageAlways: true,
-                        kCGImageSourceCreateThumbnailWithTransform: true,
-                        kCGImageSourceThumbnailMaxPixelSize: bucket,
-                        kCGImageSourceShouldCacheImmediately: true,
-                    ] as CFDictionary
-                  ) else {
-                throw ArtworkImageLoadError.decodeFailed
-            }
-            return UIImage(cgImage: cgImage)
+            throw latestError
         }
         inFlight[key] = task
 
@@ -98,6 +169,9 @@ private actor ArtworkImagePipeline {
             return image
         } catch {
             inFlight[key] = nil
+            AppDiagnostics.shared.recordImageLoadFailure(
+                category: ArtworkImageRetryPolicy.diagnosticCode(for: error)
+            )
             throw error
         }
     }
@@ -121,8 +195,10 @@ struct DownsampledAsyncImage<Content: View>: View {
     let content: (AsyncImagePhase) -> Content
 
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.scenePhase) private var scenePhase
     @State private var image: UIImage?
     @State private var error: Error?
+    @State private var retryGeneration = 0
 
     init(
         url: URL?,
@@ -145,7 +221,7 @@ struct DownsampledAsyncImage<Content: View>: View {
 
     private var requestID: String {
         guard let url else { return "missing" }
-        return "\(url.absoluteString)#\(maxPixelSize)"
+        return "\(url.absoluteString)#\(maxPixelSize)#\(retryGeneration)"
     }
 
     var body: some View {
@@ -172,6 +248,10 @@ struct DownsampledAsyncImage<Content: View>: View {
                 guard !Task.isCancelled else { return }
                 self.error = error
             }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, error != nil else { return }
+            retryGeneration &+= 1
         }
     }
 

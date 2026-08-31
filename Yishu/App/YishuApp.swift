@@ -6,7 +6,7 @@ struct YishuApp: App {
     @StateObject private var favorites = FavoritesStore()
     @StateObject private var recentlyViewed = RecentlyViewedStore()
     @StateObject private var adminSession = AdminSessionStore()
-    @StateObject private var localWeather = LocalWeatherStore()
+    @State private var localWeather = LocalWeatherStore()
 
     init() {
         AppDiagnostics.shared.start()
@@ -59,6 +59,6 @@ struct YishuApp: App {
             .environmentObject(favorites)
             .environmentObject(recentlyViewed)
             .environmentObject(adminSession)
-            .environmentObject(localWeather)
+            .environment(localWeather)
     }
 }

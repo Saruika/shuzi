@@ -52,6 +52,22 @@ final class AppDiagnostics: NSObject, MXMetricManagerSubscriber {
         }
     }
 
+    func recordWeatherUpdate(succeeded: Bool, errorCode: Int = 0) {
+        if succeeded {
+            logger.info("Weather update succeeded")
+        } else {
+            logger.error(
+                "Weather update failed: category=\(errorCode, privacy: .public)"
+            )
+        }
+    }
+
+    func recordImageLoadFailure(category: Int) {
+        logger.error(
+            "Artwork image load failed after bounded retries: category=\(category, privacy: .public)"
+        )
+    }
+
     func didReceive(_ payloads: [MXMetricPayload]) {
         logger.notice(
             "MetricKit performance payloads received: count=\(payloads.count, privacy: .public)"

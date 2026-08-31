@@ -2,7 +2,7 @@ import SwiftUI
 
 struct AboutView: View {
     @EnvironmentObject private var admin: AdminSessionStore
-    @EnvironmentObject private var localWeather: LocalWeatherStore
+    @Environment(LocalWeatherStore.self) private var localWeather
     @EnvironmentObject private var portfolioStore: PortfolioStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 

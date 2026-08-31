@@ -3,30 +3,36 @@ import UIKit
 
 struct HomeView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
-    @EnvironmentObject private var localWeather: LocalWeatherStore
+    @Environment(LocalWeatherStore.self) private var localWeather
     let showPortfolio: () -> Void
 
     var body: some View {
         GeometryReader { proxy in
             ZStack {
                 AppTheme.ink.ignoresSafeArea()
-                HeroPager(imageURLs: portfolioStore.heroImages, showPortfolio: showPortfolio)
+                HeroPager(
+                    imageURLs: portfolioStore.heroImages,
+                    localWeather: localWeather,
+                    showPortfolio: showPortfolio
+                )
                     .frame(width: proxy.size.width, height: proxy.size.height)
             }
         }
         .ignoresSafeArea(.container, edges: .top)
         .toolbar(.hidden, for: .navigationBar)
-        .onAppear { localWeather.refreshIfAuthorized() }
+        .task {
+            localWeather.refreshIfAuthorized()
+        }
     }
 }
 
 private struct HeroPager: View {
     let imageURLs: [URL]
+    let localWeather: LocalWeatherStore
     let showPortfolio: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
-    @EnvironmentObject private var localWeather: LocalWeatherStore
     @ScaledMetric(relativeTo: .largeTitle) private var scaledTitleSize: CGFloat = 42
     @State private var selection = 0
     @State private var isVisible = false
