@@ -276,7 +276,11 @@ invitation_create_status=$(curl "${curl_common[@]}" \
   --data '{"count":1}' \
   "${api_root}/app-admin/fans/invitations")
 [[ "$invitation_create_status" == '201' ]]
-if ! grep -Eiq '^cache-control:.*private.*no-store.*max-age=0' \
+if ! grep -Eiq '^cache-control:.*private' \
+    "$test_dir/invitation-create.headers" \
+  || ! grep -Eiq '^cache-control:.*no-store' \
+    "$test_dir/invitation-create.headers" \
+  || ! grep -Eiq '^cache-control:.*max-age=0' \
     "$test_dir/invitation-create.headers" \
   || ! grep -Eiq '^pragma:[[:space:]]*no-cache' \
     "$test_dir/invitation-create.headers"; then
