@@ -15,6 +15,7 @@ private enum VisualTestingDestination {
 
 struct RootView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
+    @EnvironmentObject private var favorites: FavoritesStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
     @EnvironmentObject private var adminSession: AdminSessionStore
     @EnvironmentObject private var fanAccount: FanAccountStore
@@ -88,6 +89,14 @@ struct RootView: View {
         }
         .onChange(of: portfolioStore.portfolios) { _, portfolios in
             recentlyViewed.retainAvailablePortfolios(in: portfolios)
+        }
+        .onChange(of: fanAccount.profile?.userID, initial: true) { _, userID in
+            switchLocalLibrary(to: userID)
+        }
+        .onChange(of: fanAccount.removedAccountUserID, initial: true) { _, userID in
+            guard let userID else { return }
+            favorites.removeData(for: userID)
+            recentlyViewed.removeData(for: userID)
         }
         .onChange(of: fanAccount.profile?.status) { _, status in
             if fanAccount.isApproved || shouldBypassAccessGate {
@@ -178,7 +187,7 @@ struct RootView: View {
                 }
 
                 NavigationStack {
-                    FavoritesView()
+                    FavoritesView(showPortfolio: { selectedTab = .portfolio })
                 }
                 .tag(AppTab.favorites)
                 .tabItem { Label("收藏", systemImage: "heart") }
@@ -334,14 +343,27 @@ struct RootView: View {
     private func refreshApprovedContent() async {
         let refreshID = UUID()
         approvedContentRefreshID = refreshID
-        guard fanAccount.isApproved,
-              !adminSession.isAuthenticated,
-              let manifest = try? await fanAccount.fetchApprovedContent(),
-              approvedContentRefreshID == refreshID,
-              fanAccount.isApproved,
-              !adminSession.isAuthenticated else { return }
-        portfolioStore.applyPublishedManifest(manifest)
-        enforceCurrentFanPermissionScope()
+        guard fanAccount.isApproved, !adminSession.isAuthenticated else { return }
+        let storeRefreshID = portfolioStore.beginContentRefresh()
+        do {
+            let manifest = try await fanAccount.fetchApprovedContent()
+            guard approvedContentRefreshID == refreshID,
+                  fanAccount.isApproved,
+                  !adminSession.isAuthenticated else {
+                portfolioStore.cancelContentRefresh(storeRefreshID)
+                return
+            }
+            portfolioStore.completeContentRefresh(storeRefreshID, with: manifest)
+            enforceCurrentFanPermissionScope()
+        } catch {
+            guard approvedContentRefreshID == refreshID,
+                  fanAccount.isApproved,
+                  !adminSession.isAuthenticated else {
+                portfolioStore.cancelContentRefresh(storeRefreshID)
+                return
+            }
+            portfolioStore.failContentRefresh(storeRefreshID)
+        }
     }
 
     private func invalidateApprovedContentRefresh() {
@@ -381,5 +403,16 @@ struct RootView: View {
         isLaunchPosterVisible = false
         launchPosterSnapshot = nil
         portfolioPath = []
+    }
+
+    private func switchLocalLibrary(to userID: String?) {
+        guard let userID else {
+            favorites.deactivate()
+            recentlyViewed.deactivate()
+            return
+        }
+        favorites.activate(accountID: userID)
+        recentlyViewed.activate(accountID: userID)
+        recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
     }
 }

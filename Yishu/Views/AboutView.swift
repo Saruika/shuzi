@@ -6,6 +6,7 @@ struct AboutView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
     @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var presentsAdminAccess = false
 
     var body: some View {
@@ -13,7 +14,9 @@ struct AboutView: View {
             AppTheme.ink.ignoresSafeArea()
             GeometryReader { proxy in
                 ScrollView {
-                    if horizontalSizeClass == .regular, proxy.size.width >= 760 {
+                    if horizontalSizeClass == .regular,
+                       proxy.size.width >= 760,
+                       !dynamicTypeSize.isAccessibilitySize {
                         let availableWidth = min(max(0, proxy.size.width - 48), 1_164)
                         let portraitWidth = min(580, max(320, availableWidth * 0.52))
                         let detailsWidth = max(300, availableWidth - portraitWidth - 24)
@@ -42,10 +45,16 @@ struct AboutView: View {
                 .ignoresSafeArea(.container, edges: .top)
             }
         }
-        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .toolbar(.hidden, for: .navigationBar)
         .fullScreenCover(isPresented: $presentsAdminAccess) {
-            AdminAccessView()
+            SecureCaptureSurface(
+                owner: .fullScreenPresentation,
+                onExit: { presentsAdminAccess = false }
+            ) {
+                AdminAccessView()
+                    .environmentObject(admin)
+                    .environmentObject(portfolioStore)
+            }
         }
     }
 
@@ -82,7 +91,7 @@ struct AboutView: View {
                     .tracking(4)
                     .foregroundStyle(AppTheme.gold)
                 Text("易姝")
-                    .font(.editorial(48))
+                    .font(.system(.largeTitle, design: .serif))
                 Text("短剧演员 / 模特 / 视频创作者")
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.7))
@@ -97,7 +106,7 @@ struct AboutView: View {
     private var biography: some View {
         VStack(alignment: .leading, spacing: 26) {
             Text("关于")
-                .font(.editorial(32))
+                .font(.system(.title, design: .serif))
                 .accessibilityIdentifier("about-heading")
             Text("专注于短剧表演、时尚摄影与艺术创作。希望通过克制而真实的情绪、东方气质与镜头表现，让每个角色留下属于自己的余韵。")
                 .font(.system(size: 16))
@@ -125,14 +134,24 @@ struct AboutView: View {
                 }
             }
 
-            HStack(spacing: 0) {
-                stat("演员", "身份")
-                Divider().overlay(.white.opacity(0.14))
-                stat("浙江 · 杭州", "所在地")
-                Divider().overlay(.white.opacity(0.14))
-                stat("合作中", "状态")
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(spacing: 0) {
+                    stat("演员", "身份")
+                    Divider().overlay(.white.opacity(0.14))
+                    stat("浙江 · 杭州", "所在地")
+                    Divider().overlay(.white.opacity(0.14))
+                    stat("合作中", "状态")
+                }
+            } else {
+                HStack(spacing: 0) {
+                    stat("演员", "身份")
+                    Divider().overlay(.white.opacity(0.14))
+                    stat("浙江 · 杭州", "所在地")
+                    Divider().overlay(.white.opacity(0.14))
+                    stat("合作中", "状态")
+                }
+                .frame(minHeight: 68)
             }
-            .frame(height: 68)
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 38)
@@ -261,11 +280,11 @@ struct AboutView: View {
             HStack(spacing: 5) {
                 Text("管理员入口")
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
             }
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.white.opacity(0.22))
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(AppTheme.muted)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .trailing)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -344,15 +363,14 @@ struct AboutView: View {
     private func stat(_ value: String, _ label: String) -> some View {
         VStack(spacing: 7) {
             Text(value)
-                .font(.editorial(17))
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
+                .font(.system(.headline, design: .serif))
             Text(label)
-                .font(.system(size: 9, weight: .medium))
+                .font(.caption2.weight(.medium))
                 .tracking(1.2)
                 .foregroundStyle(AppTheme.muted)
         }
         .frame(maxWidth: .infinity)
+        .padding(.vertical, dynamicTypeSize.isAccessibilitySize ? 12 : 0)
     }
 
     private func contactLink(_ title: String, detail: String, icon: String, url: URL) -> some View {

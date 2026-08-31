@@ -5,11 +5,20 @@ struct FavoritesView: View {
     @EnvironmentObject private var favorites: FavoritesStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedEntry: FavoriteEntry?
     @State private var selectedSection: LibrarySection = .favorites
     @State private var showClearHistoryConfirmation = false
+    let showPortfolio: () -> Void
+
+    init(showPortfolio: @escaping () -> Void = {}) {
+        self.showPortfolio = showPortfolio
+    }
 
     private var columns: [GridItem] {
+        if dynamicTypeSize.isAccessibilitySize {
+            return [GridItem(.flexible())]
+        }
         if horizontalSizeClass == .regular {
             return Array(repeating: GridItem(.flexible(), spacing: 3), count: 3)
         }
@@ -39,7 +48,7 @@ struct FavoritesView: View {
         return (
             ["我收藏了易姝的 \(entries.count) 张影像："]
                 + groups
-                + ["更多作品请在易姝 App 内浏览。"]
+                + ["更多作品请在 Hi，梳子 App 内浏览。"]
         ).joined(separator: "\n\n")
     }
 
@@ -69,7 +78,14 @@ struct FavoritesView: View {
             PortfolioDetailView(portfolio: portfolio)
         }
         .fullScreenCover(item: $selectedEntry) { entry in
-            GalleryViewer(portfolio: entry.portfolio, initialImage: entry.image)
+            SecureCaptureSurface(
+                owner: .fullScreenPresentation,
+                onExit: { selectedEntry = nil }
+            ) {
+                GalleryViewer(portfolio: entry.portfolio, initialImage: entry.image)
+                    .environmentObject(store)
+                    .environmentObject(favorites)
+            }
         }
         .confirmationDialog(
             "清除最近浏览记录？",
@@ -92,7 +108,7 @@ struct FavoritesView: View {
 
             HStack(alignment: .firstTextBaseline) {
                 Text("收藏")
-                    .font(.editorial(42))
+                    .font(.system(.largeTitle, design: .serif))
                     .accessibilityIdentifier("favorites-heading")
                 Spacer()
                 if selectedSection == .favorites, !entries.isEmpty {
@@ -153,7 +169,9 @@ struct FavoritesView: View {
             emptyState(
                 icon: "heart",
                 title: "还没有收藏",
-                message: "打开任意作品，点亮心形即可留在这里。"
+                message: "打开任意作品，点亮心形即可留在这里。",
+                actionTitle: "去看作品",
+                action: showPortfolio
             )
         } else {
             LazyVGrid(columns: columns, spacing: 3) {
@@ -191,7 +209,9 @@ struct FavoritesView: View {
             emptyState(
                 icon: "clock.arrow.circlepath",
                 title: "还没有浏览记录",
-                message: "进入任意相册后，最近看过的作品会保留在这里。"
+                message: "进入任意相册后，最近看过的作品会保留在这里。",
+                actionTitle: "浏览相册",
+                action: showPortfolio
             )
         } else {
             LazyVGrid(columns: columns, spacing: 3) {
@@ -225,17 +245,30 @@ struct FavoritesView: View {
         }
     }
 
-    private func emptyState(icon: String, title: String, message: String) -> some View {
+    private func emptyState(
+        icon: String,
+        title: String,
+        message: String,
+        actionTitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
         VStack(spacing: 18) {
             Image(systemName: icon)
                 .font(.system(size: 34, weight: .light))
                 .foregroundStyle(AppTheme.gold)
             Text(title)
-                .font(.editorial(28))
+                .font(.system(.title, design: .serif))
             Text(message)
                 .font(.subheadline)
                 .foregroundStyle(AppTheme.muted)
                 .multilineTextAlignment(.center)
+            Button(actionTitle, action: action)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AppTheme.ink)
+                .padding(.horizontal, 22)
+                .frame(minHeight: 44)
+                .background(AppTheme.warmWhite, in: Capsule())
+                .accessibilityIdentifier("library-open-portfolio")
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 36)

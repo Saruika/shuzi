@@ -165,7 +165,15 @@ private struct HeroPager: View {
                     .padding(.top, 26)
                 }
                 .padding(.horizontal, 22)
-                .padding(.top, max(18, AppWindowMetrics.topInsetForLayout + 2))
+                .padding(
+                    .top,
+                    max(
+                        18,
+                        AppWindowMetrics.topInsetForLayout(
+                            measured: proxy.safeAreaInsets.top
+                        ) + 2
+                    )
+                )
                 .padding(.bottom, 32)
             }
         }

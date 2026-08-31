@@ -3,6 +3,8 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct AppAccessGateView: View {
+    @EnvironmentObject private var admin: AdminSessionStore
+    @EnvironmentObject private var store: PortfolioStore
     @State private var presentsAdminAccess = false
 
     var body: some View {
@@ -24,13 +26,26 @@ struct AppAccessGateView: View {
                 }
         }
         .fullScreenCover(isPresented: $presentsAdminAccess) {
+            protectedAdminAccess
+        }
+    }
+
+    private var protectedAdminAccess: some View {
+        SecureCaptureSurface(
+            owner: .fullScreenPresentation,
+            onExit: { presentsAdminAccess = false }
+        ) {
             AdminAccessView()
+                .environmentObject(admin)
+                .environmentObject(store)
         }
     }
 }
 
 struct FanAccountView: View {
     @EnvironmentObject private var account: FanAccountStore
+    @EnvironmentObject private var admin: AdminSessionStore
+    @EnvironmentObject private var store: PortfolioStore
     @Environment(\.scenePhase) private var scenePhase
     let isAccessGate: Bool
     let externalAdminAccessPresented: Bool
@@ -48,8 +63,12 @@ struct FanAccountView: View {
     @State private var invitedNewPassword = ""
     @State private var invitedPasswordConfirmation = ""
     @State private var acceptedInvitationDataUse = false
+    @State private var recoveryTemporaryPassword = ""
+    @State private var recoveryNewPassword = ""
+    @State private var recoveryPasswordConfirmation = ""
     @State private var copiedLabel: String?
     @State private var showDeleteConfirmation = false
+    @State private var deleteCurrentPassword = ""
     @State private var presentsAdminAccess = false
 
     init(
@@ -88,10 +107,14 @@ struct FanAccountView: View {
             guard oldUserID != newUserID else { return }
             clearAuthenticationPasswords()
             clearInvitationSetupFields()
+            deleteCurrentPassword = ""
             copiedLabel = nil
         }
         .onChange(of: account.profile?.requiresAccountSetup) { _, requiresSetup in
             if requiresSetup != true { clearInvitationSetupFields() }
+        }
+        .onChange(of: account.profile?.requiresPasswordChange) { _, requiresChange in
+            if requiresChange != true { clearRecoveryPasswords() }
         }
         .onChange(of: mode) { _, _ in
             clearAuthenticationPasswords()
@@ -108,20 +131,31 @@ struct FanAccountView: View {
         .onChange(of: externalAdminAccessPresented) { _, presented in
             if presented { clearAllPasswords() }
         }
-        .confirmationDialog(
+        .alert(
             "永久删除粉丝账号？",
-            isPresented: $showDeleteConfirmation,
-            titleVisibility: .visible
+            isPresented: $showDeleteConfirmation
         ) {
+            SecureField("当前密码", text: $deleteCurrentPassword)
+                .textContentType(.password)
             Button("删除账号与全部个人资料", role: .destructive) {
-                Task { await account.deleteAccount() }
+                let password = deleteCurrentPassword
+                deleteCurrentPassword = ""
+                Task { await account.deleteAccount(currentPassword: password) }
             }
-            Button("取消", role: .cancel) { }
+            .disabled(deleteCurrentPassword.isEmpty)
+            Button("取消", role: .cancel) { deleteCurrentPassword = "" }
         } message: {
-            Text("身份码、抖音 ID、权限和服务器账号记录都会被删除，且无法恢复。")
+            Text("请重新输入当前密码。身份码、抖音 ID、权限和服务器账号记录都会被删除，且无法恢复。")
         }
         .fullScreenCover(isPresented: $presentsAdminAccess) {
-            AdminAccessView()
+            SecureCaptureSurface(
+                owner: .fullScreenPresentation,
+                onExit: { presentsAdminAccess = false }
+            ) {
+                AdminAccessView()
+                    .environmentObject(admin)
+                    .environmentObject(store)
+            }
         }
     }
 
@@ -295,7 +329,10 @@ struct FanAccountView: View {
             VStack(alignment: .leading, spacing: 9) {
                 Text(profile.requiresAccountSetup
                      ? "SECURE ACCOUNT SETUP"
-                     : (profile.status == FanAccountStatus.active.rawValue ? "APPROVED MEMBER" : "ACCESS REVIEW"))
+                     : (profile.requiresPasswordChange
+                        ? "PASSWORD RECOVERY"
+                        : (profile.status == FanAccountStatus.active.rawValue
+                            ? "APPROVED MEMBER" : "ACCESS REVIEW")))
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
@@ -303,21 +340,33 @@ struct FanAccountView: View {
                     .font(.editorial(38))
                     .accessibilityIdentifier("fan-account-heading")
                 Label(
-                    profile.requiresAccountSetup ? "完成本人设置前不会开放 App 内容" : statusTitle(profile.status),
-                    systemImage: profile.requiresAccountSetup ? "key.horizontal.fill" : statusIcon(profile.status)
+                    profile.requiresAccountSetup
+                        ? "完成本人设置前不会开放 App 内容"
+                        : (profile.requiresPasswordChange
+                            ? "请先设置一个只有你知道的新密码"
+                            : statusTitle(profile.status)),
+                    systemImage: profile.requiresAccountSetup || profile.requiresPasswordChange
+                        ? "key.horizontal.fill" : statusIcon(profile.status)
                 )
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(
-                        !profile.requiresAccountSetup && profile.status == FanAccountStatus.active.rawValue
+                        !profile.requiresAccountSetup && !profile.requiresPasswordChange
+                            && profile.status == FanAccountStatus.active.rawValue
                             ? AppTheme.gold : .orange
                     )
                     .accessibilityIdentifier(
-                        profile.requiresAccountSetup ? "fan-account-setup-required" : "fan-access-status-\(profile.status)"
+                        profile.requiresAccountSetup
+                            ? "fan-account-setup-required"
+                            : (profile.requiresPasswordChange
+                                ? "fan-password-recovery-required"
+                                : "fan-access-status-\(profile.status)")
                     )
             }
 
             if profile.requiresAccountSetup {
                 requiredAccountSetupForm(profile)
+            } else if profile.requiresPasswordChange {
+                passwordRecoveryForm(profile)
             } else {
                 if profile.status != FanAccountStatus.active.rawValue {
                     approvalStatusCard(profile.status)
@@ -361,6 +410,18 @@ struct FanAccountView: View {
                         }
                     }
                 }
+
+                NavigationLink {
+                    FanAccountSecurityView()
+                } label: {
+                    Label("密码与登录设备", systemImage: "lock.shield")
+                        .font(.caption.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("fan-account-security")
             }
 
             if let copiedLabel {
@@ -389,7 +450,9 @@ struct FanAccountView: View {
 
             Text(profile.requiresAccountSetup
                  ? "管理员只会看到这次生成的临时凭据一次，无法读取你设置的新密码。完成后临时密码和旧会话会立即失效。"
-                 : "请妥善保存身份码。管理员只能看到昵称、抖音 ID、身份码、审批状态和权限，无法查看你的密码。")
+                 : (profile.requiresPasswordChange
+                    ? "恢复凭据只会向管理员显示一次。完成后临时密码和所有旧会话都会失效。"
+                    : "请妥善保存身份码。管理员只能看到昵称、抖音 ID、身份码、审批状态和权限，无法查看你的密码。"))
                 .font(.caption2)
                 .lineSpacing(4)
                 .foregroundStyle(AppTheme.muted)
@@ -496,8 +559,55 @@ struct FanAccountView: View {
         .textFieldStyle(AccountTextFieldStyle())
     }
 
+    private func passwordRecoveryForm(_ profile: FanProfile) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(
+                "管理员已生成一次性恢复凭据。在这里设置新密码后才能继续使用 App。",
+                systemImage: "key.horizontal.fill"
+            )
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(AppTheme.gold)
+
+            if let expiresAt = profile.passwordRecoveryExpiresAt {
+                Text("恢复凭据有效至 \(expiresAt.formatted(date: .abbreviated, time: .shortened))。")
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.muted)
+            }
+
+            identityRow("粉丝身份码", value: profile.identityCode, copyable: true)
+                .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+            SecureField("重新输入管理员给你的临时密码", text: $recoveryTemporaryPassword)
+                .textContentType(.password)
+            SecureField("设置仅本人知道的新密码（至少 10 位）", text: $recoveryNewPassword)
+                .textContentType(.newPassword)
+            SecureField("再输入一次新密码", text: $recoveryPasswordConfirmation)
+                .textContentType(.newPassword)
+
+            Button {
+                Task {
+                    await account.completePasswordRecovery(
+                        currentPassword: recoveryTemporaryPassword,
+                        newPassword: recoveryNewPassword,
+                        passwordConfirmation: recoveryPasswordConfirmation
+                    )
+                    if account.profile?.requiresPasswordChange == false {
+                        clearRecoveryPasswords()
+                    }
+                }
+            } label: {
+                accountButtonLabel(account.isWorking ? "正在安全更新" : "设置新密码并继续")
+            }
+            .disabled(account.isWorking)
+            .accessibilityIdentifier("fan-password-recovery-submit")
+        }
+        .padding(16)
+        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+        .textFieldStyle(AccountTextFieldStyle())
+    }
+
     private func profileHeading(_ profile: FanProfile) -> String {
         if profile.requiresAccountSetup { return "完成首次设置" }
+        if profile.requiresPasswordChange { return "重新设置密码" }
         switch profile.accountStatus {
         case .some(.active): return "你好，\(profile.displayName)"
         case .some(.pending): return "申请已提交"
@@ -509,7 +619,7 @@ struct FanAccountView: View {
 
     private func statusTitle(_ status: String) -> String {
         switch FanAccountStatus(rawValue: status) {
-        case .some(.active): return "管理员已批准，可以访问 App 全部页面"
+        case .some(.active): return "管理员已批准，可按已授予权限访问 App"
         case .some(.pending): return "正在等待管理员审批"
         case .some(.rejected): return "管理员未批准本次访问申请"
         case .some(.suspended): return "管理员已暂停 App 访问"
@@ -536,7 +646,7 @@ struct FanAccountView: View {
         case .some(.suspended):
             message = "现有 App 内容访问已经停用。你仍可重新登录管理资料，并随时永久删除账号。"
         case .some(.active):
-            message = "访问已批准。"
+            message = "访问已批准，可按已授予权限使用相应内容。"
         case .none:
             message = "服务器返回了未知状态，请联系管理员。"
         }
@@ -585,9 +695,17 @@ struct FanAccountView: View {
         invitedPasswordConfirmation = ""
     }
 
+    private func clearRecoveryPasswords() {
+        recoveryTemporaryPassword = ""
+        recoveryNewPassword = ""
+        recoveryPasswordConfirmation = ""
+    }
+
     private func clearAllPasswords() {
         clearAuthenticationPasswords()
         clearInvitationPasswords()
+        clearRecoveryPasswords()
+        deleteCurrentPassword = ""
     }
 
     private func profileRefreshButton(_ profile: FanProfile) -> some View {
@@ -656,6 +774,148 @@ struct FanAccountView: View {
         .padding(.vertical, 14)
         .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
         .foregroundStyle(AppTheme.ink)
+    }
+}
+
+private struct FanAccountSecurityView: View {
+    @EnvironmentObject private var account: FanAccountStore
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var currentPassword = ""
+    @State private var newPassword = ""
+    @State private var passwordConfirmation = ""
+
+    var body: some View {
+        ZStack {
+            AppTheme.ink.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 13) {
+                        Text("修改密码").font(.editorial(27))
+                        Text("修改成功后会撤销所有旧会话，并为当前设备立即换发新会话。")
+                            .font(.caption)
+                            .lineSpacing(4)
+                            .foregroundStyle(AppTheme.muted)
+                        SecureField("当前密码", text: $currentPassword)
+                            .textContentType(.password)
+                        SecureField("新密码（至少 10 位）", text: $newPassword)
+                            .textContentType(.newPassword)
+                        SecureField("再输入一次新密码", text: $passwordConfirmation)
+                            .textContentType(.newPassword)
+                        Button {
+                            Task {
+                                await account.changePassword(
+                                    currentPassword: currentPassword,
+                                    newPassword: newPassword,
+                                    passwordConfirmation: passwordConfirmation
+                                )
+                                if account.errorMessage == nil {
+                                    clearPasswords()
+                                    await account.fetchSessions()
+                                }
+                            }
+                        } label: {
+                            Label("更新密码", systemImage: "key.horizontal")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 13)
+                                .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
+                                .foregroundStyle(AppTheme.ink)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(account.isWorking)
+                    }
+                    .padding(16)
+                    .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+                    .textFieldStyle(AccountTextFieldStyle())
+
+                    VStack(alignment: .leading, spacing: 13) {
+                        HStack {
+                            Text("登录设备与会话").font(.editorial(27))
+                            Spacer()
+                            Button {
+                                Task { await account.fetchSessions() }
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .frame(width: 44, height: 44)
+                            }
+                            .disabled(account.isWorking)
+                            .accessibilityLabel("刷新登录会话")
+                        }
+
+                        if account.sessions.isEmpty, account.isWorking {
+                            ProgressView("正在读取安全会话")
+                                .tint(AppTheme.gold)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 22)
+                        } else {
+                            ForEach(account.sessions) { session in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack {
+                                        Label(
+                                            session.isCurrent ? "当前设备" : "其他登录设备",
+                                            systemImage: session.isCurrent
+                                                ? "iphone.gen3.circle.fill" : "iphone.gen3.circle"
+                                        )
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(session.isCurrent ? AppTheme.gold : .white)
+                                        Spacer()
+                                        Text(session.installationCode)
+                                            .font(.system(.caption2, design: .monospaced))
+                                            .foregroundStyle(AppTheme.muted)
+                                    }
+                                    Text("登录于 \(session.createdAt.formatted(date: .abbreviated, time: .shortened)) · 有效至 \(session.expiresAt.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.caption2)
+                                        .foregroundStyle(AppTheme.muted)
+                                    if !session.isCurrent {
+                                        Button(role: .destructive) {
+                                            Task { await account.revokeSession(session.sessionID) }
+                                        } label: {
+                                            Label("撤销这个会话", systemImage: "rectangle.portrait.and.arrow.right")
+                                                .font(.caption.weight(.semibold))
+                                                .frame(minHeight: 44)
+                                        }
+                                        .disabled(account.isWorking)
+                                    }
+                                }
+                                .padding(13)
+                                .background(.black.opacity(0.2), in: RoundedRectangle(cornerRadius: 6))
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+
+                    if let notice = account.noticeMessage {
+                        Label(notice, systemImage: "checkmark.shield.fill")
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.gold)
+                    }
+                    if let error = account.errorMessage {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .padding(20)
+                .padding(.bottom, 44)
+                .frame(maxWidth: 700, alignment: .leading)
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .navigationTitle("账号安全")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .task { await account.fetchSessions() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { clearPasswords() }
+        }
+        .onDisappear { clearPasswords() }
+    }
+
+    private func clearPasswords() {
+        currentPassword = ""
+        newPassword = ""
+        passwordConfirmation = ""
     }
 }
 
@@ -1015,8 +1275,13 @@ struct FanAccessAdminView: View {
 
 private struct FanAccessDetailView: View {
     @EnvironmentObject private var admin: AdminSessionStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var user: AdminFanUser
     @State private var isSaving = false
+    @State private var isGeneratingRecovery = false
+    @State private var showRecoveryConfirmation = false
+    @State private var passwordRecovery: AdminFanPasswordRecovery?
+    @State private var recoveryPasteboardValue: String?
     @State private var errorMessage: String?
     let catalog: [AdminFanPermissionDefinition]
     let onUpdate: (AdminFanUser) -> Void
@@ -1113,6 +1378,55 @@ private struct FanAccessDetailView: View {
                         }
                     }
 
+                    if !user.requiresAccountSetup {
+                        VStack(alignment: .leading, spacing: 13) {
+                            Text("密码恢复").font(.editorial(25))
+                            Text("生成后会立即撤销该账号所有旧会话和旧密码。临时恢复凭据仅显示一次，有效期 15 分钟。")
+                                .font(.caption)
+                                .lineSpacing(4)
+                                .foregroundStyle(AppTheme.muted)
+
+                            Button(role: .destructive) {
+                                showRecoveryConfirmation = true
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if isGeneratingRecovery { ProgressView() }
+                                    Label("生成一次性密码恢复凭据", systemImage: "key.viewfinder")
+                                }
+                                .font(.caption.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .background(.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                            }
+                            .disabled(isSaving || isGeneratingRecovery || !admin.isAuthenticated)
+
+                            if let passwordRecovery {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Label("请立即安全交给账号本人", systemImage: "exclamationmark.shield.fill")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.orange)
+                                    Text(passwordRecovery.identityCode)
+                                        .font(.system(.subheadline, design: .monospaced, weight: .semibold))
+                                        .textSelection(.enabled)
+                                    Text(passwordRecovery.temporaryPassword)
+                                        .font(.system(.subheadline, design: .monospaced))
+                                        .privacySensitive()
+                                    Text("有效至 \(passwordRecovery.expiresAt.formatted(date: .abbreviated, time: .shortened))")
+                                        .font(.caption2)
+                                        .foregroundStyle(AppTheme.muted)
+                                    Button {
+                                        copyPasswordRecovery(passwordRecovery)
+                                    } label: {
+                                        Label("复制凭据（2 分钟后清除）", systemImage: "doc.on.doc")
+                                            .font(.caption.weight(.semibold))
+                                            .frame(minHeight: 44)
+                                    }
+                                }
+                                .padding(13)
+                                .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 6))
+                            }
+                        }
+                    }
+
                     VStack(alignment: .leading, spacing: 18) {
                         Text("功能权限").font(.editorial(25))
                         ForEach(catalog) { permission in
@@ -1166,7 +1480,26 @@ private struct FanAccessDetailView: View {
         )
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
-        .disabled(isSaving)
+        .disabled(isSaving || isGeneratingRecovery)
+        .confirmationDialog(
+            "撤销该粉丝的旧密码和全部会话？",
+            isPresented: $showRecoveryConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("生成恢复凭据", role: .destructive) {
+                Task { await generatePasswordRecovery() }
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("生成后不能查看原密码，已登录设备会立即失效。")
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { clearPasswordRecoverySecret() }
+        }
+        .onChange(of: admin.isAuthenticated) { _, authenticated in
+            if !authenticated { clearPasswordRecoverySecret() }
+        }
+        .onDisappear { clearPasswordRecoverySecret() }
     }
 
     private func permissionBinding(_ code: String) -> Binding<Bool> {
@@ -1221,6 +1554,47 @@ private struct FanAccessDetailView: View {
             errorMessage = (error as? AdminAPIError)?.errorDescription
                 ?? "权限更新失败。"
         }
+    }
+
+    private func generatePasswordRecovery() async {
+        guard admin.isAuthenticated, !isGeneratingRecovery else {
+            errorMessage = "管理员会话已锁定，请返回后重新登录。"
+            return
+        }
+        clearPasswordRecoverySecret()
+        isGeneratingRecovery = true
+        defer { isGeneratingRecovery = false }
+        do {
+            passwordRecovery = try await admin.createFanPasswordRecovery(userID: user.userID)
+            errorMessage = nil
+        } catch {
+            passwordRecovery = nil
+            errorMessage = (error as? AdminAPIError)?.errorDescription
+                ?? "暂时无法生成恢复凭据。"
+        }
+    }
+
+    private func copyPasswordRecovery(_ recovery: AdminFanPasswordRecovery) {
+        clearRecoveryPasteboardIfOwned()
+        let value = "Hi，梳子密码恢复\n身份码：\(recovery.identityCode)\n临时密码：\(recovery.temporaryPassword)\n有效至：\(recovery.expiresAt.formatted(date: .numeric, time: .shortened))"
+        UIPasteboard.general.setItems(
+            [[UTType.plainText.identifier: value]],
+            options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(120)]
+        )
+        recoveryPasteboardValue = value
+    }
+
+    private func clearPasswordRecoverySecret() {
+        passwordRecovery = nil
+        clearRecoveryPasteboardIfOwned()
+    }
+
+    private func clearRecoveryPasteboardIfOwned() {
+        if let recoveryPasteboardValue,
+           UIPasteboard.general.string == recoveryPasteboardValue {
+            UIPasteboard.general.items = []
+        }
+        recoveryPasteboardValue = nil
     }
 }
 

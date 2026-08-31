@@ -9,8 +9,8 @@ struct LaunchPosterView: View {
     @State private var copyIsVisible = false
 
     var body: some View {
-        ZStack {
-            GeometryReader { proxy in
+        GeometryReader { proxy in
+            ZStack {
                 AppTheme.ink
                     .overlay {
                         LinearGradient(
@@ -52,48 +52,63 @@ struct LaunchPosterView: View {
                             .frame(width: proxy.size.width, height: proxy.size.height)
                     }
                 }
-            }
 
-            LinearGradient(
-                stops: [
-                    .init(color: .black.opacity(0.5), location: 0),
-                    .init(color: .clear, location: 0.26),
-                    .init(color: .clear, location: 0.5),
-                    .init(color: AppTheme.ink.opacity(0.94), location: 1),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
+                LinearGradient(
+                    stops: [
+                        .init(color: .black.opacity(0.5), location: 0),
+                        .init(color: .clear, location: 0.26),
+                        .init(color: .clear, location: 0.5),
+                        .init(color: AppTheme.ink.opacity(0.94), location: 1),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
 
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        Spacer()
+                        Button(action: dismiss) {
+                            Text("跳过")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 9)
+                        }
+                        .foregroundStyle(.white.opacity(0.9))
+                        .background(.black.opacity(0.32), in: Capsule())
+                        .overlay {
+                            Capsule().stroke(.white.opacity(0.14), lineWidth: 0.5)
+                        }
+                        .accessibilityHint("立即进入首页")
+                    }
+
                     Spacer()
-                    Button(action: dismiss) {
-                        Text("跳过")
-                            .font(.system(size: 12, weight: .semibold))
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 9)
-                    }
-                    .foregroundStyle(.white.opacity(0.9))
-                    .background(.black.opacity(0.32), in: Capsule())
-                    .overlay {
-                        Capsule().stroke(.white.opacity(0.14), lineWidth: 0.5)
-                    }
-                    .accessibilityHint("立即进入首页")
+
+                    LaunchPosterTextBlock(poster: poster)
+                        .opacity(copyIsVisible ? 1 : 0)
+                        .offset(y: copyIsVisible ? 0 : 12)
                 }
-
-                Spacer()
-
-                LaunchPosterTextBlock(poster: poster)
-                    .opacity(copyIsVisible ? 1 : 0)
-                    .offset(y: copyIsVisible ? 0 : 12)
+                .padding(.horizontal, 22)
+                .padding(
+                    .top,
+                    max(
+                        12,
+                        AppWindowMetrics.topInsetForLayout(
+                            measured: proxy.safeAreaInsets.top
+                        ) + 12
+                    )
+                )
+                .padding(
+                    .bottom,
+                    max(
+                        24,
+                        AppWindowMetrics.bottomInsetForLayout(
+                            measured: proxy.safeAreaInsets.bottom
+                        ) + 24
+                    )
+                )
             }
-            .padding(.horizontal, 22)
-            .padding(.top, max(12, AppWindowMetrics.topInsetForLayout + 12))
-            .padding(.bottom, max(24, AppWindowMetrics.bottomInsetForLayout + 24))
         }
         .ignoresSafeArea()
-        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .background(AppTheme.ink.ignoresSafeArea())
         .task(id: remoteImageIsVisible) {
             guard remoteImageIsVisible else { return }

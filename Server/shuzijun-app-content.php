@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned access-controlled content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.5.6
+ * Version: 1.5.7
  * Author: Shuzijun
  */
 
@@ -26,12 +26,15 @@ final class Shuzijun_App_Content_API {
     const FAN_META_SESSIONS = '_yishu_fan_sessions';
     const FAN_META_REVIEW = '_yishu_fan_review';
     const FAN_META_INVITATION = '_yishu_fan_invitation';
+    const FAN_META_PASSWORD_RECOVERY = '_yishu_fan_password_recovery';
     const FAN_META_CREDENTIAL_EPOCH = '_yishu_fan_credential_epoch';
     const FAN_CONSENT_VERSION = '2026-08-31-approval-v2';
     const FAN_DOUYIN_OPTION_PREFIX = 'yishu_fan_douyin_';
     const FAN_SESSION_OPTION_PREFIX = 'yishu_fan_session_';
     const FAN_SESSION_TTL = 2592000;
     const FAN_ONBOARDING_SESSION_TTL = 600;
+    const FAN_PASSWORD_RECOVERY_SESSION_TTL = 600;
+    const FAN_PASSWORD_RECOVERY_TTL = 900;
     const FAN_INVITATION_TTL = 86400;
     const FAN_MAX_INSTALLATIONS = 16;
     const FAN_MAX_SESSIONS = 8;
@@ -150,13 +153,37 @@ final class Shuzijun_App_Content_API {
         register_rest_route('shuzijun/v1', '/fan/delete', array(
             'methods' => WP_REST_Server::CREATABLE,
             'callback' => array(__CLASS__, 'delete_fan_account'),
-            'permission_callback' => array(__CLASS__, 'can_access_fan_session'),
+            'permission_callback' => array(__CLASS__, 'can_delete_fan_account'),
         ));
 
         register_rest_route('shuzijun/v1', '/fan/complete-invitation', array(
             'methods' => WP_REST_Server::CREATABLE,
             'callback' => array(__CLASS__, 'complete_fan_invitation'),
             'permission_callback' => array(__CLASS__, 'can_complete_fan_invitation'),
+        ));
+
+        register_rest_route('shuzijun/v1', '/fan/complete-password-recovery', array(
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => array(__CLASS__, 'complete_fan_password_recovery'),
+            'permission_callback' => array(__CLASS__, 'can_complete_fan_password_recovery'),
+        ));
+
+        register_rest_route('shuzijun/v1', '/fan/change-password', array(
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => array(__CLASS__, 'change_fan_password'),
+            'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session'),
+        ));
+
+        register_rest_route('shuzijun/v1', '/fan/sessions', array(
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => array(__CLASS__, 'list_fan_sessions'),
+            'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session'),
+        ));
+
+        register_rest_route('shuzijun/v1', '/fan/sessions/revoke', array(
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => array(__CLASS__, 'revoke_other_fan_session'),
+            'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session'),
         ));
 
         register_rest_route('shuzijun/v1', '/app-admin/fans', array(
@@ -168,6 +195,12 @@ final class Shuzijun_App_Content_API {
         register_rest_route('shuzijun/v1', '/app-admin/fans/invitations', array(
             'methods' => WP_REST_Server::CREATABLE,
             'callback' => array(__CLASS__, 'create_fan_invitations'),
+            'permission_callback' => array(__CLASS__, 'can_manage_fans'),
+        ));
+
+        register_rest_route('shuzijun/v1', '/app-admin/fans/(?P<uuid>[a-f0-9-]{36})/password-recovery', array(
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => array(__CLASS__, 'create_fan_password_recovery'),
             'permission_callback' => array(__CLASS__, 'can_manage_fans'),
         ));
 
@@ -365,6 +398,12 @@ final class Shuzijun_App_Content_API {
         if ($has_invitation && $user instanceof WP_User) {
             return self::login_invited_fan($user, $identity_code, $password, $install_id);
         }
+        $raw_recovery = $user instanceof WP_User
+            ? self::fan_meta_from_database((int) $user->ID, self::FAN_META_PASSWORD_RECOVERY, null)
+            : null;
+        if (!empty($raw_recovery) && $user instanceof WP_User) {
+            return self::login_recovering_fan($user, $identity_code, $password, $install_id);
+        }
 
         $failure_identity = self::request_network_fingerprint() . '|' . $identity_code;
         $failure_bucket = 'fan_login_failure';
@@ -374,8 +413,7 @@ final class Shuzijun_App_Content_API {
             10
         );
         if (is_wp_error($failure_check)) { return $failure_check; }
-        if (!$user instanceof WP_User
-            || !self::fan_password_matches_database((int) $user->ID, $password)) {
+        if (!$user instanceof WP_User) {
             $failure = self::record_failure(
                 $failure_bucket,
                 $failure_identity,
@@ -384,10 +422,31 @@ final class Shuzijun_App_Content_API {
             if (is_wp_error($failure)) { return $failure; }
             return new WP_Error('fan_login_invalid', '身份码或密码不正确。', array('status' => 401));
         }
-        self::clear_failure_limit($failure_bucket, $failure_identity);
-        $session = self::issue_fan_session((int) $user->ID, $install_id, 'normal');
-        if (is_wp_error($session)) { return $session; }
-        return self::fan_auth_response((int) $user->ID, $session);
+        $user_id = (int) $user->ID;
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        try {
+            // Recheck setup markers after acquiring the account lock. Otherwise
+            // a password reset racing a normal login could issue a fresh token
+            // after the old password had already been accepted.
+            if (!empty(self::fan_meta_from_database($user_id, self::FAN_META_INVITATION, null))
+                || !empty(self::fan_meta_from_database($user_id, self::FAN_META_PASSWORD_RECOVERY, null))
+                || !self::fan_password_matches_database($user_id, $password)) {
+                $failure = self::record_failure(
+                    $failure_bucket,
+                    $failure_identity,
+                    15 * MINUTE_IN_SECONDS
+                );
+                if (is_wp_error($failure)) { return $failure; }
+                return new WP_Error('fan_login_invalid', '身份码或密码不正确。', array('status' => 401));
+            }
+            self::clear_failure_limit($failure_bucket, $failure_identity);
+            $session = self::issue_fan_session($user_id, $install_id, 'normal');
+            if (is_wp_error($session)) { return $session; }
+            return self::fan_auth_response($user_id, $session);
+        } finally {
+            self::release_fan_lock($user_id, $lock_owner);
+        }
     }
 
     private static function login_invited_fan(WP_User $user, $identity_code, $password, $install_id) {
@@ -452,6 +511,122 @@ final class Shuzijun_App_Content_API {
         }
     }
 
+    private static function login_recovering_fan(WP_User $user, $identity_code, $password, $install_id) {
+        $user_id = (int) $user->ID;
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        try {
+            $failure_check = self::check_failure_limit(
+                'fan_recovery_login_failure',
+                $identity_code,
+                5
+            );
+            if (is_wp_error($failure_check)) { return $failure_check; }
+            if (!self::fan_password_matches_database($user_id, $password)) {
+                $failure = self::record_failure(
+                    'fan_recovery_login_failure',
+                    $identity_code,
+                    15 * MINUTE_IN_SECONDS
+                );
+                if (is_wp_error($failure)) { return $failure; }
+                return new WP_Error('fan_login_invalid', '身份码或密码不正确。', array('status' => 401));
+            }
+            // Validate the secret before revealing whether this identity has a
+            // live, expired or malformed recovery marker.
+            $recovery = self::normalize_fan_password_recovery(
+                self::fan_meta_from_database($user_id, self::FAN_META_PASSWORD_RECOVERY, null)
+            );
+            if (is_wp_error($recovery)) { return $recovery; }
+            if ((int) $recovery['expiresTimestamp'] <= time()) {
+                return new WP_Error(
+                    'fan_password_recovery_expired',
+                    '密码恢复凭据已过期，请联系管理员重新生成。',
+                    array('status' => 410)
+                );
+            }
+            $request_install_hash = hash('sha256', strtolower((string) $install_id));
+            if (!empty($recovery['claimedInstallHash'])) {
+                if (empty($recovery['claimedInstallHash'])
+                    || !hash_equals(
+                        (string) $recovery['claimedInstallHash'],
+                        $request_install_hash
+                    )) {
+                    return new WP_Error(
+                        'fan_login_invalid',
+                        '身份码或密码不正确。',
+                        array('status' => 401)
+                    );
+                }
+                if (!empty($recovery['claimedSessionID'])) {
+                    // A lost HTTP response may leave the legitimate installation
+                    // without the first token. Reissue only to that same hashed
+                    // installation and invalidate the prior recovery session.
+                    self::revoke_fan_session_by_public_id(
+                        $user_id,
+                        (string) $recovery['claimedSessionID']
+                    );
+                }
+            } else {
+                try {
+                    $claim_nonce = bin2hex(random_bytes(16));
+                } catch (Exception $error) {
+                    return new WP_Error(
+                        'fan_password_recovery_unavailable',
+                        '暂时无法安全绑定恢复会话，请联系管理员重新生成。',
+                        array('status' => 503)
+                    );
+                }
+                // Persist an installation-bound nonce before issuing any
+                // token. A crash can leave only this harmless preliminary
+                // claim; the same installation may retry, while another one
+                // cannot steal the credential.
+                $recovery['claimedAt'] = gmdate('c');
+                $recovery['claimedInstallHash'] = $request_install_hash;
+                $recovery['claimNonce'] = $claim_nonce;
+                $recovery['claimedSessionID'] = '';
+                unset($recovery['createdTimestamp'], $recovery['expiresTimestamp']);
+                if (!self::update_user_meta_verified(
+                    $user_id,
+                    self::FAN_META_PASSWORD_RECOVERY,
+                    $recovery
+                )) {
+                    return new WP_Error(
+                        'fan_password_recovery_unavailable',
+                        '暂时无法安全绑定恢复会话，请联系管理员重新生成。',
+                        array('status' => 503)
+                    );
+                }
+            }
+            self::clear_failure_limit('fan_recovery_login_failure', $identity_code);
+            $session = self::issue_fan_session(
+                $user_id,
+                $install_id,
+                'password_recovery',
+                self::FAN_PASSWORD_RECOVERY_SESSION_TTL
+            );
+            if (is_wp_error($session)) { return $session; }
+            $recovery['claimedAt'] = gmdate('c');
+            $recovery['claimedInstallHash'] = $request_install_hash;
+            $recovery['claimedSessionID'] = (string) $session['sessionID'];
+            unset($recovery['createdTimestamp'], $recovery['expiresTimestamp']);
+            if (!self::update_user_meta_verified(
+                $user_id,
+                self::FAN_META_PASSWORD_RECOVERY,
+                $recovery
+            )) {
+                self::revoke_fan_session($user_id, (string) $session['tokenHash']);
+                return new WP_Error(
+                    'fan_password_recovery_unavailable',
+                    '暂时无法安全绑定恢复会话，请联系管理员重新生成。',
+                    array('status' => 503)
+                );
+            }
+            return self::fan_auth_response($user_id, $session);
+        } finally {
+            self::release_fan_lock($user_id, $lock_owner);
+        }
+    }
+
     public static function can_access_fan_session(WP_REST_Request $request) {
         self::$fan_session_context = null;
         $context = self::authenticate_fan_session($request);
@@ -496,6 +671,140 @@ final class Shuzijun_App_Content_API {
         return true;
     }
 
+    public static function can_access_normal_fan_session(WP_REST_Request $request) {
+        self::$fan_session_context = null;
+        $context = self::authenticate_fan_session($request);
+        if (is_wp_error($context)) { return $context; }
+        $user_id = (int) $context['userID'];
+        if (($context['scope'] ?? '') !== 'normal'
+            || !empty(self::fan_meta_from_database($user_id, self::FAN_META_INVITATION, null))
+            || !empty(self::fan_meta_from_database($user_id, self::FAN_META_PASSWORD_RECOVERY, null))) {
+            return new WP_Error(
+                'fan_normal_session_required',
+                '请先完成账号安全设置。',
+                array('status' => 403)
+            );
+        }
+        self::$fan_session_context = $context;
+        return true;
+    }
+
+    public static function can_complete_fan_password_recovery(WP_REST_Request $request) {
+        self::$fan_session_context = null;
+        $context = self::authenticate_fan_session($request);
+        if (is_wp_error($context)) { return $context; }
+        if (($context['scope'] ?? '') !== 'password_recovery') {
+            return new WP_Error(
+                'fan_password_recovery_session_required',
+                '请先使用密码恢复凭据登录。',
+                array('status' => 403)
+            );
+        }
+        $recovery = self::normalize_fan_password_recovery(
+            self::fan_meta_from_database(
+                (int) $context['userID'],
+                self::FAN_META_PASSWORD_RECOVERY,
+                null
+            )
+        );
+        if (is_wp_error($recovery)) { return $recovery; }
+        if ((int) $recovery['expiresTimestamp'] <= time()) {
+            return new WP_Error(
+                'fan_password_recovery_expired',
+                '密码恢复凭据已过期，请联系管理员重新生成。',
+                array('status' => 410)
+            );
+        }
+        if (empty($recovery['claimedSessionID'])
+            || empty($recovery['claimedInstallHash'])
+            || empty($recovery['claimNonce'])
+            || !hash_equals(
+                (string) $recovery['claimedSessionID'],
+                (string) ($context['sessionID'] ?? '')
+            )
+            || !hash_equals(
+                (string) $recovery['claimedInstallHash'],
+                (string) ($context['installHash'] ?? '')
+            )) {
+            return new WP_Error(
+                'fan_password_recovery_session_required',
+                '密码恢复会话已失效，请联系管理员重新生成。',
+                array('status' => 403)
+            );
+        }
+        $context['passwordRecovery'] = $recovery;
+        self::$fan_session_context = $context;
+        return true;
+    }
+
+    public static function can_delete_fan_account(WP_REST_Request $request) {
+        self::$fan_session_context = null;
+        $context = self::authenticate_fan_session($request);
+        if (is_wp_error($context)) { return $context; }
+        $scope = (string) ($context['scope'] ?? '');
+        $user_id = (int) ($context['userID'] ?? 0);
+        if (!in_array($scope, array('normal', 'onboarding', 'password_recovery'), true)
+            || $user_id <= 0) {
+            return new WP_Error('fan_session_required', '请重新登录。', array('status' => 401));
+        }
+        if ($scope === 'normal') {
+            if (!empty(self::fan_meta_from_database($user_id, self::FAN_META_INVITATION, null))
+                || !empty(self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_PASSWORD_RECOVERY,
+                    null
+                ))) {
+                return new WP_Error(
+                    'fan_delete_session_invalid',
+                    '账号安全状态已变更，请重新登录后再试。',
+                    array('status' => 403)
+                );
+            }
+        } elseif ($scope === 'onboarding') {
+            $invitation = self::normalize_fan_invitation(
+                self::fan_meta_from_database($user_id, self::FAN_META_INVITATION, null)
+            );
+            if (is_wp_error($invitation) || (int) $invitation['expiresTimestamp'] <= time()) {
+                return new WP_Error(
+                    'fan_invitation_expired',
+                    '临时账号已过期，请联系管理员。',
+                    array('status' => 410)
+                );
+            }
+            $context['deleteMarkerGeneration'] = (string) $invitation['generation'];
+        } else {
+            $recovery = self::normalize_fan_password_recovery(
+                self::fan_meta_from_database($user_id, self::FAN_META_PASSWORD_RECOVERY, null)
+            );
+            if (is_wp_error($recovery) || (int) $recovery['expiresTimestamp'] <= time()) {
+                return new WP_Error(
+                    'fan_password_recovery_expired',
+                    '密码恢复凭据已过期，请联系管理员重新生成。',
+                    array('status' => 410)
+                );
+            }
+            if (empty($recovery['claimedSessionID'])
+                || empty($recovery['claimedInstallHash'])
+                || !hash_equals(
+                    (string) $recovery['claimedSessionID'],
+                    (string) ($context['sessionID'] ?? '')
+                )
+                || !hash_equals(
+                    (string) $recovery['claimedInstallHash'],
+                    (string) ($context['installHash'] ?? '')
+                )) {
+                return new WP_Error(
+                    'fan_delete_session_invalid',
+                    '密码恢复会话已失效，请重新登录后再试。',
+                    array('status' => 403)
+                );
+            }
+            $context['deleteMarkerGeneration'] = (string) $recovery['generation'];
+        }
+        self::$fan_session_context = $context;
+        return true;
+    }
+
     public static function can_access_app_content(WP_REST_Request $request) {
         if (self::authenticate_content_manager($request)) { return true; }
 
@@ -503,7 +812,8 @@ final class Shuzijun_App_Content_API {
         $context = self::authenticate_fan_session($request);
         if (is_wp_error($context)) { return $context; }
         if (($context['scope'] ?? '') !== 'normal'
-            || !empty(get_user_meta((int) $context['userID'], self::FAN_META_INVITATION, true))) {
+            || !empty(get_user_meta((int) $context['userID'], self::FAN_META_INVITATION, true))
+            || !empty(get_user_meta((int) $context['userID'], self::FAN_META_PASSWORD_RECOVERY, true))) {
             return new WP_Error(
                 'fan_account_setup_required',
                 '请先完成密码、抖音 ID 和隐私同意设置。',
@@ -555,13 +865,111 @@ final class Shuzijun_App_Content_API {
         if (!is_array($context) || empty($context['userID'])) {
             return new WP_Error('fan_session_required', '请重新登录。', array('status' => 401));
         }
-        if ((string) $request->get_param('confirmation') !== 'DELETE_ACCOUNT') {
+        $header_install_id = self::request_install_id($request);
+        if (is_wp_error($header_install_id)) { return $header_install_id; }
+        $body_install_id = strtolower(trim((string) $request->get_param('installID')));
+        if (!$body_install_id || !hash_equals($header_install_id, $body_install_id)) {
+            return new WP_Error(
+                'fan_install_id_invalid',
+                '安装记录无效，请重启 App 后再试。',
+                array('status' => 400)
+            );
+        }
+        $current_password = (string) $request->get_param('currentPassword');
+        if ((string) $request->get_param('confirmation') !== 'DELETE_ACCOUNT'
+            || !$current_password || strlen($current_password) > 512) {
             return new WP_Error('fan_delete_confirmation_required', '请确认后再删除账号。', array('status' => 400));
         }
+        $network_limit = self::rate_limit(
+            'fan_delete_net',
+            self::request_network_fingerprint(),
+            10,
+            15 * MINUTE_IN_SECONDS
+        );
+        if (is_wp_error($network_limit)) { return $network_limit; }
         $user_id = (int) $context['userID'];
         $lock_owner = self::acquire_fan_lock($user_id);
         if (is_wp_error($lock_owner)) { return $lock_owner; }
         try {
+            $scope = (string) ($context['scope'] ?? '');
+            if (!self::fan_session_context_is_current_from_database($context, $scope)) {
+                return new WP_Error(
+                    'fan_delete_session_invalid',
+                    '登录状态已变更，请重新登录后再试。',
+                    array('status' => 403)
+                );
+            }
+            $failure_check = self::check_failure_limit(
+                'fan_delete_failure',
+                (string) $user_id,
+                5
+            );
+            if (is_wp_error($failure_check)) { return $failure_check; }
+            $marker_valid = false;
+            if ($scope === 'normal') {
+                $marker_valid = empty(self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_INVITATION,
+                    null
+                )) && empty(self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_PASSWORD_RECOVERY,
+                    null
+                ));
+            } elseif ($scope === 'onboarding') {
+                $invitation = self::normalize_fan_invitation(
+                    self::fan_meta_from_database($user_id, self::FAN_META_INVITATION, null)
+                );
+                $marker_valid = !is_wp_error($invitation)
+                    && (int) $invitation['expiresTimestamp'] > time()
+                    && (string) self::fan_meta_from_database(
+                        $user_id,
+                        self::FAN_META_STATUS,
+                        ''
+                    ) === 'pending'
+                    && hash_equals(
+                        (string) $invitation['generation'],
+                        (string) ($context['deleteMarkerGeneration'] ?? '')
+                    );
+            } elseif ($scope === 'password_recovery') {
+                $recovery = self::normalize_fan_password_recovery(
+                    self::fan_meta_from_database(
+                        $user_id,
+                        self::FAN_META_PASSWORD_RECOVERY,
+                        null
+                    )
+                );
+                $marker_valid = !is_wp_error($recovery)
+                    && (int) $recovery['expiresTimestamp'] > time()
+                    && !empty($recovery['claimNonce'])
+                    && hash_equals(
+                        (string) $recovery['generation'],
+                        (string) ($context['deleteMarkerGeneration'] ?? '')
+                    )
+                    && hash_equals(
+                        (string) $recovery['claimedSessionID'],
+                        (string) ($context['sessionID'] ?? '')
+                    )
+                    && hash_equals(
+                        (string) $recovery['claimedInstallHash'],
+                        (string) ($context['installHash'] ?? '')
+                    );
+            }
+            if (!$marker_valid
+                || !self::fan_password_matches_database($user_id, $current_password)) {
+                $failure = self::record_failure(
+                    'fan_delete_failure',
+                    (string) $user_id,
+                    15 * MINUTE_IN_SECONDS
+                );
+                if (is_wp_error($failure)) { return $failure; }
+                return new WP_Error(
+                    'fan_login_invalid',
+                    '当前密码不正确。',
+                    array('status' => 401)
+                );
+            }
+            self::clear_failure_limit('fan_delete_failure', (string) $user_id);
             $douyin_id = (string) get_user_meta($user_id, self::FAN_META_DOUYIN_ID, true);
             $reservation = $douyin_id ? self::douyin_reservation_name($douyin_id) : '';
             if (!self::remove_fan_user($user_id, $reservation)) {
@@ -852,6 +1260,372 @@ final class Shuzijun_App_Content_API {
         }
     }
 
+    public static function create_fan_password_recovery(WP_REST_Request $request) {
+        $user = self::find_fan_user_by_uuid((string) $request['uuid']);
+        if (is_wp_error($user)) { return $user; }
+        $user_id = (int) $user->ID;
+        $limit = self::rate_limit(
+            'fan_admin_password_recovery',
+            get_current_user_id() . '|' . $user_id,
+            5,
+            HOUR_IN_SECONDS
+        );
+        if (is_wp_error($limit)) { return $limit; }
+
+        $temporary_password = self::generate_temporary_password();
+        if (is_wp_error($temporary_password)) { return $temporary_password; }
+        try {
+            $generation = bin2hex(random_bytes(16));
+        } catch (Exception $error) {
+            return new WP_Error(
+                'fan_password_recovery_unavailable',
+                '暂时无法生成安全恢复凭据。',
+                array('status' => 503)
+            );
+        }
+        $created_timestamp = time();
+        $expires_timestamp = $created_timestamp + self::FAN_PASSWORD_RECOVERY_TTL;
+        $recovery = array(
+            'createdAt' => gmdate('c', $created_timestamp),
+            'expiresAt' => gmdate('c', $expires_timestamp),
+            'createdBy' => get_current_user_id(),
+            'generation' => $generation,
+        );
+
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        $transaction_started = false;
+        $transaction_committed = false;
+        try {
+            global $wpdb;
+            if (!empty(self::fan_meta_from_database($user_id, self::FAN_META_INVITATION, null))) {
+                return new WP_Error(
+                    'fan_account_setup_required',
+                    '临时邀请账号必须先由本人完成首次设置。',
+                    array('status' => 409)
+                );
+            }
+            if (!isset($wpdb) || !method_exists($wpdb, 'query')
+                || $wpdb->query('START TRANSACTION') === false) {
+                return new WP_Error(
+                    'fan_password_recovery_unavailable',
+                    '账号安全事务暂时不可用。',
+                    array('status' => 503)
+                );
+            }
+            $transaction_started = true;
+            $uuid = (string) self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_UUID,
+                '',
+                true
+            );
+            if ($uuid !== strtolower((string) $request['uuid'])
+                || !empty(self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_INVITATION,
+                    null,
+                    true
+                ))) {
+                return new WP_Error('fan_not_found', '用户不存在。', array('status' => 404));
+            }
+            $current_epoch = (int) self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_CREDENTIAL_EPOCH,
+                0,
+                true
+            );
+            $password_hash = wp_hash_password((string) $temporary_password);
+            $password_saved = $wpdb->update(
+                $wpdb->users,
+                array('user_pass' => $password_hash, 'user_activation_key' => ''),
+                array('ID' => $user_id),
+                array('%s', '%s'),
+                array('%d')
+            );
+            if ($current_epoch <= 0 || $password_saved === false
+                || !wp_check_password((string) $temporary_password, $password_hash, $user_id)
+                || !self::set_fan_meta_in_transaction(
+                    $user_id,
+                    self::FAN_META_PASSWORD_RECOVERY,
+                    $recovery
+                )
+                || !self::set_fan_meta_in_transaction(
+                    $user_id,
+                    self::FAN_META_CREDENTIAL_EPOCH,
+                    $current_epoch + 1
+                )) {
+                return new WP_Error(
+                    'fan_password_recovery_unavailable',
+                    '暂时无法安全更新账号凭据。',
+                    array('status' => 503)
+                );
+            }
+            if ($wpdb->query('COMMIT') === false) {
+                return new WP_Error(
+                    'fan_password_recovery_unavailable',
+                    '暂时无法安全更新账号凭据。',
+                    array('status' => 503)
+                );
+            }
+            $transaction_committed = true;
+            clean_user_cache($user_id);
+            wp_cache_delete($user_id, 'user_meta');
+            // The epoch change rejects all previous tokens before their option
+            // records are removed, so reset creation is fail closed.
+            self::revoke_all_fan_sessions($user_id);
+            $response = new WP_REST_Response(array(
+                'passwordRecovery' => array(
+                    'userID' => (string) get_user_meta($user_id, self::FAN_META_UUID, true),
+                    'identityCode' => (string) get_user_meta($user_id, self::FAN_META_CODE, true),
+                    'temporaryPassword' => (string) $temporary_password,
+                    'expiresAt' => (string) $recovery['expiresAt'],
+                    'requiresPasswordChange' => true,
+                ),
+            ), 201);
+            $response->header('Cache-Control', 'private, no-store, max-age=0');
+            $response->header('Pragma', 'no-cache');
+            return $response;
+        } finally {
+            if ($transaction_started && !$transaction_committed) {
+                $wpdb->query('ROLLBACK');
+                clean_user_cache($user_id);
+                wp_cache_delete($user_id, 'user_meta');
+            }
+            self::release_fan_lock($user_id, $lock_owner);
+        }
+    }
+
+    public static function complete_fan_password_recovery(WP_REST_Request $request) {
+        $context = self::$fan_session_context;
+        if (!is_array($context) || empty($context['userID'])
+            || ($context['scope'] ?? '') !== 'password_recovery'
+            || empty($context['passwordRecovery']['generation'])) {
+            return new WP_Error(
+                'fan_password_recovery_session_required',
+                '请先使用密码恢复凭据登录。',
+                array('status' => 403)
+            );
+        }
+        $input = self::password_change_input($request);
+        if (is_wp_error($input)) { return $input; }
+        $user_id = (int) $context['userID'];
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        try {
+            $failure_check = self::check_failure_limit(
+                'fan_recovery_complete_failure',
+                (string) $user_id,
+                5
+            );
+            if (is_wp_error($failure_check)) { return $failure_check; }
+            $recovery = self::normalize_fan_password_recovery(
+                self::fan_meta_from_database($user_id, self::FAN_META_PASSWORD_RECOVERY, null)
+            );
+            if (is_wp_error($recovery)
+                || !hash_equals(
+                    (string) $context['passwordRecovery']['generation'],
+                    (string) ($recovery['generation'] ?? '')
+                )
+                || (int) ($recovery['expiresTimestamp'] ?? 0) <= time()) {
+                return new WP_Error(
+                    'fan_password_recovery_expired',
+                    '密码恢复凭据已过期，请联系管理员重新生成。',
+                    array('status' => 410)
+                );
+            }
+            if (empty($recovery['claimedSessionID'])
+                || empty($recovery['claimedInstallHash'])
+                || empty($recovery['claimNonce'])
+                || !hash_equals(
+                    (string) $recovery['claimedSessionID'],
+                    (string) ($context['sessionID'] ?? '')
+                )
+                || !hash_equals(
+                    (string) $recovery['claimedInstallHash'],
+                    (string) ($context['installHash'] ?? '')
+                )
+                || !self::fan_session_context_is_current_from_database(
+                    $context,
+                    'password_recovery'
+                )) {
+                return new WP_Error(
+                    'fan_password_recovery_session_required',
+                    '密码恢复会话已失效，请使用当前恢复凭据重新登录。',
+                    array('status' => 403)
+                );
+            }
+            if (!self::fan_password_matches_database($user_id, $input['currentPassword'])) {
+                $failure = self::record_failure(
+                    'fan_recovery_complete_failure',
+                    (string) $user_id,
+                    15 * MINUTE_IN_SECONDS
+                );
+                if (is_wp_error($failure)) { return $failure; }
+                return new WP_Error('fan_login_invalid', '当前临时密码不正确。', array('status' => 401));
+            }
+            self::clear_failure_limit('fan_recovery_complete_failure', (string) $user_id);
+            $changed = self::commit_fan_password_change(
+                $user_id,
+                $input['currentPassword'],
+                $input['newPassword'],
+                (string) $recovery['generation']
+            );
+            if (is_wp_error($changed)) { return $changed; }
+            self::revoke_all_fan_sessions($user_id);
+            $session = self::issue_fan_session($user_id, $input['installID'], 'normal');
+            if (is_wp_error($session)) { return $session; }
+            return self::fan_auth_response($user_id, $session);
+        } finally {
+            self::release_fan_lock($user_id, $lock_owner);
+        }
+    }
+
+    public static function change_fan_password(WP_REST_Request $request) {
+        $context = self::$fan_session_context;
+        if (!is_array($context) || empty($context['userID'])
+            || ($context['scope'] ?? '') !== 'normal') {
+            return new WP_Error('fan_session_required', '请重新登录。', array('status' => 401));
+        }
+        $network_limit = self::rate_limit(
+            'fan_password_change_net',
+            self::request_network_fingerprint(),
+            20,
+            15 * MINUTE_IN_SECONDS
+        );
+        if (is_wp_error($network_limit)) { return $network_limit; }
+        $input = self::password_change_input($request);
+        if (is_wp_error($input)) { return $input; }
+        $user_id = (int) $context['userID'];
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        try {
+            $failure_check = self::check_failure_limit(
+                'fan_password_change_failure',
+                (string) $user_id,
+                5
+            );
+            if (is_wp_error($failure_check)) { return $failure_check; }
+            if (!empty(self::fan_meta_from_database($user_id, self::FAN_META_INVITATION, null))
+                || !empty(self::fan_meta_from_database($user_id, self::FAN_META_PASSWORD_RECOVERY, null))) {
+                return new WP_Error(
+                    'fan_normal_session_required',
+                    '请先完成账号安全设置。',
+                    array('status' => 403)
+                );
+            }
+            if (!self::fan_password_matches_database($user_id, $input['currentPassword'])) {
+                $failure = self::record_failure(
+                    'fan_password_change_failure',
+                    (string) $user_id,
+                    15 * MINUTE_IN_SECONDS
+                );
+                if (is_wp_error($failure)) { return $failure; }
+                return new WP_Error('fan_login_invalid', '当前密码不正确。', array('status' => 401));
+            }
+            self::clear_failure_limit('fan_password_change_failure', (string) $user_id);
+            $changed = self::commit_fan_password_change(
+                $user_id,
+                $input['currentPassword'],
+                $input['newPassword']
+            );
+            if (is_wp_error($changed)) { return $changed; }
+            self::revoke_all_fan_sessions($user_id);
+            $session = self::issue_fan_session($user_id, $input['installID'], 'normal');
+            if (is_wp_error($session)) { return $session; }
+            return self::fan_auth_response($user_id, $session);
+        } finally {
+            self::release_fan_lock($user_id, $lock_owner);
+        }
+    }
+
+    public static function list_fan_sessions() {
+        $context = self::$fan_session_context;
+        if (!is_array($context) || empty($context['userID']) || empty($context['tokenHash'])) {
+            return new WP_Error('fan_session_required', '请重新登录。', array('status' => 401));
+        }
+        $user_id = (int) $context['userID'];
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        try {
+            $sessions = self::fan_session_directory(
+                $user_id,
+                (string) $context['tokenHash']
+            );
+            if (is_wp_error($sessions)) { return $sessions; }
+            $response = rest_ensure_response(array('sessions' => $sessions));
+            $response->header('Cache-Control', 'private, no-store');
+            return $response;
+        } finally {
+            self::release_fan_lock($user_id, $lock_owner);
+        }
+    }
+
+    public static function revoke_other_fan_session(WP_REST_Request $request) {
+        $context = self::$fan_session_context;
+        $session_id = strtolower(trim((string) $request->get_param('sessionID')));
+        if (!is_array($context) || empty($context['userID']) || empty($context['tokenHash'])) {
+            return new WP_Error('fan_session_required', '请重新登录。', array('status' => 401));
+        }
+        if (!preg_match('/^[a-f0-9]{32}$/', $session_id)) {
+            return new WP_Error('fan_session_target_invalid', '会话记录无效。', array('status' => 400));
+        }
+        $user_id = (int) $context['userID'];
+        $current_id = isset($context['sessionID'])
+            && preg_match('/^[a-f0-9]{32}$/', (string) $context['sessionID'])
+            ? (string) $context['sessionID']
+            : self::fan_public_session_id((string) $context['tokenHash']);
+        if (hash_equals($current_id, $session_id)) {
+            return new WP_Error(
+                'fan_current_session_cannot_be_revoked',
+                '当前设备请使用退出登录。',
+                array('status' => 409)
+            );
+        }
+        $limit = self::rate_limit(
+            'fan_session_revoke',
+            $user_id . '|' . self::request_network_fingerprint(),
+            30,
+            HOUR_IN_SECONDS
+        );
+        if (is_wp_error($limit)) { return $limit; }
+
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        try {
+            $sessions = get_user_meta($user_id, self::FAN_META_SESSIONS, true);
+            $sessions = is_array($sessions) ? $sessions : array();
+            $target_hash = '';
+            foreach ($sessions as $session) {
+                if (!is_array($session) || empty($session['hash'])) { continue; }
+                $hash = strtolower((string) $session['hash']);
+                if (!preg_match('/^[a-f0-9]{64}$/', $hash)) { continue; }
+                $public_id = isset($session['sessionID'])
+                    && preg_match('/^[a-f0-9]{32}$/', (string) $session['sessionID'])
+                    ? (string) $session['sessionID']
+                    : self::fan_public_session_id($hash);
+                if (hash_equals($public_id, $session_id)) {
+                    $target_hash = $hash;
+                    break;
+                }
+            }
+            if (!$target_hash) {
+                return new WP_Error('fan_session_target_not_found', '会话已失效或不存在。', array('status' => 404));
+            }
+            self::revoke_fan_session($user_id, $target_hash);
+            $directory = self::fan_session_directory(
+                $user_id,
+                (string) $context['tokenHash']
+            );
+            if (is_wp_error($directory)) { return $directory; }
+            $response = rest_ensure_response(array('ok' => true, 'sessions' => $directory));
+            $response->header('Cache-Control', 'private, no-store');
+            return $response;
+        } finally {
+            self::release_fan_lock($user_id, $lock_owner);
+        }
+    }
+
     public static function list_fans(WP_REST_Request $request) {
         $search = sanitize_text_field((string) $request->get_param('search'));
         $search = self::text_length($search) > 80 ? '' : $search;
@@ -1013,6 +1787,23 @@ final class Shuzijun_App_Content_API {
         return is_string($value) && preg_match('/^invite_[a-f0-9]{24}$/', $value) === 1;
     }
 
+    private static function find_fan_user_by_uuid($value) {
+        $uuid = strtolower(trim((string) $value));
+        if (!preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/', $uuid)) {
+            return new WP_Error('fan_not_found', '用户不存在。', array('status' => 404));
+        }
+        $users = get_users(array(
+            'number' => 2,
+            'fields' => 'all',
+            'meta_key' => self::FAN_META_UUID,
+            'meta_value' => $uuid,
+        ));
+        if (count($users) !== 1 || !$users[0] instanceof WP_User) {
+            return new WP_Error('fan_not_found', '用户不存在。', array('status' => 404));
+        }
+        return $users[0];
+    }
+
     private static function douyin_reservation_name($douyin_id) {
         return self::FAN_DOUYIN_OPTION_PREFIX . hash('sha256', (string) $douyin_id);
     }
@@ -1151,6 +1942,207 @@ final class Shuzijun_App_Content_API {
             'preapproved' => true,
             'placeholderDouyinID' => $placeholder,
         );
+    }
+
+    private static function normalize_fan_password_recovery($value) {
+        if (!is_array($value)) {
+            return new WP_Error(
+                'fan_password_recovery_unavailable',
+                '密码恢复凭据已失效，请联系管理员。',
+                array('status' => 410)
+            );
+        }
+        $created_at = isset($value['createdAt']) && is_scalar($value['createdAt'])
+            ? strtotime((string) $value['createdAt'])
+            : false;
+        $expires_at = isset($value['expiresAt']) && is_scalar($value['expiresAt'])
+            ? strtotime((string) $value['expiresAt'])
+            : false;
+        $created_by = isset($value['createdBy']) ? (int) $value['createdBy'] : 0;
+        $generation = isset($value['generation']) ? (string) $value['generation'] : '';
+        $claimed_at = isset($value['claimedAt']) && is_scalar($value['claimedAt'])
+            ? strtotime((string) $value['claimedAt'])
+            : false;
+        $claimed_install_hash = isset($value['claimedInstallHash'])
+            ? strtolower((string) $value['claimedInstallHash'])
+            : '';
+        $claim_nonce = isset($value['claimNonce'])
+            ? strtolower((string) $value['claimNonce'])
+            : '';
+        $claimed_session_id = isset($value['claimedSessionID'])
+            ? strtolower((string) $value['claimedSessionID'])
+            : '';
+        $has_claim = $claimed_at !== false || $claimed_install_hash !== ''
+            || $claim_nonce !== '' || $claimed_session_id !== '';
+        if ($created_at === false || $expires_at === false || $created_at <= 0
+            || $expires_at <= $created_at
+            || $expires_at - $created_at > self::FAN_PASSWORD_RECOVERY_TTL
+            || $created_by <= 0 || !preg_match('/^[a-f0-9]{32}$/', $generation)
+            || ($has_claim && ($claimed_at === false
+                || $claimed_at < $created_at || $claimed_at > $expires_at
+                || !preg_match('/^[a-f0-9]{64}$/', $claimed_install_hash)
+                || !preg_match('/^[a-f0-9]{32}$/', $claim_nonce)
+                || ($claimed_session_id !== ''
+                    && !preg_match('/^[a-f0-9]{32}$/', $claimed_session_id))))) {
+            return new WP_Error(
+                'fan_password_recovery_invalid',
+                '密码恢复凭据无效，请联系管理员。',
+                array('status' => 503)
+            );
+        }
+        return array(
+            'createdAt' => gmdate('c', $created_at),
+            'expiresAt' => gmdate('c', $expires_at),
+            'createdTimestamp' => $created_at,
+            'expiresTimestamp' => $expires_at,
+            'createdBy' => $created_by,
+            'generation' => $generation,
+            'claimedAt' => $has_claim ? gmdate('c', $claimed_at) : null,
+            'claimedInstallHash' => $has_claim ? $claimed_install_hash : '',
+            'claimNonce' => $has_claim ? $claim_nonce : '',
+            'claimedSessionID' => $has_claim ? $claimed_session_id : '',
+        );
+    }
+
+    private static function password_change_input(WP_REST_Request $request) {
+        $header_install_id = self::request_install_id($request);
+        if (is_wp_error($header_install_id)) { return $header_install_id; }
+        $body_install_id = strtolower(trim((string) $request->get_param('installID')));
+        if (!$body_install_id || !hash_equals($header_install_id, $body_install_id)) {
+            return new WP_Error(
+                'fan_install_id_invalid',
+                '安装记录无效，请重启 App 后再试。',
+                array('status' => 400)
+            );
+        }
+        $current_password = (string) $request->get_param('currentPassword');
+        $new_password = (string) $request->get_param('newPassword');
+        if (!$current_password || strlen($current_password) > 512) {
+            return new WP_Error('fan_login_invalid', '当前密码不正确。', array('status' => 401));
+        }
+        $password_error = self::validate_fan_password($new_password);
+        if (is_wp_error($password_error)) { return $password_error; }
+        if (hash_equals($current_password, $new_password)) {
+            return new WP_Error(
+                'fan_new_password_must_differ',
+                '新密码必须与当前密码不同。',
+                array('status' => 400)
+            );
+        }
+        return array(
+            'installID' => $header_install_id,
+            'currentPassword' => $current_password,
+            'newPassword' => $new_password,
+        );
+    }
+
+    private static function commit_fan_password_change(
+        $user_id,
+        $current_password,
+        $new_password,
+        $recovery_generation = ''
+    ) {
+        global $wpdb;
+        $transaction_started = false;
+        $transaction_committed = false;
+        try {
+            if (!isset($wpdb) || !method_exists($wpdb, 'query')
+                || $wpdb->query('START TRANSACTION') === false) {
+                return new WP_Error(
+                    'fan_password_change_unavailable',
+                    '账号安全事务暂时不可用。',
+                    array('status' => 503)
+                );
+            }
+            $transaction_started = true;
+            if (!self::fan_password_matches_database($user_id, $current_password, true)) {
+                return new WP_Error('fan_login_invalid', '当前密码不正确。', array('status' => 401));
+            }
+            if ($recovery_generation !== '') {
+                $recovery = self::normalize_fan_password_recovery(
+                    self::fan_meta_from_database(
+                        $user_id,
+                        self::FAN_META_PASSWORD_RECOVERY,
+                        null,
+                        true
+                    )
+                );
+                if (is_wp_error($recovery)
+                    || !hash_equals((string) $recovery['generation'], (string) $recovery_generation)
+                    || (int) $recovery['expiresTimestamp'] <= time()) {
+                    return new WP_Error(
+                        'fan_password_recovery_expired',
+                        '密码恢复凭据已过期，请联系管理员重新生成。',
+                        array('status' => 410)
+                    );
+                }
+            } elseif (!empty(self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_INVITATION,
+                null,
+                true
+            )) || !empty(self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_PASSWORD_RECOVERY,
+                null,
+                true
+            ))) {
+                return new WP_Error(
+                    'fan_normal_session_required',
+                    '请先完成账号安全设置。',
+                    array('status' => 403)
+                );
+            }
+            $current_epoch = (int) self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_CREDENTIAL_EPOCH,
+                0,
+                true
+            );
+            $password_hash = wp_hash_password((string) $new_password);
+            $password_saved = $wpdb->update(
+                $wpdb->users,
+                array('user_pass' => $password_hash, 'user_activation_key' => ''),
+                array('ID' => (int) $user_id),
+                array('%s', '%s'),
+                array('%d')
+            );
+            $recovery_deleted = $recovery_generation === ''
+                || self::delete_fan_meta_in_transaction(
+                    $user_id,
+                    self::FAN_META_PASSWORD_RECOVERY
+                );
+            if ($current_epoch <= 0 || $password_saved === false || !$recovery_deleted
+                || !wp_check_password((string) $new_password, $password_hash, (int) $user_id)
+                || !self::set_fan_meta_in_transaction(
+                    $user_id,
+                    self::FAN_META_CREDENTIAL_EPOCH,
+                    $current_epoch + 1
+                )) {
+                return new WP_Error(
+                    'fan_password_change_unavailable',
+                    '暂时无法安全更新密码。',
+                    array('status' => 503)
+                );
+            }
+            if ($wpdb->query('COMMIT') === false) {
+                return new WP_Error(
+                    'fan_password_change_unavailable',
+                    '暂时无法安全更新密码。',
+                    array('status' => 503)
+                );
+            }
+            $transaction_committed = true;
+            clean_user_cache((int) $user_id);
+            wp_cache_delete((int) $user_id, 'user_meta');
+            return true;
+        } finally {
+            if ($transaction_started && !$transaction_committed) {
+                $wpdb->query('ROLLBACK');
+                clean_user_cache((int) $user_id);
+                wp_cache_delete((int) $user_id, 'user_meta');
+            }
+        }
     }
 
     private static function generate_temporary_password() {
@@ -1548,12 +2540,14 @@ final class Shuzijun_App_Content_API {
         $scope = 'normal',
         $ttl = self::FAN_SESSION_TTL
     ) {
-        if (!in_array($scope, array('normal', 'onboarding'), true)) {
+        if (!in_array($scope, array('normal', 'onboarding', 'password_recovery'), true)) {
             return new WP_Error('fan_session_scope_invalid', '暂时无法创建安全会话。', array('status' => 503));
         }
         $maximum_ttl = $scope === 'onboarding'
             ? self::FAN_ONBOARDING_SESSION_TTL
-            : self::FAN_SESSION_TTL;
+            : ($scope === 'password_recovery'
+                ? self::FAN_PASSWORD_RECOVERY_SESSION_TTL
+                : self::FAN_SESSION_TTL);
         $ttl = (int) $ttl;
         if ($ttl <= 0 || $ttl > $maximum_ttl) {
             return new WP_Error('fan_session_ttl_invalid', '暂时无法创建安全会话。', array('status' => 503));
@@ -1567,15 +2561,19 @@ final class Shuzijun_App_Content_API {
         }
         $token = '';
         $token_hash = '';
+        $session_id = '';
         $context = array();
         try {
             for ($attempt = 0; $attempt < 4; $attempt++) {
                 $token = rtrim(strtr(base64_encode(random_bytes(32)), '+/', '-_'), '=');
                 $token_hash = hash('sha256', $token);
+                $session_id = bin2hex(random_bytes(16));
                 $context = array(
                     'userID' => (int) $user_id,
                     'installHash' => hash('sha256', strtolower($install_id)),
                     'installCode' => $install_code,
+                    'sessionID' => $session_id,
+                    'createdAt' => time(),
                     'expires' => $expires,
                     'scope' => $scope,
                     'credentialEpoch' => $credential_epoch,
@@ -1585,15 +2583,17 @@ final class Shuzijun_App_Content_API {
                 }
                 $token = '';
                 $token_hash = '';
+                $session_id = '';
             }
         } catch (Exception $error) {
             $token = '';
             $token_hash = '';
+            $session_id = '';
         }
-        if (!$token || !$token_hash) {
+        if (!$token || !$token_hash || !$session_id) {
             return new WP_Error('fan_session_unavailable', '暂时无法创建安全会话，请稍后重试。', array('status' => 503));
         }
-        if (!self::record_fan_session((int) $user_id, $token_hash, $expires)) {
+        if (!self::record_fan_session((int) $user_id, $token_hash, $context)) {
             delete_option(self::FAN_SESSION_OPTION_PREFIX . $token_hash);
             return new WP_Error('fan_session_unavailable', '暂时无法创建安全会话，请稍后重试。', array('status' => 503));
         }
@@ -1634,7 +2634,7 @@ final class Shuzijun_App_Content_API {
         $credential_epoch = isset($context['credentialEpoch'])
             ? (int) $context['credentialEpoch']
             : 1;
-        if (!in_array($scope, array('normal', 'onboarding'), true)
+        if (!in_array($scope, array('normal', 'onboarding', 'password_recovery'), true)
             || $credential_epoch <= 0
             || $credential_epoch !== self::fan_credential_epoch((int) $user->ID)) {
             self::revoke_fan_session((int) $context['userID'], $token_hash);
@@ -1647,7 +2647,59 @@ final class Shuzijun_App_Content_API {
         return $context;
     }
 
-    private static function record_fan_session($user_id, $token_hash, $expires) {
+    private static function fan_session_context_is_current_from_database(
+        $context,
+        $required_scope = ''
+    ) {
+        if (!is_array($context)) { return false; }
+        $token_hash = strtolower((string) ($context['tokenHash'] ?? ''));
+        $user_id = (int) ($context['userID'] ?? 0);
+        $required_scope = (string) $required_scope;
+        if ($user_id <= 0 || !preg_match('/^[a-f0-9]{64}$/', $token_hash)
+            || !in_array(
+                $required_scope,
+                array('normal', 'onboarding', 'password_recovery'),
+                true
+            )) {
+            return false;
+        }
+        global $wpdb;
+        if (!isset($wpdb->options) || !method_exists($wpdb, 'get_var')
+            || !method_exists($wpdb, 'prepare')) {
+            return false;
+        }
+        $serialized_session = $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1",
+            self::FAN_SESSION_OPTION_PREFIX . $token_hash
+        ));
+        if (!is_string($serialized_session)) { return false; }
+        $fresh_session = maybe_unserialize($serialized_session);
+        return is_array($fresh_session)
+            && (int) ($fresh_session['userID'] ?? 0) === $user_id
+            && (string) ($fresh_session['scope'] ?? '') === $required_scope
+            && (int) ($fresh_session['expires'] ?? 0) > time()
+            // Match authenticate_fan_session(): legacy normal sessions issued
+            // before credential epochs existed belong to epoch 1 only. Any
+            // later password/security transition advances the account epoch
+            // and therefore still invalidates them.
+            && (int) ($fresh_session['credentialEpoch'] ?? 1)
+                === self::fan_credential_epoch($user_id)
+            && hash_equals(
+                (string) ($fresh_session['sessionID'] ?? ''),
+                (string) ($context['sessionID'] ?? '')
+            )
+            && hash_equals(
+                (string) ($fresh_session['installHash'] ?? ''),
+                (string) ($context['installHash'] ?? '')
+            );
+    }
+
+    private static function record_fan_session($user_id, $token_hash, $context) {
+        if (!is_array($context) || empty($context['expires']) || empty($context['sessionID'])
+            || empty($context['installCode']) || empty($context['installHash'])
+            || !preg_match('/^[a-f0-9]{32}$/', (string) $context['sessionID'])) {
+            return false;
+        }
         $sessions = get_user_meta((int) $user_id, self::FAN_META_SESSIONS, true);
         $sessions = is_array($sessions) ? $sessions : array();
         $now = time();
@@ -1660,7 +2712,20 @@ final class Shuzijun_App_Content_API {
                 delete_option(self::FAN_SESSION_OPTION_PREFIX . $hash);
                 continue;
             }
-            $valid[] = array('hash' => $hash, 'expires' => (int) $session['expires']);
+            $valid[] = array(
+                'hash' => $hash,
+                'expires' => (int) $session['expires'],
+                'sessionID' => isset($session['sessionID'])
+                    && preg_match('/^[a-f0-9]{32}$/', (string) $session['sessionID'])
+                    ? (string) $session['sessionID']
+                    : self::fan_public_session_id($hash),
+                'installCode' => isset($session['installCode'])
+                    ? (string) $session['installCode']
+                    : '',
+                'createdAt' => isset($session['createdAt'])
+                    ? (int) $session['createdAt']
+                    : max(1, (int) $session['expires'] - self::FAN_SESSION_TTL),
+            );
         }
         usort($valid, function ($left, $right) {
             return (int) $right['expires'] <=> (int) $left['expires'];
@@ -1669,8 +2734,78 @@ final class Shuzijun_App_Content_API {
             $revoked = array_pop($valid);
             delete_option(self::FAN_SESSION_OPTION_PREFIX . $revoked['hash']);
         }
-        $valid[] = array('hash' => (string) $token_hash, 'expires' => (int) $expires);
+        $valid[] = array(
+            'hash' => (string) $token_hash,
+            'expires' => (int) $context['expires'],
+            'sessionID' => (string) $context['sessionID'],
+            'installCode' => (string) $context['installCode'],
+            'createdAt' => (int) $context['createdAt'],
+        );
         return update_user_meta((int) $user_id, self::FAN_META_SESSIONS, $valid) !== false;
+    }
+
+    private static function fan_public_session_id($token_hash) {
+        $token_hash = strtolower((string) $token_hash);
+        if (!preg_match('/^[a-f0-9]{64}$/', $token_hash)) { return ''; }
+        return substr(hash_hmac('sha256', $token_hash, wp_salt('auth')), 0, 32);
+    }
+
+    private static function fan_session_directory($user_id, $current_token_hash) {
+        $sessions = get_user_meta((int) $user_id, self::FAN_META_SESSIONS, true);
+        $sessions = is_array($sessions) ? $sessions : array();
+        $now = time();
+        $current_epoch = self::fan_credential_epoch((int) $user_id);
+        if ($current_epoch <= 0) {
+            return new WP_Error('fan_session_unavailable', '暂时无法读取安全会话。', array('status' => 503));
+        }
+        $result = array();
+        foreach ($sessions as $session) {
+            if (!is_array($session) || empty($session['hash']) || empty($session['expires'])) { continue; }
+            $hash = strtolower((string) $session['hash']);
+            if (!preg_match('/^[a-f0-9]{64}$/', $hash) || (int) $session['expires'] <= $now) {
+                continue;
+            }
+            $context = get_option(self::FAN_SESSION_OPTION_PREFIX . $hash, null);
+            if (!is_array($context) || (int) ($context['userID'] ?? 0) !== (int) $user_id
+                || (int) ($context['expires'] ?? 0) <= $now
+                || (int) ($context['credentialEpoch'] ?? 1) !== $current_epoch
+                || (string) ($context['scope'] ?? 'normal') !== 'normal') {
+                continue;
+            }
+            $session_id = isset($context['sessionID'])
+                && preg_match('/^[a-f0-9]{32}$/', (string) $context['sessionID'])
+                ? (string) $context['sessionID']
+                : self::fan_public_session_id($hash);
+            $install_code = isset($context['installCode'])
+                ? (string) $context['installCode']
+                : (string) ($session['installCode'] ?? '');
+            $created_at = isset($context['createdAt'])
+                ? (int) $context['createdAt']
+                : (isset($session['createdAt'])
+                    ? (int) $session['createdAt']
+                    : max(1, (int) $context['expires'] - self::FAN_SESSION_TTL));
+            if (!preg_match('/^IN-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{3}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{3}$/', $install_code)
+                || !$session_id || $created_at <= 0 || $created_at > (int) $context['expires']) {
+                continue;
+            }
+            $result[] = array(
+                'sessionID' => $session_id,
+                'installationCode' => $install_code,
+                'createdAt' => gmdate('c', $created_at),
+                'expiresAt' => gmdate('c', (int) $context['expires']),
+                'isCurrent' => hash_equals($hash, (string) $current_token_hash),
+            );
+        }
+        usort($result, function ($left, $right) {
+            return strcmp((string) $right['createdAt'], (string) $left['createdAt']);
+        });
+        $current_count = count(array_filter($result, function ($session) {
+            return !empty($session['isCurrent']);
+        }));
+        if ($current_count !== 1 || count($result) > self::FAN_MAX_SESSIONS) {
+            return new WP_Error('fan_session_unavailable', '暂时无法读取安全会话。', array('status' => 503));
+        }
+        return $result;
     }
 
     private static function revoke_fan_session($user_id, $token_hash) {
@@ -1685,6 +2820,26 @@ final class Shuzijun_App_Content_API {
                 && !hash_equals((string) $session['hash'], $token_hash);
         }));
         update_user_meta((int) $user_id, self::FAN_META_SESSIONS, $sessions);
+    }
+
+    private static function revoke_fan_session_by_public_id($user_id, $session_id) {
+        $session_id = strtolower((string) $session_id);
+        if (!preg_match('/^[a-f0-9]{32}$/', $session_id)) { return; }
+        $sessions = get_user_meta((int) $user_id, self::FAN_META_SESSIONS, true);
+        if (!is_array($sessions)) { return; }
+        foreach ($sessions as $session) {
+            if (!is_array($session) || empty($session['hash'])) { continue; }
+            $hash = strtolower((string) $session['hash']);
+            if (!preg_match('/^[a-f0-9]{64}$/', $hash)) { continue; }
+            $public_id = isset($session['sessionID'])
+                && preg_match('/^[a-f0-9]{32}$/', (string) $session['sessionID'])
+                ? strtolower((string) $session['sessionID'])
+                : self::fan_public_session_id($hash);
+            if (hash_equals($public_id, $session_id)) {
+                self::revoke_fan_session((int) $user_id, $hash);
+                return;
+            }
+        }
     }
 
     private static function revoke_all_fan_sessions($user_id) {
@@ -1811,6 +2966,29 @@ final class Shuzijun_App_Content_API {
         );
     }
 
+    private static function fan_password_recovery_profile_fields($user_id) {
+        $raw_recovery = get_user_meta(
+            (int) $user_id,
+            self::FAN_META_PASSWORD_RECOVERY,
+            true
+        );
+        if (empty($raw_recovery)) {
+            return array(
+                'requiresPasswordChange' => false,
+                'passwordRecoveryExpiresAt' => null,
+            );
+        }
+        $recovery = self::normalize_fan_password_recovery($raw_recovery);
+        return array(
+            // A malformed marker remains a forced-password-change state. This
+            // prevents corrupted metadata from restoring normal content access.
+            'requiresPasswordChange' => true,
+            'passwordRecoveryExpiresAt' => is_wp_error($recovery)
+                ? null
+                : (string) $recovery['expiresAt'],
+        );
+    }
+
     private static function fan_profile($user_id, $context) {
         $user = get_userdata((int) $user_id);
         $permissions = get_user_meta($user_id, self::FAN_META_PERMISSIONS, true);
@@ -1825,7 +3003,8 @@ final class Shuzijun_App_Content_API {
             'permissions' => $permissions,
             'status' => (string) get_user_meta($user_id, self::FAN_META_STATUS, true),
             'sessionExpiresAt' => gmdate('c', (int) $context['expires']),
-        ), self::fan_invitation_profile_fields((int) $user_id));
+        ), self::fan_invitation_profile_fields((int) $user_id),
+            self::fan_password_recovery_profile_fields((int) $user_id));
     }
 
     private static function fan_auth_response($user_id, $session, $status = 200) {
@@ -1855,7 +3034,8 @@ final class Shuzijun_App_Content_API {
             'status' => (string) get_user_meta($user->ID, self::FAN_META_STATUS, true),
             'registeredAt' => gmdate('c', $registered ? $registered : time()),
             'reviewedAt' => $reviewed_at ? gmdate('c', $reviewed_at) : null,
-        ), self::fan_invitation_profile_fields((int) $user->ID));
+        ), self::fan_invitation_profile_fields((int) $user->ID),
+            self::fan_password_recovery_profile_fields((int) $user->ID));
     }
 
     public static function secure_rest_response($result, $server, $request) {

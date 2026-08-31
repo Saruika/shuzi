@@ -83,7 +83,7 @@ final class YishuUITests: XCTestCase {
         XCTAssertTrue(collaboration.isHittable, "合作邀约入口不可点击")
         collaboration.tap()
         assertExists("collaboration-heading", in: app)
-        XCTAssertTrue(app.textFields["必填"].firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["联系人 / 称呼"].firstMatch.waitForExistence(timeout: 5))
         attachScreenshot(named: "08-collaboration", app: app)
 
         app.navigationBars.buttons.firstMatch.tap()
@@ -145,6 +145,42 @@ final class YishuUITests: XCTestCase {
         assertExists("about-portrait", in: app)
         XCTAssertTrue(tabButton("首页", in: app).isHittable, "横屏下主导航不可点击")
         attachScreenshot(named: "10-ipad-landscape-about", app: app)
+    }
+
+    func testEmptyLibraryCanReturnToPortfolio() {
+        let app = launchApp(arguments: ["-open-favorites-for-visual-testing"])
+        assertExists("favorites-heading", in: app)
+        let openPortfolio = element("library-open-portfolio", in: app)
+        XCTAssertTrue(openPortfolio.waitForExistence(timeout: 5))
+        openPortfolio.tap()
+        assertExists("portfolio-heading", in: app)
+    }
+
+    func testProtectedGalleryPresentationKeepsItsEnvironmentAndControls() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-skip-launch-poster-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing",
+            "-open-portfolio-for-visual-testing",
+        ]
+        app.launch()
+
+        assertExists("portfolio-heading", in: app, timeout: 12)
+        let card = app.buttons
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-"))
+            .firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 8))
+        card.tap()
+
+        let firstImage = app.buttons
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-"))
+            .firstMatch
+        XCTAssertTrue(firstImage.waitForExistence(timeout: 8))
+        firstImage.tap()
+
+        assertExists("gallery-viewer", in: app, timeout: 8)
+        XCTAssertTrue(app.buttons["收藏照片"].exists || app.buttons["取消收藏"].exists)
     }
 
     private func launchApp(arguments: [String] = []) -> XCUIApplication {

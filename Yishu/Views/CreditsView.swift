@@ -4,11 +4,19 @@ import SwiftUI
 struct CreditsView: View {
     @EnvironmentObject private var store: PortfolioStore
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var inlinePlayer: AVPlayer?
     @State private var isInlinePlaying = false
     @State private var isInlineMuted = false
+    @State private var isInlineBuffering = false
     @State private var showVideoPlaybackError = false
-    private let columns = [GridItem(.adaptive(minimum: 150, maximum: 240), spacing: 12)]
+    @State private var playbackMonitorTask: Task<Void, Never>?
+    @State private var playbackWaitStartedAt: Date?
+    private var columns: [GridItem] {
+        dynamicTypeSize.isAccessibilitySize
+            ? [GridItem(.flexible())]
+            : [GridItem(.adaptive(minimum: 150, maximum: 240), spacing: 12)]
+    }
 
     var body: some View {
         ZStack {
@@ -46,15 +54,21 @@ struct CreditsView: View {
             stopInlinePlayback()
             showVideoPlaybackError = true
         }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemPlaybackStalled)) { notification in
+            guard notificationBelongsToInlinePlayer(notification), isInlinePlaying else { return }
+            isInlineBuffering = true
+            playbackWaitStartedAt = playbackWaitStartedAt ?? .now
+        }
         .onChange(of: scenePhase) { _, phase in
             guard phase != .active, inlinePlayer != nil else { return }
             pauseInlinePlayback()
         }
         .onDisappear { stopInlinePlayback() }
         .alert("视频暂时无法播放", isPresented: $showVideoPlaybackError) {
+            Button("重新播放") { playInline() }
             Button("知道了", role: .cancel) { }
         } message: {
-            Text("请检查网络后重试。")
+            Text("连接中断或等待时间过长，请检查网络后重试。")
         }
     }
 
@@ -65,7 +79,7 @@ struct CreditsView: View {
                 .tracking(3)
                 .foregroundStyle(AppTheme.gold)
             Text("影视履历")
-                .font(.editorial(42))
+                .font(.system(.largeTitle, design: .serif))
                 .accessibilityIdentifier("credits-heading")
             Text("公开出演短剧与演员影像片段")
                 .font(.subheadline)
@@ -88,6 +102,21 @@ struct CreditsView: View {
                         endPoint: .bottom
                     )
                     .allowsHitTesting(false)
+
+                    if isInlineBuffering {
+                        VStack(spacing: 9) {
+                            ProgressView()
+                                .tint(.white)
+                            Text("正在缓冲")
+                                .font(.caption.weight(.medium))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(.black.opacity(0.18))
+                        .allowsHitTesting(false)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("视频正在缓冲")
+                    }
 
                     HStack(spacing: 10) {
                         VideoControlButton(
@@ -122,7 +151,7 @@ struct CreditsView: View {
                                     .tracking(1.7)
                                     .foregroundStyle(AppTheme.gold)
                                 Text(showreel.title)
-                                    .font(.editorial(25))
+                                    .font(.system(.title2, design: .serif))
                                 Text(showreel.tags.joined(separator: " · "))
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.68))
@@ -179,11 +208,15 @@ struct CreditsView: View {
         showVideoPlaybackError = false
         VideoAudioSession.activate()
         let player = AVPlayer(url: showreel.videoURL)
+        player.automaticallyWaitsToMinimizeStalling = true
         player.isMuted = false
         player.volume = 1
         inlinePlayer = player
         isInlineMuted = false
         isInlinePlaying = true
+        isInlineBuffering = true
+        playbackWaitStartedAt = .now
+        startPlaybackMonitor(for: player)
         player.play()
     }
 
@@ -195,12 +228,16 @@ struct CreditsView: View {
             VideoAudioSession.activate()
             inlinePlayer?.play()
             isInlinePlaying = true
+            isInlineBuffering = inlinePlayer?.timeControlStatus != .playing
+            playbackWaitStartedAt = isInlineBuffering ? .now : nil
         }
     }
 
     private func pauseInlinePlayback() {
         inlinePlayer?.pause()
         isInlinePlaying = false
+        isInlineBuffering = false
+        playbackWaitStartedAt = nil
         VideoAudioSession.deactivate()
     }
 
@@ -211,12 +248,51 @@ struct CreditsView: View {
     }
 
     private func stopInlinePlayback() {
+        playbackMonitorTask?.cancel()
+        playbackMonitorTask = nil
         inlinePlayer?.pause()
         inlinePlayer?.replaceCurrentItem(with: nil)
         inlinePlayer = nil
         isInlinePlaying = false
         isInlineMuted = false
+        isInlineBuffering = false
+        playbackWaitStartedAt = nil
         VideoAudioSession.deactivate()
+    }
+
+    private func startPlaybackMonitor(for player: AVPlayer) {
+        playbackMonitorTask?.cancel()
+        playbackMonitorTask = Task { @MainActor in
+            while !Task.isCancelled, inlinePlayer === player {
+                if player.currentItem?.status == .failed {
+                    stopInlinePlayback()
+                    showVideoPlaybackError = true
+                    return
+                }
+
+                if isInlinePlaying {
+                    if player.timeControlStatus == .playing {
+                        isInlineBuffering = false
+                        playbackWaitStartedAt = nil
+                    } else {
+                        isInlineBuffering = true
+                        playbackWaitStartedAt = playbackWaitStartedAt ?? .now
+                        if let startedAt = playbackWaitStartedAt,
+                           Date().timeIntervalSince(startedAt) > 20 {
+                            stopInlinePlayback()
+                            showVideoPlaybackError = true
+                            return
+                        }
+                    }
+                }
+
+                do {
+                    try await Task.sleep(for: .milliseconds(250))
+                } catch {
+                    return
+                }
+            }
+        }
     }
 
     private func notificationBelongsToInlinePlayer(_ notification: Notification) -> Bool {

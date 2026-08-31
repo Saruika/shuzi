@@ -70,6 +70,7 @@ function rest_sanitize_boolean($value): bool {
 require dirname(__DIR__) . '/shuzijun-app-content.php';
 
 $plugin_source = file_get_contents(dirname(__DIR__) . '/shuzijun-app-content.php');
+$fan_smoke_source = file_get_contents(__DIR__ . '/fan-api-smoke.sh');
 $backup_proxy_source = file_get_contents(
     dirname(__DIR__) . '/nginx/shuzijun-account-api-backup-proxy.conf'
 );
@@ -198,7 +199,7 @@ $invitation_meta_source = ($invitation_meta_start === false || $invitation_meta_
     ? ''
     : substr($plugin_source, $invitation_meta_start, $invitation_meta_end - $invitation_meta_start);
 expect_true(
-    strpos($plugin_source, 'Version: 1.5.6') !== false
+    strpos($plugin_source, 'Version: 1.5.7') !== false
         && Shuzijun_App_Content_API::FAN_CAPABILITY === 'manage_yishu_fan_accounts'
         && Shuzijun_App_Content_API::FAN_INVITATION_TTL === 86400
         && Shuzijun_App_Content_API::FAN_ONBOARDING_SESSION_TTL === 600
@@ -284,6 +285,191 @@ expect_true(
         && strpos($plugin_source, "'Pragma', 'no-cache'") !== false
         && strpos($plugin_source, 'rest_convert_error_to_response') !== false,
     '邀请凭据成功和错误响应都必须禁止缓存'
+);
+
+$recovery_created = time() - 60;
+$normalized_recovery = invoke_plugin_method('normalize_fan_password_recovery', array(array(
+    'createdAt' => gmdate('c', $recovery_created),
+    'expiresAt' => gmdate('c', $recovery_created + 900),
+    'createdBy' => 7,
+    'generation' => str_repeat('b', 32),
+)));
+expect_true(
+    is_array($normalized_recovery)
+        && $normalized_recovery['expiresTimestamp'] - $normalized_recovery['createdTimestamp'] === 900,
+    '密码恢复凭据必须严格限定为 15 分钟'
+);
+$overlong_recovery = invoke_plugin_method('normalize_fan_password_recovery', array(array(
+    'createdAt' => gmdate('c', $recovery_created),
+    'expiresAt' => gmdate('c', $recovery_created + 901),
+    'createdBy' => 7,
+    'generation' => str_repeat('b', 32),
+)));
+expect_error_code(
+    'fan_password_recovery_invalid',
+    $overlong_recovery,
+    '密码恢复凭据不得超过 15 分钟'
+);
+$claimed_recovery = invoke_plugin_method('normalize_fan_password_recovery', array(array(
+    'createdAt' => gmdate('c', $recovery_created),
+    'expiresAt' => gmdate('c', $recovery_created + 900),
+    'createdBy' => 7,
+    'generation' => str_repeat('c', 32),
+    'claimedAt' => gmdate('c', $recovery_created + 30),
+    'claimedInstallHash' => str_repeat('d', 64),
+    'claimNonce' => str_repeat('f', 32),
+    'claimedSessionID' => str_repeat('e', 32),
+)));
+expect_true(
+    is_array($claimed_recovery)
+        && $claimed_recovery['claimedInstallHash'] === str_repeat('d', 64)
+        && $claimed_recovery['claimNonce'] === str_repeat('f', 32)
+        && $claimed_recovery['claimedSessionID'] === str_repeat('e', 32),
+    '恢复凭据必须能绑定唯一安装与唯一会话'
+);
+expect_error_code(
+    'fan_password_recovery_invalid',
+    invoke_plugin_method('normalize_fan_password_recovery', array(array(
+        'createdAt' => gmdate('c', $recovery_created),
+        'expiresAt' => gmdate('c', $recovery_created + 900),
+        'createdBy' => 7,
+        'generation' => str_repeat('c', 32),
+        'claimedAt' => gmdate('c', $recovery_created + 30),
+        'claimedInstallHash' => str_repeat('d', 63),
+        'claimNonce' => str_repeat('f', 32),
+        'claimedSessionID' => str_repeat('e', 32),
+    ))),
+    '恢复凭据不得接受不完整的绑定标记'
+);
+$preliminary_recovery = invoke_plugin_method('normalize_fan_password_recovery', array(array(
+    'createdAt' => gmdate('c', $recovery_created),
+    'expiresAt' => gmdate('c', $recovery_created + 900),
+    'createdBy' => 7,
+    'generation' => str_repeat('a', 32),
+    'claimedAt' => gmdate('c', $recovery_created + 30),
+    'claimedInstallHash' => str_repeat('b', 64),
+    'claimNonce' => str_repeat('c', 32),
+    'claimedSessionID' => '',
+)));
+expect_true(
+    is_array($preliminary_recovery)
+        && $preliminary_recovery['claimedSessionID'] === ''
+        && $preliminary_recovery['claimNonce'] === str_repeat('c', 32),
+    '先于 token 持久化的安装绑定可以安全重试'
+);
+
+$recovery_meta_start = strpos($plugin_source, "\$recovery = array(", strpos(
+    $plugin_source,
+    'public static function create_fan_password_recovery'
+));
+$recovery_meta_end = $recovery_meta_start === false
+    ? false
+    : strpos($plugin_source, '$lock_owner = self::acquire_fan_lock', $recovery_meta_start);
+$recovery_meta_source = ($recovery_meta_start === false || $recovery_meta_end === false)
+    ? ''
+    : substr($plugin_source, $recovery_meta_start, $recovery_meta_end - $recovery_meta_start);
+expect_true(
+    strpos($plugin_source, "'/app-admin/fans/(?P<uuid>[a-f0-9-]{36})/password-recovery'") !== false
+        && strpos($plugin_source, "'/fan/complete-password-recovery'") !== false
+        && strpos($plugin_source, "'/fan/change-password'") !== false
+        && strpos($plugin_source, "'/fan/sessions'") !== false
+        && strpos($plugin_source, "'/fan/sessions/revoke'") !== false
+        && strpos($plugin_source, "'permission_callback' => array(__CLASS__, 'can_manage_fans')") !== false
+        && strpos($plugin_source, "'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session')") !== false,
+    '密码与会话管理路由必须使用管理员专用 capability 或粉丝正常会话'
+);
+expect_true(
+    $recovery_meta_source !== ''
+        && strpos($recovery_meta_source, 'temporaryPassword') === false
+        && strpos($recovery_meta_source, "'createdAt'") !== false
+        && strpos($recovery_meta_source, "'expiresAt'") !== false
+        && strpos($recovery_meta_source, "'createdBy'") !== false
+        && strpos($recovery_meta_source, "'generation'") !== false
+        && strpos($plugin_source, 'self::FAN_META_PASSWORD_RECOVERY,') !== false
+        && strpos($plugin_source, 'self::FAN_META_CREDENTIAL_EPOCH,') !== false
+        && strpos($plugin_source, 'self::revoke_all_fan_sessions($user_id);') !== false,
+    '恢复凭据只能返回一次，不得持久化明文，并必须旋转凭据世代和撤销旧会话'
+);
+expect_true(
+    strpos($plugin_source, "'password_recovery'") !== false
+        && strpos($plugin_source, 'FAN_PASSWORD_RECOVERY_SESSION_TTL') !== false
+        && substr_count($plugin_source, "'requiresPasswordChange'") >= 2
+        && substr_count($plugin_source, "'passwordRecoveryExpiresAt'") >= 2
+        && strpos($plugin_source, "'sessionID' => \$session_id") !== false
+        && strpos($plugin_source, "'installationCode' => \$install_code") !== false
+        && strpos($plugin_source, "'isCurrent'") !== false,
+    '恢复会话必须有限权 scope，设备列表只返回不含 token/hash 的公开会话字段'
+);
+$recovery_login_start = strpos($plugin_source, 'private static function login_recovering_fan');
+$recovery_login_end = strpos($plugin_source, 'public static function can_access_fan_session', $recovery_login_start);
+$recovery_login_source = ($recovery_login_start === false || $recovery_login_end === false)
+    ? ''
+    : substr($plugin_source, $recovery_login_start, $recovery_login_end - $recovery_login_start);
+expect_true(
+    $recovery_login_source !== ''
+        && strpos($recovery_login_source, 'fan_password_matches_database')
+            < strpos($recovery_login_source, 'normalize_fan_password_recovery')
+        && strpos($recovery_login_source, "'claimedInstallHash'") !== false
+        && strpos($recovery_login_source, "'claimNonce'") !== false
+        && strpos($recovery_login_source, "'claimedSessionID'") !== false
+        && strpos($recovery_login_source, 'revoke_fan_session_by_public_id') !== false
+        && strpos($recovery_login_source, 'hash_equals') !== false
+        && strpos($recovery_login_source, 'update_user_meta_verified')
+            < strpos($recovery_login_source, 'issue_fan_session'),
+    '恢复登录必须先恒定校验密码，再原子绑定且只签发一个恢复会话'
+);
+$recovery_completion_start = strpos($plugin_source, 'public static function complete_fan_password_recovery');
+$recovery_completion_end = strpos($plugin_source, 'public static function change_fan_password', $recovery_completion_start);
+$recovery_completion_source = ($recovery_completion_start === false || $recovery_completion_end === false)
+    ? ''
+    : substr($plugin_source, $recovery_completion_start, $recovery_completion_end - $recovery_completion_start);
+expect_true(
+    $recovery_completion_source !== ''
+        && substr_count($recovery_completion_source, "'claimedSessionID'") >= 2
+        && substr_count($recovery_completion_source, "'claimedInstallHash'") >= 2
+        && strpos($recovery_completion_source, "'claimNonce'") !== false
+        && strpos(
+            $recovery_completion_source,
+            "fan_session_context_is_current_from_database(\n                    \$context,\n                    'password_recovery'"
+        ) !== false
+        && strpos($plugin_source, 'FAN_SESSION_OPTION_PREFIX . $token_hash') !== false
+        && strpos($plugin_source, 'maybe_unserialize($serialized_session)') !== false
+        && strpos($plugin_source, "(\$fresh_session['credentialEpoch'] ?? 1)") !== false,
+    '密码恢复必须在用户锁内重读 token option，并复核 claim、安装和凭据世代'
+);
+$deletion_start = strpos($plugin_source, 'public static function delete_fan_account');
+$deletion_end = strpos($plugin_source, 'public static function create_fan_invitations', $deletion_start);
+$deletion_source = ($deletion_start === false || $deletion_end === false)
+    ? ''
+    : substr($plugin_source, $deletion_start, $deletion_end - $deletion_start);
+expect_true(
+    strpos($plugin_source, "'/fan/delete'") !== false
+        && strpos(
+            $plugin_source,
+            "'permission_callback' => array(__CLASS__, 'can_delete_fan_account')"
+        ) !== false
+        && strpos($plugin_source, "'fan_delete_failure'") !== false
+        && strpos($plugin_source, "'fan_delete_net'") !== false
+        && strpos($plugin_source, "get_param('currentPassword')") !== false
+        && strpos($plugin_source, "get_param('installID')") !== false
+        && $deletion_source !== ''
+        && strpos($deletion_source, "\$scope === 'normal'") !== false
+        && strpos($deletion_source, "\$scope === 'onboarding'") !== false
+        && strpos($deletion_source, "\$scope === 'password_recovery'") !== false
+        && strpos($deletion_source, 'fan_session_context_is_current_from_database') !== false
+        && strpos($deletion_source, 'fan_password_matches_database') !== false
+        && strpos($deletion_source, "'deleteMarkerGeneration'") !== false,
+    '永久删除必须按 normal/onboarding/recovery scope 在锁内重验 marker、会话、安装、当前密码与限流'
+);
+expect_true(
+    is_string($fan_smoke_source)
+        && strpos($fan_smoke_source, 'mktemp -d /tmp/yishu-fan-api-smoke.XXXXXX') !== false
+        && strpos(
+            $fan_smoke_source,
+            '^/tmp/yishu-fan-api-smoke\\.[A-Za-z0-9]+$'
+        ) !== false
+        && strpos($fan_smoke_source, 'rm -rf -- "$test_dir"') !== false,
+    '生产 smoke 的一次性凭据文件必须仅在校验过的专用 mktemp 目录中整体清理'
 );
 
 $_SERVER['REMOTE_ADDR'] = '127.0.0.1';

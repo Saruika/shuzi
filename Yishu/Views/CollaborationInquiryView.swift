@@ -145,7 +145,7 @@ struct CollaborationInquiryView: View {
                 .tint(AppTheme.warmWhite)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 13)
-                .frame(height: 48)
+                .frame(minHeight: 48)
                 .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
             }
 
@@ -169,17 +169,20 @@ struct CollaborationInquiryView: View {
                 ZStack(alignment: .topLeading) {
                     if details.isEmpty {
                         Text("角色、拍摄时长、发布平台及其他需求")
-                            .font(.system(size: 15))
+                            .font(.body)
                             .foregroundStyle(AppTheme.muted)
                             .padding(.horizontal, 17)
                             .padding(.vertical, 15)
                             .allowsHitTesting(false)
+                            .accessibilityHidden(true)
                     }
                     TextEditor(text: $details)
-                        .font(.system(size: 15))
+                        .font(.body)
                         .scrollContentBackground(.hidden)
                         .frame(minHeight: 130)
                         .padding(8)
+                        .accessibilityLabel("项目说明")
+                        .accessibilityHint("请填写角色、拍摄时长、发布平台及其他需求")
                 }
                 .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
             }
@@ -231,17 +234,19 @@ struct CollaborationInquiryView: View {
     private func field(_ label: String, text: Binding<String>, prompt: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             fieldLabel(label)
-            TextField(prompt, text: text)
+            TextField(label, text: text, prompt: Text(prompt))
                 .textInputAutocapitalization(.never)
                 .padding(.horizontal, 13)
-                .frame(height: 48)
+                .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
                 .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+                .accessibilityLabel(label)
+                .accessibilityHint(prompt)
         }
     }
 
     private func fieldLabel(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 12, weight: .medium))
+            .font(.caption.weight(.medium))
             .foregroundStyle(.white.opacity(0.75))
     }
 

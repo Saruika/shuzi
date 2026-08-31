@@ -42,12 +42,8 @@ struct YishuApp: App {
                 CaptureProtectionCover()
                     .accessibilityHidden(true)
 
-                if ScreenProtectionTesting.isDisabled {
+                SecureCaptureSurface(owner: .appRoot) {
                     appContent
-                } else {
-                    ScreenshotProtectedContent {
-                        appContent
-                    }
                 }
             }
             .preferredColorScheme(.dark)

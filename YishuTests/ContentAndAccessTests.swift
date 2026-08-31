@@ -1,5 +1,6 @@
 import XCTest
 import SwiftUI
+import UIKit
 import WeatherKit
 @testable import Yishu
 
@@ -311,6 +312,89 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertTrue(ContentSecurityPolicy.isTrusted(scoped))
     }
 
+    func testSecureCanvasFallbackPolicyRetriesThenFailsClosed() {
+        XCTAssertEqual(
+            SecureCanvasFallbackPolicy.nextStep(
+                attempt: 1,
+                maximumAttempts: 3,
+                failure: .canvasMissing
+            ),
+            .retry
+        )
+        XCTAssertEqual(
+            SecureCanvasFallbackPolicy.nextStep(
+                attempt: 3,
+                maximumAttempts: 3,
+                failure: .canvasMissing
+            ),
+            .showPrivacyFallback(.canvasMissing)
+        )
+        XCTAssertEqual(
+            SecureCanvasFallbackPolicy.nextStep(
+                attempt: 1,
+                maximumAttempts: 3,
+                failure: nil
+            ),
+            .attachSecureCanvas
+        )
+    }
+
+    @MainActor
+    func testSecureContainerHostsProtectedContentOnlyInsideAttachedCanvas() {
+        var observedStates: [SecureCanvasInstallationState] = []
+        let container = SecureHostingContainerView(
+            rootView: AnyView(Text("protected-content")),
+            fallbackView: AnyView(Text("privacy-fallback")),
+            maximumProbeAttempts: 1,
+            secureCanvasResolver: { textField in
+                let canvas = UIView(frame: textField.bounds)
+                textField.addSubview(canvas)
+                return canvas
+            },
+            stateObserver: { observedStates.append($0) }
+        )
+
+        XCTAssertEqual(container.installationState, .secured)
+        XCTAssertTrue(container.hostsProtectedContent)
+        XCTAssertFalse(container.hostsVisiblePrivacyFallback)
+        XCTAssertEqual(observedStates.last, .secured)
+    }
+
+    @MainActor
+    func testSecureContainerShowsVisiblePrivacyFallbackWhenCanvasIsMissing() {
+        var observedStates: [SecureCanvasInstallationState] = []
+        let container = SecureHostingContainerView(
+            rootView: AnyView(Text("protected-content")),
+            fallbackView: AnyView(Text("privacy-fallback")),
+            maximumProbeAttempts: 1,
+            secureCanvasResolver: { _ in nil },
+            stateObserver: { observedStates.append($0) }
+        )
+
+        XCTAssertEqual(container.installationState, .privacyFallback(.canvasMissing))
+        XCTAssertFalse(container.hostsProtectedContent)
+        XCTAssertTrue(container.hostsVisiblePrivacyFallback)
+        XCTAssertEqual(observedStates.last, .privacyFallback(.canvasMissing))
+
+        container.update(rootView: AnyView(Text("updated-protected-content")))
+        XCTAssertFalse(container.hostsProtectedContent)
+        XCTAssertTrue(container.hostsVisiblePrivacyFallback)
+    }
+
+    @MainActor
+    func testSecureContainerRejectsDetachedCanvas() {
+        let container = SecureHostingContainerView(
+            rootView: AnyView(Text("protected-content")),
+            fallbackView: AnyView(Text("privacy-fallback")),
+            maximumProbeAttempts: 1,
+            secureCanvasResolver: { _ in UIView() }
+        )
+
+        XCTAssertEqual(container.installationState, .privacyFallback(.canvasNotAttached))
+        XCTAssertFalse(container.hostsProtectedContent)
+        XCTAssertTrue(container.hostsVisiblePrivacyFallback)
+    }
+
     @MainActor
     func testPermissionDowngradeFailsClosedInMemoryAndCannotExpandLocally() {
         let store = PortfolioStore()
@@ -438,6 +522,152 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(FanAccountValidation.isValidPassword(" fansafety2026"))
     }
 
+    func testPasswordRecoveryProfileFailsClosedUntilPasswordRotation() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let profile = FanProfile(
+            userID: "00000000-0000-4000-8000-000000000001",
+            identityCode: "HS-ABCD-2345",
+            displayName: "恢复中粉丝",
+            douyinID: "recovery_fan",
+            installationCode: "IN-ABC-234",
+            permissions: FanPermission.allCases.map(\.rawValue),
+            status: FanAccountStatus.active.rawValue,
+            sessionExpiresAt: now.addingTimeInterval(600),
+            requiresPasswordChange: true,
+            passwordRecoveryExpiresAt: now.addingTimeInterval(900)
+        )
+
+        XCTAssertTrue(profile.hasConsistentAccountSetupState)
+        XCTAssertTrue(FanAccountValidation.isValidProfile(profile, now: now))
+        XCTAssertFalse(profile.isApproved(at: now))
+        XCTAssertFalse(profile.hasPermission(.galleryFull, at: now))
+
+        let missingExpiry = FanProfile(
+            userID: profile.userID,
+            identityCode: profile.identityCode,
+            displayName: profile.displayName,
+            douyinID: profile.douyinID,
+            installationCode: profile.installationCode,
+            permissions: profile.permissions,
+            status: profile.status,
+            sessionExpiresAt: profile.sessionExpiresAt,
+            requiresPasswordChange: true,
+            passwordRecoveryExpiresAt: nil
+        )
+        XCTAssertFalse(missingExpiry.hasConsistentAccountSetupState)
+        XCTAssertFalse(FanAccountValidation.isValidProfile(missingExpiry, now: now))
+    }
+
+    func testPasswordChangeValidationRequiresCurrentDifferentStrongPassword() throws {
+        XCTAssertEqual(
+            try FanAccountValidation.validatedPasswordChange(
+                currentPassword: "OldPassword2026!",
+                newPassword: "NewPassword2026!",
+                newPasswordConfirmation: "NewPassword2026!"
+            ),
+            FanPasswordChangeInput(
+                currentPassword: "OldPassword2026!",
+                newPassword: "NewPassword2026!"
+            )
+        )
+        XCTAssertThrowsError(
+            try FanAccountValidation.validatedPasswordChange(
+                currentPassword: "SamePassword2026!",
+                newPassword: "SamePassword2026!",
+                newPasswordConfirmation: "SamePassword2026!"
+            )
+        )
+        XCTAssertThrowsError(
+            try FanAccountValidation.validatedPasswordChange(
+                currentPassword: "OldPassword2026!",
+                newPassword: "weak",
+                newPasswordConfirmation: "weak"
+            )
+        )
+    }
+
+    func testFanAccountOperationGuardRejectsStaleOrTokenChangedResponses() {
+        XCTAssertTrue(
+            FanAccountOperationGuard.canAccept(
+                requestGeneration: 7,
+                currentGeneration: 7,
+                expectedToken: "token-a",
+                currentToken: "token-a"
+            )
+        )
+        XCTAssertTrue(
+            FanAccountOperationGuard.canAccept(
+                requestGeneration: 1,
+                currentGeneration: 1,
+                expectedToken: nil,
+                currentToken: nil
+            )
+        )
+        XCTAssertFalse(
+            FanAccountOperationGuard.canAccept(
+                requestGeneration: 7,
+                currentGeneration: 8,
+                expectedToken: "token-a",
+                currentToken: "token-a"
+            )
+        )
+        XCTAssertFalse(
+            FanAccountOperationGuard.canAccept(
+                requestGeneration: 7,
+                currentGeneration: 7,
+                expectedToken: "token-a",
+                currentToken: "token-b"
+            )
+        )
+    }
+
+    func testUncertainDeletionResultsFailClosedButExplicitClientErrorsDoNot() {
+        XCTAssertTrue(FanDeletionFailurePolicy.shouldFailClosed(after: .unavailable))
+        XCTAssertTrue(FanDeletionFailurePolicy.shouldFailClosed(after: .invalidResponse))
+        XCTAssertFalse(FanDeletionFailurePolicy.shouldFailClosed(after: .invalidCredentials))
+        XCTAssertFalse(FanDeletionFailurePolicy.shouldFailClosed(after: .rateLimited))
+        XCTAssertFalse(FanDeletionFailurePolicy.shouldFailClosed(after: .server("当前密码不正确。")))
+    }
+
+    func testFanSessionDirectoryRejectsForeignCurrentOrDuplicateSession() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let current = FanSessionRecord(
+            sessionID: "0123456789abcdef0123456789abcdef",
+            installationCode: "IN-ABC-234",
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(3_600),
+            isCurrent: true
+        )
+        let other = FanSessionRecord(
+            sessionID: "abcdef0123456789abcdef0123456789",
+            installationCode: "IN-BCD-345",
+            createdAt: now,
+            expiresAt: now.addingTimeInterval(3_600),
+            isCurrent: false
+        )
+        XCTAssertTrue(
+            FanAccountValidation.isValidSessionDirectory(
+                [current, other],
+                currentInstallationCode: "IN-ABC-234",
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            FanAccountValidation.isValidSessionDirectory(
+                [current, current],
+                currentInstallationCode: "IN-ABC-234",
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            FanAccountValidation.isValidSessionDirectory(
+                [current, other],
+                currentInstallationCode: "IN-XYZ-999",
+                now: now
+            )
+        )
+    }
+
     func testActiveInvitationAccountStillFailsClosed() {
         let profile = FanProfile(
             userID: UUID().uuidString.lowercased(),
@@ -559,9 +789,13 @@ final class ContentAndAccessTests: XCTestCase {
 
         XCTAssertFalse(profile.requiresAccountSetup)
         XCTAssertNil(profile.invitationExpiresAt)
+        XCTAssertFalse(profile.requiresPasswordChange)
+        XCTAssertNil(profile.passwordRecoveryExpiresAt)
         XCTAssertTrue(profile.isApproved)
         XCTAssertFalse(admin.requiresAccountSetup)
         XCTAssertNil(admin.invitationExpiresAt)
+        XCTAssertFalse(admin.requiresPasswordChange)
+        XCTAssertNil(admin.passwordRecoveryExpiresAt)
         XCTAssertTrue(FanAccountValidation.isValidAdminFanUser(admin))
 
         let invitedAdmin = AdminFanUser(
@@ -648,6 +882,44 @@ final class ContentAndAccessTests: XCTestCase {
                     ]
                 ),
                 requestedCount: 1,
+                now: now
+            )
+        )
+    }
+
+    func testAdminPasswordRecoveryCredentialIsShortLivedAndOneTimeShaped() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let recovery = AdminFanPasswordRecovery(
+            userID: "00000000-0000-4000-8000-000000000001",
+            identityCode: "HS-ABCD-2345",
+            temporaryPassword: "Tmp-abcdefghijklmnopqrstuvwx-9!",
+            expiresAt: now.addingTimeInterval(900),
+            requiresPasswordChange: true
+        )
+        XCTAssertTrue(
+            AdminFanPasswordRecoveryValidation.isValid(
+                recovery,
+                expectedUserID: recovery.userID,
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            AdminFanPasswordRecoveryValidation.isValid(
+                recovery,
+                expectedUserID: "00000000-0000-4000-8000-000000000002",
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            AdminFanPasswordRecoveryValidation.isValid(
+                AdminFanPasswordRecovery(
+                    userID: recovery.userID,
+                    identityCode: recovery.identityCode,
+                    temporaryPassword: recovery.temporaryPassword,
+                    expiresAt: now.addingTimeInterval(3_600),
+                    requiresPasswordChange: true
+                ),
+                expectedUserID: recovery.userID,
                 now: now
             )
         )

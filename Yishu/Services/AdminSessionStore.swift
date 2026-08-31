@@ -112,6 +112,40 @@ struct AdminFanInvitationResponse: Codable, Equatable {
     let invitations: [AdminFanInvitation]
 }
 
+struct AdminFanPasswordRecovery: Codable, Equatable {
+    let userID: String
+    let identityCode: String
+    let temporaryPassword: String
+    let expiresAt: Date
+    let requiresPasswordChange: Bool
+}
+
+struct AdminFanPasswordRecoveryResponse: Codable, Equatable {
+    let passwordRecovery: AdminFanPasswordRecovery
+}
+
+enum AdminFanPasswordRecoveryValidation {
+    static func isValid(
+        _ recovery: AdminFanPasswordRecovery,
+        expectedUserID: String,
+        now: Date = Date()
+    ) -> Bool {
+        guard let uuid = UUID(uuidString: recovery.userID)?.uuidString.lowercased() else {
+            return false
+        }
+        return uuid == expectedUserID.lowercased()
+            && recovery.userID == recovery.userID.lowercased()
+            && FanAccountValidation.normalizedIdentityCode(recovery.identityCode)
+                == recovery.identityCode
+            && FanAccountValidation.isValidInvitationTemporaryPassword(
+                recovery.temporaryPassword
+            )
+            && recovery.expiresAt > now
+            && recovery.expiresAt.timeIntervalSince(now) <= 16 * 60
+            && recovery.requiresPasswordChange
+    }
+}
+
 enum AdminFanInvitationValidation {
     static let allowedCount = 1...5
 
@@ -406,6 +440,24 @@ final class AdminSessionStore: ObservableObject {
             throw AdminAPIError.invalidResponse
         }
         return response.invitations
+    }
+
+    func createFanPasswordRecovery(userID: String) async throws -> AdminFanPasswordRecovery {
+        guard let uuid = UUID(uuidString: userID)?.uuidString.lowercased(),
+              uuid == userID.lowercased() else {
+            throw AdminAPIError.invalidResponse
+        }
+        let response: AdminFanPasswordRecoveryResponse = try await authorizedJSON(
+            path: "shuzijun/v1/app-admin/fans/\(uuid)/password-recovery",
+            method: "POST"
+        )
+        guard AdminFanPasswordRecoveryValidation.isValid(
+            response.passwordRecovery,
+            expectedUserID: uuid
+        ) else {
+            throw AdminAPIError.invalidResponse
+        }
+        return response.passwordRecovery
     }
 
     func updateFanAccess(

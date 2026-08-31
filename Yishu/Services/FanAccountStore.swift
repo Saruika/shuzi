@@ -43,6 +43,8 @@ struct FanProfile: Codable, Equatable {
     let sessionExpiresAt: Date
     let requiresAccountSetup: Bool
     let invitationExpiresAt: Date?
+    let requiresPasswordChange: Bool
+    let passwordRecoveryExpiresAt: Date?
 
     init(
         userID: String,
@@ -54,7 +56,9 @@ struct FanProfile: Codable, Equatable {
         status: String,
         sessionExpiresAt: Date,
         requiresAccountSetup: Bool = false,
-        invitationExpiresAt: Date? = nil
+        invitationExpiresAt: Date? = nil,
+        requiresPasswordChange: Bool = false,
+        passwordRecoveryExpiresAt: Date? = nil
     ) {
         self.userID = userID
         self.identityCode = identityCode
@@ -66,6 +70,8 @@ struct FanProfile: Codable, Equatable {
         self.sessionExpiresAt = sessionExpiresAt
         self.requiresAccountSetup = requiresAccountSetup
         self.invitationExpiresAt = invitationExpiresAt
+        self.requiresPasswordChange = requiresPasswordChange
+        self.passwordRecoveryExpiresAt = passwordRecoveryExpiresAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -79,6 +85,8 @@ struct FanProfile: Codable, Equatable {
         case sessionExpiresAt
         case requiresAccountSetup
         case invitationExpiresAt
+        case requiresPasswordChange
+        case passwordRecoveryExpiresAt
     }
 
     init(from decoder: Decoder) throws {
@@ -102,19 +110,30 @@ struct FanProfile: Codable, Equatable {
             Date.self,
             forKey: .invitationExpiresAt
         )
+        requiresPasswordChange = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresPasswordChange
+        ) ?? false
+        passwordRecoveryExpiresAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .passwordRecoveryExpiresAt
+        )
     }
 
     var accountStatus: FanAccountStatus? { FanAccountStatus(rawValue: status) }
     var hasConsistentAccountSetupState: Bool {
-        FanAccountValidation.hasConsistentAccountSetupState(
+        FanAccountValidation.hasConsistentSecuritySetupState(
             douyinID: douyinID,
             requiresAccountSetup: requiresAccountSetup,
-            invitationExpiresAt: invitationExpiresAt
+            invitationExpiresAt: invitationExpiresAt,
+            requiresPasswordChange: requiresPasswordChange,
+            passwordRecoveryExpiresAt: passwordRecoveryExpiresAt
         )
     }
     func isApproved(at date: Date) -> Bool {
         accountStatus == .active
             && !requiresAccountSetup
+            && !requiresPasswordChange
             && hasConsistentAccountSetupState
             && sessionExpiresAt > date
     }
@@ -133,6 +152,21 @@ struct FanRequiredSetupInput: Equatable {
     let douyinID: String
     let currentPassword: String
     let newPassword: String
+}
+
+struct FanPasswordChangeInput: Equatable {
+    let currentPassword: String
+    let newPassword: String
+}
+
+struct FanSessionRecord: Codable, Identifiable, Equatable {
+    let sessionID: String
+    let installationCode: String
+    let createdAt: Date
+    let expiresAt: Date
+    let isCurrent: Bool
+
+    var id: String { sessionID }
 }
 
 enum FanAccountValidation {
@@ -200,12 +234,76 @@ enum FanAccountValidation {
         return invitationExpiresAt == nil && !isInvitationPlaceholderDouyinID(douyinID)
     }
 
+    static func hasConsistentSecuritySetupState(
+        douyinID: String,
+        requiresAccountSetup: Bool,
+        invitationExpiresAt: Date?,
+        requiresPasswordChange: Bool,
+        passwordRecoveryExpiresAt: Date?
+    ) -> Bool {
+        guard !(requiresAccountSetup && requiresPasswordChange) else { return false }
+        guard hasConsistentAccountSetupState(
+            douyinID: douyinID,
+            requiresAccountSetup: requiresAccountSetup,
+            invitationExpiresAt: invitationExpiresAt
+        ) else { return false }
+        if requiresPasswordChange {
+            return !isInvitationPlaceholderDouyinID(douyinID)
+                && passwordRecoveryExpiresAt != nil
+        }
+        return passwordRecoveryExpiresAt == nil
+    }
+
+    static func validatedPasswordChange(
+        currentPassword: String,
+        newPassword: String,
+        newPasswordConfirmation: String
+    ) throws -> FanPasswordChangeInput {
+        guard !currentPassword.isEmpty, currentPassword.count <= 512 else {
+            throw FanAccountError.invalidCredentials
+        }
+        guard isValidPassword(newPassword) else { throw FanAccountError.weakPassword }
+        guard newPassword != currentPassword else { throw FanAccountError.passwordMustChange }
+        guard newPassword == newPasswordConfirmation else {
+            throw FanAccountError.passwordMismatch
+        }
+        return FanPasswordChangeInput(
+            currentPassword: currentPassword,
+            newPassword: newPassword
+        )
+    }
+
+    static func isValidSessionDirectory(
+        _ sessions: [FanSessionRecord],
+        currentInstallationCode: String,
+        now: Date = Date()
+    ) -> Bool {
+        guard (1...8).contains(sessions.count),
+              Set(sessions.map(\.sessionID)).count == sessions.count,
+              sessions.filter(\.isCurrent).count == 1 else { return false }
+        return sessions.allSatisfy { session in
+            session.sessionID.range(
+                of: #"^[a-f0-9]{32}$"#,
+                options: .regularExpression
+            ) != nil
+                && session.installationCode.range(
+                    of: #"^IN-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{3}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{3}$"#,
+                    options: .regularExpression
+                ) != nil
+                && session.createdAt <= session.expiresAt
+                && session.expiresAt > now
+                && (!session.isCurrent || session.installationCode == currentInstallationCode)
+        }
+    }
+
     static func isValidProfile(_ profile: FanProfile, now: Date = Date()) -> Bool {
         UUID(uuidString: profile.userID) != nil
             && normalizedIdentityCode(profile.identityCode) == profile.identityCode
             && normalizedDouyinID(profile.douyinID) == profile.douyinID
             && FanAccountStatus(rawValue: profile.status) != nil
             && profile.sessionExpiresAt > now
+            && (!profile.requiresPasswordChange
+                || profile.passwordRecoveryExpiresAt.map { $0 > now } == true)
             && profile.hasConsistentAccountSetupState
     }
 
@@ -214,10 +312,12 @@ enum FanAccountValidation {
             && normalizedIdentityCode(user.identityCode) == user.identityCode
             && normalizedDouyinID(user.douyinID) == user.douyinID
             && FanAccountStatus(rawValue: user.status) != nil
-            && hasConsistentAccountSetupState(
+            && hasConsistentSecuritySetupState(
                 douyinID: user.douyinID,
                 requiresAccountSetup: user.requiresAccountSetup,
-                invitationExpiresAt: user.invitationExpiresAt
+                invitationExpiresAt: user.invitationExpiresAt,
+                requiresPasswordChange: user.requiresPasswordChange,
+                passwordRecoveryExpiresAt: user.passwordRecoveryExpiresAt
             )
     }
 
@@ -265,6 +365,9 @@ enum FanAccountError: LocalizedError {
     case accountSetupRequired
     case accountSetupNotRequired
     case invitationExpired
+    case passwordRecoveryRequired
+    case passwordRecoveryExpired
+    case currentSessionCannotBeRevoked
     case sessionExpired
     case approvalPending
     case approvalRejected
@@ -287,6 +390,9 @@ enum FanAccountError: LocalizedError {
         case .accountSetupRequired: "请先完成账号资料和新密码设置。"
         case .accountSetupNotRequired: "当前账号不需要完成临时账号设置。"
         case .invitationExpired: "临时账号已过期，请联系管理员重新生成。"
+        case .passwordRecoveryRequired: "请使用临时恢复凭据设置一个新密码。"
+        case .passwordRecoveryExpired: "密码恢复凭据已过期，请联系管理员重新生成。"
+        case .currentSessionCannotBeRevoked: "当前设备请使用退出登录。"
         case .sessionExpired: "登录已失效，请重新登录。"
         case .approvalPending: "注册申请正在等待管理员审批。"
         case .approvalRejected: "注册申请未通过审批。"
@@ -299,9 +405,31 @@ enum FanAccountError: LocalizedError {
     }
 }
 
+enum FanAccountOperationGuard {
+    static func canAccept(
+        requestGeneration: UInt64,
+        currentGeneration: UInt64,
+        expectedToken: String?,
+        currentToken: String?
+    ) -> Bool {
+        requestGeneration == currentGeneration && expectedToken == currentToken
+    }
+}
+
+enum FanDeletionFailurePolicy {
+    static func shouldFailClosed(after error: FanAccountError) -> Bool {
+        switch error {
+        case .unavailable, .invalidResponse: true
+        default: false
+        }
+    }
+}
+
 @MainActor
 final class FanAccountStore: ObservableObject {
     @Published private(set) var profile: FanProfile?
+    @Published private(set) var sessions: [FanSessionRecord] = []
+    @Published private(set) var removedAccountUserID: String?
     @Published private(set) var isWorking = false
     @Published private(set) var hasSavedSession = false
     @Published var errorMessage: String?
@@ -445,6 +573,9 @@ final class FanAccountStore: ObservableObject {
             return
         }
 
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        let expectedToken = token
         isWorking = true
         defer { isWorking = false }
         do {
@@ -463,9 +594,21 @@ final class FanAccountStore: ObservableObject {
                 body: body,
                 authorized: false
             )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
             try accept(response)
             noticeMessage = "注册申请已提交，请等待管理员审批。"
         } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
             errorMessage = (error as? FanAccountError)?.errorDescription
                 ?? FanAccountError.unavailable.errorDescription
         }
@@ -482,6 +625,9 @@ final class FanAccountStore: ObservableObject {
             return
         }
 
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        let expectedToken = token
         isWorking = true
         defer { isWorking = false }
         do {
@@ -498,8 +644,20 @@ final class FanAccountStore: ObservableObject {
                 body: body,
                 authorized: false
             )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
             try accept(response)
         } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
             errorMessage = (error as? FanAccountError)?.errorDescription
                 ?? FanAccountError.unavailable.errorDescription
         }
@@ -548,6 +706,10 @@ final class FanAccountStore: ObservableObject {
             return
         }
 
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        let expectedToken = token
+
         isWorking = true
         defer { isWorking = false }
         do {
@@ -567,6 +729,12 @@ final class FanAccountStore: ObservableObject {
                 body: body,
                 authorized: true
             )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
             guard response.profile.userID == existingProfile.userID,
                   !response.profile.requiresAccountSetup else {
                 throw FanAccountError.invalidResponse
@@ -576,34 +744,292 @@ final class FanAccountStore: ObservableObject {
                 ? "账号设置已完成。"
                 : "账号设置已完成，请等待管理员审批。"
         } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.unavailable.errorDescription
+        }
+    }
+
+    func completePasswordRecovery(
+        currentPassword: String,
+        newPassword: String,
+        passwordConfirmation: String
+    ) async {
+        noticeMessage = nil
+        let input: FanPasswordChangeInput
+        do {
+            input = try FanAccountValidation.validatedPasswordChange(
+                currentPassword: currentPassword,
+                newPassword: newPassword,
+                newPasswordConfirmation: passwordConfirmation
+            )
+        } catch {
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.invalidResponse.errorDescription
+            return
+        }
+        guard token != nil, let existingProfile = profile,
+              existingProfile.requiresPasswordChange,
+              let recoveryExpiry = existingProfile.passwordRecoveryExpiresAt,
+              recoveryExpiry > Date() else {
+            errorMessage = FanAccountError.passwordRecoveryExpired.errorDescription
+            return
+        }
+
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        let expectedToken = token
+
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let body = try JSONEncoder().encode(
+                FanPasswordChangeRequest(
+                    currentPassword: input.currentPassword,
+                    newPassword: input.newPassword,
+                    installID: installID.uuidString.lowercased()
+                )
+            )
+            let response: FanAuthResponse = try await perform(
+                path: "shuzijun/v1/fan/complete-password-recovery",
+                method: "POST",
+                body: body,
+                authorized: true
+            )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
+            guard response.profile.userID == existingProfile.userID,
+                  !response.profile.requiresPasswordChange else {
+                throw FanAccountError.invalidResponse
+            }
+            try accept(response, requiringTokenRotation: true)
+            sessions.removeAll()
+            noticeMessage = "新密码已设置，其他设备已退出登录。"
+        } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.unavailable.errorDescription
+        }
+    }
+
+    func changePassword(
+        currentPassword: String,
+        newPassword: String,
+        passwordConfirmation: String
+    ) async {
+        noticeMessage = nil
+        let input: FanPasswordChangeInput
+        do {
+            input = try FanAccountValidation.validatedPasswordChange(
+                currentPassword: currentPassword,
+                newPassword: newPassword,
+                newPasswordConfirmation: passwordConfirmation
+            )
+        } catch {
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.invalidResponse.errorDescription
+            return
+        }
+        guard token != nil, let existingProfile = profile,
+              !existingProfile.requiresAccountSetup,
+              !existingProfile.requiresPasswordChange else {
+            errorMessage = FanAccountError.sessionExpired.errorDescription
+            return
+        }
+
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        let expectedToken = token
+
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let body = try JSONEncoder().encode(
+                FanPasswordChangeRequest(
+                    currentPassword: input.currentPassword,
+                    newPassword: input.newPassword,
+                    installID: installID.uuidString.lowercased()
+                )
+            )
+            let response: FanAuthResponse = try await perform(
+                path: "shuzijun/v1/fan/change-password",
+                method: "POST",
+                body: body,
+                authorized: true
+            )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
+            guard response.profile.userID == existingProfile.userID,
+                  !response.profile.requiresPasswordChange else {
+                throw FanAccountError.invalidResponse
+            }
+            try accept(response, requiringTokenRotation: true)
+            sessions.removeAll()
+            noticeMessage = "密码已更新，其他设备已退出登录。"
+        } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.unavailable.errorDescription
+        }
+    }
+
+    func fetchSessions() async {
+        guard let expectedToken = token, let profile,
+              !profile.requiresAccountSetup,
+              !profile.requiresPasswordChange else {
+            sessions.removeAll()
+            errorMessage = FanAccountError.sessionExpired.errorDescription
+            return
+        }
+        let operationGeneration = refreshGeneration
+        let expectedUserID = profile.userID
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let response: FanSessionDirectoryResponse = try await perform(
+                path: "shuzijun/v1/fan/sessions",
+                method: "GET",
+                authorized: true
+            )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), self.profile?.userID == expectedUserID else { return }
+            guard FanAccountValidation.isValidSessionDirectory(
+                response.sessions,
+                currentInstallationCode: profile.installationCode
+            ) else { throw FanAccountError.invalidResponse }
+            sessions = response.sessions
+            errorMessage = nil
+        } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), self.profile?.userID == expectedUserID else { return }
+            sessions.removeAll()
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.unavailable.errorDescription
+        }
+    }
+
+    func revokeSession(_ sessionID: String) async {
+        guard let expectedToken = token, let profile,
+              sessionID.range(of: #"^[a-f0-9]{32}$"#, options: .regularExpression) != nil,
+              sessions.first(where: { $0.sessionID == sessionID })?.isCurrent == false else {
+            errorMessage = FanAccountError.currentSessionCannotBeRevoked.errorDescription
+            return
+        }
+        let operationGeneration = refreshGeneration
+        let expectedUserID = profile.userID
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let body = try JSONEncoder().encode(FanSessionRevokeRequest(sessionID: sessionID))
+            let response: FanSessionRevokeResponse = try await perform(
+                path: "shuzijun/v1/fan/sessions/revoke",
+                method: "POST",
+                body: body,
+                authorized: true
+            )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), self.profile?.userID == expectedUserID else { return }
+            guard response.ok,
+                  FanAccountValidation.isValidSessionDirectory(
+                    response.sessions,
+                    currentInstallationCode: profile.installationCode
+                  ),
+                  !response.sessions.contains(where: { $0.sessionID == sessionID }) else {
+                throw FanAccountError.invalidResponse
+            }
+            sessions = response.sessions
+            errorMessage = nil
+            noticeMessage = "已撤销所选设备的会话。"
+        } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), self.profile?.userID == expectedUserID else { return }
             errorMessage = (error as? FanAccountError)?.errorDescription
                 ?? FanAccountError.unavailable.errorDescription
         }
     }
 
     func signOut() async {
-        if token != nil {
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        let expectedToken = token
+        if expectedToken != nil {
             let _: FanLogoutResponse? = try? await perform(
                 path: "shuzijun/v1/fan/logout",
                 method: "POST",
                 authorized: true
             )
         }
+        guard FanAccountOperationGuard.canAccept(
+            requestGeneration: operationGeneration,
+            currentGeneration: refreshGeneration,
+            expectedToken: expectedToken,
+            currentToken: token
+        ) else { return }
         clearLocalSession()
         errorMessage = nil
         noticeMessage = nil
     }
 
-    func deleteAccount() async {
-        guard token != nil else {
+    func deleteAccount(currentPassword: String) async {
+        guard let expectedToken = token, let existingProfile = profile else {
             errorMessage = FanAccountError.sessionExpired.errorDescription
             return
         }
+        guard !currentPassword.isEmpty, currentPassword.count <= 512 else {
+            errorMessage = FanAccountError.invalidCredentials.errorDescription
+            return
+        }
+        let deletingUserID = existingProfile.userID
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
         isWorking = true
         defer { isWorking = false }
         do {
             let body = try JSONEncoder().encode(
-                FanDeletionRequest(confirmation: "DELETE_ACCOUNT")
+                FanDeletionRequest(
+                    confirmation: "DELETE_ACCOUNT",
+                    currentPassword: currentPassword,
+                    installID: installID.uuidString.lowercased()
+                )
             )
             let response: FanLogoutResponse = try await perform(
                 path: "shuzijun/v1/fan/delete",
@@ -612,12 +1038,35 @@ final class FanAccountStore: ObservableObject {
                 authorized: true
             )
             guard response.ok else { throw FanAccountError.invalidResponse }
+            // The server deletion is authoritative. Publish the deleted user
+            // namespace even if the user switched accounts while awaiting the
+            // response, but never clear a newer account's token.
+            removedAccountUserID = deletingUserID
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), profile?.userID == deletingUserID else { return }
             clearLocalSession()
             errorMessage = nil
             noticeMessage = "账号与关联个人资料已永久删除。"
         } catch {
-            errorMessage = (error as? FanAccountError)?.errorDescription
-                ?? FanAccountError.unavailable.errorDescription
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), profile?.userID == deletingUserID else { return }
+            let accountError = error as? FanAccountError ?? .unavailable
+            if FanDeletionFailurePolicy.shouldFailClosed(after: accountError) {
+                clearLocalSession()
+                removedAccountUserID = deletingUserID
+                errorMessage = "删除请求的远端结果未能确认。为保护你的资料，本机已退出并清除该账号内容；请重新登录确认账号状态。"
+                noticeMessage = nil
+                return
+            }
+            errorMessage = accountError.errorDescription
         }
     }
 
@@ -625,6 +1074,9 @@ final class FanAccountStore: ObservableObject {
         guard isApproved else {
             if profile?.requiresAccountSetup == true {
                 throw FanAccountError.accountSetupRequired
+            }
+            if profile?.requiresPasswordChange == true {
+                throw FanAccountError.passwordRecoveryRequired
             }
             switch profile?.accountStatus {
             case .some(.pending): throw FanAccountError.approvalPending
@@ -656,11 +1108,15 @@ final class FanAccountStore: ObservableObject {
               FanAccountValidation.isValidProfile(response.profile) else {
             throw FanAccountError.invalidResponse
         }
+        let previousUserID = profile?.userID
         try FanAccountKeychain.saveToken(response.token)
         refreshGeneration &+= 1
         token = response.token
         hasSavedSession = true
         profile = response.profile
+        if previousUserID != nil, previousUserID != response.profile.userID {
+            sessions.removeAll()
+        }
         lastSuccessfulRefresh = Date()
         scheduleSessionExpiration()
         errorMessage = nil
@@ -674,6 +1130,7 @@ final class FanAccountStore: ObservableObject {
         FanAccountKeychain.deleteToken()
         token = nil
         profile = nil
+        sessions.removeAll()
         hasSavedSession = false
         lastSuccessfulRefresh = nil
     }
@@ -774,6 +1231,10 @@ final class FanAccountStore: ObservableObject {
         case (401, _): return .sessionExpired
         case (_, "fan_account_setup_required"): return .accountSetupRequired
         case (_, "fan_invitation_expired"): return .invitationExpired
+        case (_, "fan_password_recovery_expired"): return .passwordRecoveryExpired
+        case (_, "fan_password_recovery_session_required"): return .passwordRecoveryRequired
+        case (_, "fan_normal_session_required"): return .passwordRecoveryRequired
+        case (_, "fan_current_session_cannot_be_revoked"): return .currentSessionCannotBeRevoked
         case (_, "fan_new_password_must_differ"): return .passwordMustChange
         case (_, "fan_new_password_required"): return .passwordMustChange
         case (403, "fan_approval_pending"): return .approvalPending
@@ -816,6 +1277,8 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
     let reviewedAt: Date?
     let requiresAccountSetup: Bool
     let invitationExpiresAt: Date?
+    let requiresPasswordChange: Bool
+    let passwordRecoveryExpiresAt: Date?
 
     init(
         userID: String,
@@ -827,7 +1290,9 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
         registeredAt: Date,
         reviewedAt: Date?,
         requiresAccountSetup: Bool = false,
-        invitationExpiresAt: Date? = nil
+        invitationExpiresAt: Date? = nil,
+        requiresPasswordChange: Bool = false,
+        passwordRecoveryExpiresAt: Date? = nil
     ) {
         self.userID = userID
         self.identityCode = identityCode
@@ -839,6 +1304,8 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
         self.reviewedAt = reviewedAt
         self.requiresAccountSetup = requiresAccountSetup
         self.invitationExpiresAt = invitationExpiresAt
+        self.requiresPasswordChange = requiresPasswordChange
+        self.passwordRecoveryExpiresAt = passwordRecoveryExpiresAt
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -852,6 +1319,8 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
         case reviewedAt
         case requiresAccountSetup
         case invitationExpiresAt
+        case requiresPasswordChange
+        case passwordRecoveryExpiresAt
     }
 
     init(from decoder: Decoder) throws {
@@ -872,14 +1341,24 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
             Date.self,
             forKey: .invitationExpiresAt
         )
+        requiresPasswordChange = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresPasswordChange
+        ) ?? false
+        passwordRecoveryExpiresAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .passwordRecoveryExpiresAt
+        )
     }
 
     var id: String { userID }
     var hasConsistentAccountSetupState: Bool {
-        FanAccountValidation.hasConsistentAccountSetupState(
+        FanAccountValidation.hasConsistentSecuritySetupState(
             douyinID: douyinID,
             requiresAccountSetup: requiresAccountSetup,
-            invitationExpiresAt: invitationExpiresAt
+            invitationExpiresAt: invitationExpiresAt,
+            requiresPasswordChange: requiresPasswordChange,
+            passwordRecoveryExpiresAt: passwordRecoveryExpiresAt
         )
     }
 }
@@ -920,8 +1399,20 @@ private struct FanInvitationCompletionRequest: Encodable {
     let consentVersion: String
 }
 
+private struct FanPasswordChangeRequest: Encodable {
+    let currentPassword: String
+    let newPassword: String
+    let installID: String
+}
+
+private struct FanSessionRevokeRequest: Encodable {
+    let sessionID: String
+}
+
 private struct FanDeletionRequest: Encodable {
     let confirmation: String
+    let currentPassword: String
+    let installID: String
 }
 
 private struct FanAuthResponse: Decodable {
@@ -931,6 +1422,15 @@ private struct FanAuthResponse: Decodable {
 
 private struct FanSessionResponse: Decodable {
     let profile: FanProfile
+}
+
+private struct FanSessionDirectoryResponse: Decodable {
+    let sessions: [FanSessionRecord]
+}
+
+private struct FanSessionRevokeResponse: Decodable {
+    let ok: Bool
+    let sessions: [FanSessionRecord]
 }
 
 private struct FanLogoutResponse: Decodable {

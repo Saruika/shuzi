@@ -19,6 +19,44 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var statusMessage: String?
     @Published private(set) var contentOrigin: ContentOrigin = .bundled
+    private var contentRefreshID: UUID?
+
+    @discardableResult
+    func beginContentRefresh() -> UUID {
+        let refreshID = UUID()
+        contentRefreshID = refreshID
+        isRefreshing = true
+        statusMessage = nil
+        return refreshID
+    }
+
+    func completeContentRefresh(_ refreshID: UUID, with manifest: AppContentManifest) {
+        guard contentRefreshID == refreshID else { return }
+        contentRefreshID = nil
+        isRefreshing = false
+        applyPublishedManifest(manifest)
+        AppDiagnostics.shared.recordCatalogRefresh(
+            succeeded: true,
+            portfolioCount: manifest.portfolios.count,
+            imageCount: manifest.portfolios.reduce(0) { $0 + $1.images.count }
+        )
+    }
+
+    func failContentRefresh(_ refreshID: UUID) {
+        guard contentRefreshID == refreshID else { return }
+        contentRefreshID = nil
+        isRefreshing = false
+        statusMessage = contentOrigin == .bundled
+            ? "暂时无法连接内容服务，请稍后下拉重试"
+            : "本次同步失败，当前继续显示上次已验证的内容"
+        AppDiagnostics.shared.recordCatalogRefresh(succeeded: false)
+    }
+
+    func cancelContentRefresh(_ refreshID: UUID) {
+        guard contentRefreshID == refreshID else { return }
+        contentRefreshID = nil
+        isRefreshing = false
+    }
 
     /// Disk reads and JSON decoding stay off the main actor. The subsequent
     /// authenticated refresh replaces this snapshot with the latest approved content.
@@ -110,6 +148,8 @@ final class PortfolioStore: ObservableObject {
     }
 
     func discardProtectedContent() {
+        contentRefreshID = nil
+        isRefreshing = false
         portfolios = Portfolio.fallback
         heroImages = ContentCatalog.heroImages
         aboutPortraitURL = ContentCatalog.aboutPortraitURL

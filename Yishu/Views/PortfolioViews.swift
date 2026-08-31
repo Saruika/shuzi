@@ -5,9 +5,13 @@ struct PortfolioGridView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var searchText = ""
 
     private var columns: [GridItem] {
+        if dynamicTypeSize.isAccessibilitySize {
+            return [GridItem(.flexible())]
+        }
         if horizontalSizeClass == .regular {
             return Array(repeating: GridItem(.flexible(), spacing: 14), count: 3)
         }
@@ -111,22 +115,31 @@ struct PortfolioGridView: View {
         }
         .searchable(text: $searchText, prompt: "搜索主题、风格或描述")
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
-        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
     }
 
     private func refreshContent() async {
         // AdminView exclusively owns administrator full-manifest requests.
         // This surface only refreshes the currently approved fan scope.
-        guard !admin.isAuthenticated,
-              fanAccount.isApproved,
-              let manifest = try? await fanAccount.fetchApprovedContent(),
-              !admin.isAuthenticated,
-              fanAccount.isApproved else { return }
-        store.applyPublishedManifest(manifest)
-        store.enforcePermissionScope(
-            canViewFullGallery: fanAccount.hasPermission(.galleryFull),
-            canViewVideo: fanAccount.hasPermission(.videoView)
-        )
+        guard !admin.isAuthenticated, fanAccount.isApproved else { return }
+        let refreshID = store.beginContentRefresh()
+        do {
+            let manifest = try await fanAccount.fetchApprovedContent()
+            guard !admin.isAuthenticated, fanAccount.isApproved else {
+                store.cancelContentRefresh(refreshID)
+                return
+            }
+            store.completeContentRefresh(refreshID, with: manifest)
+            store.enforcePermissionScope(
+                canViewFullGallery: fanAccount.hasPermission(.galleryFull),
+                canViewVideo: fanAccount.hasPermission(.videoView)
+            )
+        } catch {
+            guard !admin.isAuthenticated, fanAccount.isApproved else {
+                store.cancelContentRefresh(refreshID)
+                return
+            }
+            store.failContentRefresh(refreshID)
+        }
     }
 }
 
@@ -145,7 +158,8 @@ private struct PortfolioGridCard: View {
                     .tracking(1.1)
                     .foregroundStyle(AppTheme.gold)
                 Text(portfolio.title)
-                    .font(.editorial(22))
+                    .font(.system(.title3, design: .serif))
+                    .lineLimit(2)
             }
             .foregroundStyle(.white)
             .padding(14)
@@ -159,17 +173,24 @@ private struct PortfolioGridCard: View {
 struct PortfolioDetailView: View {
     let portfolio: Portfolio
     @EnvironmentObject private var store: PortfolioStore
+    @EnvironmentObject private var favorites: FavoritesStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedImage: PortfolioImage?
 
     private var columns: [GridItem] {
-        let count = horizontalSizeClass == .regular ? 3 : 2
+        let count = dynamicTypeSize.isAccessibilitySize
+            ? 1
+            : (horizontalSizeClass == .regular ? 3 : 2)
         return Array(repeating: GridItem(.flexible(), spacing: 8), count: count)
     }
 
     private var heroHeight: CGFloat {
-        horizontalSizeClass == .regular ? 660 : 500
+        if dynamicTypeSize.isAccessibilitySize {
+            return horizontalSizeClass == .regular ? 720 : 600
+        }
+        return horizontalSizeClass == .regular ? 660 : 500
     }
 
     private var galleryImages: [PortfolioImage] {
@@ -256,7 +277,6 @@ struct PortfolioDetailView: View {
                 .padding(.bottom, 30)
             }
         }
-        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .accessibilityIdentifier("portfolio-detail-\(currentPortfolio.id)")
         .navigationTitle(currentPortfolio.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -271,7 +291,14 @@ struct PortfolioDetailView: View {
 #endif
         }
         .fullScreenCover(item: $selectedImage) { image in
-            GalleryViewer(portfolio: currentPortfolio, initialImage: image)
+            SecureCaptureSurface(
+                owner: .fullScreenPresentation,
+                onExit: { selectedImage = nil }
+            ) {
+                GalleryViewer(portfolio: currentPortfolio, initialImage: image)
+                    .environmentObject(store)
+                    .environmentObject(favorites)
+            }
         }
     }
 
@@ -300,7 +327,7 @@ private struct PortfolioHeroArtwork: View {
                     .tracking(2)
                     .foregroundStyle(AppTheme.gold)
                 Text(portfolio.title)
-                    .font(.editorial(46))
+                    .font(.system(.largeTitle, design: .serif))
                 Text(portfolio.subtitle)
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.72))
@@ -469,30 +496,84 @@ private struct ZoomableArtwork: View {
     let image: PortfolioImage
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
 
     var body: some View {
-        ArtworkImage(url: image.fullSizeURL, contentMode: .fit)
-            .scaleEffect(scale)
-            .gesture(
-                MagnifyGesture()
-                    .onChanged { value in
-                        scale = min(max(lastScale * value.magnification, 1), 4)
-                    }
-                    .onEnded { _ in
-                        lastScale = scale
-                        if scale < 1.05 {
-                            withAnimation(.spring) {
-                                scale = 1
-                                lastScale = 1
-                            }
+        GeometryReader { proxy in
+            ArtworkImage(url: image.fullSizeURL, contentMode: .fit)
+                .scaleEffect(scale)
+                .offset(offset)
+                .simultaneousGesture(magnifyGesture(in: proxy.size))
+                .gesture(
+                    dragGesture(in: proxy.size),
+                    including: scale > 1.01 ? .all : .none
+                )
+                .onTapGesture(count: 2) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                        if scale > 1.01 {
+                            resetTransform()
+                        } else {
+                            scale = 2
+                            lastScale = 2
+                            offset = .zero
+                            lastOffset = .zero
                         }
                     }
-            )
-            .onTapGesture(count: 2) {
-                withAnimation(.spring(response: 0.32)) {
-                    scale = scale > 1 ? 1 : 2
+                }
+                .accessibilityLabel(image.altText)
+                .accessibilityHint("双指缩放；放大后可拖动查看")
+        }
+    }
+
+    private func magnifyGesture(in size: CGSize) -> some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                scale = min(max(lastScale * value.magnification, 1), 4)
+                offset = constrained(offset, scale: scale, in: size)
+            }
+            .onEnded { _ in
+                if scale < 1.05 {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                        resetTransform()
+                    }
+                } else {
                     lastScale = scale
+                    offset = constrained(offset, scale: scale, in: size)
+                    lastOffset = offset
                 }
             }
+    }
+
+    private func dragGesture(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 3)
+            .onChanged { value in
+                let proposed = CGSize(
+                    width: lastOffset.width + value.translation.width,
+                    height: lastOffset.height + value.translation.height
+                )
+                offset = constrained(proposed, scale: scale, in: size)
+            }
+            .onEnded { _ in
+                offset = constrained(offset, scale: scale, in: size)
+                lastOffset = offset
+            }
+    }
+
+    private func constrained(_ proposed: CGSize, scale: CGFloat, in size: CGSize) -> CGSize {
+        guard scale > 1 else { return .zero }
+        let maximumX = max(0, size.width * (scale - 1) / 2)
+        let maximumY = max(0, size.height * (scale - 1) / 2)
+        return CGSize(
+            width: min(max(proposed.width, -maximumX), maximumX),
+            height: min(max(proposed.height, -maximumY), maximumY)
+        )
+    }
+
+    private func resetTransform() {
+        scale = 1
+        lastScale = 1
+        offset = .zero
+        lastOffset = .zero
     }
 }

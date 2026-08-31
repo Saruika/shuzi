@@ -281,8 +281,19 @@ struct AdminView: View {
                 TextField("管理员账号", text: $username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .textContentType(.username)
                 SecureField("管理员访问码", text: $applicationPassword)
                     .textContentType(.password)
+                    .submitLabel(.go)
+                    .onSubmit {
+                        guard !admin.isWorking else { return }
+                        Task {
+                            await admin.signIn(
+                                username: username,
+                                applicationPassword: applicationPassword
+                            )
+                        }
+                    }
                 Button {
                     Task { await admin.signIn(username: username, applicationPassword: applicationPassword) }
                 } label: {
@@ -305,7 +316,7 @@ struct AdminView: View {
                     .foregroundStyle(.orange)
             }
 
-            Label("访问码只保存在本设备 Keychain，可随时在服务器单独吊销。", systemImage: "lock.shield")
+            Label("账号与访问码仅用于本次验证，只在内存中保留；App 进入后台或 5 分钟后会自动锁定。", systemImage: "lock.shield")
                 .font(.caption)
                 .foregroundStyle(AppTheme.muted)
         }

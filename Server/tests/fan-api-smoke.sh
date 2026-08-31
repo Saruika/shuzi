@@ -9,10 +9,12 @@ if [[ ! "$api_host" =~ ^[A-Za-z0-9.-]+$ ]]; then
   echo 'fan-api-smoke: invalid API host' >&2
   exit 1
 fi
-test_dir=$(mktemp -d)
+test_dir=$(mktemp -d /tmp/yishu-fan-api-smoke.XXXXXX)
 umask 077
 install_id=$(cat /proc/sys/kernel/random/uuid)
+second_install_id=$(cat /proc/sys/kernel/random/uuid)
 invitation_install_id=$(cat /proc/sys/kernel/random/uuid)
+deletion_invitation_install_id=$(cat /proc/sys/kernel/random/uuid)
 suffix=$(openssl rand -hex 6)
 douyin_id="codex_test_${suffix}"
 password="Fan-${suffix}-2026!"
@@ -21,12 +23,14 @@ invitation_fault_douyin_id="codex_fault_${suffix}"
 invitation_new_password="Inv-${suffix}-New-2026!"
 token=''
 token_hash=''
+second_token=''
 invitation_token=''
 invitation_user_uuid=''
 invitation_identity_code=''
 invitation_placeholder=''
 cleanup_invitation_user_uuid=''
 cleanup_invitation_placeholder=''
+deletion_invitation_user_uuid=''
 app_password_name="codex-fan-smoke-${suffix}"
 app_password_uuid=''
 curl_common=(--silent --show-error --http1.1 --retry 2 --retry-delay 1 --retry-all-errors)
@@ -46,23 +50,12 @@ revoke_temporary_app_password() {
 }
 
 cleanup() {
-  if [[ -n "$invitation_token" ]]; then
+  if [[ -n "$second_token" ]]; then
     curl "${curl_common[@]}" --output /dev/null \
       --request POST \
-      --header 'Content-Type: application/json' \
-      --header "Authorization: Bearer ${invitation_token}" \
-      --header "X-Yishu-Install-ID: ${invitation_install_id}" \
-      --data '{"confirmation":"DELETE_ACCOUNT"}' \
-      "${api_root}/fan/delete" || true
-  fi
-  if [[ -n "$token" ]]; then
-    curl "${curl_common[@]}" --output /dev/null \
-      --request POST \
-      --header 'Content-Type: application/json' \
-      --header "Authorization: Bearer ${token}" \
-      --header "X-Yishu-Install-ID: ${install_id}" \
-      --data '{"confirmation":"DELETE_ACCOUNT"}' \
-      "${api_root}/fan/delete" || true
+      --header "Authorization: Bearer ${second_token}" \
+      --header "X-Yishu-Install-ID: ${second_install_id}" \
+      "${api_root}/fan/logout" || true
   fi
 
   local user_ids
@@ -94,6 +87,16 @@ cleanup() {
       fi
     done
   fi
+  if [[ "$deletion_invitation_user_uuid" =~ ^[a-f0-9-]{36}$ ]]; then
+    local deletion_invitation_user_ids
+    deletion_invitation_user_ids=$(sudo -u www-data wp --path="$wordpress_root" user list \
+      --meta_key=_yishu_fan_uuid --meta_value="$deletion_invitation_user_uuid" --field=ID 2>/dev/null || true)
+    for user_id in $deletion_invitation_user_ids; do
+      if [[ "$user_id" =~ ^[0-9]+$ ]]; then
+        sudo -u www-data wp --path="$wordpress_root" user delete "$user_id" --yes >/dev/null 2>&1 || true
+      fi
+    done
+  fi
 
   local option_hash
   option_hash=$(printf '%s' "$douyin_id" | sha256sum | awk '{print $1}')
@@ -115,30 +118,10 @@ cleanup() {
 
   revoke_temporary_app_password
 
-  rm -f "$test_dir/register.json" "$test_dir/session.json" \
-    "$test_dir/login.json" "$test_dir/deleted-login.json" \
-    "$test_dir/admin-list.json" "$test_dir/admin-update.json" \
-    "$test_dir/anonymous-admin-update.json" "$test_dir/fan-admin-update.json" \
-    "$test_dir/permission-update.json" "$test_dir/permission-content.json" \
-    "$test_dir/pending-content.json" "$test_dir/rejected-content.json" \
-    "$test_dir/rejected-update.json" "$test_dir/rejected-session.json" \
-    "$test_dir/rejected-login.json" \
-    "$test_dir/approved-content.json" \
-    "$test_dir/suspended-update.json" "$test_dir/revoked-session.json" \
-    "$test_dir/suspended-login.json" "$test_dir/suspended-content.json" \
-    "$test_dir/invitation-anonymous.json" "$test_dir/invitation-count.json" \
-    "$test_dir/invitation-create.json" "$test_dir/invitation-create.headers" \
-    "$test_dir/invitation-list.json" "$test_dir/invitation-meta.json" \
-    "$test_dir/invitation-active.json" "$test_dir/invitation-wrong.json" \
-    "$test_dir/invitation-rate.json" "$test_dir/invitation-login.json" \
-    "$test_dir/invitation-content.json" "$test_dir/invitation-same-password.json" \
-    "$test_dir/invitation-complete.json" "$test_dir/invitation-old-session.json" \
-    "$test_dir/invitation-old-login.json" "$test_dir/admin.netrc"
-  rm -f "$test_dir/invitation-lock.json" "$test_dir/invitation-lock-holder.log" \
-    "$test_dir/invitation-transaction-kill.log" \
-    "$test_dir/cleanup-invitation-create.json" "$test_dir/cleanup-invitation-list.json" \
-    "$test_dir/cleanup-invitation-meta.json"
-  rmdir "$test_dir" 2>/dev/null || true
+  if [[ -n "$test_dir" && "$test_dir" =~ ^/tmp/yishu-fan-api-smoke\.[A-Za-z0-9]+$ \
+      && -d "$test_dir" ]]; then
+    rm -rf -- "$test_dir"
+  fi
 }
 trap cleanup EXIT
 
@@ -304,6 +287,53 @@ invitation_temporary_password=$(jq -r '.invitations[0].temporaryPassword' "$test
 invitation_expires_at=$(jq -r '.invitations[0].expiresAt' "$test_dir/invitation-create.json")
 invitation_remaining=$(( $(date --date="$invitation_expires_at" +%s) - $(date +%s) ))
 (( invitation_remaining >= 86280 && invitation_remaining <= 86460 ))
+
+deletion_invitation_create_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/deletion-invitation-create.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  --data '{"count":1}' \
+  "${api_root}/app-admin/fans/invitations")
+[[ "$deletion_invitation_create_status" == '201' ]]
+deletion_invitation_user_uuid=$(jq -r '.invitations[0].userID' \
+  "$test_dir/deletion-invitation-create.json")
+deletion_invitation_identity_code=$(jq -r '.invitations[0].identityCode' \
+  "$test_dir/deletion-invitation-create.json")
+deletion_invitation_password=$(jq -r '.invitations[0].temporaryPassword' \
+  "$test_dir/deletion-invitation-create.json")
+deletion_invitation_login_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/deletion-invitation-login.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${deletion_invitation_install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$deletion_invitation_identity_code" \
+    --arg password "$deletion_invitation_password" \
+    --arg installID "$deletion_invitation_install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$deletion_invitation_login_status" == '200' ]]
+deletion_invitation_token=$(jq -r '.token' "$test_dir/deletion-invitation-login.json")
+deletion_invitation_delete_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/deletion-invitation-delete.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${deletion_invitation_token}" \
+  --header "X-Yishu-Install-ID: ${deletion_invitation_install_id}" \
+  --data "$(jq -nc \
+    --arg currentPassword "$deletion_invitation_password" \
+    --arg installID "$deletion_invitation_install_id" \
+    '{confirmation:"DELETE_ACCOUNT",currentPassword:$currentPassword,installID:$installID}')" \
+  "${api_root}/fan/delete")
+[[ "$deletion_invitation_delete_status" == '200' ]]
+deletion_invitation_remaining=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_uuid --meta_value="$deletion_invitation_user_uuid" --field=ID 2>/dev/null || true)
+[[ -z "$deletion_invitation_remaining" ]]
+echo 'fan-api-smoke: onboarding account deletion with temporary password passed'
 
 invitation_list_status=$(curl "${curl_common[@]}" \
   --output "$test_dir/invitation-list.json" \
@@ -566,6 +596,49 @@ invitation_real_owner=$(sudo -u www-data wp --path="$wordpress_root" option get 
 [[ "$invitation_real_owner" == "$invitation_internal_user_id" ]]
 echo 'fan-api-smoke: administrator invitation and forced setup passed'
 
+deletion_recovery_create_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/deletion-recovery-create.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  "${api_root}/app-admin/fans/${invitation_user_uuid}/password-recovery")
+[[ "$deletion_recovery_create_status" == '201' ]]
+deletion_recovery_password=$(jq -r '.passwordRecovery.temporaryPassword' \
+  "$test_dir/deletion-recovery-create.json")
+deletion_recovery_login_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/deletion-recovery-login.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$invitation_identity_code" \
+    --arg password "$deletion_recovery_password" \
+    --arg installID "$invitation_install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$deletion_recovery_login_status" == '200' ]]
+deletion_recovery_token=$(jq -r '.token' "$test_dir/deletion-recovery-login.json")
+deletion_recovery_delete_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/deletion-recovery-delete.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${deletion_recovery_token}" \
+  --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+  --data "$(jq -nc \
+    --arg currentPassword "$deletion_recovery_password" \
+    --arg installID "$invitation_install_id" \
+    '{confirmation:"DELETE_ACCOUNT",currentPassword:$currentPassword,installID:$installID}')" \
+  "${api_root}/fan/delete")
+[[ "$deletion_recovery_delete_status" == '200' ]]
+deletion_recovery_remaining=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_uuid --meta_value="$invitation_user_uuid" --field=ID 2>/dev/null || true)
+[[ -z "$deletion_recovery_remaining" ]]
+invitation_token=''
+echo 'fan-api-smoke: password-recovery account deletion with temporary password passed'
+
 cleanup_invitation_create_status=$(curl "${curl_common[@]}" \
   --output "$test_dir/cleanup-invitation-create.json" \
   --write-out '%{http_code}' \
@@ -745,6 +818,285 @@ sudo -u www-data wp --path="$wordpress_root" option get \
   "yishu_fan_session_${token_hash}" --format=json >/dev/null
 echo 'fan-api-smoke: logout and login passed'
 
+second_login_status=$(curl "${curl_common[@]}" --output "$test_dir/second-login.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${second_install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$identity_code" \
+    --arg password "$password" \
+    --arg installID "$second_install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$second_login_status" == '200' ]]
+second_token=$(jq -r '.token' "$test_dir/second-login.json")
+second_installation_code=$(jq -r '.profile.installationCode' "$test_dir/second-login.json")
+[[ "$second_installation_code" =~ ^IN-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{3}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{3}$ ]]
+[[ "$second_installation_code" != "$installation_code" ]]
+
+sessions_status=$(curl "${curl_common[@]}" --output "$test_dir/sessions.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/fan/sessions")
+[[ "$sessions_status" == '200' ]]
+jq -e --arg currentCode "$installation_code" --arg otherCode "$second_installation_code" '
+  (.sessions | length == 2) and
+  ([.sessions[].sessionID] | all(test("^[a-f0-9]{32}$"))) and
+  ([.sessions[] | select(.isCurrent == true)] | length == 1) and
+  any(.sessions[]; .isCurrent == true and .installationCode == $currentCode) and
+  any(.sessions[]; .isCurrent == false and .installationCode == $otherCode) and
+  (tostring | contains("token") | not) and
+  (tostring | contains("tokenHash") | not)
+' "$test_dir/sessions.json" >/dev/null
+other_session_id=$(jq -r --arg otherCode "$second_installation_code" \
+  '.sessions[] | select(.installationCode == $otherCode) | .sessionID' \
+  "$test_dir/sessions.json")
+[[ "$other_session_id" =~ ^[a-f0-9]{32}$ ]]
+
+session_revoke_status=$(curl "${curl_common[@]}" --output "$test_dir/session-revoke.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data "$(jq -nc --arg sessionID "$other_session_id" '{sessionID:$sessionID}')" \
+  "${api_root}/fan/sessions/revoke")
+[[ "$session_revoke_status" == '200' ]]
+jq -e --arg sessionID "$other_session_id" '
+  .ok == true and (.sessions | length == 1) and
+  all(.sessions[]; .sessionID != $sessionID and .isCurrent == true)
+' "$test_dir/session-revoke.json" >/dev/null
+second_revoked_status=$(curl "${curl_common[@]}" --output "$test_dir/second-revoked.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${second_token}" \
+  --header "X-Yishu-Install-ID: ${second_install_id}" \
+  "${api_root}/fan/session")
+[[ "$second_revoked_status" == '401' ]]
+second_token=''
+echo 'fan-api-smoke: per-account device list and other-session revocation passed'
+
+changed_password="Changed-${suffix}-2026!"
+old_token="$token"
+password_change_status=$(curl "${curl_common[@]}" --output "$test_dir/password-change.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data "$(jq -nc \
+    --arg currentPassword "$password" \
+    --arg newPassword "$changed_password" \
+    --arg installID "$install_id" \
+    '{currentPassword:$currentPassword,newPassword:$newPassword,installID:$installID}')" \
+  "${api_root}/fan/change-password")
+[[ "$password_change_status" == '200' ]]
+jq -e --arg oldToken "$old_token" '
+  (.token | test("^[A-Za-z0-9_-]{43,128}$")) and .token != $oldToken and
+  .profile.requiresPasswordChange == false and .profile.passwordRecoveryExpiresAt == null
+' "$test_dir/password-change.json" >/dev/null
+token=$(jq -r '.token' "$test_dir/password-change.json")
+token_hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
+password_old_session_status=$(curl "${curl_common[@]}" --output "$test_dir/password-old-session.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${old_token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/fan/session")
+[[ "$password_old_session_status" == '401' ]]
+password_old_login_status=$(curl "${curl_common[@]}" --output "$test_dir/password-old-login.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$identity_code" \
+    --arg password "$password" \
+    --arg installID "$install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$password_old_login_status" == '401' ]]
+password="$changed_password"
+echo 'fan-api-smoke: password change rotated token and revoked old credentials'
+
+recovery_anonymous_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-anonymous.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  "${api_root}/app-admin/fans/${user_uuid}/password-recovery")
+[[ "$recovery_anonymous_status" == '401' ]]
+recovery_fan_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-fan.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/app-admin/fans/${user_uuid}/password-recovery")
+[[ "$recovery_fan_status" == '401' ]]
+
+pre_recovery_token="$token"
+recovery_create_status=$(curl "${curl_common[@]}" \
+  --dump-header "$test_dir/recovery-create.headers" \
+  --output "$test_dir/recovery-create.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  "${api_root}/app-admin/fans/${user_uuid}/password-recovery")
+[[ "$recovery_create_status" == '201' ]]
+grep -Eiq '^cache-control:.*no-store' "$test_dir/recovery-create.headers"
+grep -Eiq '^cache-control:.*max-age=0' "$test_dir/recovery-create.headers"
+grep -Eiq '^pragma:[[:space:]]*no-cache' "$test_dir/recovery-create.headers"
+jq -e --arg userID "$user_uuid" --arg identityCode "$identity_code" '
+  .passwordRecovery.userID == $userID and
+  .passwordRecovery.identityCode == $identityCode and
+  (.passwordRecovery.temporaryPassword | test("^Tmp-[A-Za-z0-9_-]{24}-9!$")) and
+  .passwordRecovery.requiresPasswordChange == true
+' "$test_dir/recovery-create.json" >/dev/null
+recovery_temporary_password=$(jq -r '.passwordRecovery.temporaryPassword' \
+  "$test_dir/recovery-create.json")
+recovery_expires_at=$(jq -r '.passwordRecovery.expiresAt' "$test_dir/recovery-create.json")
+recovery_remaining=$(( $(date --date="$recovery_expires_at" +%s) - $(date +%s) ))
+(( recovery_remaining >= 780 && recovery_remaining <= 960 ))
+fan_internal_user_id=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_uuid --meta_value="$user_uuid" --field=ID)
+[[ "$fan_internal_user_id" =~ ^[0-9]+$ ]]
+sudo -u www-data wp --path="$wordpress_root" user meta get \
+  "$fan_internal_user_id" _yishu_fan_password_recovery --format=json \
+  > "$test_dir/recovery-meta.json"
+jq -e --arg temporaryPassword "$recovery_temporary_password" '
+  (.createdAt | type == "string") and (.expiresAt | type == "string") and
+  (.createdBy | type == "number") and (.generation | test("^[a-f0-9]{32}$")) and
+  (tostring | contains($temporaryPassword) | not) and
+  (has("temporaryPassword") | not)
+' "$test_dir/recovery-meta.json" >/dev/null
+recovery_old_session_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-old-session.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${pre_recovery_token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/fan/session")
+[[ "$recovery_old_session_status" == '401' ]]
+
+recovery_login_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-login.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$identity_code" \
+    --arg password "$recovery_temporary_password" \
+    --arg installID "$install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$recovery_login_status" == '200' ]]
+jq -e --arg expiresAt "$recovery_expires_at" '
+  .profile.requiresAccountSetup == false and
+  .profile.requiresPasswordChange == true and
+  .profile.passwordRecoveryExpiresAt == $expiresAt
+' "$test_dir/recovery-login.json" >/dev/null
+recovery_token=$(jq -r '.token' "$test_dir/recovery-login.json")
+sudo -u www-data wp --path="$wordpress_root" user meta get \
+  "$fan_internal_user_id" _yishu_fan_password_recovery --format=json \
+  > "$test_dir/recovery-claimed-meta.json"
+jq -e --arg temporaryPassword "$recovery_temporary_password" '
+  (.claimedAt | type == "string") and
+  (.claimedInstallHash | test("^[a-f0-9]{64}$")) and
+  (.claimedSessionID | test("^[a-f0-9]{32}$")) and
+  (tostring | contains($temporaryPassword) | not) and
+  (has("temporaryPassword") | not)
+' "$test_dir/recovery-claimed-meta.json" >/dev/null
+recovery_replay_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-replay.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${second_install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$identity_code" \
+    --arg password "$recovery_temporary_password" \
+    --arg installID "$second_install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$recovery_replay_status" == '401' ]]
+jq -e '.code == "fan_login_invalid"' "$test_dir/recovery-replay.json" >/dev/null
+first_recovery_token="$recovery_token"
+recovery_same_install_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-same-install.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$identity_code" \
+    --arg password "$recovery_temporary_password" \
+    --arg installID "$install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$recovery_same_install_status" == '200' ]]
+recovery_token=$(jq -r '.token' "$test_dir/recovery-same-install.json")
+[[ "$recovery_token" != "$first_recovery_token" ]]
+first_recovery_session_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/recovery-first-session.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${first_recovery_token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/fan/session")
+[[ "$first_recovery_session_status" == '401' ]]
+recovery_content_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-content.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${recovery_token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/app-content")
+[[ "$recovery_content_status" == '403' ]]
+jq -e '.code == "fan_account_setup_required"' "$test_dir/recovery-content.json" >/dev/null
+recovery_sessions_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-sessions.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${recovery_token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/fan/sessions")
+[[ "$recovery_sessions_status" == '403' ]]
+
+recovered_password="Recovered-${suffix}-2026!"
+recovery_complete_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-complete.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${recovery_token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data "$(jq -nc \
+    --arg currentPassword "$recovery_temporary_password" \
+    --arg newPassword "$recovered_password" \
+    --arg installID "$install_id" \
+    '{currentPassword:$currentPassword,newPassword:$newPassword,installID:$installID}')" \
+  "${api_root}/fan/complete-password-recovery")
+[[ "$recovery_complete_status" == '200' ]]
+jq -e --arg oldToken "$recovery_token" '
+  .token != $oldToken and .profile.requiresPasswordChange == false and
+  .profile.passwordRecoveryExpiresAt == null
+' "$test_dir/recovery-complete.json" >/dev/null
+token=$(jq -r '.token' "$test_dir/recovery-complete.json")
+token_hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
+recovery_stale_session_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-stale-session.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${recovery_token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/fan/session")
+[[ "$recovery_stale_session_status" == '401' ]]
+recovery_old_login_status=$(curl "${curl_common[@]}" --output "$test_dir/recovery-old-login.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$identity_code" \
+    --arg password "$recovery_temporary_password" \
+    --arg installID "$install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$recovery_old_login_status" == '401' ]]
+if sudo -u www-data wp --path="$wordpress_root" user meta get \
+  "$fan_internal_user_id" _yishu_fan_password_recovery >/dev/null 2>&1; then
+  echo 'fan-api-smoke: password recovery marker remained after completion' >&2
+  exit 1
+fi
+password="$recovered_password"
+echo 'fan-api-smoke: administrator one-time recovery and forced password rotation passed'
+
 suspend_status=$(curl "${curl_common[@]}" --output "$test_dir/suspended-update.json" \
   --write-out '%{http_code}' \
   --request POST \
@@ -790,12 +1142,28 @@ stopped_content_status=$(curl "${curl_common[@]}" --output "$test_dir/suspended-
 jq -e '.code == "fan_account_suspended"' "$test_dir/suspended-content.json" >/dev/null
 echo 'fan-api-smoke: suspended account retained self-service deletion access'
 
+wrong_delete_status=$(curl "${curl_common[@]}" --output "$test_dir/wrong-delete.json" --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data "$(jq -nc \
+    --arg currentPassword 'definitely-wrong-password' \
+    --arg installID "$install_id" \
+    '{confirmation:"DELETE_ACCOUNT",currentPassword:$currentPassword,installID:$installID}')" \
+  "${api_root}/fan/delete")
+[[ "$wrong_delete_status" == '401' ]]
+jq -e '.code == "fan_login_invalid"' "$test_dir/wrong-delete.json" >/dev/null
+
 delete_status=$(curl "${curl_common[@]}" --output /dev/null --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
   --header "Authorization: Bearer ${token}" \
   --header "X-Yishu-Install-ID: ${install_id}" \
-  --data '{"confirmation":"DELETE_ACCOUNT"}' \
+  --data "$(jq -nc \
+    --arg currentPassword "$password" \
+    --arg installID "$install_id" \
+    '{confirmation:"DELETE_ACCOUNT",currentPassword:$currentPassword,installID:$installID}')" \
   "${api_root}/fan/delete")
 [[ "$delete_status" == '200' ]]
 if sudo -u www-data wp --path="$wordpress_root" option get \

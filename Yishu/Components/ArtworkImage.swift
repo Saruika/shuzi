@@ -1,5 +1,6 @@
 import AVFoundation
 import ImageIO
+import OSLog
 import SwiftUI
 import UIKit
 
@@ -229,6 +230,26 @@ struct DownsampledAsyncImage<Content: View>: View {
         // renders no placeholder for the `.empty` phase.
         ZStack {
             content(phase)
+
+            if error != nil {
+                Button(action: retry) {
+                    Label("重新加载", systemImage: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .semibold))
+                        .padding(.horizontal, 16)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .foregroundStyle(AppTheme.warmWhite)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(AppTheme.gold.opacity(0.55), lineWidth: 1)
+                        }
+                }
+                .buttonStyle(.plain)
+                .contentShape(Rectangle())
+                .accessibilityLabel("重新加载图片")
+                .accessibilityHint("再次尝试加载当前图片")
+                .accessibilityIdentifier("artwork-image-retry")
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: requestID) {
@@ -253,6 +274,10 @@ struct DownsampledAsyncImage<Content: View>: View {
             guard phase == .active, error != nil else { return }
             retryGeneration &+= 1
         }
+    }
+
+    private func retry() {
+        retryGeneration &+= 1
     }
 
     private var phase: AsyncImagePhase {
@@ -622,37 +647,203 @@ struct CaptureProtectionCover: View {
     }
 }
 
-struct ScreenshotProtectedContent: UIViewRepresentable {
-    let content: AnyView
+enum SecureCaptureSurfaceOwner: String, Equatable {
+    case appRoot = "app_root"
+    case fullScreenPresentation = "full_screen_presentation"
+}
 
-    init<Content: View>(@ViewBuilder content: () -> Content) {
+/// Installs exactly one secure UIKit rendering surface for an independently
+/// composed hierarchy. A full-screen cover is a new UIKit presentation
+/// hierarchy even when it inherits SwiftUI environment values, so its owner
+/// must explicitly request a new surface.
+struct SecureCaptureSurface<Content: View>: View {
+    let owner: SecureCaptureSurfaceOwner
+    let onExit: (() -> Void)?
+    private let content: Content
+
+    init(
+        owner: SecureCaptureSurfaceOwner,
+        onExit: (() -> Void)? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.owner = owner
+        self.onExit = onExit
+        self.content = content()
+    }
+
+    @ViewBuilder
+    var body: some View {
+        if ScreenProtectionTesting.isDisabled {
+            content
+        } else {
+            ScreenshotProtectedContent(owner: owner, onExit: onExit) {
+                content
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+}
+
+struct ScreenshotProtectedContent: UIViewRepresentable {
+    let owner: SecureCaptureSurfaceOwner
+    let content: AnyView
+    let fallback: AnyView
+
+    init<Content: View>(
+        owner: SecureCaptureSurfaceOwner,
+        onExit: (() -> Void)? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.owner = owner
         self.content = AnyView(content())
+        fallback = AnyView(
+            ScreenProtectionUnavailableView(owner: owner, onExit: onExit)
+        )
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(owner: owner)
     }
 
     func makeUIView(context: Context) -> SecureHostingContainerView {
-        SecureHostingContainerView(rootView: content)
+        SecureHostingContainerView(
+            rootView: content,
+            fallbackView: fallback,
+            stateObserver: context.coordinator.didTransition(to:)
+        )
     }
 
     func updateUIView(_ view: SecureHostingContainerView, context: Context) {
         view.update(rootView: content)
     }
+
+    final class Coordinator {
+        private let owner: SecureCaptureSurfaceOwner
+
+        init(owner: SecureCaptureSurfaceOwner) {
+            self.owner = owner
+        }
+
+        func didTransition(to state: SecureCanvasInstallationState) {
+            ScreenProtectionDiagnostics.record(state: state, owner: owner)
+        }
+    }
 }
 
+enum SecureCanvasFailureCode: Int, Equatable {
+    case canvasMissing = 1
+    case canvasNotAttached = 2
+}
+
+enum SecureCanvasInstallationState: Equatable {
+    case probing(attempt: Int)
+    case secured
+    case privacyFallback(SecureCanvasFailureCode)
+}
+
+enum SecureCanvasFallbackPolicy {
+    enum NextStep: Equatable {
+        case retry
+        case attachSecureCanvas
+        case showPrivacyFallback(SecureCanvasFailureCode)
+    }
+
+    static func nextStep(
+        attempt: Int,
+        maximumAttempts: Int,
+        failure: SecureCanvasFailureCode?
+    ) -> NextStep {
+        guard let failure else { return .attachSecureCanvas }
+        return attempt < max(1, maximumAttempts)
+            ? .retry
+            : .showPrivacyFallback(failure)
+    }
+}
+
+private enum SecureCanvasResolver {
+    static func resolve(in textField: UITextField) -> UIView? {
+        textField.setNeedsLayout()
+        textField.layoutIfNeeded()
+
+        let layerDelegates = (textField.layer.sublayers ?? [])
+            .compactMap { $0.delegate as? UIView }
+        let descendants = allDescendants(of: textField)
+
+        return (layerDelegates + descendants).first { candidate in
+            guard candidate !== textField,
+                  candidate.isDescendant(of: textField) else {
+                return false
+            }
+            // UIKit's private class name has changed between releases, but the
+            // secure text layout host has consistently remained a canvas view.
+            // If that invariant changes, fail closed instead of guessing at an
+            // arbitrary subview that might be captured.
+            return NSStringFromClass(type(of: candidate))
+                .localizedCaseInsensitiveContains("canvas")
+        }
+    }
+
+    private static func allDescendants(of view: UIView) -> [UIView] {
+        view.subviews.flatMap { [$0] + allDescendants(of: $0) }
+    }
+}
+
+@MainActor
 final class SecureHostingContainerView: UIView {
+    typealias CanvasResolver = (UITextField) -> UIView?
+
     private let secureTextField = NonFocusingSecureTextField(frame: .zero)
     private let hostingController: UIHostingController<AnyView>
+    private let fallbackView: AnyView
+    private let secureCanvasResolver: CanvasResolver
+    private let maximumProbeAttempts: Int
+    private let stateObserver: (SecureCanvasInstallationState) -> Void
+    private var protectedRootView: AnyView
+    private var hostedViewConstraints: [NSLayoutConstraint] = []
+    private var probeAttempt = 0
 
-    init(rootView: AnyView) {
-        hostingController = UIHostingController(rootView: rootView)
+    private(set) var installationState = SecureCanvasInstallationState.probing(attempt: 0)
+
+    var hostsProtectedContent: Bool {
+        installationState == .secured
+            && hostingController.view.superview !== self
+            && hostingController.view.superview != nil
+    }
+
+    var hostsVisiblePrivacyFallback: Bool {
+        if case .privacyFallback = installationState {
+            return hostingController.view.superview === self
+        }
+        return false
+    }
+
+    init(
+        rootView: AnyView,
+        fallbackView: AnyView = AnyView(ScreenProtectionUnavailableView(
+            owner: .appRoot,
+            onExit: nil
+        )),
+        maximumProbeAttempts: Int = 3,
+        secureCanvasResolver: @escaping CanvasResolver = SecureCanvasResolver.resolve(in:),
+        stateObserver: @escaping (SecureCanvasInstallationState) -> Void = { _ in }
+    ) {
+        protectedRootView = rootView
+        self.fallbackView = fallbackView
+        self.maximumProbeAttempts = max(1, maximumProbeAttempts)
+        self.secureCanvasResolver = secureCanvasResolver
+        self.stateObserver = stateObserver
+        hostingController = UIHostingController(rootView: fallbackView)
         super.init(frame: .zero)
 
         backgroundColor = .black
+        isOpaque = true
         secureTextField.isSecureTextEntry = true
         secureTextField.text = " "
         secureTextField.textColor = .clear
         secureTextField.tintColor = .clear
         secureTextField.backgroundColor = .clear
         secureTextField.borderStyle = .none
+        secureTextField.isAccessibilityElement = false
         secureTextField.translatesAutoresizingMaskIntoConstraints = false
         addSubview(secureTextField)
         NSLayoutConstraint.activate([
@@ -662,24 +853,11 @@ final class SecureHostingContainerView: UIView {
             secureTextField.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
-        // The secure canvas must remain inside its text field. Detaching and
-        // returning the canvas loses capture protection on newer iOS versions.
-        secureTextField.layoutIfNeeded()
-        guard let secureCanvas = secureTextField.layer.sublayers?.first?.delegate as? UIView else {
-            // Fail closed if UIKit changes its secure rendering hierarchy.
-            return
-        }
-
         let hostedView = hostingController.view!
-        hostedView.backgroundColor = .clear
+        hostedView.backgroundColor = .black
         hostedView.translatesAutoresizingMaskIntoConstraints = false
-        secureCanvas.addSubview(hostedView)
-        NSLayoutConstraint.activate([
-            hostedView.leadingAnchor.constraint(equalTo: secureCanvas.leadingAnchor),
-            hostedView.trailingAnchor.constraint(equalTo: secureCanvas.trailingAnchor),
-            hostedView.topAnchor.constraint(equalTo: secureCanvas.topAnchor),
-            hostedView.bottomAnchor.constraint(equalTo: secureCanvas.bottomAnchor),
-        ])
+        placeHostedView(in: self)
+        probeForSecureCanvas()
     }
 
     @available(*, unavailable)
@@ -688,13 +866,157 @@ final class SecureHostingContainerView: UIView {
     }
 
     func update(rootView: AnyView) {
+        protectedRootView = rootView
+        guard installationState == .secured else {
+            // Never replace the non-sensitive fallback with protected content
+            // while the hosting view is attached to the ordinary view tree.
+            hostingController.rootView = fallbackView
+            return
+        }
         hostingController.rootView = rootView
+    }
+
+    private func probeForSecureCanvas() {
+        guard installationState != .secured else { return }
+        probeAttempt += 1
+        transition(to: .probing(attempt: probeAttempt))
+
+        let secureCanvas = secureCanvasResolver(secureTextField)
+        let failure: SecureCanvasFailureCode?
+        if let secureCanvas {
+            failure = secureCanvas !== secureTextField
+                && secureCanvas.isDescendant(of: secureTextField)
+                ? nil
+                : .canvasNotAttached
+        } else {
+            failure = .canvasMissing
+        }
+
+        switch SecureCanvasFallbackPolicy.nextStep(
+            attempt: probeAttempt,
+            maximumAttempts: maximumProbeAttempts,
+            failure: failure
+        ) {
+        case .attachSecureCanvas:
+            guard let secureCanvas else {
+                enterPrivacyFallback(.canvasMissing)
+                return
+            }
+            // Keep the fallback root while moving the hosted view. Protected
+            // content is assigned only after it is inside the secure canvas.
+            hostingController.rootView = fallbackView
+            placeHostedView(in: secureCanvas)
+            hostingController.view.accessibilityViewIsModal = false
+            hostingController.rootView = protectedRootView
+            transition(to: .secured)
+
+        case .retry:
+            // The secure canvas may not exist until UIKit finishes its first
+            // layout pass. The fallback stays visible while retrying.
+            DispatchQueue.main.async { [weak self] in
+                self?.probeForSecureCanvas()
+            }
+
+        case .showPrivacyFallback(let code):
+            enterPrivacyFallback(code)
+        }
+    }
+
+    private func enterPrivacyFallback(_ code: SecureCanvasFailureCode) {
+        hostingController.rootView = fallbackView
+        placeHostedView(in: self)
+        hostingController.view.accessibilityViewIsModal = true
+        transition(to: .privacyFallback(code))
+    }
+
+    private func placeHostedView(in container: UIView) {
+        let hostedView = hostingController.view!
+        NSLayoutConstraint.deactivate(hostedViewConstraints)
+        hostedView.removeFromSuperview()
+        container.addSubview(hostedView)
+        hostedViewConstraints = [
+            hostedView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            hostedView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            hostedView.topAnchor.constraint(equalTo: container.topAnchor),
+            hostedView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ]
+        NSLayoutConstraint.activate(hostedViewConstraints)
+    }
+
+    private func transition(to state: SecureCanvasInstallationState) {
+        guard installationState != state else { return }
+        installationState = state
+        stateObserver(state)
     }
 }
 
 private final class NonFocusingSecureTextField: UITextField {
     override var canBecomeFirstResponder: Bool {
         false
+    }
+}
+
+private struct ScreenProtectionUnavailableView: View {
+    let owner: SecureCaptureSurfaceOwner
+    let onExit: (() -> Void)?
+
+    var body: some View {
+        ZStack {
+            AppTheme.ink
+
+            VStack(spacing: 18) {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .font(.system(size: 42, weight: .light))
+                    .foregroundStyle(AppTheme.gold)
+
+                Text("安全显示暂不可用")
+                    .font(.editorial(29))
+                    .foregroundStyle(AppTheme.warmWhite)
+
+                Text("未能启用影像保护，受保护内容已隐藏。\n请关闭后重新打开此 APP。")
+                    .font(.system(size: 14))
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(6)
+                    .foregroundStyle(.white.opacity(0.66))
+
+                if owner == .fullScreenPresentation, let onExit {
+                    Button("关闭当前页面", action: onExit)
+                        .buttonStyle(.borderedProminent)
+                        .tint(AppTheme.gold)
+                        .foregroundStyle(AppTheme.ink)
+                        .padding(.top, 8)
+                }
+            }
+            .padding(32)
+        }
+        .ignoresSafeArea()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("screen-protection-unavailable")
+    }
+}
+
+private enum ScreenProtectionDiagnostics {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "cn.com.shuzijun.yishu",
+        category: "ScreenProtection"
+    )
+
+    static func record(
+        state: SecureCanvasInstallationState,
+        owner: SecureCaptureSurfaceOwner
+    ) {
+        switch state {
+        case .secured:
+            logger.info(
+                "Secure canvas installed: owner=\(owner.rawValue, privacy: .public)"
+            )
+        case .privacyFallback(let code):
+            logger.fault(
+                "Secure canvas unavailable; privacy fallback shown: owner=\(owner.rawValue, privacy: .public) code=\(code.rawValue, privacy: .public)"
+            )
+        case .probing:
+            break
+        }
     }
 }
 

@@ -11,22 +11,12 @@ enum AppTheme {
 
 @MainActor
 enum AppWindowMetrics {
-    static var safeAreaInsets: UIEdgeInsets {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let windows = scenes.flatMap(\.windows)
-        return windows.first(where: \.isKeyWindow)?.safeAreaInsets
-            ?? windows.first?.safeAreaInsets
-            ?? .zero
-    }
-
-    static var topInsetForLayout: CGFloat {
-        let measured = safeAreaInsets.top
+    static func topInsetForLayout(measured: CGFloat) -> CGFloat {
         if measured > 0 { return measured }
         return UIDevice.current.userInterfaceIdiom == .phone ? 62 : 24
     }
 
-    static var bottomInsetForLayout: CGFloat {
-        let measured = safeAreaInsets.bottom
+    static func bottomInsetForLayout(measured: CGFloat) -> CGFloat {
         if measured > 0 { return measured }
         return UIDevice.current.userInterfaceIdiom == .phone ? 34 : 20
     }
