@@ -10,6 +10,8 @@ editing Nginx, run `nginx -t` before reloading the service.
 `shuzijun-sensitive-files-deny.conf` must be included inside every TLS server
 block that can read from the WordPress document root, before the generic PHP
 and static-file locations. It returns 404 for `wp-config.php`, configuration or
-source backups, editor swap files and similarly named residue. Backups belong
-under a root-only directory outside the document root; blocking URLs is a
-second boundary, not a substitute for moving the files.
+source backups, any file with a suffix appended after `.php`, database/key/env
+files, package metadata, source-control internals, editor swap files and
+similarly named residue. Backups belong under a root-only directory outside the
+document root; blocking URLs is a second boundary, not a substitute for moving
+the files.

@@ -10,8 +10,11 @@ test -f "$nginx_site"
 test -f "$deny_snippet"
 
 if find "$site_root" -xdev -type f \
-    \( -name '*.bak*' -o -name '*.backup*' -o -name '*.old' \
-    -o -name '*.orig' -o -name '*.save' -o -name '*.swp' \
+    \( -iname '*.php?*' -o -name '*.php.*' -o -name '*.php_*' -o -name '*.php-*' \
+    -o -name '*.php~' -o -name '*.bak*' -o -name '*.backup*' \
+    -o -name '*.old*' -o -name '*.orig*' -o -name '*.save*' \
+    -o -name '*.swp*' -o -name '*.tmp*' -o -name '*.copy*' \
+    -o -name '*.disabled*' -o -name '*.corrupt*' -o -name '*.fixbak*' \
     -o -name '*.before-*' -o -name '*~' \) -print -quit | grep -q .; then
     printf 'webroot-security: backup residue remains in document root\n' >&2
     exit 1
@@ -20,13 +23,57 @@ fi
 if find "$site_root" -xdev -type f \
     \( -iname '*.sql' -o -iname '*.sql.gz' -o -iname '*.dump' \
     -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' \
-    -o -iname '.env*' -o -iname 'debug.log' \) -print -quit | grep -q .; then
+    -o -iname '*.pfx' -o -iname '*.jks' -o -iname '.env*' \
+    -o -iname '*.zip' -o -iname '*.tar' -o -iname '*.tar.gz' \
+    -o -iname '*.tgz' -o -iname '*.7z' -o -iname '*.rar' \
+    -o -iname 'debug.log' -o -iname 'error.log' -o -iname 'access.log' \
+    -o -iname 'auth.json' -o -iname 'credentials*.json' \
+    -o -iname 'service-account*.json' \) -print -quit | grep -q .; then
     printf 'webroot-security: sensitive material remains in document root\n' >&2
     exit 1
 fi
 
+if find "$site_root" -xdev -type d \
+    \( -name .git -o -name .svn -o -name .hg \) -print -quit | grep -q .; then
+    printf 'webroot-security: source-control metadata remains in document root\n' >&2
+    exit 1
+fi
+
+# Composer metadata inside a reviewed WordPress plugin can be legitimate. Only
+# root-level package manifests are deployment residue and are rejected here.
+if find "$site_root" -maxdepth 1 -type f \
+    \( -name composer.json -o -name composer.lock -o -name package.json \
+    -o -name package-lock.json -o -name yarn.lock -o -name pnpm-lock.yaml \) \
+    -print -quit | grep -q .; then
+    printf 'webroot-security: root-level package metadata remains\n' >&2
+    exit 1
+fi
+
+# WordPress has a small, known set of executable files at document-root level.
+# Any additional root-level PHP entry point must be reviewed explicitly rather
+# than silently becoming another public endpoint.
+if find "$site_root" -maxdepth 1 -type f -name '*.php' \
+    ! -name index.php ! -name xmlrpc.php ! -name wp-activate.php \
+    ! -name wp-blog-header.php ! -name wp-comments-post.php \
+    ! -name wp-config.php ! -name wp-config-sample.php ! -name wp-cron.php \
+    ! -name wp-links-opml.php ! -name wp-load.php ! -name wp-login.php \
+    ! -name wp-mail.php ! -name wp-settings.php ! -name wp-signup.php \
+    ! -name wp-trackback.php -print -quit | grep -q .; then
+    printf 'webroot-security: unexpected root-level PHP entry point remains\n' >&2
+    exit 1
+fi
+
+if find "$site_root" -xdev -xtype l -print -quit | grep -q .; then
+    printf 'webroot-security: broken symbolic link remains in document root\n' >&2
+    exit 1
+fi
+
+test "$(stat -c '%a %U:%G' "$site_root/wp-config.php")" = '640 root:www-data'
+
 grep -qF 'include /etc/nginx/snippets/shuzijun-sensitive-files-deny.conf;' "$nginx_site"
 grep -qF 'wp-config\.php' "$deny_snippet"
+grep -qF '\.php[^/]+$' "$deny_snippet"
+grep -qF '\.env' "$deny_snippet"
 grep -qF 'return 404;' "$deny_snippet"
 nginx -t >/dev/null
 

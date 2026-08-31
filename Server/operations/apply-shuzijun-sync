@@ -6,10 +6,51 @@ STAGE=/tmp/shuzijun-stage
 DATABASE="$STAGE/shuzijun-sync.sql.gz"
 MANIFEST="$STAGE/shuzijun-sync.sha256"
 LOG=/var/log/shuzijun-sync-receiver.log
+VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+
+RSYNC_FILTERS=(
+    --exclude='cache/'
+    --exclude='debug.log'
+    --exclude='*.php?*'
+    --exclude='*.php.*'
+    --exclude='*.php_*'
+    --exclude='*.php-*'
+    --exclude='*.php~'
+    --exclude='*.bak*'
+    --exclude='*.backup*'
+    --exclude='*.old*'
+    --exclude='*.orig*'
+    --exclude='*.save*'
+    --exclude='*.swp*'
+    --exclude='*.tmp*'
+    --exclude='*.copy*'
+    --exclude='*.disabled*'
+    --exclude='*.corrupt*'
+    --exclude='*.fixbak*'
+    --exclude='*.before-*'
+    --exclude='*~'
+    --exclude='.env*'
+    --exclude='*.sql*'
+    --exclude='*.dump*'
+    --exclude='*.pem'
+    --exclude='*.key'
+    --exclude='*.p12'
+    --exclude='*.pfx'
+    --exclude='*.jks'
+    --exclude='*.zip'
+    --exclude='*.tar'
+    --exclude='*.tar.gz'
+    --exclude='*.tgz'
+    --exclude='*.7z'
+    --exclude='*.rar'
+)
 
 test "$SITE" = /var/www/html/shuzijun.com.cn
 test "$STAGE" = /tmp/shuzijun-stage
 for file in "$DATABASE" "$MANIFEST"; do test -f "$file"; done
+test -x "$VERIFY"
+
+"$VERIFY" "$SITE"
 
 cd "$STAGE"
 sha256sum -c "$MANIFEST"
@@ -22,8 +63,9 @@ wp db export "$DEST/wordpress.sql" --add-drop-table --allow-root >/dev/null
 gzip -9 "$DEST/wordpress.sql"
 cp -a wp-config.php "$DEST/wp-config.php"
 
-rsync -a --delete --exclude='cache/' --exclude='debug.log' \
+rsync -a --delete "${RSYNC_FILTERS[@]}" \
     "$STAGE/wp-content/" "$SITE/wp-content/"
+"$VERIFY" "$SITE"
 gunzip -c "$DATABASE" > "$STAGE/shuzijun-sync.sql"
 wp db import "$STAGE/shuzijun-sync.sql" --allow-root >/dev/null
 wp core update-db --allow-root >/dev/null

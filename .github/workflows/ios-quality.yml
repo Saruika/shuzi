@@ -40,7 +40,7 @@ jobs:
       - name: Test iPad pages
         run: Scripts/ci-ios-tests.sh iPad
 
-      - name: Analyze Release build
+      - name: Analyze and audit Release bundle
         run: Scripts/ci-release-analyze.sh
 
       - name: Preserve failure diagnostics

@@ -42,9 +42,12 @@ fi
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/entitlement-verifier/app.py").read_text(encoding="utf-8"))'
 python3 Server/tests/sync-script-contract-test.py
 bash -n Server/operations/apply-shuzijun-sync
+bash -n Server/operations/sync-to-backup
 bash -n Server/operations/verify-webroot-security
 
 grep -qF 'wp-config\.php' Server/nginx/shuzijun-sensitive-files-deny.conf
+grep -qF '\.php[^/]+$' Server/nginx/shuzijun-sensitive-files-deny.conf
+grep -qF '\.env' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF 'return 404;' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF 'shuzijun-sensitive-files-deny.conf' Server/nginx/README.md
 

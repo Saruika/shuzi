@@ -1,0 +1,74 @@
+#!/bin/bash
+set -euo pipefail
+
+SITE=/var/www/html/shuzijun.com.cn
+HOST=129.226.202.207
+KEY=/root/.ssh/shuzijun_sync_ed25519
+LOG=/var/log/wp-sync.log
+VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+
+RSYNC_FILTERS=(
+    --exclude='cache/'
+    --exclude='debug.log'
+    --exclude='*.php?*'
+    --exclude='*.php.*'
+    --exclude='*.php_*'
+    --exclude='*.php-*'
+    --exclude='*.php~'
+    --exclude='*.bak*'
+    --exclude='*.backup*'
+    --exclude='*.old*'
+    --exclude='*.orig*'
+    --exclude='*.save*'
+    --exclude='*.swp*'
+    --exclude='*.tmp*'
+    --exclude='*.copy*'
+    --exclude='*.disabled*'
+    --exclude='*.corrupt*'
+    --exclude='*.fixbak*'
+    --exclude='*.before-*'
+    --exclude='*~'
+    --exclude='.env*'
+    --exclude='*.sql*'
+    --exclude='*.dump*'
+    --exclude='*.pem'
+    --exclude='*.key'
+    --exclude='*.p12'
+    --exclude='*.pfx'
+    --exclude='*.jks'
+    --exclude='*.zip'
+    --exclude='*.tar'
+    --exclude='*.tar.gz'
+    --exclude='*.tgz'
+    --exclude='*.7z'
+    --exclude='*.rar'
+)
+
+test "$SITE" = /var/www/html/shuzijun.com.cn
+test "$HOST" = 129.226.202.207
+test -x "$VERIFY"
+test -f "$KEY"
+
+TMP=$(mktemp -d)
+trap 'rm -rf -- "$TMP"' EXIT
+exec >>"$LOG" 2>&1
+
+printf '[%s] incremental sync started\n' "$(date '+%F %T')"
+"$VERIFY" "$SITE"
+
+cd "$SITE"
+wp db export "$TMP/shuzijun-sync.sql" --add-drop-table --allow-root >/dev/null
+gzip -9 "$TMP/shuzijun-sync.sql"
+cd "$TMP"
+sha256sum shuzijun-sync.sql.gz > shuzijun-sync.sha256
+
+SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 ubuntu@"$HOST")
+RSYNC_SSH="ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
+"${SSH[@]}" 'install -d -m 700 /tmp/shuzijun-stage'
+rsync -az --delete --delete-excluded "${RSYNC_FILTERS[@]}" \
+    -e "$RSYNC_SSH" "$SITE/wp-content/" ubuntu@"$HOST":/tmp/shuzijun-stage/wp-content/
+rsync -az -e "$RSYNC_SSH" shuzijun-sync.sql.gz shuzijun-sync.sha256 \
+    ubuntu@"$HOST":/tmp/shuzijun-stage/
+"${SSH[@]}" sudo /usr/local/sbin/apply-shuzijun-sync
+
+printf '[%s] incremental sync completed\n' "$(date '+%F %T')"
