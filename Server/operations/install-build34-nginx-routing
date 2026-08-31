@@ -1121,26 +1121,102 @@ def validate_old_block_expectation(
 
 
 def reject_internal_redirect_controls(
-    document: Sequence[Directive], label: str
+    document: Sequence[Directive], label: str, *, allow_if: bool = False
 ) -> None:
     redirect_controls = {
         "error_page",
-        "if",
         "internal_redirect",
         "recursive_error_pages",
         "rewrite",
     }
+    if not allow_if:
+        redirect_controls.add("if")
     if any(
         item.name.lower() in redirect_controls for item in all_directives(document)
     ):
         raise InstallError(f"{label} contains an internal redirect mechanism")
 
 
-def validate_location_security(document: Sequence[Directive], label: str) -> None:
+REVIEWED_ACCOUNT_ASSIGNMENT_IF_ARGS = (
+    "($remote_addr",
+    "~",
+    r"^(?:127\.0\.0\.1|::1)$)",
+)
+REVIEWED_ACCOUNT_ASSIGNMENT_SET_ARGS = (
+    "$yishu_client_ip",
+    "$http_x_yishu_client_ip",
+)
+REVIEWED_ACCOUNT_INITIAL_SET_ARGS = (
+    "$yishu_client_ip",
+    "$remote_addr",
+)
+
+
+def validate_account_snippet_controls(node: Directive, label: str) -> None:
+    """Allow only the reviewed local-proxy assignment ``if`` in account snippet."""
+
+    reject_internal_redirect_controls((node,), label, allow_if=True)
+    forbidden = {"return", "try_files"}
+    if any(
+        item.name.lower() in forbidden for item in all_directives((node,))
+    ):
+        raise InstallError(f"{label} contains an unreviewed control-flow directive")
+    all_ifs = [
+        item for item in all_directives((node,)) if item.name.lower() == "if"
+    ]
+    direct_ifs = [
+        item for item in (node.children or ()) if item.name.lower() == "if"
+    ]
+    if len(all_ifs) != 1 or all_ifs != direct_ifs:
+        raise InstallError(f"{label} contains an unreviewed if block")
+    reviewed_if = all_ifs[0]
+    children = tuple(reviewed_if.children or ())
+    if (
+        reviewed_if.args != REVIEWED_ACCOUNT_ASSIGNMENT_IF_ARGS
+        or len(children) != 1
+        or children[0].name.lower() != "set"
+        or children[0].args != REVIEWED_ACCOUNT_ASSIGNMENT_SET_ARGS
+        or children[0].children is not None
+    ):
+        raise InstallError(f"{label} contains an unreviewed if block")
+    all_client_ip_sets = [
+        item
+        for item in all_directives((node,))
+        if item.name.lower() == "set"
+        and item.args
+        and item.args[0] == "$yishu_client_ip"
+    ]
+    direct_initializers = [
+        item
+        for item in (node.children or ())
+        if item.name.lower() == "set"
+        and item.args == REVIEWED_ACCOUNT_INITIAL_SET_ARGS
+        and item.children is None
+    ]
+    if (
+        len(direct_initializers) != 1
+        or len(all_client_ip_sets) != 2
+        or not any(item is children[0] for item in all_client_ip_sets)
+        or not any(item is direct_initializers[0] for item in all_client_ip_sets)
+    ):
+        raise InstallError(f"{label} client IP assignment topology drifted")
+
+
+def validate_location_security(
+    document: Sequence[Directive],
+    label: str,
+    *,
+    allow_reviewed_account_if: bool = False,
+) -> None:
     reject_nested_locations(document, label)
     if any(item.name.lower() == "include" for item in all_directives(document)):
         raise InstallError(f"{label} must not contain another include")
-    reject_internal_redirect_controls(document, label)
+    if allow_reviewed_account_if:
+        if len(document) != 1:
+            raise InstallError(f"{label} reviewed if requires one account location")
+        validate_account_snippet_controls(document[0], label)
+    else:
+        reject_internal_redirect_controls(document, label)
     for item in all_directives(document):
         parsed = location_path(item)
         if parsed is None:
@@ -1290,7 +1366,7 @@ def rewrite_account_api_routes(
     parsed = location_path(snippet_node)
     if snippet_node.args not in ((ACCOUNT_API_PATH,), ("^~", ACCOUNT_API_PATH)):
         raise InstallError("account API snippet location is malformed")
-    reject_internal_redirect_controls((snippet_node,), "account API snippet")
+    validate_account_snippet_controls(snippet_node, "account API snippet")
     old_hash = (
         sha256(snippet_text[snippet_node.start : snippet_node.end].encode("utf-8"))
         if parsed[0] == "^~"
@@ -1309,7 +1385,11 @@ def rewrite_account_api_routes(
         apply,
     )
     if old_hash is None:
-        validate_location_security(snippet_document, "account API snippet")
+        validate_location_security(
+            snippet_document,
+            "account API snippet",
+            allow_reviewed_account_if=True,
+        )
         return AccountApiRewrite(
             active_content,
             snippet_state.data,

@@ -293,6 +293,10 @@ def backup_account_api_snippet() -> bytes:
         "# backup proxy route; comments and body bytes must survive\n"
         "location ^~ /wp-json/shuzijun/v1/ {\n"
         "    limit_req zone=sj_account_api burst=30 nodelay;\n"
+        "    set $yishu_client_ip $remote_addr;\n"
+        "    if ($remote_addr ~ ^(?:127\\.0\\.0\\.1|::1)$) {\n"
+        "        set $yishu_client_ip $http_x_yishu_client_ip;\n"
+        "    }\n"
         "    proxy_pass http://127.0.0.1:9080;\n"
         "    proxy_set_header X-Account-Node backup-singapore-preserved;\n"
         "}\n"
@@ -844,6 +848,106 @@ def assert_account_api_gates_and_topology() -> None:
     hidden_arguments["expected_account_api_snippet"] = MODULE.sha256(hidden_snippet)
     hidden_arguments["expected_old_snippet_account_api_sha256"] = "absent"
     expect_failure(hidden_entries, hidden_arguments, "contains a nested location")
+
+    def reject_account_snippet_mutation(
+        mutate,
+        message: str,
+    ) -> None:
+        current_entries = initial_entries(
+            backup_active_config(), account_snippet=backup_account_api_snippet()
+        )
+        current_arguments = install_arguments(current_entries, apply=True)
+        changed = mutate(current_entries[ACCOUNT_API_TARGET].data)
+        current_entries[ACCOUNT_API_TARGET] = file_state(changed)
+        current_arguments["expected_account_api_snippet"] = MODULE.sha256(changed)
+        expect_failure(current_entries, current_arguments, message)
+
+    reject_account_snippet_mutation(
+        lambda content: content.replace(
+            b"set $yishu_client_ip $remote_addr;",
+            b"set $yishu_client_ip $http_x_yishu_client_ip;",
+            1,
+        ),
+        "client IP assignment topology drifted",
+    )
+    reject_account_snippet_mutation(
+        lambda content: content.replace(
+            b"    set $yishu_client_ip $remote_addr;\n",
+            (
+                b"    set $yishu_client_ip $remote_addr;\n"
+                b"    set $yishu_client_ip $remote_addr;\n"
+            ),
+            1,
+        ),
+        "client IP assignment topology drifted",
+    )
+    reject_account_snippet_mutation(
+        lambda content: content.replace(
+            (
+                b"    if ($remote_addr ~ ^(?:127\\.0\\.0\\.1|::1)$) {\n"
+                b"        set $yishu_client_ip $http_x_yishu_client_ip;\n"
+                b"    }\n"
+            ),
+            b"",
+            1,
+        ),
+        "unreviewed if block",
+    )
+
+    for old, new in (
+        (
+            b"^(?:127\\.0\\.0\\.1|::1)$)",
+            b"^(?:127\\.0\\.0\\.1|::1|10\\.0\\.0\\.1)$)",
+        ),
+        (
+            b"set $yishu_client_ip $http_x_yishu_client_ip;",
+            b"set $yishu_client_ip $http_x_forwarded_for;",
+        ),
+        (
+            b"set $yishu_client_ip $http_x_yishu_client_ip;",
+            (
+                b"set $yishu_client_ip $http_x_yishu_client_ip;\n"
+                b"        set $extra_assignment on;"
+            ),
+        ),
+        (
+            b"    proxy_pass http://127.0.0.1:9080;",
+            (
+                b"    if ($request_method = OPTIONS) {\n"
+                b"        set $yishu_client_ip invalid;\n"
+                b"    }\n"
+                b"    proxy_pass http://127.0.0.1:9080;"
+            ),
+        ),
+    ):
+        reject_account_snippet_mutation(
+            lambda content, source=old, replacement=new: content.replace(
+                source, replacement, 1
+            ),
+            "unreviewed if block",
+        )
+
+    for injected, expected in (
+        (b"    return 204;\n", "unreviewed control-flow directive"),
+        (
+            b"    try_files $uri /index.php?$args;\n",
+            "unreviewed control-flow directive",
+        ),
+        (b"    rewrite ^ /index.php last;\n", "internal redirect mechanism"),
+        (b"    error_page 404 = @account_bypass;\n", "internal redirect mechanism"),
+        (
+            b"    location @account_bypass { return 204; }\n",
+            "contains a nested location",
+        ),
+    ):
+        reject_account_snippet_mutation(
+            lambda content, line=injected: content.replace(
+                b"    proxy_pass http://127.0.0.1:9080;\n",
+                line + b"    proxy_pass http://127.0.0.1:9080;\n",
+                1,
+            ),
+            expected,
+        )
 
 
 def assert_account_api_toctou_and_unused_target() -> None:
