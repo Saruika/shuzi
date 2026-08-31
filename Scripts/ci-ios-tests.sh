@@ -13,10 +13,13 @@ case "$device_family" in
 esac
 
 destination_id=""
-for attempt in 1 2 3; do
-  destination_id="$({
-    xcodebuild -project Yishu.xcodeproj -scheme Yishu -showdestinations 2>/dev/null || true
-  } | awk -v family="$device_family" '
+destination_listing=""
+for attempt in 1 2 3 4 5 6; do
+  xcrun simctl list devices available >/dev/null 2>&1 || true
+  destination_listing="$(
+    xcodebuild -project Yishu.xcodeproj -scheme Yishu -showdestinations 2>&1 || true
+  )"
+  destination_id="$(printf '%s\n' "$destination_listing" | awk -v family="$device_family" '
     $0 ~ /platform:iOS Simulator/ && $0 ~ ("name:[[:space:]]*" family) {
       line = $0
       sub(/^.*id:/, "", line)
@@ -27,11 +30,17 @@ for attempt in 1 2 3; do
     }
   ')"
   [[ -n "$destination_id" ]] && break
-  sleep "$attempt"
+  if (( attempt < 6 )); then
+    sleep "$attempt"
+  fi
 done
 
 if [[ -z "$destination_id" ]]; then
   printf 'No available %s simulator was found.\n' "$device_family" >&2
+  xcodebuild -version >&2 || true
+  printf '%s\n' "$destination_listing" >&2
+  xcrun simctl list runtimes >&2 || true
+  xcrun simctl list devices available >&2 || true
   exit 1
 fi
 
