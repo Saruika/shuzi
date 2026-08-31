@@ -40,6 +40,7 @@ if command -v php >/dev/null 2>&1; then
 fi
 
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/entitlement-verifier/app.py").read_text(encoding="utf-8"))'
+python3 -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8")) for path in pathlib.Path("Server/operations").glob("*.py")]'
 python3 Server/tests/sync-script-contract-test.py
 bash -n Server/operations/apply-shuzijun-sync
 bash -n Server/operations/sync-to-backup

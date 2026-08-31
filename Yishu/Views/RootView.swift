@@ -24,6 +24,9 @@ struct RootView: View {
     @State private var launchPosterSnapshot: LaunchPosterContent?
     @State private var hasPreparedLaunchPoster = false
     @State private var isLaunchPosterVisible = false
+    @State private var hasResolvedAccess = false
+    @State private var hasPreparedAuthorizedContent = false
+    @State private var isPreparingAuthorizedContent = false
     private let visualPortfolioTitle: String?
     private let visualTestingDestination: VisualTestingDestination?
 
@@ -67,12 +70,54 @@ struct RootView: View {
     }
 
     var body: some View {
+        Group {
+            if !hasResolvedAccess {
+                accessResolutionView
+            } else if canAccessAppContent {
+                authorizedAppContent
+            } else {
+                AppAccessGateView()
+            }
+        }
+        .tint(AppTheme.gold)
+        .protectedFromScreenCapture()
+        .task { await restoreAccess() }
+        .task(id: fanAccount.profile?.status) {
+            await monitorApprovedAccess()
+        }
+        .onChange(of: portfolioStore.portfolios) { _, portfolios in
+            recentlyViewed.retainAvailablePortfolios(in: portfolios)
+        }
+        .onChange(of: fanAccount.profile?.status) { _, status in
+            if status == FanAccountStatus.active.rawValue || shouldBypassAccessGate {
+                Task { await prepareAuthorizedContentIfNeeded() }
+            } else {
+                resetProtectedPresentation()
+            }
+        }
+        .onChange(of: adminSession.isAuthenticated) { _, authenticated in
+            guard authenticated else { return }
+            Task { await refreshAdministratorContentIfAllowed() }
+        }
+        .onChange(of: portfolioStore.launchPosters) { _, _ in
+            refreshVisibleLaunchPosterSnapshot()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task {
+                await fanAccount.refreshIfNeeded(minimumInterval: 0)
+                if fanAccount.isApproved { await refreshApprovedContent() }
+            }
+        }
+    }
+
+    private var authorizedAppContent: some View {
         ZStack {
             TabView(selection: $selectedTab) {
                 HomeView(showPortfolio: { selectedTab = .portfolio })
-                .ignoresSafeArea(.container, edges: .top)
-                .tag(AppTab.home)
-                .tabItem { Label("首页", systemImage: "play.rectangle") }
+                    .ignoresSafeArea(.container, edges: .top)
+                    .tag(AppTab.home)
+                    .tabItem { Label("首页", systemImage: "play.rectangle") }
 
                 NavigationStack(path: $portfolioPath) {
                     PortfolioGridView()
@@ -114,38 +159,34 @@ struct RootView: View {
                 .zIndex(20_000)
             }
         }
-        .tint(AppTheme.gold)
-        .protectedFromScreenCapture()
-        .task {
-            await portfolioStore.restoreCachedContent()
-            let refreshedForLaunch = shouldSkipLaunchPoster
-                ? false
-                : await portfolioStore.refreshLaunchContent()
-            prepareLaunchPosterIfNeeded(
-                allowBundledFallback: refreshedForLaunch || portfolioStore.contentOrigin != .bundled
-            )
-            await adminSession.restoreSession()
-            await fanAccount.restoreSession()
-            await refreshAdministratorContentIfAllowed(publicContentIsFresh: refreshedForLaunch)
-            recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
-            if let visualPortfolioTitle,
-               let portfolio = portfolioStore.portfolios.first(where: { $0.title == visualPortfolioTitle }) {
-                portfolioPath = [portfolio]
+    }
+
+    private var accessResolutionView: some View {
+        ZStack {
+            AppTheme.ink.ignoresSafeArea()
+            VStack(spacing: 18) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(AppTheme.gold)
+                ProgressView().tint(AppTheme.gold)
+                Text("正在验证访问授权")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.muted)
             }
         }
-        .onChange(of: portfolioStore.portfolios) { _, portfolios in
-            recentlyViewed.retainAvailablePortfolios(in: portfolios)
-        }
-        .onChange(of: adminSession.isAuthenticated) { _, _ in
-            Task { await refreshAdministratorContentIfAllowed() }
-        }
-        .onChange(of: portfolioStore.launchPosters) { _, _ in
-            refreshVisibleLaunchPosterSnapshot()
-        }
-        .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
-            Task { await fanAccount.refreshIfNeeded() }
-        }
+        .accessibilityIdentifier("access-checking")
+    }
+
+    private var canAccessAppContent: Bool {
+        fanAccount.isApproved || shouldBypassAccessGate
+    }
+
+    private var shouldBypassAccessGate: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("-bypass-access-gate-for-visual-testing")
+#else
+        false
+#endif
     }
 
     @ViewBuilder
@@ -201,13 +242,67 @@ struct RootView: View {
         isLaunchPosterVisible = latest != nil
     }
 
-    private func refreshAdministratorContentIfAllowed(publicContentIsFresh: Bool = false) async {
-        if adminSession.isAuthenticated {
-            if let manifest = try? await adminSession.fetchContent() {
-                portfolioStore.applyPublishedManifest(manifest)
-            }
-        } else if !publicContentIsFresh {
-            await portfolioStore.refresh()
+    private func restoreAccess() async {
+        await adminSession.restoreSession()
+        await fanAccount.restoreSession()
+        hasResolvedAccess = true
+        if canAccessAppContent {
+            await prepareAuthorizedContentIfNeeded()
+        } else {
+            portfolioStore.discardProtectedContent()
         }
+    }
+
+    private func prepareAuthorizedContentIfNeeded() async {
+        guard canAccessAppContent,
+              !hasPreparedAuthorizedContent,
+              !isPreparingAuthorizedContent else { return }
+        isPreparingAuthorizedContent = true
+        defer { isPreparingAuthorizedContent = false }
+
+        await portfolioStore.restoreCachedContent()
+        prepareLaunchPosterIfNeeded(allowBundledFallback: true)
+        hasPreparedAuthorizedContent = true
+        recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
+        if let visualPortfolioTitle,
+           let portfolio = portfolioStore.portfolios.first(where: { $0.title == visualPortfolioTitle }) {
+            portfolioPath = [portfolio]
+        }
+        if fanAccount.isApproved { await refreshApprovedContent() }
+    }
+
+    private func refreshApprovedContent() async {
+        guard fanAccount.isApproved,
+              let manifest = try? await fanAccount.fetchApprovedContent() else { return }
+        portfolioStore.applyPublishedManifest(manifest)
+    }
+
+    private func refreshAdministratorContentIfAllowed() async {
+        guard adminSession.isAuthenticated else { return }
+        if let manifest = try? await adminSession.fetchContent() {
+            portfolioStore.applyPublishedManifest(manifest)
+        }
+    }
+
+    private func monitorApprovedAccess() async {
+        guard fanAccount.isApproved, !shouldBypassAccessGate else { return }
+        while !Task.isCancelled, fanAccount.isApproved {
+            do {
+                try await Task.sleep(for: .seconds(60))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await fanAccount.refreshSession(showError: false)
+        }
+    }
+
+    private func resetProtectedPresentation() {
+        portfolioStore.discardProtectedContent()
+        hasPreparedAuthorizedContent = false
+        hasPreparedLaunchPoster = false
+        isLaunchPosterVisible = false
+        launchPosterSnapshot = nil
+        portfolioPath = []
     }
 }

@@ -1,8 +1,28 @@
 import SwiftUI
 import UIKit
 
+struct AppAccessGateView: View {
+    var body: some View {
+        NavigationStack {
+            FanAccountView(isAccessGate: true)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        NavigationLink {
+                            AdminView()
+                        } label: {
+                            Label("管理员", systemImage: "person.badge.key.fill")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .accessibilityIdentifier("access-gate-admin-entry")
+                    }
+                }
+        }
+    }
+}
+
 struct FanAccountView: View {
     @EnvironmentObject private var account: FanAccountStore
+    let isAccessGate: Bool
     @State private var mode: AuthenticationMode = .register
     @State private var displayName = ""
     @State private var douyinID = ""
@@ -13,6 +33,10 @@ struct FanAccountView: View {
     @State private var loginPassword = ""
     @State private var copiedLabel: String?
     @State private var showDeleteConfirmation = false
+
+    init(isAccessGate: Bool = false) {
+        self.isAccessGate = isAccessGate
+    }
 
     var body: some View {
         ZStack {
@@ -26,11 +50,14 @@ struct FanAccountView: View {
             }
             .scrollIndicators(.hidden)
         }
-        .navigationTitle("粉丝账号")
+        .navigationTitle(isAccessGate ? "访问申请" : "粉丝账号")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .task { await account.restoreSession() }
+        .task(id: account.profile?.status) {
+            await monitorPendingApproval()
+        }
         .confirmationDialog(
             "永久删除粉丝账号？",
             isPresented: $showDeleteConfirmation,
@@ -48,14 +75,16 @@ struct FanAccountView: View {
     private var authenticationContent: some View {
         VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 9) {
-                Text("FAN IDENTITY")
+                Text(isAccessGate ? "MEMBER ACCESS" : "FAN IDENTITY")
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
-                Text("粉丝身份")
+                Text(isAccessGate ? "申请访问" : "粉丝身份")
                     .font(.editorial(38))
                     .accessibilityIdentifier("fan-account-heading")
-                Text("注册后会生成独立身份码和本机安装记录码，管理员可按账号远程分配权限。")
+                Text(isAccessGate
+                     ? "请先注册并提交申请。管理员审批通过后，才能进入首页、作品、影视、收藏和关于页面。"
+                     : "注册后会生成独立身份码和本机安装记录码，管理员可按账号远程分配权限。")
                     .font(.subheadline)
                     .lineSpacing(5)
                     .foregroundStyle(AppTheme.muted)
@@ -98,6 +127,33 @@ struct FanAccountView: View {
             .font(.caption2)
             .lineSpacing(4)
             .foregroundStyle(AppTheme.muted)
+
+            if account.hasSavedSession, account.profile == nil {
+                Button {
+                    Task { await account.restoreSession() }
+                } label: {
+                    Label("重新验证已保存的登录", systemImage: "arrow.clockwise.shield")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .disabled(account.isWorking)
+            }
+
+            if isAccessGate {
+                NavigationLink {
+                    AdminView()
+                } label: {
+                    Label("管理员审批入口", systemImage: "person.badge.key")
+                        .font(.caption.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("access-gate-admin-link")
+            }
         }
         .padding(22)
         .padding(.bottom, 54)
@@ -152,7 +208,7 @@ struct FanAccountView: View {
                     }
                 }
             } label: {
-                accountButtonLabel(account.isWorking ? "正在创建身份" : "注册并生成身份码")
+                accountButtonLabel(account.isWorking ? "正在提交申请" : "注册并提交审批")
             }
             .disabled(account.isWorking || !acceptedDataUse)
             .accessibilityIdentifier("fan-register-submit")
@@ -184,20 +240,24 @@ struct FanAccountView: View {
     private func profileContent(_ profile: FanProfile) -> some View {
         VStack(alignment: .leading, spacing: 26) {
             VStack(alignment: .leading, spacing: 9) {
-                Text("VERIFIED FAN")
+                Text(profile.status == FanAccountStatus.active.rawValue ? "APPROVED MEMBER" : "ACCESS REVIEW")
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
-                Text("你好，\(profile.displayName)")
+                Text(profileHeading(profile))
                     .font(.editorial(38))
                     .accessibilityIdentifier("fan-account-heading")
                 Label(
-                    profile.status == "active" ? "账号身份已建立" : "账号功能已暂停，仍可管理或删除资料",
-                    systemImage: profile.status == "active"
-                        ? "checkmark.seal.fill" : "exclamationmark.shield.fill"
+                    statusTitle(profile.status),
+                    systemImage: statusIcon(profile.status)
                 )
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(profile.status == "active" ? AppTheme.gold : .orange)
+                    .foregroundStyle(profile.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
+                    .accessibilityIdentifier("fan-access-status-\(profile.status)")
+            }
+
+            if profile.status != FanAccountStatus.active.rawValue {
+                approvalStatusCard(profile.status)
             }
 
             VStack(spacing: 0) {
@@ -211,27 +271,30 @@ struct FanAccountView: View {
             }
             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
 
-            VStack(alignment: .leading, spacing: 15) {
-                HStack {
-                    Text("已授予权限")
-                        .font(.editorial(26))
-                    Spacer()
-                    Text("\(profile.permissions.count) 项")
-                        .font(.caption)
-                        .foregroundStyle(AppTheme.muted)
-                }
-
-                ForEach(FanPermission.allCases) { permission in
-                    HStack(spacing: 12) {
-                        Image(systemName: profile.hasPermission(permission)
-                              ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(profile.hasPermission(permission)
-                                             ? AppTheme.gold : AppTheme.muted)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(permission.title).font(.subheadline.weight(.semibold))
-                            Text(permission.detail).font(.caption2).foregroundStyle(AppTheme.muted)
-                        }
+            if profile.status == FanAccountStatus.active.rawValue
+                || profile.status == FanAccountStatus.suspended.rawValue {
+                VStack(alignment: .leading, spacing: 15) {
+                    HStack {
+                        Text("已授予权限")
+                            .font(.editorial(26))
                         Spacer()
+                        Text("\(profile.permissions.count) 项")
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.muted)
+                    }
+
+                    ForEach(FanPermission.allCases) { permission in
+                        HStack(spacing: 12) {
+                            Image(systemName: profile.hasPermission(permission)
+                                  ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(profile.hasPermission(permission)
+                                                 ? AppTheme.gold : AppTheme.muted)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(permission.title).font(.subheadline.weight(.semibold))
+                                Text(permission.detail).font(.caption2).foregroundStyle(AppTheme.muted)
+                            }
+                            Spacer()
+                        }
                     }
                 }
             }
@@ -253,7 +316,11 @@ struct FanAccountView: View {
                 Button {
                     Task { await account.refreshSession() }
                 } label: {
-                    Label("刷新权限", systemImage: "arrow.clockwise")
+                    Label(
+                        profile.status == FanAccountStatus.pending.rawValue
+                            ? "刷新审批状态" : "刷新账号状态",
+                        systemImage: "arrow.clockwise"
+                    )
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 13)
                         .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
@@ -272,7 +339,7 @@ struct FanAccountView: View {
                 .disabled(account.isWorking)
             }
 
-            Text("请妥善保存身份码。管理员只能看到昵称、抖音 ID、身份码和权限，无法查看你的密码。")
+            Text("请妥善保存身份码。管理员只能看到昵称、抖音 ID、身份码、审批状态和权限，无法查看你的密码。")
                 .font(.caption2)
                 .lineSpacing(4)
                 .foregroundStyle(AppTheme.muted)
@@ -302,6 +369,72 @@ struct FanAccountView: View {
         }
         .padding(22)
         .padding(.bottom, 54)
+    }
+
+    private func profileHeading(_ profile: FanProfile) -> String {
+        switch profile.accountStatus {
+        case .some(.active): return "你好，\(profile.displayName)"
+        case .some(.pending): return "申请已提交"
+        case .some(.rejected): return "申请未通过"
+        case .some(.suspended): return "访问已暂停"
+        case .none: return "账号状态异常"
+        }
+    }
+
+    private func statusTitle(_ status: String) -> String {
+        switch FanAccountStatus(rawValue: status) {
+        case .some(.active): return "管理员已批准，可以访问 App 全部页面"
+        case .some(.pending): return "正在等待管理员审批"
+        case .some(.rejected): return "管理员未批准本次访问申请"
+        case .some(.suspended): return "管理员已暂停 App 访问"
+        case .none: return "账号状态异常，请联系管理员"
+        }
+    }
+
+    private func statusIcon(_ status: String) -> String {
+        switch FanAccountStatus(rawValue: status) {
+        case .some(.active): return "checkmark.seal.fill"
+        case .some(.pending): return "clock.badge.questionmark.fill"
+        case .some(.rejected): return "xmark.seal.fill"
+        case .some(.suspended), .none: return "exclamationmark.shield.fill"
+        }
+    }
+
+    private func approvalStatusCard(_ status: String) -> some View {
+        let message: String
+        switch FanAccountStatus(rawValue: status) {
+        case .some(.pending):
+            message = "管理员审批通过前，首页、作品、影视、收藏和关于页面不会开放。本页会自动检查审批结果，你也可以手动刷新。"
+        case .some(.rejected):
+            message = "本次申请未获批准。你仍可查看和复制身份码、退出登录，或永久删除账号后重新申请。"
+        case .some(.suspended):
+            message = "现有 App 内容访问已经停用。你仍可重新登录管理资料，并随时永久删除账号。"
+        case .some(.active):
+            message = "访问已批准。"
+        case .none:
+            message = "服务器返回了未知状态，请联系管理员。"
+        }
+        return Label(message, systemImage: statusIcon(status))
+            .font(.subheadline)
+            .lineSpacing(5)
+            .foregroundStyle(.white.opacity(0.82))
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func monitorPendingApproval() async {
+        guard isAccessGate,
+              account.profile?.accountStatus == .pending else { return }
+        while !Task.isCancelled, account.profile?.accountStatus == .pending {
+            do {
+                try await Task.sleep(for: .seconds(15))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await account.refreshSession(showError: false)
+        }
     }
 
     private func identityRow(_ title: String, value: String, copyable: Bool) -> some View {
@@ -359,12 +492,20 @@ struct FanAccessAdminView: View {
         }
     }
 
+    private var pendingUsers: [AdminFanUser] {
+        filteredUsers.filter { $0.status == FanAccountStatus.pending.rawValue }
+    }
+
+    private var reviewedUsers: [AdminFanUser] {
+        filteredUsers.filter { $0.status != FanAccountStatus.pending.rawValue }
+    }
+
     var body: some View {
         ZStack {
             AppTheme.ink.ignoresSafeArea()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    Text("只可分配 App 粉丝权限或暂停已授予功能；粉丝密码不会在后台显示。")
+                    Text("新注册用户会先进入待审批列表。只有管理员批准后，用户才能进入首页、作品、影视、收藏和关于页面。粉丝密码不会在后台显示。")
                         .font(.caption)
                         .lineSpacing(4)
                         .foregroundStyle(AppTheme.muted)
@@ -384,18 +525,33 @@ struct FanAccessAdminView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 44)
                     } else {
-                        ForEach(filteredUsers) { user in
-                            NavigationLink {
-                                FanAccessDetailView(
-                                    user: user,
-                                    catalog: directory?.permissionCatalog ?? []
-                                ) { updated in
-                                    replace(updated)
-                                }
-                            } label: {
-                                FanAdminUserRow(user: user)
+                        if !pendingUsers.isEmpty {
+                            HStack {
+                                Label("待审批申请", systemImage: "bell.badge.fill")
+                                    .font(.headline)
+                                    .foregroundStyle(AppTheme.gold)
+                                Spacer()
+                                Text("\(pendingUsers.count)")
+                                    .font(.caption.bold())
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(AppTheme.gold, in: Capsule())
+                                    .foregroundStyle(AppTheme.ink)
                             }
-                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("fan-pending-applications")
+
+                            ForEach(pendingUsers) { user in
+                                userLink(user)
+                            }
+                        }
+
+                        if !reviewedUsers.isEmpty {
+                            Text(pendingUsers.isEmpty ? "全部用户" : "已处理用户")
+                                .font(.headline)
+                                .padding(.top, pendingUsers.isEmpty ? 0 : 14)
+                            ForEach(reviewedUsers) { user in
+                                userLink(user)
+                            }
                         }
                     }
 
@@ -410,11 +566,25 @@ struct FanAccessAdminView: View {
             }
             .refreshable { await load() }
         }
-        .navigationTitle("用户权限")
+        .navigationTitle("注册审批")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .searchable(text: $searchText, prompt: "昵称、抖音 ID 或身份码")
-        .task { await load() }
+        .task { await monitorApplications() }
+    }
+
+    private func userLink(_ user: AdminFanUser) -> some View {
+        NavigationLink {
+            FanAccessDetailView(
+                user: user,
+                catalog: directory?.permissionCatalog ?? []
+            ) { updated in
+                replace(updated)
+            }
+        } label: {
+            FanAdminUserRow(user: user)
+        }
+        .buttonStyle(.plain)
     }
 
     private func load() async {
@@ -427,6 +597,19 @@ struct FanAccessAdminView: View {
         } catch {
             errorMessage = (error as? AdminAPIError)?.errorDescription
                 ?? "暂时无法读取用户。"
+        }
+    }
+
+    private func monitorApplications() async {
+        await load()
+        while !Task.isCancelled, admin.isAuthenticated {
+            do {
+                try await Task.sleep(for: .seconds(20))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await load()
         }
     }
 
@@ -473,17 +656,59 @@ private struct FanAccessDetailView: View {
                         Text("注册于 \(user.registeredAt.formatted(date: .abbreviated, time: .shortened))")
                             .font(.caption2)
                             .foregroundStyle(AppTheme.muted)
+                        if let reviewedAt = user.reviewedAt {
+                            Text("最近处理于 \(reviewedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption2)
+                                .foregroundStyle(AppTheme.muted)
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 16) {
-                        Text("账号状态").font(.editorial(25))
-                        Toggle("允许使用已授予功能", isOn: Binding(
-                            get: { user.status == "active" },
-                            set: { enabled in
-                                Task { await save(status: enabled ? "active" : "suspended") }
+                        Text("审批状态").font(.editorial(25))
+                        Label(adminStatusTitle(user.status), systemImage: adminStatusIcon(user.status))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
+
+                        if user.status == FanAccountStatus.pending.rawValue {
+                            Button {
+                                Task { await save(status: FanAccountStatus.active.rawValue) }
+                            } label: {
+                                Label("批准并开放 App", systemImage: "checkmark.shield.fill")
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 13)
+                                    .background(AppTheme.gold, in: RoundedRectangle(cornerRadius: 6))
+                                    .foregroundStyle(AppTheme.ink)
                             }
-                        ))
-                        .tint(AppTheme.gold)
+                            .accessibilityIdentifier("fan-approve-application")
+
+                            Button(role: .destructive) {
+                                Task { await save(status: FanAccountStatus.rejected.rawValue) }
+                            } label: {
+                                Label("拒绝本次申请", systemImage: "xmark.shield")
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                            }
+                        } else if user.status == FanAccountStatus.active.rawValue {
+                            Button(role: .destructive) {
+                                Task { await save(status: FanAccountStatus.suspended.rawValue) }
+                            } label: {
+                                Label("暂停 App 访问", systemImage: "pause.circle")
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                            }
+                        } else {
+                            Button {
+                                Task { await save(status: FanAccountStatus.active.rawValue) }
+                            } label: {
+                                Label("改为批准并恢复访问", systemImage: "checkmark.shield.fill")
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 13)
+                                    .background(AppTheme.gold, in: RoundedRectangle(cornerRadius: 6))
+                                    .foregroundStyle(AppTheme.ink)
+                            }
+                        }
                     }
 
                     VStack(alignment: .leading, spacing: 18) {
@@ -512,12 +737,12 @@ private struct FanAccessDetailView: View {
                             .foregroundStyle(.orange)
                     }
 
-                    Text("权限保存后立即在服务器生效。用户下次启动 App，或在粉丝账号页点击“刷新权限”后获取新状态。")
+                    Text("审批或权限保存后立即在服务器生效。待审批用户的申请页会自动刷新；批准后会直接进入 App。")
                         .font(.caption2)
                         .lineSpacing(4)
                         .foregroundStyle(AppTheme.muted)
 
-                    Text("暂停会立即撤销现有会话并停用所有功能权限，但用户仍可用身份码与密码进入账号管理并主动删除个人资料。")
+                    Text("拒绝不会删除用户资料；暂停会立即撤销现有内容会话。无论待审批、拒绝或暂停，用户都能主动永久删除账号与个人资料。")
                         .font(.caption2)
                         .lineSpacing(4)
                         .foregroundStyle(AppTheme.muted)
@@ -526,7 +751,7 @@ private struct FanAccessDetailView: View {
                 .padding(.bottom, 44)
             }
         }
-        .navigationTitle("分配权限")
+        .navigationTitle(user.status == FanAccountStatus.pending.rawValue ? "审批申请" : "账号权限")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .disabled(isSaving)
@@ -541,6 +766,25 @@ private struct FanAccessDetailView: View {
                 Task { await save(permissions: Array(permissions).sorted()) }
             }
         )
+    }
+
+    private func adminStatusTitle(_ status: String) -> String {
+        switch FanAccountStatus(rawValue: status) {
+        case .some(.pending): return "等待管理员审批"
+        case .some(.active): return "已批准访问"
+        case .some(.rejected): return "申请已拒绝"
+        case .some(.suspended): return "访问已暂停"
+        case .none: return "未知状态"
+        }
+    }
+
+    private func adminStatusIcon(_ status: String) -> String {
+        switch FanAccountStatus(rawValue: status) {
+        case .some(.pending): return "clock.badge.questionmark.fill"
+        case .some(.active): return "checkmark.seal.fill"
+        case .some(.rejected): return "xmark.seal.fill"
+        case .some(.suspended), .none: return "pause.circle.fill"
+        }
     }
 
     private func save(permissions: [String]? = nil, status: String? = nil) async {
@@ -568,16 +812,16 @@ private struct FanAdminUserRow: View {
 
     var body: some View {
         HStack(spacing: 13) {
-            Image(systemName: user.status == "active" ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.xmark")
+            Image(systemName: rowIcon)
                 .font(.system(size: 27))
-                .foregroundStyle(user.status == "active" ? AppTheme.gold : .orange)
+                .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
                 .frame(width: 42)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(user.displayName).font(.subheadline.weight(.semibold))
-                    Text("\(user.permissions.count) 项权限")
+                    Text(rowStatus)
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(AppTheme.gold)
+                        .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
                 }
                 Text("@\(user.douyinID) · \(user.identityCode)")
                     .font(.caption2)
@@ -591,6 +835,25 @@ private struct FanAdminUserRow: View {
         }
         .padding(14)
         .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private var rowIcon: String {
+        switch FanAccountStatus(rawValue: user.status) {
+        case .some(.pending): return "person.crop.circle.badge.questionmark"
+        case .some(.active): return "person.crop.circle.badge.checkmark"
+        case .some(.rejected): return "person.crop.circle.badge.xmark"
+        case .some(.suspended), .none: return "person.crop.circle.badge.minus"
+        }
+    }
+
+    private var rowStatus: String {
+        switch FanAccountStatus(rawValue: user.status) {
+        case .some(.pending): return "待审批"
+        case .some(.active): return "已批准 · \(user.permissions.count) 项权限"
+        case .some(.rejected): return "已拒绝"
+        case .some(.suspended): return "已暂停"
+        case .none: return "状态异常"
+        }
     }
 }
 

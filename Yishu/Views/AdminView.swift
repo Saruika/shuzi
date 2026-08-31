@@ -28,6 +28,7 @@ struct AdminView: View {
     @State private var isPublishing = false
     @State private var operationMessage: String?
     @State private var operationFailed = false
+    @State private var pendingFanCount = 0
 
     var body: some View {
         ZStack {
@@ -50,10 +51,16 @@ struct AdminView: View {
             await admin.restoreSession()
             loadDrafts()
         }
+        .task(id: admin.isAuthenticated) {
+            await monitorPendingFanCount()
+        }
         .onChange(of: admin.isAuthenticated) { _, authenticated in
             if authenticated {
                 applicationPassword = ""
                 loadDrafts()
+                Task { await refreshPendingFanCount() }
+            } else {
+                pendingFanCount = 0
             }
         }
         .onChange(of: selectedPhotos) { _, items in
@@ -111,7 +118,7 @@ struct AdminView: View {
                 Text("管理员登录")
                     .font(.editorial(40))
                     .accessibilityIdentifier("admin-login-heading")
-                Text("普通用户无需登录。这里仅用于照片、视频和影视资料的发布。")
+                Text("普通用户需先注册并通过审批。这里用于注册审批、权限分配和内容发布。")
                     .font(.subheadline)
                     .foregroundStyle(AppTheme.muted)
             }
@@ -346,19 +353,49 @@ struct AdminView: View {
     }
 
     private var fanAccessEditor: some View {
-        AdminSection(title: "粉丝用户", subtitle: "按昵称、抖音 ID 或身份码远程分配权限") {
+        AdminSection(title: "注册审批", subtitle: "审核新用户，并按账号远程分配访问权限") {
+            if pendingFanCount > 0 {
+                Label("有 \(pendingFanCount) 个新用户等待审批", systemImage: "bell.badge.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppTheme.gold)
+                    .padding(13)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(AppTheme.gold.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityIdentifier("admin-pending-fan-banner")
+            }
+
             NavigationLink {
                 FanAccessAdminView()
             } label: {
-                Label("打开用户与权限管理", systemImage: "person.2.badge.gearshape")
+                Label("打开注册审批与权限管理", systemImage: "person.2.badge.gearshape")
                     .adminPrimaryButton()
             }
             .buttonStyle(.plain)
 
-            Text("粉丝密码使用 WordPress 标准强哈希保存，管理端无法读取；粉丝权限不会获得内容发布权。")
+            Text("新注册账号默认不能进入 App；批准后才开放主页与内容。粉丝密码使用 WordPress 标准强哈希保存，管理端无法读取。")
                 .font(.caption2)
                 .lineSpacing(4)
                 .foregroundStyle(AppTheme.muted)
+        }
+    }
+
+    private func refreshPendingFanCount() async {
+        guard admin.isAuthenticated,
+              let directory = try? await admin.fetchFanDirectory() else { return }
+        pendingFanCount = directory.users.filter {
+            $0.status == FanAccountStatus.pending.rawValue
+        }.count
+    }
+
+    private func monitorPendingFanCount() async {
+        guard admin.isAuthenticated else { return }
+        while !Task.isCancelled, admin.isAuthenticated {
+            await refreshPendingFanCount()
+            do {
+                try await Task.sleep(for: .seconds(20))
+            } catch {
+                return
+            }
         }
     }
 

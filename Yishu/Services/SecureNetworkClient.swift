@@ -5,6 +5,7 @@ import Foundation
 /// destination appears to use the same host name.
 enum AppNetworkSecurityPolicy {
     static let contentHost = "www.shuzijun.com.cn"
+    static let apiHost = "shuzijun.com.cn"
     private static let allowedImageMIMETypes: Set<String> = [
         "image/avif",
         "image/heic",
@@ -25,16 +26,26 @@ enum AppNetworkSecurityPolicy {
     }
 
     static func matchesPublishedContentEndpoint(_ url: URL?, expected: URL) -> Bool {
-        guard isTrustedHTTPSOrigin(url),
-              isTrustedHTTPSOrigin(expected),
+        guard isTrustedAPIOrigin(url),
+              isTrustedAPIOrigin(expected),
               let url else { return false }
         return url.path == expected.path
             && url.query == expected.query
     }
 
     static func isTrustedAdminAPIURL(_ url: URL?) -> Bool {
-        guard isTrustedHTTPSOrigin(url), let url else { return false }
+        guard isTrustedAPIOrigin(url), let url else { return false }
         return url.path == "/wp-json" || url.path.hasPrefix("/wp-json/")
+    }
+
+    private static func isTrustedAPIOrigin(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url.scheme?.lowercased() == "https"
+            && url.host?.lowercased() == apiHost
+            && url.user == nil
+            && url.password == nil
+            && (url.port == nil || url.port == 443)
+            && url.fragment == nil
     }
 
     static func isJSONMIMEType(_ rawValue: String?) -> Bool {

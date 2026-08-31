@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Shuzijun App Content API
- * Description: Versioned public content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.5.2
+ * Description: Versioned access-controlled content feed and least-privilege mobile publishing API for the Yi Shu app.
+ * Version: 1.5.4
  * Author: Shuzijun
  */
 
@@ -23,7 +23,8 @@ final class Shuzijun_App_Content_API {
     const FAN_META_CONSENT = '_yishu_fan_consent';
     const FAN_META_INSTALLATIONS = '_yishu_fan_installations';
     const FAN_META_SESSIONS = '_yishu_fan_sessions';
-    const FAN_CONSENT_VERSION = '2026-08-31';
+    const FAN_META_REVIEW = '_yishu_fan_review';
+    const FAN_CONSENT_VERSION = '2026-08-31-approval-v2';
     const FAN_DOUYIN_OPTION_PREFIX = 'yishu_fan_douyin_';
     const FAN_SESSION_OPTION_PREFIX = 'yishu_fan_session_';
     const FAN_SESSION_TTL = 2592000;
@@ -82,7 +83,7 @@ final class Shuzijun_App_Content_API {
             array(
                 'methods' => WP_REST_Server::READABLE,
                 'callback' => array(__CLASS__, 'get_content'),
-                'permission_callback' => '__return_true',
+                'permission_callback' => array(__CLASS__, 'can_access_app_content'),
             ),
             array(
                 'methods' => WP_REST_Server::EDITABLE,
@@ -269,7 +270,7 @@ final class Shuzijun_App_Content_API {
             && update_user_meta($user_id, self::FAN_META_CODE, $identity_code)
             && update_user_meta($user_id, self::FAN_META_DOUYIN_ID, $douyin_id)
             && update_user_meta($user_id, self::FAN_META_PERMISSIONS, array('gallery_full', 'video_view'))
-            && update_user_meta($user_id, self::FAN_META_STATUS, 'active')
+            && update_user_meta($user_id, self::FAN_META_STATUS, 'pending')
             && update_user_meta($user_id, self::FAN_META_CONSENT, array(
                 'version' => self::FAN_CONSENT_VERSION,
                 'acceptedAt' => gmdate('c'),
@@ -331,6 +332,28 @@ final class Shuzijun_App_Content_API {
         self::$fan_session_context = null;
         $context = self::authenticate_fan_session($request);
         if (is_wp_error($context)) { return $context; }
+        self::$fan_session_context = $context;
+        return true;
+    }
+
+    public static function can_access_app_content(WP_REST_Request $request) {
+        if (self::authenticate_content_manager($request)) { return true; }
+
+        self::$fan_session_context = null;
+        $context = self::authenticate_fan_session($request);
+        if (is_wp_error($context)) { return $context; }
+        $status = (string) get_user_meta((int) $context['userID'], self::FAN_META_STATUS, true);
+        if ($status !== 'active') {
+            $errors = array(
+                'pending' => array('fan_approval_pending', '注册申请正在等待管理员审批。'),
+                'rejected' => array('fan_approval_rejected', '注册申请未通过审批。'),
+                'suspended' => array('fan_account_suspended', '账号访问已暂停，请联系管理员。'),
+            );
+            $error = isset($errors[$status])
+                ? $errors[$status]
+                : array('fan_approval_required', '账号尚未获得 App 访问授权。');
+            return new WP_Error($error[0], $error[1], array('status' => 403));
+        }
         self::$fan_session_context = $context;
         return true;
     }
@@ -426,17 +449,31 @@ final class Shuzijun_App_Content_API {
         }
         $user = $users[0];
 
+        $permissions = null;
+        $status = null;
         if ($request->has_param('permissions')) {
             $permissions = self::sanitize_fan_permissions($request->get_param('permissions'));
             if (is_wp_error($permissions)) { return $permissions; }
-            update_user_meta($user->ID, self::FAN_META_PERMISSIONS, $permissions);
         }
         if ($request->has_param('status')) {
             $status = sanitize_key((string) $request->get_param('status'));
-            if (!in_array($status, array('active', 'suspended'), true)) {
+            if (!in_array($status, array('pending', 'active', 'rejected', 'suspended'), true)) {
                 return new WP_Error('fan_status_invalid', '账号状态无效。', array('status' => 400));
             }
+        }
+        if (is_array($permissions)) {
+            update_user_meta($user->ID, self::FAN_META_PERMISSIONS, $permissions);
+        }
+        if ($status !== null) {
+            $previous_status = (string) get_user_meta($user->ID, self::FAN_META_STATUS, true);
             update_user_meta($user->ID, self::FAN_META_STATUS, $status);
+            if ($status !== $previous_status) {
+                update_user_meta($user->ID, self::FAN_META_REVIEW, array(
+                    'status' => $status,
+                    'reviewedAt' => gmdate('c'),
+                    'reviewedBy' => get_current_user_id(),
+                ));
+            }
             if ($status === 'suspended') {
                 self::revoke_all_fan_sessions((int) $user->ID);
             }
@@ -842,6 +879,10 @@ final class Shuzijun_App_Content_API {
         $permissions = self::sanitize_fan_permissions(is_array($permissions) ? $permissions : array());
         if (is_wp_error($permissions)) { $permissions = array(); }
         $registered = strtotime($user->user_registered . ' UTC');
+        $review = get_user_meta($user->ID, self::FAN_META_REVIEW, true);
+        $reviewed_at = is_array($review) && !empty($review['reviewedAt'])
+            ? strtotime((string) $review['reviewedAt'])
+            : false;
         return array(
             'userID' => (string) get_user_meta($user->ID, self::FAN_META_UUID, true),
             'identityCode' => (string) get_user_meta($user->ID, self::FAN_META_CODE, true),
@@ -850,6 +891,7 @@ final class Shuzijun_App_Content_API {
             'permissions' => $permissions,
             'status' => (string) get_user_meta($user->ID, self::FAN_META_STATUS, true),
             'registeredAt' => gmdate('c', $registered ? $registered : time()),
+            'reviewedAt' => $reviewed_at ? gmdate('c', $reviewed_at) : null,
         );
     }
 
@@ -863,8 +905,10 @@ final class Shuzijun_App_Content_API {
         $response->header('X-Frame-Options', 'DENY');
         $response->header('Referrer-Policy', 'no-referrer');
         $response->header('X-Robots-Tag', 'noindex, nofollow');
-        if ($request->get_route() !== '/shuzijun/v1/app-content' || $request->get_method() !== 'GET') {
-            $response->header('Cache-Control', 'private, no-store');
+        $response->header('Cache-Control', 'private, no-store, max-age=0');
+        if ($request->get_route() === '/shuzijun/v1/app-content') {
+            $response->header('Vary', 'Authorization, X-Yishu-Install-ID');
+            $response->header('Pragma', 'no-cache');
         }
         return $response;
     }
@@ -995,12 +1039,9 @@ final class Shuzijun_App_Content_API {
             ? 'admin'
             : (self::FULL_GALLERY_FOR_APP ? 'app' : 'public');
         $response = rest_ensure_response(self::manifest($audience));
-        $response->header(
-            'Cache-Control',
-            $audience === 'public'
-                ? 'public, max-age=60, stale-while-revalidate=300'
-                : 'private, no-store'
-        );
+        $response->header('Cache-Control', 'private, no-store, max-age=0');
+        $response->header('Vary', 'Authorization, X-Yishu-Install-ID');
+        $response->header('Pragma', 'no-cache');
         return $response;
     }
 

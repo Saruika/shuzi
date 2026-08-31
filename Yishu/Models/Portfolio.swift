@@ -72,7 +72,7 @@ struct AppContentManifest: Codable {
 /// manifest from creating unbounded SwiftUI collections or pathological text.
 enum ContentManifestPolicy {
     static let currentSchemaVersion = 1
-    static let currentCacheSchemaVersion = 1
+    static let currentCacheSchemaVersion = 2
 
     private static let maximumHeroCount = 5
     private static let maximumLaunchPosterCount = 12
@@ -96,9 +96,9 @@ enum ContentManifestPolicy {
     }
 
     static func isSupportedCacheSchemaVersion(_ version: Int?) -> Bool {
-        // v1.3.13 and earlier caches did not carry a schema marker. Accept one
-        // legacy generation, while rejecting any future format we do not know.
-        version == nil || version == currentCacheSchemaVersion
+        // Access-gated builds reject every pre-gate cache generation so content
+        // URLs cannot be restored before an approved account is verified.
+        version == currentCacheSchemaVersion
     }
 
     static func isValidCache(
@@ -216,7 +216,7 @@ enum ContentManifestPolicy {
 enum ContentCatalog {
     /// The App consumes this versioned manifest contract rather than any CMS-specific models.
     /// The compatibility endpoint can move to a CDN without changing the client data model.
-    static let publishedManifestURL = URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-content")!
+    static let publishedManifestURL = URL(string: "https://shuzijun.com.cn/wp-json/shuzijun/v1/app-content")!
     static let heroImages = [
         URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-01-nas-1943-20260829.jpg")!,
         URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-02-nas-1938-20260829.jpg")!,

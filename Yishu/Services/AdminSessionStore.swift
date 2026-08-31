@@ -106,7 +106,7 @@ final class AdminSessionStore: ObservableObject {
     @Published var errorMessage: String?
 
     private var credential: AdminCredential?
-    private let apiRoot = URL(string: "https://www.shuzijun.com.cn/wp-json")!
+    private let apiRoot = URL(string: "https://shuzijun.com.cn/wp-json")!
     private let session: URLSession
 
     var isAuthenticated: Bool {
@@ -331,7 +331,7 @@ final class AdminSessionStore: ObservableObject {
                         == user.identityCode
                       && FanAccountValidation.normalizedDouyinID(user.douyinID)
                         == user.douyinID
-                      && ["active", "suspended"].contains(user.status)
+                      && FanAccountStatus(rawValue: user.status) != nil
               }) else {
             throw AdminAPIError.invalidResponse
         }
@@ -353,7 +353,7 @@ final class AdminSessionStore: ObservableObject {
                     options: .regularExpression
                   ) != nil
               }),
-              ["active", "suspended"].contains(status) else {
+              FanAccountStatus(rawValue: status) != nil else {
             throw AdminAPIError.invalidResponse
         }
         let body = try JSONEncoder().encode(

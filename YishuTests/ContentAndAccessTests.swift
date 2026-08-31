@@ -113,10 +113,11 @@ final class ContentAndAccessTests: XCTestCase {
         )
 
         XCTAssertFalse(ContentManifestPolicy.isValid(invalidTiming))
-        XCTAssertTrue(ContentManifestPolicy.isSupportedCacheSchemaVersion(nil))
-        XCTAssertTrue(ContentManifestPolicy.isSupportedCacheSchemaVersion(1))
+        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(nil))
+        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(1))
         XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(0))
-        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(2))
+        XCTAssertTrue(ContentManifestPolicy.isSupportedCacheSchemaVersion(2))
+        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(3))
     }
 
     func testInsecureOrUnknownMediaHostsAreRejected() {
@@ -143,7 +144,7 @@ final class ContentAndAccessTests: XCTestCase {
         let endpoint = ContentCatalog.publishedManifestURL
 
         XCTAssertEqual(endpoint.scheme, "https")
-        XCTAssertEqual(endpoint.host, "www.shuzijun.com.cn")
+        XCTAssertEqual(endpoint.host, "shuzijun.com.cn")
         XCTAssertNil(endpoint.user)
         XCTAssertNil(endpoint.password)
     }
@@ -159,25 +160,25 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertTrue(AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(expected, expected: expected))
         XCTAssertFalse(
             AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
-                URL(string: "http://www.shuzijun.com.cn\(expected.path)"),
+                URL(string: "http://shuzijun.com.cn\(expected.path)"),
                 expected: expected
             )
         )
         XCTAssertFalse(
             AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
-                URL(string: "https://www.shuzijun.com.cn.evil.example\(expected.path)"),
+                URL(string: "https://shuzijun.com.cn.evil.example\(expected.path)"),
                 expected: expected
             )
         )
         XCTAssertFalse(
             AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
-                URL(string: "https://www.shuzijun.com.cn:444\(expected.path)"),
+                URL(string: "https://shuzijun.com.cn:444\(expected.path)"),
                 expected: expected
             )
         )
         XCTAssertFalse(
             AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
-                URL(string: "https://user:password@www.shuzijun.com.cn\(expected.path)"),
+                URL(string: "https://user:password@shuzijun.com.cn\(expected.path)"),
                 expected: expected
             )
         )
@@ -186,17 +187,22 @@ final class ContentAndAccessTests: XCTestCase {
     func testAdministratorRequestsStayInsideTheWordPressAPINamespace() {
         XCTAssertTrue(
             AppNetworkSecurityPolicy.isTrustedAdminAPIURL(
-                URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-admin/session")
+                URL(string: "https://shuzijun.com.cn/wp-json/shuzijun/v1/app-admin/session")
             )
         )
         XCTAssertFalse(
             AppNetworkSecurityPolicy.isTrustedAdminAPIURL(
-                URL(string: "https://www.shuzijun.com.cn/wp-json-evil/session")
+                URL(string: "https://shuzijun.com.cn/wp-json-evil/session")
             )
         )
         XCTAssertFalse(
             AppNetworkSecurityPolicy.isTrustedAdminAPIURL(
                 URL(string: "https://img.shuzijun.com.cn/wp-json/shuzijun/v1/app-admin/session")
+            )
+        )
+        XCTAssertFalse(
+            AppNetworkSecurityPolicy.isTrustedAdminAPIURL(
+                URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-admin/session")
             )
         )
     }
@@ -261,6 +267,20 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(suspendedProfile.hasPermission(.galleryFull))
         XCTAssertFalse(suspendedProfile.hasPermission(.videoView))
         XCTAssertFalse(suspendedProfile.hasPermission(.earlyAccess))
+
+        let pendingProfile = FanProfile(
+            userID: profile.userID,
+            identityCode: profile.identityCode,
+            displayName: profile.displayName,
+            douyinID: profile.douyinID,
+            installationCode: profile.installationCode,
+            permissions: FanPermission.allCases.map(\.rawValue),
+            status: FanAccountStatus.pending.rawValue,
+            sessionExpiresAt: profile.sessionExpiresAt
+        )
+        XCTAssertFalse(pendingProfile.isApproved)
+        XCTAssertFalse(pendingProfile.hasPermission(.galleryFull))
+        XCTAssertTrue(profile.isApproved)
     }
 
     func testOnlyJSONResponseTypesAreAccepted() {

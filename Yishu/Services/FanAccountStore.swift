@@ -25,6 +25,13 @@ enum FanPermission: String, CaseIterable, Identifiable {
     }
 }
 
+enum FanAccountStatus: String, CaseIterable {
+    case pending
+    case active
+    case rejected
+    case suspended
+}
+
 struct FanProfile: Codable, Equatable {
     let userID: String
     let identityCode: String
@@ -34,6 +41,9 @@ struct FanProfile: Codable, Equatable {
     let permissions: [String]
     let status: String
     let sessionExpiresAt: Date
+
+    var accountStatus: FanAccountStatus? { FanAccountStatus(rawValue: status) }
+    var isApproved: Bool { accountStatus == .active }
 
     func hasPermission(_ permission: FanPermission) -> Bool {
         status == "active" && permissions.contains(permission.rawValue)
@@ -93,6 +103,8 @@ enum FanAccountError: LocalizedError {
     case invalidIdentityCode
     case invalidCredentials
     case sessionExpired
+    case approvalPending
+    case approvalRejected
     case accountSuspended
     case rateLimited
     case invalidResponse
@@ -109,7 +121,9 @@ enum FanAccountError: LocalizedError {
         case .invalidIdentityCode: "请输入完整的粉丝身份码。"
         case .invalidCredentials: "身份码或密码不正确。"
         case .sessionExpired: "登录已失效，请重新登录。"
-        case .accountSuspended: "账号已暂停，请联系管理员。"
+        case .approvalPending: "注册申请正在等待管理员审批。"
+        case .approvalRejected: "注册申请未通过审批。"
+        case .accountSuspended: "账号访问已暂停，请联系管理员。"
         case .rateLimited: "尝试次数过多，请稍后再试。"
         case .invalidResponse: "服务器返回了无法识别的账号数据。"
         case .unavailable: "暂时无法连接账号服务，请检查网络后重试。"
@@ -126,13 +140,14 @@ final class FanAccountStore: ObservableObject {
     @Published var errorMessage: String?
     @Published var noticeMessage: String?
 
-    private let apiRoot = URL(string: "https://www.shuzijun.com.cn/wp-json")!
+    private let apiRoot = URL(string: "https://shuzijun.com.cn/wp-json")!
     private let session: URLSession
     private let installID: UUID
     private var token: String?
     private var lastSuccessfulRefresh: Date?
 
     var isAuthenticated: Bool { profile != nil && token != nil }
+    var isApproved: Bool { isAuthenticated && profile?.isApproved == true }
 
     init() {
         session = SecureURLSessionFactory.make(requestTimeout: 30, resourceTimeout: 45)
@@ -228,7 +243,7 @@ final class FanAccountStore: ObservableObject {
                     douyinID: cleanDouyinID,
                     password: password,
                     installID: installID.uuidString.lowercased(),
-                    consentVersion: "2026-08-31"
+                    consentVersion: "2026-08-31-approval-v2"
                 )
             )
             let response: FanAuthResponse = try await perform(
@@ -238,6 +253,7 @@ final class FanAccountStore: ObservableObject {
                 authorized: false
             )
             try accept(response)
+            noticeMessage = "注册申请已提交，请等待管理员审批。"
         } catch {
             errorMessage = (error as? FanAccountError)?.errorDescription
                 ?? FanAccountError.unavailable.errorDescription
@@ -318,6 +334,26 @@ final class FanAccountStore: ObservableObject {
         }
     }
 
+    func fetchApprovedContent() async throws -> AppContentManifest {
+        guard isApproved else {
+            switch profile?.accountStatus {
+            case .some(.pending): throw FanAccountError.approvalPending
+            case .some(.rejected): throw FanAccountError.approvalRejected
+            case .some(.suspended): throw FanAccountError.accountSuspended
+            default: throw FanAccountError.sessionExpired
+            }
+        }
+        let manifest: AppContentManifest = try await perform(
+            path: "shuzijun/v1/app-content",
+            method: "GET",
+            authorized: true
+        )
+        guard ContentSecurityPolicy.isTrusted(manifest) else {
+            throw FanAccountError.invalidResponse
+        }
+        return manifest
+    }
+
     private func accept(_ response: FanAuthResponse) throws {
         guard response.token.range(
             of: #"^[A-Za-z0-9_-]{43,128}$"#,
@@ -328,6 +364,7 @@ final class FanAccountStore: ObservableObject {
               FanAccountValidation.normalizedDouyinID(response.profile.douyinID)
                 == response.profile.douyinID,
               UUID(uuidString: response.profile.userID) != nil,
+              response.profile.accountStatus != nil,
               response.profile.sessionExpiresAt > Date() else {
             throw FanAccountError.invalidResponse
         }
@@ -386,7 +423,10 @@ final class FanAccountStore: ObservableObject {
         } catch {
             throw FanAccountError.unavailable
         }
-        guard data.count <= 1024 * 1024,
+        let maximumResponseBytes = path == "shuzijun/v1/app-content"
+            ? 5 * 1024 * 1024
+            : 1024 * 1024
+        guard data.count <= maximumResponseBytes,
               let http = response as? HTTPURLResponse,
               AppNetworkSecurityPolicy.isTrustedAdminAPIURL(http.url) else {
             throw FanAccountError.invalidResponse
@@ -419,6 +459,8 @@ final class FanAccountStore: ObservableObject {
         switch (response.statusCode, payload?.code) {
         case (401, "fan_login_invalid"): return .invalidCredentials
         case (401, _): return .sessionExpired
+        case (403, "fan_approval_pending"): return .approvalPending
+        case (403, "fan_approval_rejected"): return .approvalRejected
         case (403, "fan_account_suspended"): return .accountSuspended
         case (429, _): return .rateLimited
         default:
@@ -454,6 +496,7 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
     let permissions: [String]
     let status: String
     let registeredAt: Date
+    let reviewedAt: Date?
 
     var id: String { userID }
 }

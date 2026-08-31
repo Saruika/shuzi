@@ -160,6 +160,16 @@ expect_true(
         && strpos($plugin_source, 'resolve_install_code') !== false,
     '同一安装的记录码必须稳定保存'
 );
+expect_true(
+    is_string($plugin_source)
+        && strpos($plugin_source, "FAN_META_STATUS, 'pending'") !== false
+        && strpos($plugin_source, "'permission_callback' => array(__CLASS__, 'can_access_app_content')") !== false
+        && strpos($plugin_source, "'fan_approval_pending'") !== false
+        && strpos($plugin_source, "array('pending', 'active', 'rejected', 'suspended')") !== false
+        && strpos($plugin_source, "'Vary', 'Authorization, X-Yishu-Install-ID'") !== false
+        && substr_count($plugin_source, "'Cache-Control', 'private, no-store, max-age=0'") >= 2,
+    '新注册账号必须待审批，内容清单必须绑定已批准会话'
+);
 
 $fragment_url = invoke_plugin_method(
     'trusted_media_url',

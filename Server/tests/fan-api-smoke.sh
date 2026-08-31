@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-api_root="${1:-https://www.shuzijun.com.cn/wp-json/shuzijun/v1}"
+api_root="${1:-https://shuzijun.com.cn/wp-json/shuzijun/v1}"
 wordpress_root="${2:-/var/www/html/shuzijun.com.cn}"
+api_host="${api_root#*://}"
+api_host="${api_host%%/*}"
+if [[ ! "$api_host" =~ ^[A-Za-z0-9.-]+$ ]]; then
+  echo 'fan-api-smoke: invalid API host' >&2
+  exit 1
+fi
 test_dir=$(mktemp -d)
 install_id=$(cat /proc/sys/kernel/random/uuid)
 suffix=$(openssl rand -hex 6)
@@ -12,6 +18,7 @@ token=''
 token_hash=''
 app_password_name="codex-fan-smoke-${suffix}"
 app_password_uuid=''
+curl_common=(--silent --show-error --http1.1 --retry 2 --retry-delay 1 --retry-all-errors)
 
 revoke_temporary_app_password() {
   local target_uuid="$app_password_uuid"
@@ -29,7 +36,7 @@ revoke_temporary_app_password() {
 
 cleanup() {
   if [[ -n "$token" ]]; then
-    curl --silent --show-error --output /dev/null \
+    curl "${curl_common[@]}" --output /dev/null \
       --request POST \
       --header 'Content-Type: application/json' \
       --header "Authorization: Bearer ${token}" \
@@ -57,13 +64,17 @@ cleanup() {
   rm -f "$test_dir/register.json" "$test_dir/session.json" \
     "$test_dir/login.json" "$test_dir/deleted-login.json" \
     "$test_dir/admin-list.json" "$test_dir/admin-update.json" \
+    "$test_dir/pending-content.json" "$test_dir/rejected-content.json" \
+    "$test_dir/rejected-update.json" "$test_dir/rejected-session.json" \
+    "$test_dir/approved-content.json" \
     "$test_dir/suspended-update.json" "$test_dir/revoked-session.json" \
-    "$test_dir/suspended-login.json" "$test_dir/admin.netrc"
+    "$test_dir/suspended-login.json" "$test_dir/suspended-content.json" \
+    "$test_dir/admin.netrc"
   rmdir "$test_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-register_status=$(curl --silent --show-error --output "$test_dir/register.json" \
+register_status=$(curl "${curl_common[@]}" --output "$test_dir/register.json" \
   --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
@@ -73,16 +84,24 @@ register_status=$(curl --silent --show-error --output "$test_dir/register.json" 
     --arg douyinID "$douyin_id" \
     --arg password "$password" \
     --arg installID "$install_id" \
-    --arg consentVersion '2026-08-31' \
+    --arg consentVersion '2026-08-31-approval-v2' \
     '{displayName:$displayName,douyinID:$douyinID,password:$password,installID:$installID,consentVersion:$consentVersion}')" \
   "${api_root}/fan/register")
-[[ "$register_status" == '201' ]]
-jq -e --arg douyinID "$douyin_id" '
+if [[ "$register_status" != '201' ]]; then
+  register_error=$(jq -r '.code // "unknown"' "$test_dir/register.json" 2>/dev/null || true)
+  echo "fan-api-smoke: registration failed status=${register_status} code=${register_error:-unknown}" >&2
+  exit 1
+fi
+if ! jq -e --arg douyinID "$douyin_id" '
   (.token | test("^[A-Za-z0-9_-]{43,128}$")) and
   (.profile.identityCode | test("^HS-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$")) and
   (.profile.douyinID == $douyinID) and
-  (.profile.permissions == ["gallery_full", "video_view"])
-' "$test_dir/register.json" >/dev/null
+  (.profile.permissions == ["gallery_full", "video_view"]) and
+  (.profile.status == "pending")
+' "$test_dir/register.json" >/dev/null; then
+  echo 'fan-api-smoke: registration response contract failed' >&2
+  exit 1
+fi
 token=$(jq -r '.token' "$test_dir/register.json")
 token_hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
 identity_code=$(jq -r '.profile.identityCode' "$test_dir/register.json")
@@ -90,7 +109,23 @@ installation_code=$(jq -r '.profile.installationCode' "$test_dir/register.json")
 [[ "$installation_code" =~ ^IN-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{3}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{3}$ ]]
 sudo -u www-data wp --path="$wordpress_root" option get \
   "yishu_fan_session_${token_hash}" --format=json >/dev/null
-echo 'fan-api-smoke: registration passed'
+anonymous_content_status=$(curl "${curl_common[@]}" --output /dev/null --write-out '%{http_code}' \
+  "${api_root}/app-content")
+if [[ "$anonymous_content_status" != '401' ]]; then
+  echo "fan-api-smoke: anonymous content gate failed status=${anonymous_content_status}" >&2
+  exit 1
+fi
+pending_content_status=$(curl "${curl_common[@]}" --output "$test_dir/pending-content.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/app-content")
+pending_error=$(jq -r '.code // "unknown"' "$test_dir/pending-content.json" 2>/dev/null || true)
+if [[ "$pending_content_status" != '403' || "$pending_error" != 'fan_approval_pending' ]]; then
+  echo "fan-api-smoke: pending content gate failed status=${pending_content_status} code=${pending_error:-unknown}" >&2
+  exit 1
+fi
+echo 'fan-api-smoke: pending registration gate passed'
 
 app_password_payload=$(sudo -u www-data wp --path="$wordpress_root" eval \
   "\$user = get_user_by('login', 'yishu_app_manager'); \$result = WP_Application_Passwords::create_new_application_password(\$user->ID, array('name' => '${app_password_name}')); if (is_wp_error(\$result)) { exit(2); } echo wp_json_encode(array('uuid' => \$result[1]['uuid'], 'password' => \$result[0]));")
@@ -98,16 +133,16 @@ app_password=$(printf '%s' "$app_password_payload" | jq -r '.password')
 app_password_uuid=$(printf '%s' "$app_password_payload" | jq -r '.uuid')
 [[ "$app_password_uuid" =~ ^[a-f0-9-]{36}$ ]]
 umask 077
-printf 'machine www.shuzijun.com.cn\nlogin yishu_app_manager\npassword %s\n' \
-  "$app_password" > "$test_dir/admin.netrc"
+printf 'machine %s\nlogin yishu_app_manager\npassword %s\n' \
+  "$api_host" "$app_password" > "$test_dir/admin.netrc"
 
-admin_list_status=$(curl --silent --show-error --output "$test_dir/admin-list.json" \
+admin_list_status=$(curl "${curl_common[@]}" --output "$test_dir/admin-list.json" \
   --write-out '%{http_code}' \
   --netrc-file "$test_dir/admin.netrc" \
   "${api_root}/app-admin/fans")
 [[ "$admin_list_status" == '200' ]]
 jq -e --arg identityCode "$identity_code" --arg douyinID "$douyin_id" '
-  any(.users[]; .identityCode == $identityCode and .douyinID == $douyinID) and
+  any(.users[]; .identityCode == $identityCode and .douyinID == $douyinID and .status == "pending") and
   ([.permissionCatalog[].code] | sort == ["early_access", "gallery_full", "video_view"])
 ' "$test_dir/admin-list.json" >/dev/null
 user_uuid=$(jq -r --arg identityCode "$identity_code" \
@@ -115,7 +150,33 @@ user_uuid=$(jq -r --arg identityCode "$identity_code" \
   "$test_dir/admin-list.json")
 [[ "$user_uuid" =~ ^[a-f0-9-]{36}$ ]]
 
-admin_update_status=$(curl --silent --show-error --output "$test_dir/admin-update.json" \
+reject_status=$(curl "${curl_common[@]}" --output "$test_dir/rejected-update.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  --data '{"permissions":["gallery_full","video_view"],"status":"rejected"}' \
+  "${api_root}/app-admin/fans/${user_uuid}")
+[[ "$reject_status" == '200' ]]
+jq -e '.user.status == "rejected" and (.user.reviewedAt | type == "string")' \
+  "$test_dir/rejected-update.json" >/dev/null
+
+rejected_session_status=$(curl "${curl_common[@]}" --output "$test_dir/rejected-session.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/fan/session")
+[[ "$rejected_session_status" == '200' ]]
+jq -e '.profile.status == "rejected"' "$test_dir/rejected-session.json" >/dev/null
+rejected_content_status=$(curl "${curl_common[@]}" --output "$test_dir/rejected-content.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/app-content")
+[[ "$rejected_content_status" == '403' ]]
+jq -e '.code == "fan_approval_rejected"' "$test_dir/rejected-content.json" >/dev/null
+
+admin_update_status=$(curl "${curl_common[@]}" --output "$test_dir/admin-update.json" \
   --write-out '%{http_code}' \
   --request POST \
   --netrc-file "$test_dir/admin.netrc" \
@@ -126,17 +187,26 @@ admin_update_status=$(curl --silent --show-error --output "$test_dir/admin-updat
 jq -e '.user.permissions == ["gallery_full", "early_access"] and .user.status == "active"' \
   "$test_dir/admin-update.json" >/dev/null
 
-session_status=$(curl --silent --show-error --output "$test_dir/session.json" \
+approved_content_status=$(curl "${curl_common[@]}" --output "$test_dir/approved-content.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/app-content")
+[[ "$approved_content_status" == '200' ]]
+jq -e '.schemaVersion == 1 and (.portfolios | length > 0)' \
+  "$test_dir/approved-content.json" >/dev/null
+
+session_status=$(curl "${curl_common[@]}" --output "$test_dir/session.json" \
   --write-out '%{http_code}' \
   --header "Authorization: Bearer ${token}" \
   --header "X-Yishu-Install-ID: ${install_id}" \
   "${api_root}/fan/session")
 [[ "$session_status" == '200' ]]
-jq -e '.profile.permissions == ["gallery_full", "early_access"]' \
+jq -e '.profile.permissions == ["gallery_full", "early_access"] and .profile.status == "active"' \
   "$test_dir/session.json" >/dev/null
-echo 'fan-api-smoke: administrator permission update passed'
+echo 'fan-api-smoke: rejection and administrator approval passed'
 
-logout_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+logout_status=$(curl "${curl_common[@]}" --output /dev/null --write-out '%{http_code}' \
   --request POST \
   --header "Authorization: Bearer ${token}" \
   --header "X-Yishu-Install-ID: ${install_id}" \
@@ -149,7 +219,7 @@ fi
 token=''
 token_hash=''
 
-login_status=$(curl --silent --show-error --output "$test_dir/login.json" \
+login_status=$(curl "${curl_common[@]}" --output "$test_dir/login.json" \
   --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
@@ -169,7 +239,7 @@ sudo -u www-data wp --path="$wordpress_root" option get \
   "yishu_fan_session_${token_hash}" --format=json >/dev/null
 echo 'fan-api-smoke: logout and login passed'
 
-suspend_status=$(curl --silent --show-error --output "$test_dir/suspended-update.json" \
+suspend_status=$(curl "${curl_common[@]}" --output "$test_dir/suspended-update.json" \
   --write-out '%{http_code}' \
   --request POST \
   --netrc-file "$test_dir/admin.netrc" \
@@ -179,7 +249,7 @@ suspend_status=$(curl --silent --show-error --output "$test_dir/suspended-update
 [[ "$suspend_status" == '200' ]]
 jq -e '.user.status == "suspended"' "$test_dir/suspended-update.json" >/dev/null
 
-revoked_session_status=$(curl --silent --show-error --output "$test_dir/revoked-session.json" \
+revoked_session_status=$(curl "${curl_common[@]}" --output "$test_dir/revoked-session.json" \
   --write-out '%{http_code}' \
   --header "Authorization: Bearer ${token}" \
   --header "X-Yishu-Install-ID: ${install_id}" \
@@ -188,7 +258,7 @@ revoked_session_status=$(curl --silent --show-error --output "$test_dir/revoked-
 token=''
 token_hash=''
 
-suspended_login_status=$(curl --silent --show-error --output "$test_dir/suspended-login.json" \
+suspended_login_status=$(curl "${curl_common[@]}" --output "$test_dir/suspended-login.json" \
   --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
@@ -205,9 +275,16 @@ jq -e --arg installationCode "$installation_code" \
   "$test_dir/suspended-login.json" >/dev/null
 token=$(jq -r '.token' "$test_dir/suspended-login.json")
 token_hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
+stopped_content_status=$(curl "${curl_common[@]}" --output "$test_dir/suspended-content.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/app-content")
+[[ "$stopped_content_status" == '403' ]]
+jq -e '.code == "fan_account_suspended"' "$test_dir/suspended-content.json" >/dev/null
 echo 'fan-api-smoke: suspended account retained self-service deletion access'
 
-delete_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+delete_status=$(curl "${curl_common[@]}" --output /dev/null --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \
   --header "Authorization: Bearer ${token}" \
@@ -222,7 +299,7 @@ fi
 token=''
 token_hash=''
 
-deleted_login_status=$(curl --silent --show-error --output "$test_dir/deleted-login.json" \
+deleted_login_status=$(curl "${curl_common[@]}" --output "$test_dir/deleted-login.json" \
   --write-out '%{http_code}' \
   --request POST \
   --header 'Content-Type: application/json' \

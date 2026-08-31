@@ -6,6 +6,23 @@ final class YishuUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testAppRequiresAdministratorApprovalBeforeShowingContent() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-skip-launch-poster-for-visual-testing",
+            "-disable-screen-protection-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+        ]
+        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launch()
+
+        assertExists("fan-account-heading", in: app, timeout: 12)
+        assertExists("fan-register-douyin-id", in: app)
+        assertExists("access-gate-admin-entry", in: app)
+        XCTAssertFalse(app.tabBars.buttons["首页"].exists, "未审批用户不应看到主导航")
+        attachScreenshot(named: "00-access-gate", app: app)
+    }
+
     func testPrimaryTabsExposeTheirCoreContent() {
         let app = launchApp()
 
@@ -136,6 +153,7 @@ final class YishuUITests: XCTestCase {
             "-skip-launch-poster-for-visual-testing",
             "-disable-screen-protection-for-visual-testing",
             "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing",
         ] + arguments
         app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
         app.launch()

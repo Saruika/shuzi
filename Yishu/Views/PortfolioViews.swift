@@ -3,6 +3,7 @@ import SwiftUI
 struct PortfolioGridView: View {
     @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var admin: AdminSessionStore
+    @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var searchText = ""
 
@@ -114,11 +115,13 @@ struct PortfolioGridView: View {
     }
 
     private func refreshContent() async {
-        await store.refresh()
         if admin.isAuthenticated {
             if let manifest = try? await admin.fetchContent() {
                 store.applyPublishedManifest(manifest)
             }
+        } else if fanAccount.isApproved,
+                  let manifest = try? await fanAccount.fetchApprovedContent() {
+            store.applyPublishedManifest(manifest)
         }
     }
 }

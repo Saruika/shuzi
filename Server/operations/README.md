@@ -28,8 +28,21 @@ is absent, or when the resulting Nginx configuration is invalid. Recovery
 copies must use a root-only directory under `/var/backups` and must never be
 placed next to the live site.
 
-For end-to-end continuity, both `www.shuzijun.com.cn` (the App manifest) and
-`img.shuzijun.com.cn` (media delivery) must keep Shanghai as the primary CDN
-origin and Singapore as the backup origin. The failover monitor is a second
-layer that swaps their priority after repeated health-check failures; it does
-not replace the CDN backup-origin configuration.
+For ordinary website and media continuity, both `www.shuzijun.com.cn` and
+`img.shuzijun.com.cn` keep Shanghai as the primary CDN origin and Singapore as
+the backup origin. The account API under `/wp-json/shuzijun/v1` is stateful,
+while the two WordPress databases are synchronized in batches rather than
+shared in real time. `configure-account-api-origin.py` therefore adds a
+path-based origin rule that pins this API namespace to Shanghai and fails
+closed if it is unavailable. This prevents a registration on one node from
+being followed by an invalid-session response from the other. The global
+backup origin remains active for non-account paths, and the rule can be removed
+after a deliberate disaster-recovery promotion and final database sync.
+Because the CDN can still retry 401/403 responses against the backup origin,
+the Singapore Nginx server also uses
+`shuzijun-account-api-backup-proxy.conf` to forward this namespace to
+Shanghai. Both controls are removed together during a deliberate promotion.
+The iOS client itself uses the direct `https://shuzijun.com.cn/wp-json/...`
+route installed by `install-apex-account-api-route.py`; this avoids CDN
+per-response fallback entirely for normal App traffic. The public website still
+redirects from the apex hostname to `www` outside the account API namespace.

@@ -19,17 +19,9 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var statusMessage: String?
     @Published private(set) var contentOrigin: ContentOrigin = .bundled
-    private let contentSession: URLSession
-
-    init() {
-        contentSession = SecureURLSessionFactory.make(
-            requestTimeout: 20,
-            resourceTimeout: 30
-        )
-    }
 
     /// Disk reads and JSON decoding stay off the main actor. The subsequent
-    /// network refresh replaces this snapshot with the latest public content.
+    /// authenticated refresh replaces this snapshot with the latest approved content.
     func restoreCachedContent() async {
         guard contentOrigin == .bundled else { return }
         let cache = await Task.detached(priority: .userInitiated) {
@@ -90,65 +82,19 @@ final class PortfolioStore: ObservableObject {
         )
     }
 
-    /// Fetch the versioned manifest before freezing the launch-poster snapshot.
-    /// A short timeout keeps cold starts responsive; cached content remains the
-    /// fallback when the device is offline.
-    func refreshLaunchContent() async -> Bool {
-        do {
-            let manifest = try await fetchContentManifest(
-                timeoutInterval: 3,
-                maxAttempts: 2
-            )
-            guard manifest.schemaVersion == 1,
-                  !manifest.portfolios.isEmpty,
-                  ContentSecurityPolicy.isTrusted(manifest) else { return false }
-            applyPublishedManifest(manifest)
-            return true
-        } catch {
-            return false
-        }
-    }
-
-    func refresh() async {
-        guard !isRefreshing else { return }
-        isRefreshing = true
-        defer { isRefreshing = false }
-
-        do {
-            let manifest = try await fetchContentManifest(maxAttempts: 2)
-            guard manifest.schemaVersion == 1,
-                  !manifest.portfolios.isEmpty,
-                  ContentSecurityPolicy.isTrusted(manifest) else {
-                throw URLError(.zeroByteResource)
-            }
-            portfolios = manifest.portfolios
-            heroImages = manifest.heroImages
-            aboutPortraitURL = manifest.aboutPortraitURL
-            launchPosters = manifest.launchPosters ?? launchPosters
-            showreel = manifest.showreel
-            dramas = manifest.dramas
-            lastUpdated = manifest.updatedAt
-            contentOrigin = .network
-            statusMessage = nil
-            AppDiagnostics.shared.recordCatalogRefresh(
-                succeeded: true,
-                portfolioCount: manifest.portfolios.count,
-                imageCount: manifest.portfolios.reduce(0) { $0 + $1.images.count }
-            )
-            Self.persistCacheInBackground(
-                portfolios: manifest.portfolios,
-                heroImages: manifest.heroImages,
-                aboutPortraitURL: manifest.aboutPortraitURL,
-                launchPosters: manifest.launchPosters ?? launchPosters,
-                showreel: manifest.showreel,
-                dramas: manifest.dramas,
-                updatedAt: manifest.updatedAt
-            )
-        } catch {
-            AppDiagnostics.shared.recordCatalogRefresh(succeeded: false, error: error)
-            statusMessage = contentOrigin == .bundled
-                ? "网络不可用，当前显示离线基础内容"
-                : "网络不可用，继续显示上次同步内容"
+    func discardProtectedContent() {
+        portfolios = Portfolio.fallback
+        heroImages = ContentCatalog.heroImages
+        aboutPortraitURL = ContentCatalog.aboutPortraitURL
+        launchPosters = ContentCatalog.launchPosters
+        showreel = ContentCatalog.showreel
+        dramas = ContentCatalog.dramas
+        lastUpdated = nil
+        statusMessage = nil
+        contentOrigin = .bundled
+        Task.detached(priority: .utility) {
+            guard let url = Self.cacheFileURL(createDirectory: false) else { return }
+            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -157,7 +103,7 @@ final class PortfolioStore: ObservableObject {
               let data = try? Data(contentsOf: url),
               data.count <= 5 * 1024 * 1024,
               let cache = try? JSONDecoder().decode(PortfolioCacheEnvelope.self, from: data),
-              cache.isPublicPreview,
+              cache.isAuthorizedPreview,
               ContentSecurityPolicy.isTrusted(cache) else { return nil }
         return cache
     }
@@ -193,8 +139,8 @@ final class PortfolioStore: ObservableObject {
         dramas: [DramaWork],
         updatedAt: Date
     ) {
-        // Keep only a small offline preview on disk. The complete live gallery
-        // remains an in-memory response and is refreshed whenever the App opens.
+        // Keep only a small authorized offline preview on disk. The complete
+        // live gallery remains an in-memory response.
         let cachedPortfolios = portfolios.map { portfolio in
             let preview = Array(portfolio.images.prefix(offlinePreviewImageCount))
             return Portfolio(
@@ -220,7 +166,7 @@ final class PortfolioStore: ObservableObject {
                     showreel: showreel,
                     dramas: dramas,
                     updatedAt: updatedAt,
-                    isPublicPreview: true
+                    isAuthorizedPreview: true
                 )
               ) else { return }
         do {
@@ -255,73 +201,6 @@ final class PortfolioStore: ObservableObject {
         return directory.appending(path: "portfolio-cache.json")
     }
 
-    private func fetchContentManifest(
-        timeoutInterval: TimeInterval = 20,
-        maxAttempts: Int = 1
-    ) async throws -> AppContentManifest {
-        var latestError: Error = URLError(.unknown)
-
-        for attempt in 0..<max(1, maxAttempts) {
-            do {
-                return try await requestContentManifest(timeoutInterval: timeoutInterval)
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                latestError = error
-                guard attempt + 1 < maxAttempts, Self.isRetryableNetworkError(error) else {
-                    throw error
-                }
-                try await Task.sleep(for: .milliseconds(350))
-            }
-        }
-        throw latestError
-    }
-
-    private func requestContentManifest(timeoutInterval: TimeInterval) async throws -> AppContentManifest {
-        var request = URLRequest(url: ContentCatalog.publishedManifestURL)
-        request.timeoutInterval = timeoutInterval
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("Yishu-iOS/2.1", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-
-        let (data, response) = try await contentSession.data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              AppNetworkSecurityPolicy.matchesPublishedContentEndpoint(
-                http.url,
-                expected: ContentCatalog.publishedManifestURL
-              ) else {
-            throw URLError(.secureConnectionFailed)
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-        guard data.count <= 5 * 1024 * 1024 else { throw URLError(.dataLengthExceedsMaximum) }
-        guard AppNetworkSecurityPolicy.isJSONMIMEType(http.value(forHTTPHeaderField: "Content-Type")) else {
-            throw URLError(.cannotDecodeContentData)
-        }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let manifest = try decoder.decode(AppContentManifest.self, from: data)
-        guard ContentSecurityPolicy.isTrusted(manifest) else { throw URLError(.secureConnectionFailed) }
-        return manifest
-    }
-
-    nonisolated private static func isRetryableNetworkError(_ error: Error) -> Bool {
-        guard let urlError = error as? URLError else { return false }
-        return [
-            .timedOut,
-            .cannotFindHost,
-            .cannotConnectToHost,
-            .dnsLookupFailed,
-            .networkConnectionLost,
-            .notConnectedToInternet,
-            .resourceUnavailable,
-            .secureConnectionFailed,
-            .dataNotAllowed,
-            .cannotLoadFromNetwork,
-        ].contains(urlError.code)
-    }
 }
 
 enum ContentSecurityPolicy {
@@ -431,7 +310,7 @@ fileprivate struct PortfolioCacheEnvelope: Codable {
     let showreel: ShowreelContent?
     let dramas: [DramaWork]?
     let updatedAt: Date
-    let isPublicPreview: Bool
+    let isAuthorizedPreview: Bool
 }
 
 private extension Portfolio {

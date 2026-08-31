@@ -15,3 +15,21 @@ files, package metadata, source-control internals, editor swap files and
 similarly named residue. Backups belong under a root-only directory outside the
 document root; blocking URLs is a second boundary, not a substitute for moving
 the files.
+
+`shuzijun-account-api-backup-proxy.conf` is only for the Singapore backup
+node's `www.shuzijun.com.cn` TLS server. Tencent CDN may retry a 401/403 from
+the primary against its backup origin. Because account/session data is not
+real-time multi-primary, the backup must forward `/wp-json/shuzijun/v1/` to
+the authoritative Shanghai origin rather than answer from its local database.
+The proxy validates the Shanghai TLS certificate, preserves authorization and
+installation headers, disables proxy caching, and fails closed if Shanghai is
+unavailable. Remove it only as part of a deliberate disaster-recovery
+promotion after a final database sync.
+
+`shuzijun-account-api-apex-route.conf` is included in the
+`shuzijun.com.cn` TLS server on both nodes. The App uses this direct, non-CDN
+hostname for the stateful namespace, while ordinary apex website traffic still
+redirects to `www`. On the authoritative node the route loops through the local
+`www` TLS virtual host so WordPress retains its canonical origin and existing
+FastCGI security rules. It preserves authentication and installation headers,
+validates TLS, and never caches API responses.
