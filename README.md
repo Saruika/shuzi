@@ -108,6 +108,7 @@ xcodebuild -project Yishu.xcodeproj \
 - Apple Developer 已为 `cn.com.shuzijun.yishu` 开启 Sign in with Apple 与 WeatherKit；服务端通知与专用签名密钥按仓库外安全配置部署。
 - 安全门禁继续扫描一方代码、资源与第三方 `vendor` 中的长期凭据，仅排除已锁定 JWT 依赖文档中的公开测试样例；CI 强制执行 Composer 漏洞审计并由 Dependabot 每周检查锁定依赖。
 - 主备同步、Web 根目录检查与 Nginx 规则新增 Apple `.p8` 私钥防护；`wp-content` 与全部插件/主题代码保持 root 所有，仅上传和缓存目录允许 PHP worker 写入且禁止执行 PHP。
+- 旧版 `/images/...` 地址改由只允许图片扩展名的 Nginx 映射提供，移除 Web 根目录符号链接，同时保持官网与 CDN 图片兼容。
 - App 版本升级为 `1.3.23 (34)`。
 
 ## v1.3.22

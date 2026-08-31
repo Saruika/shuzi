@@ -129,6 +129,14 @@ when the Nginx deny include is absent, or when the resulting Nginx configuration
 is invalid. Recovery copies must use a root-only directory under `/var/backups`
 and must never be placed next to the live site.
 
+The legacy `/images/...` public URLs must be provided by the constrained
+`shuzijun-legacy-images-alias.conf` include in both `www` and `img` TLS blocks,
+not by a document-root symbolic link. Install the sensitive-file snippet first,
+validate and reload Nginx, then install the alias include, validate it against a
+known image and a denied `.php` probe, and only then remove the old `images`
+symlink. The Web-root verifier requires two alias includes and rejects any
+remaining symlink, so a partial migration fails closed.
+
 For ordinary website and media continuity, both `www.shuzijun.com.cn` and
 `img.shuzijun.com.cn` keep Shanghai as the primary CDN origin and Singapore as
 the backup origin. The account API under `/wp-json/shuzijun/v1` is stateful,

@@ -17,6 +17,16 @@ document root; blocking URLs is a second boundary, not a substitute for moving
 the files. The same snippet denies every PHP path below writable `uploads` and
 `cache` trees, irrespective of filename case.
 
+`shuzijun-legacy-images-alias.conf` replaces the historical document-root
+`images -> wp-content/uploads/hero-images` symbolic link. Include it immediately
+after the sensitive-file deny snippet and before generic PHP/static locations in
+the `www` and `img` TLS server blocks, then remove the symbolic link. The alias
+accepts only one flat, conservative image filename and returns 404 for nested or
+unknown paths; exact PHP payloads under `/images/` are denied independently by
+the sensitive-file snippet. This preserves existing `/images/...` URLs without
+letting a writable upload directory participate in PHP routing or exposing
+arbitrary file types.
+
 `shuzijun-account-api-backup-proxy.conf` is only for the Singapore backup
 node's `www.shuzijun.com.cn` TLS server. Tencent CDN may retry a 401/403 from
 the primary against its backup origin. Because account/session data is not

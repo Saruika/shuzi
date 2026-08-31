@@ -4,6 +4,8 @@ from pathlib import Path
 RECEIVER = Path("Server/operations/apply-shuzijun-sync")
 SENDER = Path("Server/operations/sync-to-backup")
 VERIFIER = Path("Server/operations/verify-webroot-security")
+SENSITIVE_DENY = Path("Server/nginx/shuzijun-sensitive-files-deny.conf")
+LEGACY_IMAGES = Path("Server/nginx/shuzijun-legacy-images-alias.conf")
 
 
 def line_number(lines: list[str], fragment: str) -> int:
@@ -33,6 +35,8 @@ def main() -> None:
     receiver_text = RECEIVER.read_text(encoding="utf-8")
     sender_text = SENDER.read_text(encoding="utf-8")
     verifier_text = VERIFIER.read_text(encoding="utf-8")
+    sensitive_deny_text = SENSITIVE_DENY.read_text(encoding="utf-8")
+    legacy_images_text = LEGACY_IMAGES.read_text(encoding="utf-8")
     lines = receiver_text.splitlines()
 
     assert lines[:2] == ["#!/bin/bash", "set -euo pipefail"]
@@ -71,6 +75,12 @@ def main() -> None:
     assert '-path "$wp_content/cache"' in verifier_text
     assert "-type l -print -quit" in verifier_text
     assert "-iname '*.php' ! -name '*.php'" in verifier_text
+    assert "shuzijun-legacy-images-alias.conf" in verifier_text
+    assert "^/images/.*\\.php" in sensitive_deny_text
+    assert "location ~* ^/images/" in legacy_images_text
+    assert "wp-content/uploads/hero-images/$1" in legacy_images_text
+    assert "location /images/" in legacy_images_text
+    assert "location ^~ /images/" not in legacy_images_text
 
     print("sync-script-contract-test: passed")
 

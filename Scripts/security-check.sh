@@ -65,9 +65,17 @@ bash -n Server/tests/fan-api-smoke.sh
 grep -qF 'wp-config\.php' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF '\.php[^/]+$' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF 'wp-content/(?:uploads|cache)' Server/nginx/shuzijun-sensitive-files-deny.conf
+grep -qF '^/images/.*\.php' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF '\.env' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF '|p8|' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF 'return 404;' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF 'shuzijun-sensitive-files-deny.conf' Server/nginx/README.md
+grep -qF 'location ~* ^/images/' Server/nginx/shuzijun-legacy-images-alias.conf
+grep -qF 'wp-content/uploads/hero-images/$1;' Server/nginx/shuzijun-legacy-images-alias.conf
+grep -qF 'location /images/' Server/nginx/shuzijun-legacy-images-alias.conf
+if grep -qF 'location ^~ /images/' Server/nginx/shuzijun-legacy-images-alias.conf; then
+  fail '旧图片映射不得绕过敏感文件正则规则'
+fi
+grep -qF 'shuzijun-legacy-images-alias.conf' Server/nginx/README.md
 
 printf 'security-check: passed\n'

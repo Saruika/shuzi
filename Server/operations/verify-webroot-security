@@ -4,10 +4,12 @@ set -euo pipefail
 site_root=${1:-/var/www/html/shuzijun.com.cn}
 nginx_site=${2:-/etc/nginx/sites-available/shuzijun-ssl.conf}
 deny_snippet=${3:-/etc/nginx/snippets/shuzijun-sensitive-files-deny.conf}
+legacy_images_snippet=${4:-/etc/nginx/snippets/shuzijun-legacy-images-alias.conf}
 
 test -d "$site_root"
 test -f "$nginx_site"
 test -f "$deny_snippet"
+test -f "$legacy_images_snippet"
 
 if find "$site_root" -xdev -type f \
     \( -iname '*.php?*' -o -name '*.php.*' -o -name '*.php_*' -o -name '*.php-*' \
@@ -107,9 +109,23 @@ grep -qF 'include /etc/nginx/snippets/shuzijun-sensitive-files-deny.conf;' "$ngi
 grep -qF 'wp-config\.php' "$deny_snippet"
 grep -qF '\.php[^/]+$' "$deny_snippet"
 grep -qF 'wp-content/(?:uploads|cache)' "$deny_snippet"
+grep -qF '^/images/.*\.php' "$deny_snippet"
 grep -qF '\.env' "$deny_snippet"
 grep -qF '|p8|' "$deny_snippet"
 grep -qF 'return 404;' "$deny_snippet"
+
+# The old root-level /images symlink is both unnecessary and unsafe once this
+# constrained alias is installed. Require the versioned include in both www
+# and img TLS server blocks and reject a partially migrated configuration.
+test "$(grep -cF 'include /etc/nginx/snippets/shuzijun-legacy-images-alias.conf;' "$nginx_site")" -ge 2
+grep -qF 'location ~* ^/images/' "$legacy_images_snippet"
+grep -qF 'wp-content/uploads/hero-images/$1;' "$legacy_images_snippet"
+grep -qF 'location /images/' "$legacy_images_snippet"
+grep -qF 'return 404;' "$legacy_images_snippet"
+if grep -qF 'location ^~ /images/' "$legacy_images_snippet"; then
+    printf 'webroot-security: legacy image alias bypasses regex deny rules\n' >&2
+    exit 1
+fi
 nginx -t >/dev/null
 
 printf 'webroot-security: passed\n'
