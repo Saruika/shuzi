@@ -38,6 +38,9 @@ struct AdminAccessView: View {
             guard hasLockedOnEntry else { return }
             admin.lock()
         }
+        // A full-screen cover lives in a separate presentation hierarchy, so
+        // it must install its own capture shield instead of relying on RootView.
+        .protectedFromScreenCapture()
     }
 }
 
@@ -82,6 +85,7 @@ enum SafeIdentifiedBinding {
 struct AdminView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var store: PortfolioStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var username = "yishu_app_manager"
     @State private var applicationPassword = ""
     @State private var heroImageURLs = ContentCatalog.heroImages
@@ -116,15 +120,22 @@ struct AdminView: View {
         ZStack {
             AppTheme.ink.ignoresSafeArea()
             ScrollView {
-                if admin.isAuthenticated {
-                    if administratorEditorIsReady {
-                        dashboard
+                Group {
+                    if admin.isAuthenticated {
+                        if administratorEditorIsReady {
+                            dashboard
+                        } else {
+                            administratorContentLoadingView
+                        }
                     } else {
-                        administratorContentLoadingView
+                        login
                     }
-                } else {
-                    login
                 }
+                .frame(
+                    maxWidth: admin.isAuthenticated ? 1_000 : 680,
+                    alignment: .leading
+                )
+                .frame(maxWidth: .infinity)
             }
             .scrollIndicators(.hidden)
         }
@@ -144,13 +155,16 @@ struct AdminView: View {
             await monitorPendingFanCount()
         }
         .onChange(of: admin.isAuthenticated) { _, authenticated in
+            applicationPassword = ""
             if authenticated {
-                applicationPassword = ""
                 Task { await refreshPendingFanCount() }
             } else {
                 invalidateAdministratorContentLoad()
                 pendingFanCount = 0
             }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { applicationPassword = "" }
         }
         .onChange(of: selectedPhotos) { _, items in
             guard !items.isEmpty else { return }

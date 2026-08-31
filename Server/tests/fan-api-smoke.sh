@@ -10,12 +10,23 @@ if [[ ! "$api_host" =~ ^[A-Za-z0-9.-]+$ ]]; then
   exit 1
 fi
 test_dir=$(mktemp -d)
+umask 077
 install_id=$(cat /proc/sys/kernel/random/uuid)
+invitation_install_id=$(cat /proc/sys/kernel/random/uuid)
 suffix=$(openssl rand -hex 6)
 douyin_id="codex_test_${suffix}"
 password="Fan-${suffix}-2026!"
+invitation_douyin_id="codex_invite_${suffix}"
+invitation_fault_douyin_id="codex_fault_${suffix}"
+invitation_new_password="Inv-${suffix}-New-2026!"
 token=''
 token_hash=''
+invitation_token=''
+invitation_user_uuid=''
+invitation_identity_code=''
+invitation_placeholder=''
+cleanup_invitation_user_uuid=''
+cleanup_invitation_placeholder=''
 app_password_name="codex-fan-smoke-${suffix}"
 app_password_uuid=''
 curl_common=(--silent --show-error --http1.1 --retry 2 --retry-delay 1 --retry-all-errors)
@@ -35,6 +46,15 @@ revoke_temporary_app_password() {
 }
 
 cleanup() {
+  if [[ -n "$invitation_token" ]]; then
+    curl "${curl_common[@]}" --output /dev/null \
+      --request POST \
+      --header 'Content-Type: application/json' \
+      --header "Authorization: Bearer ${invitation_token}" \
+      --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+      --data '{"confirmation":"DELETE_ACCOUNT"}' \
+      "${api_root}/fan/delete" || true
+  fi
   if [[ -n "$token" ]]; then
     curl "${curl_common[@]}" --output /dev/null \
       --request POST \
@@ -54,10 +74,44 @@ cleanup() {
     fi
   done
 
+  if [[ "$invitation_user_uuid" =~ ^[a-f0-9-]{36}$ ]]; then
+    local invitation_user_ids
+    invitation_user_ids=$(sudo -u www-data wp --path="$wordpress_root" user list \
+      --meta_key=_yishu_fan_uuid --meta_value="$invitation_user_uuid" --field=ID 2>/dev/null || true)
+    for user_id in $invitation_user_ids; do
+      if [[ "$user_id" =~ ^[0-9]+$ ]]; then
+        sudo -u www-data wp --path="$wordpress_root" user delete "$user_id" --yes >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+  if [[ "$cleanup_invitation_user_uuid" =~ ^[a-f0-9-]{36}$ ]]; then
+    local cleanup_invitation_user_ids
+    cleanup_invitation_user_ids=$(sudo -u www-data wp --path="$wordpress_root" user list \
+      --meta_key=_yishu_fan_uuid --meta_value="$cleanup_invitation_user_uuid" --field=ID 2>/dev/null || true)
+    for user_id in $cleanup_invitation_user_ids; do
+      if [[ "$user_id" =~ ^[0-9]+$ ]]; then
+        sudo -u www-data wp --path="$wordpress_root" user delete "$user_id" --yes >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+
   local option_hash
   option_hash=$(printf '%s' "$douyin_id" | sha256sum | awk '{print $1}')
   sudo -u www-data wp --path="$wordpress_root" option delete \
     "yishu_fan_douyin_${option_hash}" >/dev/null 2>&1 || true
+  for invitation_value in "$invitation_douyin_id" "$invitation_fault_douyin_id" "$invitation_placeholder" "$cleanup_invitation_placeholder"; do
+    if [[ -n "$invitation_value" ]]; then
+      option_hash=$(printf '%s' "$invitation_value" | sha256sum | awk '{print $1}')
+      sudo -u www-data wp --path="$wordpress_root" option delete \
+        "yishu_fan_douyin_${option_hash}" >/dev/null 2>&1 || true
+    fi
+  done
+  if [[ -n "$invitation_identity_code" ]]; then
+    local invitation_failure_hash
+    invitation_failure_hash=$(printf '%s' "$invitation_identity_code" | sha256sum | awk '{print $1}')
+    sudo -u www-data wp --path="$wordpress_root" transient delete \
+      "yishu_fan_invite_login_failure_${invitation_failure_hash}" >/dev/null 2>&1 || true
+  fi
 
   revoke_temporary_app_password
 
@@ -68,10 +122,22 @@ cleanup() {
     "$test_dir/permission-update.json" "$test_dir/permission-content.json" \
     "$test_dir/pending-content.json" "$test_dir/rejected-content.json" \
     "$test_dir/rejected-update.json" "$test_dir/rejected-session.json" \
+    "$test_dir/rejected-login.json" \
     "$test_dir/approved-content.json" \
     "$test_dir/suspended-update.json" "$test_dir/revoked-session.json" \
     "$test_dir/suspended-login.json" "$test_dir/suspended-content.json" \
-    "$test_dir/admin.netrc"
+    "$test_dir/invitation-anonymous.json" "$test_dir/invitation-count.json" \
+    "$test_dir/invitation-create.json" "$test_dir/invitation-create.headers" \
+    "$test_dir/invitation-list.json" "$test_dir/invitation-meta.json" \
+    "$test_dir/invitation-active.json" "$test_dir/invitation-wrong.json" \
+    "$test_dir/invitation-rate.json" "$test_dir/invitation-login.json" \
+    "$test_dir/invitation-content.json" "$test_dir/invitation-same-password.json" \
+    "$test_dir/invitation-complete.json" "$test_dir/invitation-old-session.json" \
+    "$test_dir/invitation-old-login.json" "$test_dir/admin.netrc"
+  rm -f "$test_dir/invitation-lock.json" "$test_dir/invitation-lock-holder.log" \
+    "$test_dir/invitation-transaction-kill.log" \
+    "$test_dir/cleanup-invitation-create.json" "$test_dir/cleanup-invitation-list.json" \
+    "$test_dir/cleanup-invitation-meta.json"
   rmdir "$test_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -179,6 +245,365 @@ unchanged_status=$(curl "${curl_common[@]}" --netrc-file "$test_dir/admin.netrc"
 [[ "$unchanged_status" == 'pending' ]]
 echo 'fan-api-smoke: anonymous and fan administrator mutations rejected'
 
+invitation_anonymous_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-anonymous.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data '{"count":1}' \
+  "${api_root}/app-admin/fans/invitations")
+[[ "$invitation_anonymous_status" == '401' ]]
+
+invitation_count_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-count.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  --data '{"count":6}' \
+  "${api_root}/app-admin/fans/invitations")
+[[ "$invitation_count_status" == '400' ]]
+jq -e '.code == "fan_invitation_count_invalid"' \
+  "$test_dir/invitation-count.json" >/dev/null
+
+invitation_create_status=$(curl "${curl_common[@]}" \
+  --dump-header "$test_dir/invitation-create.headers" \
+  --output "$test_dir/invitation-create.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  --data '{"count":1}' \
+  "${api_root}/app-admin/fans/invitations")
+[[ "$invitation_create_status" == '201' ]]
+if ! grep -Eiq '^cache-control:.*private.*no-store.*max-age=0' \
+    "$test_dir/invitation-create.headers" \
+  || ! grep -Eiq '^pragma:[[:space:]]*no-cache' \
+    "$test_dir/invitation-create.headers"; then
+  echo 'fan-api-smoke: invitation credential response was cacheable' >&2
+  exit 1
+fi
+jq -e '
+  (keys | sort) == ["invitations"] and
+  (.invitations | length) == 1 and
+  (.invitations[0] | keys | sort) ==
+    ["expiresAt", "identityCode", "requiresAccountSetup", "temporaryPassword", "userID"] and
+  (.invitations[0].userID | test("^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$")) and
+  (.invitations[0].identityCode | test("^HS-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}-[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{4}$")) and
+  (.invitations[0].temporaryPassword | test("^Tmp-[A-Za-z0-9_-]{24}-9!$")) and
+  (.invitations[0].expiresAt | type == "string") and
+  (.invitations[0].requiresAccountSetup == true)
+' "$test_dir/invitation-create.json" >/dev/null
+invitation_user_uuid=$(jq -r '.invitations[0].userID' "$test_dir/invitation-create.json")
+invitation_identity_code=$(jq -r '.invitations[0].identityCode' "$test_dir/invitation-create.json")
+invitation_temporary_password=$(jq -r '.invitations[0].temporaryPassword' "$test_dir/invitation-create.json")
+invitation_expires_at=$(jq -r '.invitations[0].expiresAt' "$test_dir/invitation-create.json")
+invitation_remaining=$(( $(date --date="$invitation_expires_at" +%s) - $(date +%s) ))
+(( invitation_remaining >= 86280 && invitation_remaining <= 86460 ))
+
+invitation_list_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-list.json" \
+  --write-out '%{http_code}' \
+  --netrc-file "$test_dir/admin.netrc" \
+  "${api_root}/app-admin/fans")
+[[ "$invitation_list_status" == '200' ]]
+jq -e --arg userID "$invitation_user_uuid" --arg expiresAt "$invitation_expires_at" '
+  any(.users[];
+    .userID == $userID and
+    .status == "pending" and
+    .requiresAccountSetup == true and
+    .invitationExpiresAt == $expiresAt and
+    (.douyinID | test("^invite_[a-f0-9]{24}$")) and
+    .permissions == ["gallery_full", "video_view"]
+  )
+' "$test_dir/invitation-list.json" >/dev/null
+invitation_placeholder=$(jq -r --arg userID "$invitation_user_uuid" \
+  '.users[] | select(.userID == $userID) | .douyinID' \
+  "$test_dir/invitation-list.json")
+invitation_internal_user_id=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_uuid --meta_value="$invitation_user_uuid" --field=ID)
+[[ "$invitation_internal_user_id" =~ ^[0-9]+$ ]]
+sudo -u www-data wp --path="$wordpress_root" user meta get \
+  "$invitation_internal_user_id" _yishu_fan_invitation --format=json \
+  > "$test_dir/invitation-meta.json"
+jq -e '
+  has("temporaryPassword") | not
+' "$test_dir/invitation-meta.json" >/dev/null
+jq -e --arg placeholder "$invitation_placeholder" '
+  .preapproved == true and
+  .placeholderDouyinID == $placeholder and
+  (.generation | test("^[a-f0-9]{32}$")) and
+  (.createdBy | type == "number") and
+  (.createdAt | type == "string") and
+  (.expiresAt | type == "string")
+' "$test_dir/invitation-meta.json" >/dev/null
+invitation_generation=$(jq -r '.generation' "$test_dir/invitation-meta.json")
+invitation_expiry_timestamp=$(date --date="$invitation_expires_at" +%s)
+invitation_wp_auth_state=$(sudo -u www-data wp --path="$wordpress_root" eval \
+  "\$user = get_userdata(${invitation_internal_user_id}); \$result = apply_filters('wp_authenticate_user', \$user, 'unused'); echo is_wp_error(\$result) ? \$result->get_error_code() : 'allowed';")
+[[ "$invitation_wp_auth_state" == 'fan_wordpress_login_restricted' ]]
+invitation_app_password_state=$(sudo -u www-data wp --path="$wordpress_root" eval \
+  "\$user = get_userdata(${invitation_internal_user_id}); echo wp_is_application_passwords_available_for_user(\$user) ? 'enabled' : 'disabled';")
+[[ "$invitation_app_password_state" == 'disabled' ]]
+
+sudo -u www-data wp --path="$wordpress_root" eval \
+  "global \$wpdb; \$name = 'yishu_fan_' . substr(hash('sha256', home_url('/') . '|${invitation_internal_user_id}'), 0, 48); \$got = \$wpdb->get_var(\$wpdb->prepare('SELECT GET_LOCK(%s, 0)', \$name)); if ((string) \$got !== '1') { exit(2); } echo 'locked'; sleep(3); \$wpdb->get_var(\$wpdb->prepare('SELECT RELEASE_LOCK(%s)', \$name));" \
+  > "$test_dir/invitation-lock-holder.log" 2>&1 &
+invitation_lock_holder_pid=$!
+for lock_wait in 1 2 3 4 5 6 7 8 9 10; do
+  if grep -q 'locked' "$test_dir/invitation-lock-holder.log" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+grep -q 'locked' "$test_dir/invitation-lock-holder.log"
+invitation_lock_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-lock.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  --data '{"permissions":["video_view"]}' \
+  "${api_root}/app-admin/fans/${invitation_user_uuid}")
+[[ "$invitation_lock_status" == '409' ]]
+jq -e '.code == "fan_setup_busy"' "$test_dir/invitation-lock.json" >/dev/null
+wait "$invitation_lock_holder_pid"
+
+invitation_fault_hash=$(printf '%s' "$invitation_fault_douyin_id" | sha256sum | awk '{print $1}')
+set +e
+sudo -u www-data timeout --signal=KILL 2s wp --path="$wordpress_root" eval \
+  "global \$wpdb; \$wpdb->query('START TRANSACTION'); \$wpdb->query(\$wpdb->prepare(\"UPDATE {\$wpdb->usermeta} SET meta_value = %s WHERE user_id = %d AND meta_key = %s\", '${invitation_fault_douyin_id}', ${invitation_internal_user_id}, '_yishu_fan_douyin_id')); \$wpdb->query(\$wpdb->prepare(\"UPDATE {\$wpdb->usermeta} SET meta_value = 'active' WHERE user_id = %d AND meta_key = %s\", ${invitation_internal_user_id}, '_yishu_fan_status')); \$wpdb->query(\$wpdb->prepare(\"INSERT INTO {\$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')\", 'yishu_fan_douyin_${invitation_fault_hash}', '${invitation_internal_user_id}')); echo 'staged'; fflush(STDOUT); sleep(30); \$wpdb->query('COMMIT');" \
+  > "$test_dir/invitation-transaction-kill.log" 2>&1
+invitation_fault_status=$?
+set -e
+[[ "$invitation_fault_status" != '0' ]]
+grep -q 'staged' "$test_dir/invitation-transaction-kill.log"
+invitation_rollback_state=$(sudo -u www-data wp --path="$wordpress_root" eval \
+  "global \$wpdb; \$direct_douyin = \$wpdb->get_var(\$wpdb->prepare(\"SELECT meta_value FROM {\$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s LIMIT 1\", ${invitation_internal_user_id}, '_yishu_fan_douyin_id')); \$direct_status = \$wpdb->get_var(\$wpdb->prepare(\"SELECT meta_value FROM {\$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s LIMIT 1\", ${invitation_internal_user_id}, '_yishu_fan_status')); \$reservation = (int) \$wpdb->get_var(\$wpdb->prepare(\"SELECT COUNT(*) FROM {\$wpdb->options} WHERE option_name = %s\", 'yishu_fan_douyin_${invitation_fault_hash}')); echo wp_json_encode(array('directDouyin' => \$direct_douyin, 'cachedDouyin' => get_user_meta(${invitation_internal_user_id}, '_yishu_fan_douyin_id', true), 'directStatus' => \$direct_status, 'cachedStatus' => get_user_meta(${invitation_internal_user_id}, '_yishu_fan_status', true), 'faultReservationCount' => \$reservation));")
+printf '%s' "$invitation_rollback_state" | jq -e \
+  --arg placeholder "$invitation_placeholder" '
+    .directDouyin == $placeholder and
+    .cachedDouyin == $placeholder and
+    .directStatus == "pending" and
+    .cachedStatus == "pending" and
+    .faultReservationCount == 0
+  ' >/dev/null
+
+invitation_active_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-active.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  --data '{"status":"active"}' \
+  "${api_root}/app-admin/fans/${invitation_user_uuid}")
+[[ "$invitation_active_status" == '409' ]]
+jq -e '.code == "fan_account_setup_required"' \
+  "$test_dir/invitation-active.json" >/dev/null
+
+for attempt in 1 2 3 4 5; do
+  invitation_wrong_status=$(curl "${curl_common[@]}" \
+    --output "$test_dir/invitation-wrong.json" \
+    --write-out '%{http_code}' \
+    --request POST \
+    --header 'Content-Type: application/json' \
+    --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+    --data "$(jq -nc \
+      --arg identityCode "$invitation_identity_code" \
+      --arg password 'incorrect-temporary-password' \
+      --arg installID "$invitation_install_id" \
+      '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+    "${api_root}/fan/login")
+  [[ "$invitation_wrong_status" == '401' ]]
+done
+invitation_rate_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-rate.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$invitation_identity_code" \
+    --arg password 'incorrect-temporary-password' \
+    --arg installID "$invitation_install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$invitation_rate_status" == '429' ]]
+invitation_failure_hash=$(printf '%s' "$invitation_identity_code" | sha256sum | awk '{print $1}')
+sudo -u www-data wp --path="$wordpress_root" transient delete \
+  "yishu_fan_invite_login_failure_${invitation_failure_hash}" >/dev/null
+
+invitation_login_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-login.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$invitation_identity_code" \
+    --arg password "$invitation_temporary_password" \
+    --arg installID "$invitation_install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$invitation_login_status" == '200' ]]
+jq -e --arg userID "$invitation_user_uuid" --arg expiresAt "$invitation_expires_at" '
+  (.token | test("^[A-Za-z0-9_-]{43,128}$")) and
+  .profile.userID == $userID and
+  .profile.status == "pending" and
+  .profile.requiresAccountSetup == true and
+  .profile.invitationExpiresAt == $expiresAt
+' "$test_dir/invitation-login.json" >/dev/null
+invitation_token=$(jq -r '.token' "$test_dir/invitation-login.json")
+invitation_session_expires_at=$(jq -r '.profile.sessionExpiresAt' "$test_dir/invitation-login.json")
+invitation_session_remaining=$(( $(date --date="$invitation_session_expires_at" +%s) - $(date +%s) ))
+(( invitation_session_remaining >= 480 && invitation_session_remaining <= 660 ))
+
+invitation_content_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-content.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${invitation_token}" \
+  --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+  "${api_root}/app-content")
+[[ "$invitation_content_status" == '403' ]]
+jq -e '.code == "fan_account_setup_required"' \
+  "$test_dir/invitation-content.json" >/dev/null
+
+invitation_same_password_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-same-password.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${invitation_token}" \
+  --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+  --data "$(jq -nc \
+    --arg displayName '邀请验收用户' \
+    --arg douyinID "$invitation_douyin_id" \
+    --arg currentPassword "$invitation_temporary_password" \
+    --arg newPassword "$invitation_temporary_password" \
+    --arg installID "$invitation_install_id" \
+    --arg consentVersion '2026-08-31-approval-v2' \
+    '{displayName:$displayName,douyinID:$douyinID,currentPassword:$currentPassword,newPassword:$newPassword,installID:$installID,consentVersion:$consentVersion}')" \
+  "${api_root}/fan/complete-invitation")
+[[ "$invitation_same_password_status" == '400' ]]
+
+# Emulate an interrupted legacy completion after the real Douyin meta and
+# reservation were written but before the immutable invitation was consumed.
+sudo -u www-data wp --path="$wordpress_root" user meta update \
+  "$invitation_internal_user_id" _yishu_fan_douyin_id "$invitation_douyin_id" >/dev/null
+invitation_recovery_real_hash=$(printf '%s' "$invitation_douyin_id" | sha256sum | awk '{print $1}')
+sudo -u www-data wp --path="$wordpress_root" option add \
+  "yishu_fan_douyin_${invitation_recovery_real_hash}" "$invitation_internal_user_id" \
+  --autoload=no >/dev/null
+
+onboarding_token="$invitation_token"
+invitation_complete_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-complete.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${onboarding_token}" \
+  --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+  --data "$(jq -nc \
+    --arg displayName '邀请验收用户' \
+    --arg douyinID "$invitation_douyin_id" \
+    --arg currentPassword "$invitation_temporary_password" \
+    --arg newPassword "$invitation_new_password" \
+    --arg installID "$invitation_install_id" \
+    --arg consentVersion '2026-08-31-approval-v2' \
+    '{displayName:$displayName,douyinID:$douyinID,currentPassword:$currentPassword,newPassword:$newPassword,installID:$installID,consentVersion:$consentVersion}')" \
+  "${api_root}/fan/complete-invitation")
+[[ "$invitation_complete_status" == '200' ]]
+jq -e --arg userID "$invitation_user_uuid" --arg douyinID "$invitation_douyin_id" '
+  (.token | test("^[A-Za-z0-9_-]{43,128}$")) and
+  .profile.userID == $userID and
+  .profile.douyinID == $douyinID and
+  .profile.status == "active" and
+  .profile.requiresAccountSetup == false and
+  .profile.invitationExpiresAt == null
+' "$test_dir/invitation-complete.json" >/dev/null
+invitation_token=$(jq -r '.token' "$test_dir/invitation-complete.json")
+stale_invitation_cleanup_state=$(sudo -u www-data wp --path="$wordpress_root" eval \
+  "do_action('yishu_cleanup_fan_invitation', ${invitation_internal_user_id}, '${invitation_generation}', '${invitation_placeholder}', ${invitation_expiry_timestamp}); echo get_userdata(${invitation_internal_user_id}) ? 'exists' : 'deleted';")
+[[ "$stale_invitation_cleanup_state" == 'exists' ]]
+invitation_completed_wp_auth_state=$(sudo -u www-data wp --path="$wordpress_root" eval \
+  "\$user = get_userdata(${invitation_internal_user_id}); \$result = apply_filters('wp_authenticate_user', \$user, 'unused'); echo is_wp_error(\$result) ? \$result->get_error_code() : 'allowed';")
+[[ "$invitation_completed_wp_auth_state" == 'fan_wordpress_login_restricted' ]]
+invitation_completed_app_password_state=$(sudo -u www-data wp --path="$wordpress_root" eval \
+  "\$user = get_userdata(${invitation_internal_user_id}); echo wp_is_application_passwords_available_for_user(\$user) ? 'enabled' : 'disabled';")
+[[ "$invitation_completed_app_password_state" == 'disabled' ]]
+
+invitation_old_session_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-old-session.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${onboarding_token}" \
+  --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+  "${api_root}/fan/session")
+[[ "$invitation_old_session_status" == '401' ]]
+invitation_old_login_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/invitation-old-login.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${invitation_install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$invitation_identity_code" \
+    --arg password "$invitation_temporary_password" \
+    --arg installID "$invitation_install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$invitation_old_login_status" == '401' ]]
+invitation_placeholder_hash=$(printf '%s' "$invitation_placeholder" | sha256sum | awk '{print $1}')
+if sudo -u www-data wp --path="$wordpress_root" option get \
+  "yishu_fan_douyin_${invitation_placeholder_hash}" >/dev/null 2>&1; then
+  echo 'fan-api-smoke: invitation placeholder reservation was not removed' >&2
+  exit 1
+fi
+invitation_real_hash=$(printf '%s' "$invitation_douyin_id" | sha256sum | awk '{print $1}')
+invitation_real_owner=$(sudo -u www-data wp --path="$wordpress_root" option get \
+  "yishu_fan_douyin_${invitation_real_hash}")
+[[ "$invitation_real_owner" == "$invitation_internal_user_id" ]]
+echo 'fan-api-smoke: administrator invitation and forced setup passed'
+
+cleanup_invitation_create_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/cleanup-invitation-create.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  --data '{"count":1}' \
+  "${api_root}/app-admin/fans/invitations")
+[[ "$cleanup_invitation_create_status" == '201' ]]
+cleanup_invitation_user_uuid=$(jq -r '.invitations[0].userID' \
+  "$test_dir/cleanup-invitation-create.json")
+cleanup_invitation_list_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/cleanup-invitation-list.json" \
+  --write-out '%{http_code}' \
+  --netrc-file "$test_dir/admin.netrc" \
+  "${api_root}/app-admin/fans")
+[[ "$cleanup_invitation_list_status" == '200' ]]
+cleanup_invitation_placeholder=$(jq -r --arg userID "$cleanup_invitation_user_uuid" \
+  '.users[] | select(.userID == $userID) | .douyinID' \
+  "$test_dir/cleanup-invitation-list.json")
+cleanup_invitation_internal_user_id=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_uuid --meta_value="$cleanup_invitation_user_uuid" --field=ID)
+[[ "$cleanup_invitation_internal_user_id" =~ ^[0-9]+$ ]]
+sudo -u www-data wp --path="$wordpress_root" user meta get \
+  "$cleanup_invitation_internal_user_id" _yishu_fan_invitation --format=json \
+  > "$test_dir/cleanup-invitation-meta.json"
+cleanup_invitation_generation=$(jq -r '.generation' "$test_dir/cleanup-invitation-meta.json")
+cleanup_invitation_original_expiry=$(date --date="$(jq -r '.expiresAt' "$test_dir/cleanup-invitation-meta.json")" +%s)
+cleanup_invitation_cron=$(sudo -u www-data wp --path="$wordpress_root" eval \
+  "\$args = array(${cleanup_invitation_internal_user_id}, '${cleanup_invitation_generation}', '${cleanup_invitation_placeholder}', ${cleanup_invitation_original_expiry}); echo (int) wp_next_scheduled('yishu_cleanup_fan_invitation', \$args);")
+(( cleanup_invitation_cron >= cleanup_invitation_original_expiry ))
+cleanup_invitation_state=$(sudo -u www-data wp --path="$wordpress_root" eval \
+  "\$user_id = ${cleanup_invitation_internal_user_id}; \$meta = get_user_meta(\$user_id, '_yishu_fan_invitation', true); \$expires = time() - 60; \$meta['createdAt'] = gmdate('c', \$expires - 86400); \$meta['expiresAt'] = gmdate('c', \$expires); if (update_user_meta(\$user_id, '_yishu_fan_invitation', \$meta) === false) { exit(2); } do_action('yishu_cleanup_fan_invitation', \$user_id, '${cleanup_invitation_generation}', '${cleanup_invitation_placeholder}', \$expires); echo get_userdata(\$user_id) ? 'exists' : 'deleted';")
+[[ "$cleanup_invitation_state" == 'deleted' ]]
+cleanup_invitation_placeholder_hash=$(printf '%s' "$cleanup_invitation_placeholder" | sha256sum | awk '{print $1}')
+if sudo -u www-data wp --path="$wordpress_root" option get \
+  "yishu_fan_douyin_${cleanup_invitation_placeholder_hash}" >/dev/null 2>&1; then
+  echo 'fan-api-smoke: expired invitation reservation was not removed' >&2
+  exit 1
+fi
+echo 'fan-api-smoke: scheduled invitation expiry cleanup passed'
+
 reject_status=$(curl "${curl_common[@]}" --output "$test_dir/rejected-update.json" \
   --write-out '%{http_code}' \
   --request POST \
@@ -195,8 +620,26 @@ rejected_session_status=$(curl "${curl_common[@]}" --output "$test_dir/rejected-
   --header "Authorization: Bearer ${token}" \
   --header "X-Yishu-Install-ID: ${install_id}" \
   "${api_root}/fan/session")
-[[ "$rejected_session_status" == '200' ]]
-jq -e '.profile.status == "rejected"' "$test_dir/rejected-session.json" >/dev/null
+[[ "$rejected_session_status" == '401' ]]
+token=''
+token_hash=''
+
+rejected_login_status=$(curl "${curl_common[@]}" --output "$test_dir/rejected-login.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data "$(jq -nc \
+    --arg identityCode "$identity_code" \
+    --arg password "$password" \
+    --arg installID "$install_id" \
+    '{identityCode:$identityCode,password:$password,installID:$installID}')" \
+  "${api_root}/fan/login")
+[[ "$rejected_login_status" == '200' ]]
+jq -e '.profile.status == "rejected" and .profile.requiresAccountSetup == false and .profile.invitationExpiresAt == null' \
+  "$test_dir/rejected-login.json" >/dev/null
+token=$(jq -r '.token' "$test_dir/rejected-login.json")
+token_hash=$(printf '%s' "$token" | sha256sum | awk '{print $1}')
 rejected_content_status=$(curl "${curl_common[@]}" --output "$test_dir/rejected-content.json" \
   --write-out '%{http_code}' \
   --header "Authorization: Bearer ${token}" \

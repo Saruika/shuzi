@@ -41,16 +41,104 @@ struct FanProfile: Codable, Equatable {
     let permissions: [String]
     let status: String
     let sessionExpiresAt: Date
+    let requiresAccountSetup: Bool
+    let invitationExpiresAt: Date?
+
+    init(
+        userID: String,
+        identityCode: String,
+        displayName: String,
+        douyinID: String,
+        installationCode: String,
+        permissions: [String],
+        status: String,
+        sessionExpiresAt: Date,
+        requiresAccountSetup: Bool = false,
+        invitationExpiresAt: Date? = nil
+    ) {
+        self.userID = userID
+        self.identityCode = identityCode
+        self.displayName = displayName
+        self.douyinID = douyinID
+        self.installationCode = installationCode
+        self.permissions = permissions
+        self.status = status
+        self.sessionExpiresAt = sessionExpiresAt
+        self.requiresAccountSetup = requiresAccountSetup
+        self.invitationExpiresAt = invitationExpiresAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case userID
+        case identityCode
+        case displayName
+        case douyinID
+        case installationCode
+        case permissions
+        case status
+        case sessionExpiresAt
+        case requiresAccountSetup
+        case invitationExpiresAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        userID = try container.decode(String.self, forKey: .userID)
+        identityCode = try container.decode(String.self, forKey: .identityCode)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        douyinID = try container.decode(String.self, forKey: .douyinID)
+        installationCode = try container.decode(String.self, forKey: .installationCode)
+        permissions = try container.decode([String].self, forKey: .permissions)
+        status = try container.decode(String.self, forKey: .status)
+        sessionExpiresAt = try container.decode(Date.self, forKey: .sessionExpiresAt)
+        // Responses from builds before invitation onboarding omit both fields.
+        // Treat those established accounts as fully configured, while the
+        // consistency checks below fail closed for partial or contradictory data.
+        requiresAccountSetup = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresAccountSetup
+        ) ?? false
+        invitationExpiresAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .invitationExpiresAt
+        )
+    }
 
     var accountStatus: FanAccountStatus? { FanAccountStatus(rawValue: status) }
-    var isApproved: Bool { accountStatus == .active }
+    var hasConsistentAccountSetupState: Bool {
+        FanAccountValidation.hasConsistentAccountSetupState(
+            douyinID: douyinID,
+            requiresAccountSetup: requiresAccountSetup,
+            invitationExpiresAt: invitationExpiresAt
+        )
+    }
+    func isApproved(at date: Date) -> Bool {
+        accountStatus == .active
+            && !requiresAccountSetup
+            && hasConsistentAccountSetupState
+            && sessionExpiresAt > date
+    }
 
-    func hasPermission(_ permission: FanPermission) -> Bool {
-        status == "active" && permissions.contains(permission.rawValue)
+    var isApproved: Bool {
+        isApproved(at: Date())
+    }
+
+    func hasPermission(_ permission: FanPermission, at date: Date = Date()) -> Bool {
+        isApproved(at: date) && permissions.contains(permission.rawValue)
     }
 }
 
+struct FanRequiredSetupInput: Equatable {
+    let displayName: String
+    let douyinID: String
+    let currentPassword: String
+    let newPassword: String
+}
+
 enum FanAccountValidation {
+    private static let invitationPlaceholderPattern = #"^invite_[a-f0-9]{24}$"#
+    private static let temporaryPasswordPattern = #"^Tmp-[A-Za-z0-9_-]{24}-9!$"#
+
     static func normalizedIdentityCode(_ value: String) -> String? {
         var compact = value
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -92,6 +180,77 @@ enum FanAccountValidation {
         ) != nil
         return [containsLetter, containsNumber, containsSymbol].filter { $0 }.count >= 2
     }
+
+    static func isInvitationPlaceholderDouyinID(_ value: String) -> Bool {
+        value.range(of: invitationPlaceholderPattern, options: .regularExpression) != nil
+    }
+
+    static func isValidInvitationTemporaryPassword(_ value: String) -> Bool {
+        value.range(of: temporaryPasswordPattern, options: .regularExpression) != nil
+    }
+
+    static func hasConsistentAccountSetupState(
+        douyinID: String,
+        requiresAccountSetup: Bool,
+        invitationExpiresAt: Date?
+    ) -> Bool {
+        if requiresAccountSetup {
+            return invitationExpiresAt != nil && isInvitationPlaceholderDouyinID(douyinID)
+        }
+        return invitationExpiresAt == nil && !isInvitationPlaceholderDouyinID(douyinID)
+    }
+
+    static func isValidProfile(_ profile: FanProfile, now: Date = Date()) -> Bool {
+        UUID(uuidString: profile.userID) != nil
+            && normalizedIdentityCode(profile.identityCode) == profile.identityCode
+            && normalizedDouyinID(profile.douyinID) == profile.douyinID
+            && FanAccountStatus(rawValue: profile.status) != nil
+            && profile.sessionExpiresAt > now
+            && profile.hasConsistentAccountSetupState
+    }
+
+    static func isValidAdminFanUser(_ user: AdminFanUser) -> Bool {
+        UUID(uuidString: user.userID) != nil
+            && normalizedIdentityCode(user.identityCode) == user.identityCode
+            && normalizedDouyinID(user.douyinID) == user.douyinID
+            && FanAccountStatus(rawValue: user.status) != nil
+            && hasConsistentAccountSetupState(
+                douyinID: user.douyinID,
+                requiresAccountSetup: user.requiresAccountSetup,
+                invitationExpiresAt: user.invitationExpiresAt
+            )
+    }
+
+    static func validatedRequiredSetup(
+        displayName: String,
+        douyinID: String,
+        currentPassword: String,
+        newPassword: String,
+        newPasswordConfirmation: String,
+        acceptedDataUse: Bool
+    ) throws -> FanRequiredSetupInput {
+        let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidDisplayName(cleanName) else { throw FanAccountError.invalidDisplayName }
+        guard let cleanDouyinID = normalizedDouyinID(douyinID),
+              !isInvitationPlaceholderDouyinID(cleanDouyinID) else {
+            throw FanAccountError.invalidDouyinID
+        }
+        guard isValidInvitationTemporaryPassword(currentPassword) else {
+            throw FanAccountError.invalidCredentials
+        }
+        guard acceptedDataUse else { throw FanAccountError.consentRequired }
+        guard isValidPassword(newPassword) else { throw FanAccountError.weakPassword }
+        guard newPassword != currentPassword else { throw FanAccountError.passwordMustChange }
+        guard newPassword == newPasswordConfirmation else {
+            throw FanAccountError.passwordMismatch
+        }
+        return FanRequiredSetupInput(
+            displayName: cleanName,
+            douyinID: cleanDouyinID,
+            currentPassword: currentPassword,
+            newPassword: newPassword
+        )
+    }
 }
 
 enum FanAccountError: LocalizedError {
@@ -100,8 +259,12 @@ enum FanAccountError: LocalizedError {
     case consentRequired
     case weakPassword
     case passwordMismatch
+    case passwordMustChange
     case invalidIdentityCode
     case invalidCredentials
+    case accountSetupRequired
+    case accountSetupNotRequired
+    case invitationExpired
     case sessionExpired
     case approvalPending
     case approvalRejected
@@ -118,8 +281,12 @@ enum FanAccountError: LocalizedError {
         case .consentRequired: "请先阅读并确认账号资料的使用说明。"
         case .weakPassword: "密码至少 10 位，并包含文字或字母、数字、符号中的至少两类。"
         case .passwordMismatch: "两次输入的密码不一致。"
+        case .passwordMustChange: "新密码不能与临时密码相同。"
         case .invalidIdentityCode: "请输入完整的粉丝身份码。"
         case .invalidCredentials: "身份码或密码不正确。"
+        case .accountSetupRequired: "请先完成账号资料和新密码设置。"
+        case .accountSetupNotRequired: "当前账号不需要完成临时账号设置。"
+        case .invitationExpired: "临时账号已过期，请联系管理员重新生成。"
         case .sessionExpired: "登录已失效，请重新登录。"
         case .approvalPending: "注册申请正在等待管理员审批。"
         case .approvalRejected: "注册申请未通过审批。"
@@ -145,9 +312,15 @@ final class FanAccountStore: ObservableObject {
     private let installID: UUID
     private var token: String?
     private var lastSuccessfulRefresh: Date?
+    private var sessionExpiryTask: Task<Void, Never>?
+    private var refreshGeneration: UInt64 = 0
 
-    var isAuthenticated: Bool { profile != nil && token != nil }
-    var isApproved: Bool { isAuthenticated && profile?.isApproved == true }
+    var isAuthenticated: Bool {
+        token != nil && profile.map { $0.sessionExpiresAt > Date() } == true
+    }
+    var isApproved: Bool {
+        token != nil && profile?.isApproved(at: Date()) == true
+    }
 
     init() {
         session = SecureURLSessionFactory.make(requestTimeout: 30, resourceTimeout: 45)
@@ -162,7 +335,19 @@ final class FanAccountStore: ObservableObject {
     }
 
     func hasPermission(_ permission: FanPermission) -> Bool {
-        profile?.hasPermission(permission) == true
+        token != nil && profile?.hasPermission(permission, at: Date()) == true
+    }
+
+    /// Clears an expired session without waiting for a network round trip. This
+    /// is called on foreground entry as well as by the scheduled expiry task so
+    /// an unavailable server can never extend access from stale memory.
+    @discardableResult
+    func clearExpiredSessionIfNeeded(now: Date = Date()) -> Bool {
+        guard let profile, profile.sessionExpiresAt <= now else { return false }
+        clearLocalSession()
+        errorMessage = FanAccountError.sessionExpired.errorDescription
+        noticeMessage = nil
+        return true
     }
 
     func restoreSession() async {
@@ -171,6 +356,7 @@ final class FanAccountStore: ObservableObject {
     }
 
     func refreshIfNeeded(minimumInterval: TimeInterval = 300) async {
+        guard !clearExpiredSessionIfNeeded() else { return }
         guard token != nil else { return }
         if let lastSuccessfulRefresh,
            Date().timeIntervalSince(lastSuccessfulRefresh) < minimumInterval { return }
@@ -178,7 +364,13 @@ final class FanAccountStore: ObservableObject {
     }
 
     func refreshSession(showError: Bool = true) async {
-        guard token != nil else { return }
+        guard !clearExpiredSessionIfNeeded() else {
+            if !showError { errorMessage = nil }
+            return
+        }
+        guard let refreshToken = token else { return }
+        refreshGeneration &+= 1
+        let generation = refreshGeneration
         isWorking = true
         defer { isWorking = false }
         do {
@@ -187,16 +379,35 @@ final class FanAccountStore: ObservableObject {
                 method: "GET",
                 authorized: true
             )
+            guard FanAccountValidation.isValidProfile(response.profile) else {
+                throw FanAccountError.invalidResponse
+            }
+            guard generation == refreshGeneration,
+                  token == refreshToken else { return }
             profile = response.profile
             lastSuccessfulRefresh = Date()
+            scheduleSessionExpiration()
             errorMessage = nil
         } catch FanAccountError.sessionExpired {
+            guard generation == refreshGeneration,
+                  token == refreshToken else { return }
             clearLocalSession()
             if showError { errorMessage = FanAccountError.sessionExpired.errorDescription }
         } catch FanAccountError.accountSuspended {
+            guard generation == refreshGeneration,
+                  token == refreshToken else { return }
             clearLocalSession()
             if showError { errorMessage = FanAccountError.accountSuspended.errorDescription }
+        } catch FanAccountError.invalidResponse {
+            guard generation == refreshGeneration,
+                  token == refreshToken else { return }
+            // A contradictory setup state must never leave an older approved
+            // profile usable in memory.
+            clearLocalSession()
+            if showError { errorMessage = FanAccountError.invalidResponse.errorDescription }
         } catch {
+            guard generation == refreshGeneration,
+                  token == refreshToken else { return }
             if showError {
                 errorMessage = (error as? FanAccountError)?.errorDescription
                     ?? FanAccountError.unavailable.errorDescription
@@ -294,6 +505,82 @@ final class FanAccountStore: ObservableObject {
         }
     }
 
+    func completeRequiredSetup(
+        displayName: String,
+        douyinID: String,
+        currentPassword: String,
+        newPassword: String,
+        passwordConfirmation: String,
+        acceptedDataUse: Bool
+    ) async {
+        noticeMessage = nil
+        let input: FanRequiredSetupInput
+        do {
+            input = try FanAccountValidation.validatedRequiredSetup(
+                displayName: displayName,
+                douyinID: douyinID,
+                currentPassword: currentPassword,
+                newPassword: newPassword,
+                newPasswordConfirmation: passwordConfirmation,
+                acceptedDataUse: acceptedDataUse
+            )
+        } catch {
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.invalidResponse.errorDescription
+            return
+        }
+
+        guard token != nil, let existingProfile = profile else {
+            errorMessage = FanAccountError.sessionExpired.errorDescription
+            return
+        }
+        guard existingProfile.requiresAccountSetup else {
+            errorMessage = FanAccountError.accountSetupNotRequired.errorDescription
+            return
+        }
+        guard existingProfile.hasConsistentAccountSetupState else {
+            errorMessage = FanAccountError.invalidResponse.errorDescription
+            return
+        }
+        guard let invitationExpiresAt = existingProfile.invitationExpiresAt,
+              invitationExpiresAt > Date() else {
+            errorMessage = FanAccountError.invitationExpired.errorDescription
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let body = try JSONEncoder().encode(
+                FanInvitationCompletionRequest(
+                    displayName: input.displayName,
+                    douyinID: input.douyinID,
+                    currentPassword: input.currentPassword,
+                    newPassword: input.newPassword,
+                    installID: installID.uuidString.lowercased(),
+                    consentVersion: "2026-08-31-approval-v2"
+                )
+            )
+            let response: FanAuthResponse = try await perform(
+                path: "shuzijun/v1/fan/complete-invitation",
+                method: "POST",
+                body: body,
+                authorized: true
+            )
+            guard response.profile.userID == existingProfile.userID,
+                  !response.profile.requiresAccountSetup else {
+                throw FanAccountError.invalidResponse
+            }
+            try accept(response, requiringTokenRotation: true)
+            noticeMessage = response.profile.isApproved
+                ? "账号设置已完成。"
+                : "账号设置已完成，请等待管理员审批。"
+        } catch {
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.unavailable.errorDescription
+        }
+    }
+
     func signOut() async {
         if token != nil {
             let _: FanLogoutResponse? = try? await perform(
@@ -336,6 +623,9 @@ final class FanAccountStore: ObservableObject {
 
     func fetchApprovedContent() async throws -> AppContentManifest {
         guard isApproved else {
+            if profile?.requiresAccountSetup == true {
+                throw FanAccountError.accountSetupRequired
+            }
             switch profile?.accountStatus {
             case .some(.pending): throw FanAccountError.approvalPending
             case .some(.rejected): throw FanAccountError.approvalRejected
@@ -354,35 +644,58 @@ final class FanAccountStore: ObservableObject {
         return manifest
     }
 
-    private func accept(_ response: FanAuthResponse) throws {
+    private func accept(
+        _ response: FanAuthResponse,
+        requiringTokenRotation: Bool = false
+    ) throws {
         guard response.token.range(
             of: #"^[A-Za-z0-9_-]{43,128}$"#,
             options: .regularExpression
         ) != nil,
-              FanAccountValidation.normalizedIdentityCode(response.profile.identityCode)
-                == response.profile.identityCode,
-              FanAccountValidation.normalizedDouyinID(response.profile.douyinID)
-                == response.profile.douyinID,
-              UUID(uuidString: response.profile.userID) != nil,
-              response.profile.accountStatus != nil,
-              response.profile.sessionExpiresAt > Date() else {
+              (!requiringTokenRotation || response.token != token),
+              FanAccountValidation.isValidProfile(response.profile) else {
             throw FanAccountError.invalidResponse
         }
         try FanAccountKeychain.saveToken(response.token)
+        refreshGeneration &+= 1
         token = response.token
         hasSavedSession = true
         profile = response.profile
         lastSuccessfulRefresh = Date()
+        scheduleSessionExpiration()
         errorMessage = nil
         noticeMessage = nil
     }
 
     private func clearLocalSession() {
+        refreshGeneration &+= 1
+        sessionExpiryTask?.cancel()
+        sessionExpiryTask = nil
         FanAccountKeychain.deleteToken()
         token = nil
         profile = nil
         hasSavedSession = false
         lastSuccessfulRefresh = nil
+    }
+
+    private func scheduleSessionExpiration() {
+        sessionExpiryTask?.cancel()
+        sessionExpiryTask = nil
+        guard let expiresAt = profile?.sessionExpiresAt else { return }
+        let delay = expiresAt.timeIntervalSinceNow
+        guard delay > 0 else {
+            _ = clearExpiredSessionIfNeeded()
+            return
+        }
+        sessionExpiryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self else { return }
+            _ = self.clearExpiredSessionIfNeeded()
+        }
     }
 
     private func perform<T: Decodable>(
@@ -459,6 +772,10 @@ final class FanAccountStore: ObservableObject {
         switch (response.statusCode, payload?.code) {
         case (401, "fan_login_invalid"): return .invalidCredentials
         case (401, _): return .sessionExpired
+        case (_, "fan_account_setup_required"): return .accountSetupRequired
+        case (_, "fan_invitation_expired"): return .invitationExpired
+        case (_, "fan_new_password_must_differ"): return .passwordMustChange
+        case (_, "fan_new_password_required"): return .passwordMustChange
         case (403, "fan_approval_pending"): return .approvalPending
         case (403, "fan_approval_rejected"): return .approvalRejected
         case (403, "fan_account_suspended"): return .accountSuspended
@@ -497,8 +814,74 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
     let status: String
     let registeredAt: Date
     let reviewedAt: Date?
+    let requiresAccountSetup: Bool
+    let invitationExpiresAt: Date?
+
+    init(
+        userID: String,
+        identityCode: String,
+        displayName: String,
+        douyinID: String,
+        permissions: [String],
+        status: String,
+        registeredAt: Date,
+        reviewedAt: Date?,
+        requiresAccountSetup: Bool = false,
+        invitationExpiresAt: Date? = nil
+    ) {
+        self.userID = userID
+        self.identityCode = identityCode
+        self.displayName = displayName
+        self.douyinID = douyinID
+        self.permissions = permissions
+        self.status = status
+        self.registeredAt = registeredAt
+        self.reviewedAt = reviewedAt
+        self.requiresAccountSetup = requiresAccountSetup
+        self.invitationExpiresAt = invitationExpiresAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case userID
+        case identityCode
+        case displayName
+        case douyinID
+        case permissions
+        case status
+        case registeredAt
+        case reviewedAt
+        case requiresAccountSetup
+        case invitationExpiresAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        userID = try container.decode(String.self, forKey: .userID)
+        identityCode = try container.decode(String.self, forKey: .identityCode)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        douyinID = try container.decode(String.self, forKey: .douyinID)
+        permissions = try container.decode([String].self, forKey: .permissions)
+        status = try container.decode(String.self, forKey: .status)
+        registeredAt = try container.decode(Date.self, forKey: .registeredAt)
+        reviewedAt = try container.decodeIfPresent(Date.self, forKey: .reviewedAt)
+        requiresAccountSetup = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresAccountSetup
+        ) ?? false
+        invitationExpiresAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .invitationExpiresAt
+        )
+    }
 
     var id: String { userID }
+    var hasConsistentAccountSetupState: Bool {
+        FanAccountValidation.hasConsistentAccountSetupState(
+            douyinID: douyinID,
+            requiresAccountSetup: requiresAccountSetup,
+            invitationExpiresAt: invitationExpiresAt
+        )
+    }
 }
 
 struct AdminFanPermissionDefinition: Codable, Identifiable, Equatable {
@@ -526,6 +909,15 @@ private struct FanLoginRequest: Encodable {
     let identityCode: String
     let password: String
     let installID: String
+}
+
+private struct FanInvitationCompletionRequest: Encodable {
+    let displayName: String
+    let douyinID: String
+    let currentPassword: String
+    let newPassword: String
+    let installID: String
+    let consentVersion: String
 }
 
 private struct FanDeletionRequest: Encodable {

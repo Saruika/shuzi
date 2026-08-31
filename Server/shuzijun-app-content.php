@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned access-controlled content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.5.5
+ * Version: 1.5.6
  * Author: Shuzijun
  */
 
@@ -12,6 +12,7 @@ final class Shuzijun_App_Content_API {
     const OPTION_CONFIG = 'shuzijun_app_content_config';
     const OPTION_UPDATED = 'shuzijun_app_content_updated_at';
     const CAPABILITY = 'manage_yishu_app_content';
+    const FAN_CAPABILITY = 'manage_yishu_fan_accounts';
     const ROLE = 'yishu_content_manager';
     const FREE_PREVIEW_COUNT = 3;
     const FULL_GALLERY_FOR_APP = true;
@@ -24,10 +25,14 @@ final class Shuzijun_App_Content_API {
     const FAN_META_INSTALLATIONS = '_yishu_fan_installations';
     const FAN_META_SESSIONS = '_yishu_fan_sessions';
     const FAN_META_REVIEW = '_yishu_fan_review';
+    const FAN_META_INVITATION = '_yishu_fan_invitation';
+    const FAN_META_CREDENTIAL_EPOCH = '_yishu_fan_credential_epoch';
     const FAN_CONSENT_VERSION = '2026-08-31-approval-v2';
     const FAN_DOUYIN_OPTION_PREFIX = 'yishu_fan_douyin_';
     const FAN_SESSION_OPTION_PREFIX = 'yishu_fan_session_';
     const FAN_SESSION_TTL = 2592000;
+    const FAN_ONBOARDING_SESSION_TTL = 600;
+    const FAN_INVITATION_TTL = 86400;
     const FAN_MAX_INSTALLATIONS = 16;
     const FAN_MAX_SESSIONS = 8;
     private static $fan_session_context = null;
@@ -40,12 +45,14 @@ final class Shuzijun_App_Content_API {
         add_action('pre_get_posts', array(__CLASS__, 'hide_public_portfolio_queries'));
         add_action('wp_head', array(__CLASS__, 'hide_public_portfolio_section'));
         add_action('yishu_cleanup_fan_session', array(__CLASS__, 'cleanup_fan_session'), 10, 2);
+        add_action('yishu_cleanup_fan_invitation', array(__CLASS__, 'cleanup_fan_invitation'), 10, 4);
         add_action('delete_user', array(__CLASS__, 'prepare_fan_user_deletion'), 10, 1);
         add_filter('rest_post_dispatch', array(__CLASS__, 'secure_rest_response'), 10, 3);
         add_filter('rest_pre_dispatch', array(__CLASS__, 'block_public_catalog_routes'), 10, 3);
         add_filter('wp_sitemaps_post_types', array(__CLASS__, 'remove_portfolios_from_sitemaps'));
         add_filter('theme_mod_hero_cta', array(__CLASS__, 'public_hero_cta'));
         add_filter('theme_mod_hero_cta_link', array(__CLASS__, 'public_hero_cta_link'));
+        add_filter('wp_authenticate_user', array(__CLASS__, 'block_fan_wordpress_login'), 99, 2);
 
         // Application Passwords are revocable, per-client credentials intended
         // for HTTPS REST clients. Keep the site's global disable policy and
@@ -60,6 +67,7 @@ final class Shuzijun_App_Content_API {
                 'read' => true,
                 'upload_files' => true,
                 self::CAPABILITY => true,
+                self::FAN_CAPABILITY => true,
             ));
             $role = get_role(self::ROLE);
         }
@@ -67,15 +75,32 @@ final class Shuzijun_App_Content_API {
             if (!$role->has_cap('read')) { $role->add_cap('read', true); }
             if (!$role->has_cap('upload_files')) { $role->add_cap('upload_files', true); }
             if (!$role->has_cap(self::CAPABILITY)) { $role->add_cap(self::CAPABILITY, true); }
+            if (!$role->has_cap(self::FAN_CAPABILITY)) { $role->add_cap(self::FAN_CAPABILITY, true); }
         }
         $administrator = get_role('administrator');
         if ($administrator && !$administrator->has_cap(self::CAPABILITY)) {
             $administrator->add_cap(self::CAPABILITY, true);
         }
+        if ($administrator && !$administrator->has_cap(self::FAN_CAPABILITY)) {
+            $administrator->add_cap(self::FAN_CAPABILITY, true);
+        }
     }
 
     public static function application_passwords_for_user($available, $user) {
-        return $user instanceof WP_User && user_can($user, self::CAPABILITY);
+        return $user instanceof WP_User
+            && (user_can($user, self::CAPABILITY) || user_can($user, self::FAN_CAPABILITY));
+    }
+
+    public static function block_fan_wordpress_login($user, $password = '') {
+        if ($user instanceof WP_User
+            && !empty(get_user_meta((int) $user->ID, self::FAN_META_UUID, true))) {
+            return new WP_Error(
+                'fan_wordpress_login_restricted',
+                '粉丝账号只能在 App 内登录。',
+                array('status' => 403)
+            );
+        }
+        return $user;
     }
 
     public static function register_routes() {
@@ -128,16 +153,28 @@ final class Shuzijun_App_Content_API {
             'permission_callback' => array(__CLASS__, 'can_access_fan_session'),
         ));
 
+        register_rest_route('shuzijun/v1', '/fan/complete-invitation', array(
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => array(__CLASS__, 'complete_fan_invitation'),
+            'permission_callback' => array(__CLASS__, 'can_complete_fan_invitation'),
+        ));
+
         register_rest_route('shuzijun/v1', '/app-admin/fans', array(
             'methods' => WP_REST_Server::READABLE,
             'callback' => array(__CLASS__, 'list_fans'),
-            'permission_callback' => array(__CLASS__, 'can_manage'),
+            'permission_callback' => array(__CLASS__, 'can_manage_fans'),
+        ));
+
+        register_rest_route('shuzijun/v1', '/app-admin/fans/invitations', array(
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => array(__CLASS__, 'create_fan_invitations'),
+            'permission_callback' => array(__CLASS__, 'can_manage_fans'),
         ));
 
         register_rest_route('shuzijun/v1', '/app-admin/fans/(?P<uuid>[a-f0-9-]{36})', array(
             'methods' => WP_REST_Server::EDITABLE,
             'callback' => array(__CLASS__, 'update_fan_access'),
-            'permission_callback' => array(__CLASS__, 'can_manage'),
+            'permission_callback' => array(__CLASS__, 'can_manage_fans'),
         ));
 
         register_rest_route('shuzijun/v1', '/app-content/premium', array(
@@ -163,12 +200,20 @@ final class Shuzijun_App_Content_API {
     }
 
     public static function can_manage($request = null) {
-        if (!self::authenticate_content_manager($request)) { return false; }
+        return self::can_manage_capability($request, self::CAPABILITY, 'yishu_app_rate_');
+    }
+
+    public static function can_manage_fans($request = null) {
+        return self::can_manage_capability($request, self::FAN_CAPABILITY, 'yishu_fan_admin_rate_');
+    }
+
+    private static function can_manage_capability($request, $capability, $rate_prefix) {
+        if (!self::authenticate_manager_for_capability($request, $capability)) { return false; }
         if (!$request instanceof WP_REST_Request || $request->get_method() === 'GET') { return true; }
 
         // Bound authenticated mutation bursts by WordPress user, not by a
         // spoofable forwarding IP. Normal app publishing is far below this.
-        $key = 'yishu_app_rate_' . get_current_user_id();
+        $key = (string) $rate_prefix . get_current_user_id();
         $count = (int) get_transient($key);
         if ($count >= 120) {
             return new WP_Error(
@@ -225,7 +270,7 @@ final class Shuzijun_App_Content_API {
         if (is_wp_error($display_error)) { return $display_error; }
         $password_error = self::validate_fan_password($password);
         if (is_wp_error($password_error)) { return $password_error; }
-        if (!$douyin_id) {
+        if (!$douyin_id || self::is_invitation_douyin_id($douyin_id)) {
             return new WP_Error(
                 'fan_douyin_id_invalid',
                 '请填写 2–50 位的抖音 ID，不要填链接。',
@@ -271,6 +316,7 @@ final class Shuzijun_App_Content_API {
             && update_user_meta($user_id, self::FAN_META_DOUYIN_ID, $douyin_id)
             && update_user_meta($user_id, self::FAN_META_PERMISSIONS, array('gallery_full', 'video_view'))
             && update_user_meta($user_id, self::FAN_META_STATUS, 'pending')
+            && update_user_meta($user_id, self::FAN_META_CREDENTIAL_EPOCH, 1)
             && update_user_meta($user_id, self::FAN_META_CONSENT, array(
                 'version' => self::FAN_CONSENT_VERSION,
                 'acceptedAt' => gmdate('c'),
@@ -281,7 +327,7 @@ final class Shuzijun_App_Content_API {
         }
         update_option($douyin_reservation, (int) $user_id, false);
 
-        $session = self::issue_fan_session((int) $user_id, $install_id);
+        $session = self::issue_fan_session((int) $user_id, $install_id, 'normal');
         if (is_wp_error($session)) {
             self::remove_fan_user((int) $user_id, $douyin_reservation);
             return $session;
@@ -305,14 +351,6 @@ final class Shuzijun_App_Content_API {
             15 * MINUTE_IN_SECONDS
         );
         if (is_wp_error($network_limit)) { return $network_limit; }
-        $login_limit = self::rate_limit(
-            'fan_login',
-            self::request_network_fingerprint() . '|' . $identity_code,
-            10,
-            15 * MINUTE_IN_SECONDS
-        );
-        if (is_wp_error($login_limit)) { return $login_limit; }
-
         $users = get_users(array(
             'number' => 2,
             'fields' => 'all',
@@ -320,12 +358,98 @@ final class Shuzijun_App_Content_API {
             'meta_value' => $identity_code,
         ));
         $user = count($users) === 1 ? $users[0] : null;
-        if (!$user instanceof WP_User || !wp_check_password($password, $user->user_pass, $user->ID)) {
+        $raw_invitation = $user instanceof WP_User
+            ? self::fan_meta_from_database((int) $user->ID, self::FAN_META_INVITATION, null)
+            : null;
+        $has_invitation = !empty($raw_invitation);
+        if ($has_invitation && $user instanceof WP_User) {
+            return self::login_invited_fan($user, $identity_code, $password, $install_id);
+        }
+
+        $failure_identity = self::request_network_fingerprint() . '|' . $identity_code;
+        $failure_bucket = 'fan_login_failure';
+        $failure_check = self::check_failure_limit(
+            $failure_bucket,
+            $failure_identity,
+            10
+        );
+        if (is_wp_error($failure_check)) { return $failure_check; }
+        if (!$user instanceof WP_User
+            || !self::fan_password_matches_database((int) $user->ID, $password)) {
+            $failure = self::record_failure(
+                $failure_bucket,
+                $failure_identity,
+                15 * MINUTE_IN_SECONDS
+            );
+            if (is_wp_error($failure)) { return $failure; }
             return new WP_Error('fan_login_invalid', '身份码或密码不正确。', array('status' => 401));
         }
-        $session = self::issue_fan_session((int) $user->ID, $install_id);
+        self::clear_failure_limit($failure_bucket, $failure_identity);
+        $session = self::issue_fan_session((int) $user->ID, $install_id, 'normal');
         if (is_wp_error($session)) { return $session; }
         return self::fan_auth_response((int) $user->ID, $session);
+    }
+
+    private static function login_invited_fan(WP_User $user, $identity_code, $password, $install_id) {
+        $user_id = (int) $user->ID;
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        try {
+            // Serialize the account-global counter so concurrent requests
+            // cannot race past the five-failure limit.
+            $failure_check = self::check_failure_limit(
+                'fan_invite_login_failure',
+                $identity_code,
+                5
+            );
+            if (is_wp_error($failure_check)) { return $failure_check; }
+            $fresh_invitation = self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_INVITATION,
+                null
+            );
+            if (empty($fresh_invitation)
+                || !self::fan_password_matches_database($user_id, $password)) {
+                $failure = self::record_failure(
+                    'fan_invite_login_failure',
+                    $identity_code,
+                    15 * MINUTE_IN_SECONDS
+                );
+                if (is_wp_error($failure)) { return $failure; }
+                return new WP_Error('fan_login_invalid', '身份码或密码不正确。', array('status' => 401));
+            }
+            self::clear_failure_limit('fan_invite_login_failure', $identity_code);
+
+            $invitation = self::normalize_fan_invitation($fresh_invitation);
+            if (is_wp_error($invitation)) { return $invitation; }
+            if ((int) $invitation['expiresTimestamp'] <= time()) {
+                $reservation = self::douyin_reservation_name(
+                    (string) get_user_meta($user_id, self::FAN_META_DOUYIN_ID, true)
+                );
+                if (!self::remove_fan_user($user_id, $reservation)) {
+                    return new WP_Error(
+                        'fan_invitation_cleanup_failed',
+                        '临时账号已过期，但暂时无法完成清理。',
+                        array('status' => 503)
+                    );
+                }
+                return new WP_Error(
+                    'fan_invitation_expired',
+                    '临时账号已过期，请联系管理员重新创建。',
+                    array('status' => 410)
+                );
+            }
+            $session = self::issue_fan_session(
+                $user_id,
+                $install_id,
+                'onboarding',
+                self::FAN_ONBOARDING_SESSION_TTL
+            );
+            if (is_wp_error($session)) { return $session; }
+            return self::fan_auth_response($user_id, $session);
+        } finally {
+            self::release_fan_lock($user_id, $lock_owner);
+        }
     }
 
     public static function can_access_fan_session(WP_REST_Request $request) {
@@ -336,12 +460,56 @@ final class Shuzijun_App_Content_API {
         return true;
     }
 
+    public static function can_complete_fan_invitation(WP_REST_Request $request) {
+        self::$fan_session_context = null;
+        $context = self::authenticate_fan_session($request);
+        if (is_wp_error($context)) { return $context; }
+        if (($context['scope'] ?? '') !== 'onboarding') {
+            return new WP_Error(
+                'fan_onboarding_session_required',
+                '请先使用临时密码登录。',
+                array('status' => 403)
+            );
+        }
+        $user_id = (int) $context['userID'];
+        $invitation = self::normalize_fan_invitation(
+            get_user_meta($user_id, self::FAN_META_INVITATION, true)
+        );
+        if (is_wp_error($invitation)) { return $invitation; }
+        if ((string) get_user_meta($user_id, self::FAN_META_STATUS, true) !== 'pending'
+            || empty($invitation['preapproved'])) {
+            return new WP_Error(
+                'fan_invitation_unavailable',
+                '临时账号当前不能完成设置。',
+                array('status' => 403)
+            );
+        }
+        if ((int) $invitation['expiresTimestamp'] <= time()) {
+            return new WP_Error(
+                'fan_invitation_expired',
+                '临时账号已过期，请联系管理员重新创建。',
+                array('status' => 410)
+            );
+        }
+        $context['invitation'] = $invitation;
+        self::$fan_session_context = $context;
+        return true;
+    }
+
     public static function can_access_app_content(WP_REST_Request $request) {
         if (self::authenticate_content_manager($request)) { return true; }
 
         self::$fan_session_context = null;
         $context = self::authenticate_fan_session($request);
         if (is_wp_error($context)) { return $context; }
+        if (($context['scope'] ?? '') !== 'normal'
+            || !empty(get_user_meta((int) $context['userID'], self::FAN_META_INVITATION, true))) {
+            return new WP_Error(
+                'fan_account_setup_required',
+                '请先完成密码、抖音 ID 和隐私同意设置。',
+                array('status' => 403)
+            );
+        }
         $status = (string) get_user_meta((int) $context['userID'], self::FAN_META_STATUS, true);
         if ($status !== 'active') {
             $errors = array(
@@ -391,17 +559,297 @@ final class Shuzijun_App_Content_API {
             return new WP_Error('fan_delete_confirmation_required', '请确认后再删除账号。', array('status' => 400));
         }
         $user_id = (int) $context['userID'];
-        $douyin_id = (string) get_user_meta($user_id, self::FAN_META_DOUYIN_ID, true);
-        $reservation = $douyin_id
-            ? self::FAN_DOUYIN_OPTION_PREFIX . hash('sha256', $douyin_id)
-            : '';
-        if (!self::remove_fan_user($user_id, $reservation)) {
-            return new WP_Error('fan_delete_failed', '暂时无法删除账号，请稍后重试。', array('status' => 503));
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        try {
+            $douyin_id = (string) get_user_meta($user_id, self::FAN_META_DOUYIN_ID, true);
+            $reservation = $douyin_id ? self::douyin_reservation_name($douyin_id) : '';
+            if (!self::remove_fan_user($user_id, $reservation)) {
+                return new WP_Error('fan_delete_failed', '暂时无法删除账号，请稍后重试。', array('status' => 503));
+            }
+            self::$fan_session_context = null;
+            $response = rest_ensure_response(array('ok' => true));
+            $response->header('Cache-Control', 'private, no-store');
+            return $response;
+        } finally {
+            self::release_fan_lock($user_id, $lock_owner);
         }
-        self::$fan_session_context = null;
-        $response = rest_ensure_response(array('ok' => true));
-        $response->header('Cache-Control', 'private, no-store');
+    }
+
+    public static function create_fan_invitations(WP_REST_Request $request) {
+        $raw_count = $request->get_param('count');
+        $count = is_scalar($raw_count) ? filter_var($raw_count, FILTER_VALIDATE_INT) : false;
+        if ($count === false || $count < 1 || $count > 5) {
+            return new WP_Error(
+                'fan_invitation_count_invalid',
+                '每次只能创建 1–5 个临时账号。',
+                array('status' => 400)
+            );
+        }
+
+        $created = array();
+        $result = array();
+        for ($index = 0; $index < $count; $index++) {
+            $invitation = self::create_single_fan_invitation(get_current_user_id());
+            if (is_wp_error($invitation)) {
+                foreach ($created as $record) {
+                    self::remove_fan_user((int) $record['userID'], (string) $record['reservation']);
+                }
+                return $invitation;
+            }
+            $created[] = array(
+                'userID' => (int) $invitation['internalUserID'],
+                'reservation' => (string) $invitation['reservation'],
+            );
+            $result[] = array(
+                'userID' => (string) $invitation['userID'],
+                'identityCode' => (string) $invitation['identityCode'],
+                'temporaryPassword' => (string) $invitation['temporaryPassword'],
+                'expiresAt' => (string) $invitation['expiresAt'],
+                'requiresAccountSetup' => true,
+            );
+        }
+
+        $response = new WP_REST_Response(array('invitations' => $result), 201);
+        $response->header('Cache-Control', 'private, no-store, max-age=0');
+        $response->header('Pragma', 'no-cache');
         return $response;
+    }
+
+    public static function complete_fan_invitation(WP_REST_Request $request) {
+        $context = self::$fan_session_context;
+        if (!is_array($context) || empty($context['userID'])
+            || ($context['scope'] ?? '') !== 'onboarding') {
+            return new WP_Error(
+                'fan_onboarding_session_required',
+                '请先使用临时密码登录。',
+                array('status' => 403)
+            );
+        }
+        $header_install_id = self::request_install_id($request);
+        if (is_wp_error($header_install_id)) { return $header_install_id; }
+        $body_install_id = strtolower(trim((string) $request->get_param('installID')));
+        if (!preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/', $body_install_id)
+            || !hash_equals($header_install_id, $body_install_id)) {
+            return new WP_Error('fan_install_id_invalid', '安装记录无效，请重启 App 后再试。', array('status' => 400));
+        }
+
+        $display_name = sanitize_text_field((string) $request->get_param('displayName'));
+        $douyin_id = self::normalize_douyin_id($request->get_param('douyinID'));
+        $current_password = (string) $request->get_param('currentPassword');
+        $new_password = (string) $request->get_param('newPassword');
+        $display_error = self::validate_fan_display_name($display_name);
+        if (is_wp_error($display_error)) { return $display_error; }
+        if (!$douyin_id || self::is_invitation_douyin_id($douyin_id)) {
+            return new WP_Error(
+                'fan_douyin_id_invalid',
+                '请填写 2–50 位的真实抖音 ID，不要填链接。',
+                array('status' => 400)
+            );
+        }
+        if ((string) $request->get_param('consentVersion') !== self::FAN_CONSENT_VERSION) {
+            return new WP_Error('fan_consent_required', '请先阅读并确认账号资料的使用说明。', array('status' => 400));
+        }
+        $password_error = self::validate_fan_password($new_password);
+        if (is_wp_error($password_error)) { return $password_error; }
+        if (!$current_password || strlen($current_password) > 512
+            || hash_equals($current_password, $new_password)) {
+            return new WP_Error(
+                'fan_new_password_required',
+                '新密码必须与临时密码不同。',
+                array('status' => 400)
+            );
+        }
+
+        $user_id = (int) $context['userID'];
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        $transaction_started = false;
+        $transaction_committed = false;
+        $real_reservation = '';
+        $placeholder_reservation = '';
+        try {
+            global $wpdb;
+            if (!isset($wpdb) || !method_exists($wpdb, 'query')
+                || $wpdb->query('START TRANSACTION') === false) {
+                return new WP_Error(
+                    'fan_invitation_transaction_unavailable',
+                    '账号安全事务暂时不可用。',
+                    array('status' => 503)
+                );
+            }
+            $transaction_started = true;
+            $invitation = self::normalize_fan_invitation(
+                self::fan_meta_from_database($user_id, self::FAN_META_INVITATION, null, true)
+            );
+            if (is_wp_error($invitation)
+                || (int) $invitation['expiresTimestamp'] <= time()
+                || empty($invitation['preapproved'])
+                || (string) self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_STATUS,
+                    '',
+                    true
+                ) !== 'pending') {
+                return new WP_Error(
+                    'fan_invitation_unavailable',
+                    '临时账号已过期或当前不能完成设置。',
+                    array('status' => 410)
+                );
+            }
+            if (!self::fan_password_matches_database($user_id, $current_password, true)) {
+                return new WP_Error('fan_login_invalid', '身份码或密码不正确。', array('status' => 401));
+            }
+            $placeholder = (string) $invitation['placeholderDouyinID'];
+            $current_douyin_id = (string) self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_DOUYIN_ID,
+                '',
+                true
+            );
+            if ($current_douyin_id !== $placeholder && $current_douyin_id !== $douyin_id) {
+                return new WP_Error(
+                    'fan_invitation_state_invalid',
+                    '临时账号状态不一致，请联系管理员。',
+                    array('status' => 409)
+                );
+            }
+
+            $duplicate_id = (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s AND user_id <> %d LIMIT 1",
+                self::FAN_META_DOUYIN_ID,
+                $douyin_id,
+                $user_id
+            ));
+            if ($duplicate_id > 0) {
+                return new WP_Error('fan_douyin_id_exists', '该抖音 ID 已登记，请直接登录或联系管理员。', array('status' => 409));
+            }
+
+            $real_reservation = self::douyin_reservation_name($douyin_id);
+            $reservation_inserted = $wpdb->query($wpdb->prepare(
+                "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
+                $real_reservation,
+                (string) $user_id
+            ));
+            if ($reservation_inserted === false
+                || self::reservation_owner_from_database($real_reservation) !== $user_id) {
+                return new WP_Error('fan_douyin_id_exists', '该抖音 ID 已登记，请直接登录或联系管理员。', array('status' => 409));
+            }
+
+            $profile_saved = self::set_fan_meta_in_transaction(
+                $user_id,
+                self::FAN_META_DOUYIN_ID,
+                $douyin_id
+            ) && self::set_fan_meta_in_transaction(
+                $user_id,
+                self::FAN_META_CONSENT,
+                array(
+                    'version' => self::FAN_CONSENT_VERSION,
+                    'acceptedAt' => gmdate('c'),
+                    'source' => 'invitation_completion',
+                )
+            );
+            $display_name_saved = $wpdb->update(
+                $wpdb->users,
+                array('display_name' => $display_name),
+                array('ID' => $user_id),
+                array('%s'),
+                array('%d')
+            );
+            if (!$profile_saved || $display_name_saved === false) {
+                return new WP_Error('fan_invitation_completion_failed', '暂时无法完成账号设置，请稍后重试。', array('status' => 503));
+            }
+            if (!self::set_fan_meta_in_transaction(
+                $user_id,
+                self::FAN_META_STATUS,
+                'active'
+            )) {
+                return new WP_Error('fan_invitation_completion_failed', '暂时无法完成账号设置，请稍后重试。', array('status' => 503));
+            }
+            $current_epoch = (int) self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_CREDENTIAL_EPOCH,
+                0,
+                true
+            );
+            if ($current_epoch <= 0 || !self::set_fan_meta_in_transaction(
+                $user_id,
+                self::FAN_META_CREDENTIAL_EPOCH,
+                $current_epoch + 1
+            )) {
+                return new WP_Error(
+                    'fan_credential_update_failed',
+                    '暂时无法保存账号安全状态。',
+                    array('status' => 503)
+                );
+            }
+
+            $new_password_hash = wp_hash_password($new_password);
+            $password_saved = $wpdb->update(
+                $wpdb->users,
+                array('user_pass' => $new_password_hash, 'user_activation_key' => ''),
+                array('ID' => $user_id),
+                array('%s', '%s'),
+                array('%d')
+            );
+            if ($password_saved === false
+                || !wp_check_password($new_password, $new_password_hash, $user_id)
+                || !self::delete_fan_meta_in_transaction(
+                    $user_id,
+                    self::FAN_META_INVITATION
+                )) {
+                return new WP_Error('fan_invitation_completion_failed', '暂时无法完成账号设置，请稍后重试。', array('status' => 503));
+            }
+
+            $placeholder_reservation = self::douyin_reservation_name($placeholder);
+            if (self::reservation_owner_from_database($placeholder_reservation) === $user_id) {
+                $placeholder_deleted = $wpdb->delete(
+                    $wpdb->options,
+                    array('option_name' => $placeholder_reservation),
+                    array('%s')
+                );
+                if ($placeholder_deleted === false) {
+                    return new WP_Error(
+                        'fan_invitation_reservation_failed',
+                        '暂时无法安全保存抖音 ID。',
+                        array('status' => 503)
+                    );
+                }
+            }
+            if (self::reservation_owner_from_database($placeholder_reservation) === $user_id
+                || self::reservation_owner_from_database($real_reservation) !== $user_id) {
+                return new WP_Error(
+                    'fan_invitation_reservation_failed',
+                    '暂时无法安全保存抖音 ID。',
+                    array('status' => 503)
+                );
+            }
+            if ($wpdb->query('COMMIT') === false) {
+                return new WP_Error(
+                    'fan_invitation_completion_failed',
+                    '暂时无法完成账号设置，请稍后重试。',
+                    array('status' => 503)
+                );
+            }
+            $transaction_committed = true;
+            clean_user_cache($user_id);
+            wp_cache_delete($user_id, 'user_meta');
+            self::clear_fan_option_caches(array($real_reservation, $placeholder_reservation));
+            // The committed credential epoch already rejects every old token;
+            // remove their records immediately as a second layer.
+            self::revoke_all_fan_sessions($user_id);
+            $session = self::issue_fan_session($user_id, $header_install_id, 'normal');
+            if (is_wp_error($session)) { return $session; }
+            return self::fan_auth_response($user_id, $session);
+        } finally {
+            if ($transaction_started && !$transaction_committed) {
+                $wpdb->query('ROLLBACK');
+                clean_user_cache($user_id);
+                wp_cache_delete($user_id, 'user_meta');
+                self::clear_fan_option_caches(array($real_reservation, $placeholder_reservation));
+            }
+            self::release_fan_lock($user_id, $lock_owner);
+        }
     }
 
     public static function list_fans(WP_REST_Request $request) {
@@ -449,43 +897,67 @@ final class Shuzijun_App_Content_API {
             return new WP_Error('fan_not_found', '用户不存在。', array('status' => 404));
         }
         $user = $users[0];
+        $lock_owner = self::acquire_fan_lock((int) $user->ID);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
 
-        $permissions = null;
-        $status = null;
-        if ($request->has_param('permissions')) {
-            $permissions = self::sanitize_fan_permissions($request->get_param('permissions'));
-            if (is_wp_error($permissions)) { return $permissions; }
-        }
-        if ($request->has_param('status')) {
-            $status = sanitize_key((string) $request->get_param('status'));
-            if (!in_array($status, array('pending', 'active', 'rejected', 'suspended'), true)) {
-                return new WP_Error('fan_status_invalid', '账号状态无效。', array('status' => 400));
+        try {
+            $permissions = null;
+            $status = null;
+            if ($request->has_param('permissions')) {
+                $permissions = self::sanitize_fan_permissions($request->get_param('permissions'));
+                if (is_wp_error($permissions)) { return $permissions; }
             }
-        }
-        if (is_array($permissions)) {
-            update_user_meta($user->ID, self::FAN_META_PERMISSIONS, $permissions);
-        }
-        if ($status !== null) {
-            $previous_status = (string) get_user_meta($user->ID, self::FAN_META_STATUS, true);
-            update_user_meta($user->ID, self::FAN_META_STATUS, $status);
-            if ($status !== $previous_status) {
-                update_user_meta($user->ID, self::FAN_META_REVIEW, array(
-                    'status' => $status,
-                    'reviewedAt' => gmdate('c'),
-                    'reviewedBy' => get_current_user_id(),
-                ));
+            if ($request->has_param('status')) {
+                $status = sanitize_key((string) $request->get_param('status'));
+                if (!in_array($status, array('pending', 'active', 'rejected', 'suspended'), true)) {
+                    return new WP_Error('fan_status_invalid', '账号状态无效。', array('status' => 400));
+                }
             }
-            if ($status === 'suspended') {
-                self::revoke_all_fan_sessions((int) $user->ID);
+            if ($status === 'active'
+                && !empty(get_user_meta((int) $user->ID, self::FAN_META_INVITATION, true))) {
+                return new WP_Error(
+                    'fan_account_setup_required',
+                    '用户必须先使用临时密码完成密码、抖音 ID 和隐私同意设置。',
+                    array('status' => 409)
+                );
             }
+            if (is_array($permissions)) {
+                if (!self::update_user_meta_verified($user->ID, self::FAN_META_PERMISSIONS, $permissions)) {
+                    return new WP_Error('fan_update_failed', '暂时无法更新用户权限。', array('status' => 503));
+                }
+            }
+            if ($status !== null) {
+                $previous_status = (string) get_user_meta($user->ID, self::FAN_META_STATUS, true);
+                if (!self::update_user_meta_verified($user->ID, self::FAN_META_STATUS, $status)) {
+                    return new WP_Error('fan_update_failed', '暂时无法更新用户状态。', array('status' => 503));
+                }
+                if ($status !== $previous_status) {
+                    update_user_meta($user->ID, self::FAN_META_REVIEW, array(
+                        'status' => $status,
+                        'reviewedAt' => gmdate('c'),
+                        'reviewedBy' => get_current_user_id(),
+                    ));
+                }
+                if ($status !== $previous_status && in_array($status, array('rejected', 'suspended'), true)) {
+                    $epoch = self::advance_fan_credential_epoch((int) $user->ID);
+                    self::revoke_all_fan_sessions((int) $user->ID);
+                    if (is_wp_error($epoch)) { return $epoch; }
+                }
+            }
+            $response = rest_ensure_response(array('user' => self::fan_admin_profile($user)));
+            $response->header('Cache-Control', 'private, no-store');
+            return $response;
+        } finally {
+            self::release_fan_lock((int) $user->ID, $lock_owner);
         }
-        $response = rest_ensure_response(array('user' => self::fan_admin_profile($user)));
-        $response->header('Cache-Control', 'private, no-store');
-        return $response;
     }
 
     private static function authenticate_content_manager($request) {
-        if (current_user_can(self::CAPABILITY)) { return true; }
+        return self::authenticate_manager_for_capability($request, self::CAPABILITY);
+    }
+
+    private static function authenticate_manager_for_capability($request, $capability) {
+        if (current_user_can($capability)) { return true; }
         if (!$request instanceof WP_REST_Request) { return false; }
 
         $authorization = trim((string) $request->get_header('authorization'));
@@ -506,7 +978,7 @@ final class Shuzijun_App_Content_API {
         add_filter('wp_is_application_passwords_available', '__return_true', PHP_INT_MAX);
         $user = wp_authenticate_application_password(null, $username, $password);
         remove_filter('wp_is_application_passwords_available', '__return_true', PHP_INT_MAX);
-        if (is_wp_error($user) || !$user instanceof WP_User || !user_can($user, self::CAPABILITY)) {
+        if (is_wp_error($user) || !$user instanceof WP_User || !user_can($user, $capability)) {
             return false;
         }
         wp_set_current_user($user->ID);
@@ -535,6 +1007,350 @@ final class Shuzijun_App_Content_API {
             return '';
         }
         return $candidate;
+    }
+
+    private static function is_invitation_douyin_id($value) {
+        return is_string($value) && preg_match('/^invite_[a-f0-9]{24}$/', $value) === 1;
+    }
+
+    private static function douyin_reservation_name($douyin_id) {
+        return self::FAN_DOUYIN_OPTION_PREFIX . hash('sha256', (string) $douyin_id);
+    }
+
+    private static function reservation_owner_from_database($option_name) {
+        global $wpdb;
+        if (!isset($wpdb->options) || !method_exists($wpdb, 'get_var')
+            || !method_exists($wpdb, 'prepare')) {
+            return 0;
+        }
+        $value = $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1",
+            (string) $option_name
+        ));
+        return is_scalar($value) ? (int) maybe_unserialize($value) : 0;
+    }
+
+    private static function clear_fan_option_caches($option_names) {
+        $option_names = array_values(array_filter(array_map('strval', (array) $option_names)));
+        foreach ($option_names as $option_name) {
+            wp_cache_delete($option_name, 'options');
+        }
+        // Invalidate aggregate snapshots instead of read-modify-writing them;
+        // replacing a stale snapshot could erase another request's updates.
+        wp_cache_delete('notoptions', 'options');
+        wp_cache_delete('alloptions', 'options');
+    }
+
+    private static function fan_meta_from_database($user_id, $meta_key, $default = '', $for_update = false) {
+        global $wpdb;
+        if (!isset($wpdb->usermeta) || !method_exists($wpdb, 'get_var')
+            || !method_exists($wpdb, 'prepare')) {
+            return $default;
+        }
+        $locking_clause = $for_update ? ' FOR UPDATE' : '';
+        $value = $wpdb->get_var($wpdb->prepare(
+            "SELECT meta_value FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s ORDER BY umeta_id ASC LIMIT 1{$locking_clause}",
+            (int) $user_id,
+            (string) $meta_key
+        ));
+        return $value === null ? $default : maybe_unserialize($value);
+    }
+
+    private static function set_fan_meta_in_transaction($user_id, $meta_key, $value) {
+        global $wpdb;
+        $meta_id = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT umeta_id FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s ORDER BY umeta_id ASC LIMIT 1 FOR UPDATE",
+            (int) $user_id,
+            (string) $meta_key
+        ));
+        $serialized = maybe_serialize($value);
+        if ($meta_id > 0) {
+            $updated = $wpdb->update(
+                $wpdb->usermeta,
+                array('meta_value' => $serialized),
+                array('umeta_id' => $meta_id),
+                array('%s'),
+                array('%d')
+            );
+            return $updated !== false;
+        }
+        return $wpdb->insert(
+            $wpdb->usermeta,
+            array(
+                'user_id' => (int) $user_id,
+                'meta_key' => (string) $meta_key,
+                'meta_value' => $serialized,
+            ),
+            array('%d', '%s', '%s')
+        ) !== false;
+    }
+
+    private static function delete_fan_meta_in_transaction($user_id, $meta_key) {
+        global $wpdb;
+        $deleted = $wpdb->delete(
+            $wpdb->usermeta,
+            array('user_id' => (int) $user_id, 'meta_key' => (string) $meta_key),
+            array('%d', '%s')
+        );
+        return $deleted !== false && $deleted > 0;
+    }
+
+    private static function fan_password_matches_database($user_id, $password, $for_update = false) {
+        global $wpdb;
+        if (!isset($wpdb->users) || !method_exists($wpdb, 'get_var')
+            || !method_exists($wpdb, 'prepare')) {
+            return false;
+        }
+        $locking_clause = $for_update ? ' FOR UPDATE' : '';
+        $password_hash = $wpdb->get_var($wpdb->prepare(
+            "SELECT user_pass FROM {$wpdb->users} WHERE ID = %d LIMIT 1{$locking_clause}",
+            (int) $user_id
+        ));
+        return is_string($password_hash)
+            && $password_hash !== ''
+            && wp_check_password((string) $password, $password_hash, (int) $user_id);
+    }
+
+    private static function normalize_fan_invitation($value) {
+        if (!is_array($value)) {
+            return new WP_Error(
+                'fan_invitation_unavailable',
+                '临时账号信息已失效，请联系管理员。',
+                array('status' => 410)
+            );
+        }
+        $created_at = isset($value['createdAt']) && is_scalar($value['createdAt'])
+            ? strtotime((string) $value['createdAt'])
+            : false;
+        $expires_at = isset($value['expiresAt']) && is_scalar($value['expiresAt'])
+            ? strtotime((string) $value['expiresAt'])
+            : false;
+        $created_by = isset($value['createdBy']) ? (int) $value['createdBy'] : 0;
+        $generation = isset($value['generation']) ? (string) $value['generation'] : '';
+        $placeholder = isset($value['placeholderDouyinID'])
+            ? (string) $value['placeholderDouyinID']
+            : '';
+        if ($created_at === false || $expires_at === false || $created_at <= 0
+            || $expires_at <= $created_at || $expires_at - $created_at > self::FAN_INVITATION_TTL
+            || $created_by <= 0 || empty($value['preapproved'])
+            || !preg_match('/^[a-f0-9]{32}$/', $generation)
+            || !self::is_invitation_douyin_id($placeholder)) {
+            return new WP_Error(
+                'fan_invitation_invalid',
+                '临时账号信息无效，请联系管理员。',
+                array('status' => 503)
+            );
+        }
+        return array(
+            'createdAt' => gmdate('c', $created_at),
+            'expiresAt' => gmdate('c', $expires_at),
+            'createdTimestamp' => $created_at,
+            'expiresTimestamp' => $expires_at,
+            'createdBy' => $created_by,
+            'generation' => $generation,
+            'preapproved' => true,
+            'placeholderDouyinID' => $placeholder,
+        );
+    }
+
+    private static function generate_temporary_password() {
+        try {
+            $random = rtrim(strtr(base64_encode(random_bytes(18)), '+/', '-_'), '=');
+        } catch (Exception $error) {
+            return new WP_Error(
+                'fan_invitation_unavailable',
+                '暂时无法生成安全的临时密码。',
+                array('status' => 503)
+            );
+        }
+        return 'Tmp-' . $random . '-9!';
+    }
+
+    private static function reserve_invitation_douyin_id() {
+        try {
+            for ($attempt = 0; $attempt < 24; $attempt++) {
+                $placeholder = 'invite_' . bin2hex(random_bytes(12));
+                $existing = get_users(array(
+                    'number' => 1,
+                    'fields' => 'ids',
+                    'meta_key' => self::FAN_META_DOUYIN_ID,
+                    'meta_value' => $placeholder,
+                ));
+                if ($existing) { continue; }
+                $reservation = self::douyin_reservation_name($placeholder);
+                if (add_option($reservation, 'pending', '', false)) {
+                    return array('douyinID' => $placeholder, 'reservation' => $reservation);
+                }
+            }
+        } catch (Exception $error) {
+            // Return the generic availability error below.
+        }
+        return new WP_Error(
+            'fan_invitation_unavailable',
+            '暂时无法生成唯一的临时账号。',
+            array('status' => 503)
+        );
+    }
+
+    private static function create_single_fan_invitation($created_by) {
+        $identity_code = self::generate_unique_identity_code();
+        if (is_wp_error($identity_code)) { return $identity_code; }
+        $temporary_password = self::generate_temporary_password();
+        if (is_wp_error($temporary_password)) { return $temporary_password; }
+        $placeholder = self::reserve_invitation_douyin_id();
+        if (is_wp_error($placeholder)) { return $placeholder; }
+        try {
+            $login = 'fan_' . bin2hex(random_bytes(16));
+            $generation = bin2hex(random_bytes(16));
+        } catch (Exception $error) {
+            delete_option((string) $placeholder['reservation']);
+            return new WP_Error('fan_invitation_unavailable', '暂时无法创建临时账号。', array('status' => 503));
+        }
+
+        $created_timestamp = time();
+        $expires_timestamp = $created_timestamp + self::FAN_INVITATION_TTL;
+        $created_at = gmdate('c', $created_timestamp);
+        $expires_at = gmdate('c', $expires_timestamp);
+        $display_name = '受邀粉丝 ' . substr(str_replace('-', '', $identity_code), -4);
+        $user_id = wp_insert_user(array(
+            'user_login' => $login,
+            'user_pass' => $temporary_password,
+            'display_name' => $display_name,
+            'role' => 'subscriber',
+        ));
+        if (is_wp_error($user_id)) {
+            delete_option((string) $placeholder['reservation']);
+            return new WP_Error('fan_invitation_unavailable', '暂时无法创建临时账号。', array('status' => 503));
+        }
+
+        $uuid = wp_generate_uuid4();
+        $saved = self::update_user_meta_verified($user_id, self::FAN_META_UUID, $uuid)
+            && self::update_user_meta_verified($user_id, self::FAN_META_CODE, $identity_code)
+            && self::update_user_meta_verified(
+                $user_id,
+                self::FAN_META_DOUYIN_ID,
+                (string) $placeholder['douyinID']
+            )
+            && self::update_user_meta_verified(
+                $user_id,
+                self::FAN_META_PERMISSIONS,
+                array('gallery_full', 'video_view')
+            )
+            && self::update_user_meta_verified($user_id, self::FAN_META_STATUS, 'pending')
+            && self::update_user_meta_verified($user_id, self::FAN_META_CREDENTIAL_EPOCH, 1)
+            && self::update_user_meta_verified($user_id, self::FAN_META_INVITATION, array(
+                'createdAt' => $created_at,
+                'expiresAt' => $expires_at,
+                'createdBy' => (int) $created_by,
+                'generation' => $generation,
+                'preapproved' => true,
+                'placeholderDouyinID' => (string) $placeholder['douyinID'],
+            ))
+            && self::update_user_meta_verified($user_id, self::FAN_META_REVIEW, array(
+                'status' => 'preapproved',
+                'reviewedAt' => $created_at,
+                'reviewedBy' => (int) $created_by,
+            ));
+        if (!$saved || (!update_option((string) $placeholder['reservation'], (int) $user_id, false)
+            && (int) get_option((string) $placeholder['reservation'], 0) !== (int) $user_id)) {
+            self::remove_fan_user((int) $user_id, (string) $placeholder['reservation']);
+            return new WP_Error('fan_invitation_unavailable', '暂时无法创建临时账号。', array('status' => 503));
+        }
+        $cleanup_scheduled = wp_schedule_single_event(
+            $expires_timestamp + 60,
+            'yishu_cleanup_fan_invitation',
+            array((int) $user_id, $generation, (string) $placeholder['douyinID'], $expires_timestamp),
+            true
+        );
+        if (is_wp_error($cleanup_scheduled) || !$cleanup_scheduled) {
+            self::remove_fan_user((int) $user_id, (string) $placeholder['reservation']);
+            return new WP_Error('fan_invitation_unavailable', '暂时无法安排临时账号过期清理。', array('status' => 503));
+        }
+        return array(
+            'internalUserID' => (int) $user_id,
+            'reservation' => (string) $placeholder['reservation'],
+            'userID' => (string) $uuid,
+            'identityCode' => (string) $identity_code,
+            'temporaryPassword' => (string) $temporary_password,
+            'expiresAt' => $expires_at,
+        );
+    }
+
+    private static function update_user_meta_verified($user_id, $key, $value) {
+        $updated = update_user_meta((int) $user_id, (string) $key, $value);
+        return $updated !== false || get_user_meta((int) $user_id, (string) $key, true) === $value;
+    }
+
+    private static function fan_credential_epoch($user_id) {
+        global $wpdb;
+        $epoch = (int) self::fan_meta_from_database(
+            (int) $user_id,
+            self::FAN_META_CREDENTIAL_EPOCH,
+            0
+        );
+        if (!empty($wpdb->last_error)) { return 0; }
+        return $epoch > 0 ? $epoch : 1;
+    }
+
+    private static function advance_fan_credential_epoch($user_id) {
+        $current_epoch = self::fan_credential_epoch((int) $user_id);
+        if ($current_epoch <= 0) {
+            return new WP_Error('fan_credential_update_failed', '暂时无法保存账号安全状态。', array('status' => 503));
+        }
+        $epoch = $current_epoch + 1;
+        if (!self::update_user_meta_verified((int) $user_id, self::FAN_META_CREDENTIAL_EPOCH, $epoch)) {
+            return new WP_Error('fan_credential_update_failed', '暂时无法保存账号安全状态。', array('status' => 503));
+        }
+        return $epoch;
+    }
+
+    private static function failure_transient_name($bucket, $identity) {
+        return 'yishu_' . sanitize_key($bucket) . '_' . hash('sha256', (string) $identity);
+    }
+
+    private static function check_failure_limit($bucket, $identity, $limit) {
+        $count = (int) get_transient(self::failure_transient_name($bucket, $identity));
+        if ($count >= (int) $limit) {
+            return new WP_Error('fan_rate_limited', '尝试次数过多，请稍后再试。', array('status' => 429));
+        }
+        return true;
+    }
+
+    private static function record_failure($bucket, $identity, $window) {
+        $key = self::failure_transient_name($bucket, $identity);
+        $count = (int) get_transient($key);
+        if (!set_transient($key, $count + 1, max(60, (int) $window))) {
+            return new WP_Error('fan_rate_limit_unavailable', '账号服务暂时不可用，请稍后重试。', array('status' => 503));
+        }
+        return true;
+    }
+
+    private static function clear_failure_limit($bucket, $identity) {
+        delete_transient(self::failure_transient_name($bucket, $identity));
+    }
+
+    private static function acquire_fan_lock($user_id) {
+        global $wpdb;
+        if (!isset($wpdb) || !method_exists($wpdb, 'get_var') || !method_exists($wpdb, 'prepare')) {
+            return new WP_Error('fan_setup_busy', '账号安全锁暂时不可用。', array('status' => 503));
+        }
+        $name = 'yishu_fan_' . substr(
+            hash('sha256', home_url('/') . '|' . (int) $user_id),
+            0,
+            48
+        );
+        $acquired = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 0)', $name));
+        if ((string) $acquired === '1') { return $name; }
+        return new WP_Error('fan_setup_busy', '账号正在处理中，请稍后重试。', array('status' => 409));
+    }
+
+    private static function release_fan_lock($user_id, $lock_name) {
+        global $wpdb;
+        if (!is_string($lock_name) || !preg_match('/^yishu_fan_[a-f0-9]{48}$/', $lock_name)
+            || !isset($wpdb) || !method_exists($wpdb, 'get_var') || !method_exists($wpdb, 'prepare')) {
+            return;
+        }
+        $wpdb->get_var($wpdb->prepare('SELECT RELEASE_LOCK(%s)', $lock_name));
     }
 
     private static function validate_fan_display_name($display_name) {
@@ -726,10 +1542,29 @@ final class Shuzijun_App_Content_API {
         return $code;
     }
 
-    private static function issue_fan_session($user_id, $install_id) {
+    private static function issue_fan_session(
+        $user_id,
+        $install_id,
+        $scope = 'normal',
+        $ttl = self::FAN_SESSION_TTL
+    ) {
+        if (!in_array($scope, array('normal', 'onboarding'), true)) {
+            return new WP_Error('fan_session_scope_invalid', '暂时无法创建安全会话。', array('status' => 503));
+        }
+        $maximum_ttl = $scope === 'onboarding'
+            ? self::FAN_ONBOARDING_SESSION_TTL
+            : self::FAN_SESSION_TTL;
+        $ttl = (int) $ttl;
+        if ($ttl <= 0 || $ttl > $maximum_ttl) {
+            return new WP_Error('fan_session_ttl_invalid', '暂时无法创建安全会话。', array('status' => 503));
+        }
         $install_code = self::resolve_install_code((int) $user_id, $install_id);
         if (is_wp_error($install_code)) { return $install_code; }
-        $expires = time() + self::FAN_SESSION_TTL;
+        $expires = time() + $ttl;
+        $credential_epoch = self::fan_credential_epoch((int) $user_id);
+        if ($credential_epoch <= 0) {
+            return new WP_Error('fan_session_unavailable', '暂时无法创建安全会话，请稍后重试。', array('status' => 503));
+        }
         $token = '';
         $token_hash = '';
         $context = array();
@@ -742,6 +1577,8 @@ final class Shuzijun_App_Content_API {
                     'installHash' => hash('sha256', strtolower($install_id)),
                     'installCode' => $install_code,
                     'expires' => $expires,
+                    'scope' => $scope,
+                    'credentialEpoch' => $credential_epoch,
                 );
                 if (add_option(self::FAN_SESSION_OPTION_PREFIX . $token_hash, $context, '', false)) {
                     break;
@@ -790,7 +1627,22 @@ final class Shuzijun_App_Content_API {
             self::revoke_fan_session((int) $context['userID'], $token_hash);
             return new WP_Error('fan_session_invalid', '登录已失效，请重新登录。', array('status' => 401));
         }
+        // Tokens issued before credential epochs were introduced remain valid
+        // only for accounts that are still on their initial epoch. Every
+        // security-sensitive account transition advances the epoch.
+        $scope = isset($context['scope']) ? (string) $context['scope'] : 'normal';
+        $credential_epoch = isset($context['credentialEpoch'])
+            ? (int) $context['credentialEpoch']
+            : 1;
+        if (!in_array($scope, array('normal', 'onboarding'), true)
+            || $credential_epoch <= 0
+            || $credential_epoch !== self::fan_credential_epoch((int) $user->ID)) {
+            self::revoke_fan_session((int) $context['userID'], $token_hash);
+            return new WP_Error('fan_session_invalid', '登录已失效，请重新登录。', array('status' => 401));
+        }
         wp_set_current_user($user->ID);
+        $context['scope'] = $scope;
+        $context['credentialEpoch'] = $credential_epoch;
         $context['tokenHash'] = $token_hash;
         return $context;
     }
@@ -857,14 +1709,106 @@ final class Shuzijun_App_Content_API {
         }
     }
 
+    public static function cleanup_fan_invitation(
+        $user_id,
+        $generation,
+        $placeholder,
+        $expires_timestamp
+    ) {
+        $user_id = (int) $user_id;
+        $generation = (string) $generation;
+        $placeholder = (string) $placeholder;
+        $expires_timestamp = (int) $expires_timestamp;
+        if ($user_id <= 0 || !preg_match('/^[a-f0-9]{32}$/', $generation)
+            || !self::is_invitation_douyin_id($placeholder) || $expires_timestamp <= 0) {
+            return;
+        }
+        $lock_name = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_name)) {
+            wp_schedule_single_event(
+                time() + 300,
+                'yishu_cleanup_fan_invitation',
+                array($user_id, $generation, $placeholder, $expires_timestamp)
+            );
+            return;
+        }
+        try {
+            global $wpdb;
+            $user_exists = (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT ID FROM {$wpdb->users} WHERE ID = %d LIMIT 1",
+                $user_id
+            ));
+            $invitation = self::normalize_fan_invitation(
+                self::fan_meta_from_database($user_id, self::FAN_META_INVITATION, null)
+            );
+            if ($user_exists !== $user_id || is_wp_error($invitation)
+                || !hash_equals((string) $invitation['generation'], $generation)
+                || !hash_equals((string) $invitation['placeholderDouyinID'], $placeholder)
+                || (int) $invitation['expiresTimestamp'] !== $expires_timestamp
+                || (string) self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_DOUYIN_ID,
+                    ''
+                ) !== $placeholder
+                || (string) self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_STATUS,
+                    ''
+                ) === 'active') {
+                return;
+            }
+            if ($expires_timestamp > time()) {
+                wp_schedule_single_event(
+                    $expires_timestamp + 60,
+                    'yishu_cleanup_fan_invitation',
+                    array($user_id, $generation, $placeholder, $expires_timestamp)
+                );
+                return;
+            }
+            if (!self::remove_fan_user($user_id, self::douyin_reservation_name($placeholder))) {
+                wp_schedule_single_event(
+                    time() + 300,
+                    'yishu_cleanup_fan_invitation',
+                    array($user_id, $generation, $placeholder, $expires_timestamp)
+                );
+            }
+        } finally {
+            self::release_fan_lock($user_id, $lock_name);
+        }
+    }
+
     public static function prepare_fan_user_deletion($user_id) {
         $user_id = (int) $user_id;
         if ($user_id <= 0 || !get_user_meta($user_id, self::FAN_META_UUID, true)) { return; }
         self::revoke_all_fan_sessions($user_id);
         $douyin_id = (string) get_user_meta($user_id, self::FAN_META_DOUYIN_ID, true);
         if ($douyin_id) {
-            delete_option(self::FAN_DOUYIN_OPTION_PREFIX . hash('sha256', $douyin_id));
+            delete_option(self::douyin_reservation_name($douyin_id));
         }
+        $invitation = get_user_meta($user_id, self::FAN_META_INVITATION, true);
+        if (is_array($invitation) && isset($invitation['placeholderDouyinID'])
+            && self::is_invitation_douyin_id((string) $invitation['placeholderDouyinID'])) {
+            delete_option(self::douyin_reservation_name((string) $invitation['placeholderDouyinID']));
+        }
+    }
+
+    private static function fan_invitation_profile_fields($user_id) {
+        $raw_invitation = get_user_meta((int) $user_id, self::FAN_META_INVITATION, true);
+        if (empty($raw_invitation)) {
+            return array(
+                'requiresAccountSetup' => false,
+                'invitationExpiresAt' => null,
+            );
+        }
+        $invitation = self::normalize_fan_invitation($raw_invitation);
+        return array(
+            // Malformed invitation metadata fails closed: the account cannot
+            // silently become a normal content session.
+            'requiresAccountSetup' => true,
+            'invitationExpiresAt' => is_wp_error($invitation)
+                ? null
+                : (string) $invitation['expiresAt'],
+        );
     }
 
     private static function fan_profile($user_id, $context) {
@@ -872,7 +1816,7 @@ final class Shuzijun_App_Content_API {
         $permissions = get_user_meta($user_id, self::FAN_META_PERMISSIONS, true);
         $permissions = self::sanitize_fan_permissions(is_array($permissions) ? $permissions : array());
         if (is_wp_error($permissions)) { $permissions = array(); }
-        return array(
+        return array_merge(array(
             'userID' => (string) get_user_meta($user_id, self::FAN_META_UUID, true),
             'identityCode' => (string) get_user_meta($user_id, self::FAN_META_CODE, true),
             'displayName' => $user instanceof WP_User ? (string) $user->display_name : '',
@@ -881,7 +1825,7 @@ final class Shuzijun_App_Content_API {
             'permissions' => $permissions,
             'status' => (string) get_user_meta($user_id, self::FAN_META_STATUS, true),
             'sessionExpiresAt' => gmdate('c', (int) $context['expires']),
-        );
+        ), self::fan_invitation_profile_fields((int) $user_id));
     }
 
     private static function fan_auth_response($user_id, $session, $status = 200) {
@@ -902,7 +1846,7 @@ final class Shuzijun_App_Content_API {
         $reviewed_at = is_array($review) && !empty($review['reviewedAt'])
             ? strtotime((string) $review['reviewedAt'])
             : false;
-        return array(
+        return array_merge(array(
             'userID' => (string) get_user_meta($user->ID, self::FAN_META_UUID, true),
             'identityCode' => (string) get_user_meta($user->ID, self::FAN_META_CODE, true),
             'displayName' => (string) $user->display_name,
@@ -911,23 +1855,24 @@ final class Shuzijun_App_Content_API {
             'status' => (string) get_user_meta($user->ID, self::FAN_META_STATUS, true),
             'registeredAt' => gmdate('c', $registered ? $registered : time()),
             'reviewedAt' => $reviewed_at ? gmdate('c', $reviewed_at) : null,
-        );
+        ), self::fan_invitation_profile_fields((int) $user->ID));
     }
 
     public static function secure_rest_response($result, $server, $request) {
         if (!$request instanceof WP_REST_Request || strpos($request->get_route(), '/shuzijun/v1/') !== 0) {
             return $result;
         }
-        if (is_wp_error($result)) { return $result; }
-        $response = rest_ensure_response($result);
+        $response = is_wp_error($result)
+            ? rest_convert_error_to_response($result)
+            : rest_ensure_response($result);
         $response->header('X-Content-Type-Options', 'nosniff');
         $response->header('X-Frame-Options', 'DENY');
         $response->header('Referrer-Policy', 'no-referrer');
         $response->header('X-Robots-Tag', 'noindex, nofollow');
         $response->header('Cache-Control', 'private, no-store, max-age=0');
+        $response->header('Pragma', 'no-cache');
         if ($request->get_route() === '/shuzijun/v1/app-content') {
             $response->header('Vary', 'Authorization, X-Yishu-Install-ID');
-            $response->header('Pragma', 'no-cache');
         }
         return $response;
     }

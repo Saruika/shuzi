@@ -98,6 +98,52 @@ enum AdminUploadPolicy {
     }
 }
 
+struct AdminFanInvitation: Codable, Identifiable, Equatable {
+    let userID: String
+    let identityCode: String
+    let temporaryPassword: String
+    let expiresAt: Date
+    let requiresAccountSetup: Bool
+
+    var id: String { userID }
+}
+
+struct AdminFanInvitationResponse: Codable, Equatable {
+    let invitations: [AdminFanInvitation]
+}
+
+enum AdminFanInvitationValidation {
+    static let allowedCount = 1...5
+
+    static func isValid(_ invitation: AdminFanInvitation, now: Date = Date()) -> Bool {
+        guard let uuid = UUID(uuidString: invitation.userID) else { return false }
+        return uuid.uuidString.lowercased() == invitation.userID.lowercased()
+            && invitation.userID == invitation.userID.lowercased()
+            && FanAccountValidation.normalizedIdentityCode(invitation.identityCode)
+                == invitation.identityCode
+            && FanAccountValidation.isValidInvitationTemporaryPassword(
+                invitation.temporaryPassword
+            )
+            && invitation.expiresAt > now
+            && invitation.requiresAccountSetup
+    }
+
+    static func isValid(
+        _ response: AdminFanInvitationResponse,
+        requestedCount: Int,
+        now: Date = Date()
+    ) -> Bool {
+        guard allowedCount.contains(requestedCount),
+              response.invitations.count == requestedCount,
+              response.invitations.allSatisfy({ isValid($0, now: now) }) else {
+            return false
+        }
+        return Set(response.invitations.map(\.userID)).count == requestedCount
+            && Set(response.invitations.map(\.identityCode)).count == requestedCount
+            && Set(response.invitations.map(\.temporaryPassword)).count == requestedCount
+    }
+}
+
 @MainActor
 final class AdminSessionStore: ObservableObject {
     private static let sessionLifetime: TimeInterval = 5 * 60
@@ -337,35 +383,52 @@ final class AdminSessionStore: ObservableObject {
               Set(directory.users.map(\.userID)).count == directory.users.count,
               Set(directory.permissionCatalog.map(\.code)).count
                 == directory.permissionCatalog.count,
-              directory.users.allSatisfy({ user in
-                  UUID(uuidString: user.userID) != nil
-                      && FanAccountValidation.normalizedIdentityCode(user.identityCode)
-                        == user.identityCode
-                      && FanAccountValidation.normalizedDouyinID(user.douyinID)
-                        == user.douyinID
-                      && FanAccountStatus(rawValue: user.status) != nil
-              }) else {
+              directory.users.allSatisfy(FanAccountValidation.isValidAdminFanUser) else {
             throw AdminAPIError.invalidResponse
         }
         return directory
     }
 
+    func createFanInvitations(count: Int) async throws -> [AdminFanInvitation] {
+        guard AdminFanInvitationValidation.allowedCount.contains(count) else {
+            throw AdminAPIError.invalidResponse
+        }
+        let body = try JSONEncoder().encode(AdminFanInvitationRequest(count: count))
+        let response: AdminFanInvitationResponse = try await authorizedJSON(
+            path: "shuzijun/v1/app-admin/fans/invitations",
+            method: "POST",
+            body: body
+        )
+        guard AdminFanInvitationValidation.isValid(
+            response,
+            requestedCount: count
+        ) else {
+            throw AdminAPIError.invalidResponse
+        }
+        return response.invitations
+    }
+
     func updateFanAccess(
         userID: String,
-        permissions: [String],
-        status: String
+        permissions: [String]? = nil,
+        status: String? = nil
     ) async throws -> AdminFanUser {
+        let permissionsAreValid = permissions.map { values in
+            values.count <= 20
+                && Set(values).count == values.count
+                && values.allSatisfy { permission in
+                    permission.range(
+                        of: #"^[a-z][a-z0-9_]{0,63}$"#,
+                        options: .regularExpression
+                    ) != nil
+                }
+        } ?? true
+        let statusIsValid = status.map { FanAccountStatus(rawValue: $0) != nil } ?? true
         guard let uuid = UUID(uuidString: userID)?.uuidString.lowercased(),
               uuid == userID.lowercased(),
-              permissions.count <= 20,
-              Set(permissions).count == permissions.count,
-              permissions.allSatisfy({ permission in
-                  permission.range(
-                    of: #"^[a-z][a-z0-9_]{0,63}$"#,
-                    options: .regularExpression
-                  ) != nil
-              }),
-              FanAccountStatus(rawValue: status) != nil else {
+              permissions != nil || status != nil,
+              permissionsAreValid,
+              statusIsValid else {
             throw AdminAPIError.invalidResponse
         }
         let body = try JSONEncoder().encode(
@@ -376,7 +439,8 @@ final class AdminSessionStore: ObservableObject {
             method: "POST",
             body: body
         )
-        guard response.user.userID.lowercased() == uuid else {
+        guard response.user.userID.lowercased() == uuid,
+              FanAccountValidation.isValidAdminFanUser(response.user) else {
             throw AdminAPIError.invalidResponse
         }
         return response.user
@@ -597,9 +661,13 @@ private struct CreatePortfolioRequest: Encodable {
     let eyebrow: String
 }
 
-private struct AdminFanAccessUpdate: Encodable {
-    let permissions: [String]
-    let status: String
+struct AdminFanAccessUpdate: Encodable {
+    let permissions: [String]?
+    let status: String?
+}
+
+private struct AdminFanInvitationRequest: Encodable {
+    let count: Int
 }
 
 private struct AdminFanAccessUpdateResponse: Decodable {

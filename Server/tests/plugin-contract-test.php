@@ -151,6 +151,141 @@ $unknown_permission = invoke_plugin_method(
 );
 expect_error_code('fan_permission_unknown', $unknown_permission, '粉丝权限不得提权到内容管理');
 
+$temporary_password = invoke_plugin_method('generate_temporary_password');
+expect_true(
+    is_string($temporary_password)
+        && preg_match('/^Tmp-[A-Za-z0-9_-]{24}-9!$/', $temporary_password) === 1,
+    '临时密码必须使用固定强随机契约'
+);
+expect_true(
+    invoke_plugin_method('is_invitation_douyin_id', array('invite_' . str_repeat('a', 24))) === true
+        && invoke_plugin_method('is_invitation_douyin_id', array('invite_' . str_repeat('a', 23))) === false,
+    '邀请占位抖音 ID 必须是 invite_ 加 24 位小写十六进制'
+);
+$invitation_created = time() - 60;
+$normalized_invitation = invoke_plugin_method('normalize_fan_invitation', array(array(
+    'createdAt' => gmdate('c', $invitation_created),
+    'expiresAt' => gmdate('c', $invitation_created + 86400),
+    'createdBy' => 1,
+    'generation' => str_repeat('d', 32),
+    'preapproved' => true,
+    'placeholderDouyinID' => 'invite_' . str_repeat('b', 24),
+)));
+expect_true(
+    is_array($normalized_invitation)
+        && $normalized_invitation['expiresTimestamp'] - $normalized_invitation['createdTimestamp'] === 86400,
+    '管理员邀请必须严格限定 24 小时'
+);
+$overlong_invitation = invoke_plugin_method('normalize_fan_invitation', array(array(
+    'createdAt' => gmdate('c', $invitation_created),
+    'expiresAt' => gmdate('c', $invitation_created + 86401),
+    'createdBy' => 1,
+    'generation' => str_repeat('e', 32),
+    'preapproved' => true,
+    'placeholderDouyinID' => 'invite_' . str_repeat('c', 24),
+)));
+expect_error_code('fan_invitation_invalid', $overlong_invitation, '邀请有效期不得超过 24 小时');
+
+$invitation_meta_start = strpos(
+    $plugin_source,
+    'self::FAN_META_INVITATION, array(',
+    strpos($plugin_source, 'private static function create_single_fan_invitation')
+);
+$invitation_meta_end = $invitation_meta_start === false
+    ? false
+    : strpos($plugin_source, 'self::FAN_META_REVIEW, array(', $invitation_meta_start);
+$invitation_meta_source = ($invitation_meta_start === false || $invitation_meta_end === false)
+    ? ''
+    : substr($plugin_source, $invitation_meta_start, $invitation_meta_end - $invitation_meta_start);
+expect_true(
+    strpos($plugin_source, 'Version: 1.5.6') !== false
+        && Shuzijun_App_Content_API::FAN_CAPABILITY === 'manage_yishu_fan_accounts'
+        && Shuzijun_App_Content_API::FAN_INVITATION_TTL === 86400
+        && Shuzijun_App_Content_API::FAN_ONBOARDING_SESSION_TTL === 600
+        && strpos($plugin_source, "'/app-admin/fans/invitations'") !== false
+        && substr_count(
+            $plugin_source,
+            "'permission_callback' => array(__CLASS__, 'can_manage_fans')"
+        ) >= 3
+        && strpos($plugin_source, "'permission_callback' => array(__CLASS__, 'can_complete_fan_invitation')") !== false,
+    '邀请与审批路由必须使用独立粉丝管理权限'
+);
+expect_true(
+    strpos(
+        $plugin_source,
+        "add_filter('wp_authenticate_user', array(__CLASS__, 'block_fan_wordpress_login')"
+    ) !== false
+        && strpos($plugin_source, "'fan_wordpress_login_restricted'") !== false
+        && strpos($plugin_source, 'self::FAN_META_UUID, true') !== false
+        && strpos($plugin_source, 'user_can($user, self::CAPABILITY)') !== false
+        && strpos($plugin_source, 'user_can($user, self::FAN_CAPABILITY)') !== false,
+    '粉丝账号不得使用 WordPress 常规登录，subscriber 不得获得 Application Password'
+);
+expect_true(
+    $invitation_meta_source !== ''
+        && strpos($invitation_meta_source, 'temporaryPassword') === false
+        && strpos($invitation_meta_source, "'createdAt'") !== false
+        && strpos($invitation_meta_source, "'expiresAt'") !== false
+        && strpos($invitation_meta_source, "'createdBy'") !== false
+        && strpos($invitation_meta_source, "'generation'") !== false
+        && strpos($invitation_meta_source, "'preapproved'") !== false,
+    '服务端只能一次返回临时密码，不得将明文写入邀请 meta'
+);
+expect_true(
+    strpos($plugin_source, "'scope' => \$scope") !== false
+        && strpos($plugin_source, "'credentialEpoch' => \$credential_epoch") !== false
+        && strpos($plugin_source, "\$credential_epoch !== self::fan_credential_epoch") !== false
+        && strpos($plugin_source, "(\$context['scope'] ?? '') !== 'normal'") !== false
+        && substr_count($plugin_source, "'requiresAccountSetup'") >= 2
+        && substr_count($plugin_source, "'invitationExpiresAt'") >= 2,
+    '邀请会话必须有限权 scope、逐请求凭据世代校验和明确的资料状态'
+);
+expect_true(
+    strpos($plugin_source, "add_action('yishu_cleanup_fan_invitation'") !== false
+        && strpos($plugin_source, "'yishu_cleanup_fan_invitation'") !== false
+        && strpos($plugin_source, "['generation']") !== false
+        && strpos($plugin_source, 'wp_schedule_single_event') !== false,
+    '每个邀请必须带不可变 generation 并安排自动过期清理'
+);
+expect_true(
+    strpos($plugin_source, 'SELECT GET_LOCK(%s, 0)') !== false
+        && strpos($plugin_source, 'SELECT RELEASE_LOCK(%s)') !== false
+        && strpos($plugin_source, 'START TRANSACTION') !== false
+        && strpos($plugin_source, "query('COMMIT')") !== false
+        && strpos($plugin_source, "query('ROLLBACK')") !== false
+        && strpos($plugin_source, "\$placeholder = (string) \$invitation['placeholderDouyinID']") !== false
+        && substr_count($plugin_source, 'reservation_owner_from_database') >= 3,
+    '邀请领取必须使用原子数据库锁、事务和不可变占位预留'
+);
+$transaction_start = strpos($plugin_source, "query('START TRANSACTION')");
+$transaction_commit = $transaction_start === false
+    ? false
+    : strpos($plugin_source, "query('COMMIT')", $transaction_start);
+$transaction_source = ($transaction_start === false || $transaction_commit === false)
+    ? ''
+    : substr($plugin_source, $transaction_start, $transaction_commit - $transaction_start);
+expect_true(
+    $transaction_source !== ''
+        && strpos($transaction_source, 'set_fan_meta_in_transaction') !== false
+        && strpos($transaction_source, 'delete_fan_meta_in_transaction') !== false
+        && strpos($transaction_source, 'update_user_meta(') === false
+        && strpos($transaction_source, 'delete_user_meta(') === false
+        && strpos($transaction_source, 'update_option(') === false
+        && strpos($transaction_source, 'delete_option(') === false
+        && strpos($transaction_source, 'get_user_meta(') === false
+        && strpos($transaction_source, 'get_option(') === false
+        && strpos($transaction_source, 'wp_update_user(') === false
+        && strpos($transaction_source, 'wp_set_password(') === false
+        && strpos($transaction_source, 'revoke_all_fan_sessions(') === false,
+    '邀请事务内只能直接写 InnoDB，不得在 COMMIT 前写穿 Redis 对象缓存'
+);
+expect_true(
+    strpos($plugin_source, "'Cache-Control', 'private, no-store, max-age=0'") !== false
+        && strpos($plugin_source, "'Pragma', 'no-cache'") !== false
+        && strpos($plugin_source, 'rest_convert_error_to_response') !== false,
+    '邀请凭据成功和错误响应都必须禁止缓存'
+);
+
 $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
 $_SERVER['HTTP_X_YISHU_CLIENT_IP'] = '203.0.113.24';
 expect_same(

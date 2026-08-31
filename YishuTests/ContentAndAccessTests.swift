@@ -438,6 +438,266 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(FanAccountValidation.isValidPassword(" fansafety2026"))
     }
 
+    func testActiveInvitationAccountStillFailsClosed() {
+        let profile = FanProfile(
+            userID: UUID().uuidString.lowercased(),
+            identityCode: "HS-ABCD-2345",
+            displayName: "待完成设置",
+            douyinID: "invite_0123456789abcdef01234567",
+            installationCode: "IN-ABC-234",
+            permissions: FanPermission.allCases.map(\.rawValue),
+            status: FanAccountStatus.active.rawValue,
+            sessionExpiresAt: Date().addingTimeInterval(600),
+            requiresAccountSetup: true,
+            invitationExpiresAt: Date().addingTimeInterval(3_600)
+        )
+
+        XCTAssertTrue(profile.hasConsistentAccountSetupState)
+        XCTAssertFalse(profile.isApproved)
+        XCTAssertFalse(profile.hasPermission(.galleryFull))
+        XCTAssertFalse(profile.hasPermission(.videoView))
+        XCTAssertFalse(profile.hasPermission(.earlyAccess))
+
+        let contradictoryProfile = FanProfile(
+            userID: profile.userID,
+            identityCode: profile.identityCode,
+            displayName: profile.displayName,
+            douyinID: profile.douyinID,
+            installationCode: profile.installationCode,
+            permissions: profile.permissions,
+            status: profile.status,
+            sessionExpiresAt: profile.sessionExpiresAt,
+            requiresAccountSetup: false,
+            invitationExpiresAt: nil
+        )
+        XCTAssertFalse(contradictoryProfile.hasConsistentAccountSetupState)
+        XCTAssertFalse(contradictoryProfile.isApproved)
+    }
+
+    func testSessionExpiryFailsClosedAfterTimeAdvanceEvenWhenRefreshIsUnavailable() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let profile = FanProfile(
+            userID: UUID().uuidString.lowercased(),
+            identityCode: "HS-ABCD-2345",
+            displayName: "已批准粉丝",
+            douyinID: "approved_fan",
+            installationCode: "IN-ABC-234",
+            permissions: FanPermission.allCases.map(\.rawValue),
+            status: FanAccountStatus.active.rawValue,
+            sessionExpiresAt: now.addingTimeInterval(60)
+        )
+
+        XCTAssertTrue(profile.isApproved(at: now))
+        XCTAssertTrue(profile.hasPermission(.galleryFull, at: now))
+
+        // A failed refresh leaves the last decoded value in memory. Access is
+        // still decided from the local expiry, not from the stale active flag.
+        let retainedAfterNetworkFailure = profile
+        let afterExpiry = now.addingTimeInterval(61)
+        XCTAssertFalse(retainedAfterNetworkFailure.isApproved(at: afterExpiry))
+        XCTAssertFalse(retainedAfterNetworkFailure.hasPermission(.galleryFull, at: afterExpiry))
+        XCTAssertFalse(retainedAfterNetworkFailure.hasPermission(.videoView, at: afterExpiry))
+    }
+
+    func testAdminAccessPatchEncodesOnlyTheFieldBeingChanged() throws {
+        let statusData = try JSONEncoder().encode(
+            AdminFanAccessUpdate(permissions: nil, status: FanAccountStatus.suspended.rawValue)
+        )
+        let statusObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: statusData) as? [String: Any]
+        )
+        XCTAssertEqual(Set(statusObject.keys), ["status"])
+        XCTAssertEqual(statusObject["status"] as? String, FanAccountStatus.suspended.rawValue)
+
+        let permissionData = try JSONEncoder().encode(
+            AdminFanAccessUpdate(permissions: [FanPermission.galleryFull.rawValue], status: nil)
+        )
+        let permissionObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: permissionData) as? [String: Any]
+        )
+        XCTAssertEqual(Set(permissionObject.keys), ["permissions"])
+        XCTAssertEqual(
+            permissionObject["permissions"] as? [String],
+            [FanPermission.galleryFull.rawValue]
+        )
+    }
+
+    func testLegacyFanModelsDecodeAsConfiguredAccounts() throws {
+        let profileJSON = Data(
+            """
+            {
+              "userID":"00000000-0000-4000-8000-000000000001",
+              "identityCode":"HS-ABCD-2345",
+              "displayName":"旧版粉丝",
+              "douyinID":"legacy_fan",
+              "installationCode":"IN-ABC-234",
+              "permissions":["gallery_full"],
+              "status":"active",
+              "sessionExpiresAt":"2099-01-01T00:00:00Z"
+            }
+            """.utf8
+        )
+        let adminJSON = Data(
+            """
+            {
+              "userID":"00000000-0000-4000-8000-000000000001",
+              "identityCode":"HS-ABCD-2345",
+              "displayName":"旧版粉丝",
+              "douyinID":"legacy_fan",
+              "permissions":["gallery_full"],
+              "status":"active",
+              "registeredAt":"2026-08-31T00:00:00Z",
+              "reviewedAt":null
+            }
+            """.utf8
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let profile = try decoder.decode(FanProfile.self, from: profileJSON)
+        let admin = try decoder.decode(AdminFanUser.self, from: adminJSON)
+
+        XCTAssertFalse(profile.requiresAccountSetup)
+        XCTAssertNil(profile.invitationExpiresAt)
+        XCTAssertTrue(profile.isApproved)
+        XCTAssertFalse(admin.requiresAccountSetup)
+        XCTAssertNil(admin.invitationExpiresAt)
+        XCTAssertTrue(FanAccountValidation.isValidAdminFanUser(admin))
+
+        let invitedAdmin = AdminFanUser(
+            userID: "00000000-0000-4000-8000-000000000002",
+            identityCode: "HS-BCDE-3456",
+            displayName: "待完成设置",
+            douyinID: "invite_0123456789abcdef01234567",
+            permissions: [],
+            status: FanAccountStatus.pending.rawValue,
+            registeredAt: Date(),
+            reviewedAt: nil,
+            requiresAccountSetup: true,
+            invitationExpiresAt: Date().addingTimeInterval(3_600)
+        )
+        XCTAssertTrue(FanAccountValidation.isValidAdminFanUser(invitedAdmin))
+
+        let unmarkedPlaceholder = AdminFanUser(
+            userID: invitedAdmin.userID,
+            identityCode: invitedAdmin.identityCode,
+            displayName: invitedAdmin.displayName,
+            douyinID: invitedAdmin.douyinID,
+            permissions: invitedAdmin.permissions,
+            status: invitedAdmin.status,
+            registeredAt: invitedAdmin.registeredAt,
+            reviewedAt: nil
+        )
+        XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(unmarkedPlaceholder))
+    }
+
+    func testInvitationResponseValidationRejectsMalformedOrReplayedBatchShapes() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let data = Data(
+            """
+            {
+              "invitations":[{
+                "userID":"00000000-0000-4000-8000-000000000001",
+                "identityCode":"HS-ABCD-2345",
+                "temporaryPassword":"Tmp-abcdefghijklmnopqrstuvwx-9!",
+                "expiresAt":"2099-01-01T00:00:00Z",
+                "requiresAccountSetup":true
+              }]
+            }
+            """.utf8
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(AdminFanInvitationResponse.self, from: data)
+        let invitation = try XCTUnwrap(response.invitations.first)
+
+        XCTAssertTrue(
+            AdminFanInvitationValidation.isValid(
+                response,
+                requestedCount: 1,
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            AdminFanInvitationValidation.isValid(
+                response,
+                requestedCount: 2,
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            AdminFanInvitationValidation.isValid(
+                AdminFanInvitationResponse(
+                    invitations: [invitation, invitation]
+                ),
+                requestedCount: 2,
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            AdminFanInvitationValidation.isValid(
+                AdminFanInvitationResponse(
+                    invitations: [
+                        AdminFanInvitation(
+                            userID: invitation.userID,
+                            identityCode: invitation.identityCode,
+                            temporaryPassword: invitation.temporaryPassword,
+                            expiresAt: now,
+                            requiresAccountSetup: true
+                        ),
+                    ]
+                ),
+                requestedCount: 1,
+                now: now
+            )
+        )
+    }
+
+    func testRequiredSetupValidationRequiresRealIdentityAndPasswordRotation() throws {
+        let temporaryPassword = "Tmp-abcdefghijklmnopqrstuvwx-9!"
+        let valid = try FanAccountValidation.validatedRequiredSetup(
+            displayName: "  测试粉丝  ",
+            douyinID: " @Real_Fan ",
+            currentPassword: temporaryPassword,
+            newPassword: "new-password-2026",
+            newPasswordConfirmation: "new-password-2026",
+            acceptedDataUse: true
+        )
+        XCTAssertEqual(valid.displayName, "测试粉丝")
+        XCTAssertEqual(valid.douyinID, "real_fan")
+
+        XCTAssertThrowsError(
+            try FanAccountValidation.validatedRequiredSetup(
+                displayName: "测试粉丝",
+                douyinID: "invite_0123456789abcdef01234567",
+                currentPassword: temporaryPassword,
+                newPassword: "new-password-2026",
+                newPasswordConfirmation: "new-password-2026",
+                acceptedDataUse: true
+            )
+        )
+        XCTAssertThrowsError(
+            try FanAccountValidation.validatedRequiredSetup(
+                displayName: "测试粉丝",
+                douyinID: "real_fan",
+                currentPassword: temporaryPassword,
+                newPassword: temporaryPassword,
+                newPasswordConfirmation: temporaryPassword,
+                acceptedDataUse: true
+            )
+        )
+        XCTAssertThrowsError(
+            try FanAccountValidation.validatedRequiredSetup(
+                displayName: "测试粉丝",
+                douyinID: "real_fan",
+                currentPassword: temporaryPassword,
+                newPassword: "new-password-2026",
+                newPasswordConfirmation: "new-password-2026",
+                acceptedDataUse: false
+            )
+        )
+    }
+
     func testFanPermissionsAreExplicitAndUnknownValuesStayInactive() {
         let profile = FanProfile(
             userID: UUID().uuidString.lowercased(),

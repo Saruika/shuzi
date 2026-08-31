@@ -1,12 +1,16 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct AppAccessGateView: View {
     @State private var presentsAdminAccess = false
 
     var body: some View {
         NavigationStack {
-            FanAccountView(isAccessGate: true)
+            FanAccountView(
+                isAccessGate: true,
+                externalAdminAccessPresented: presentsAdminAccess
+            )
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
@@ -27,7 +31,9 @@ struct AppAccessGateView: View {
 
 struct FanAccountView: View {
     @EnvironmentObject private var account: FanAccountStore
+    @Environment(\.scenePhase) private var scenePhase
     let isAccessGate: Bool
+    let externalAdminAccessPresented: Bool
     @State private var mode: AuthenticationMode = .register
     @State private var displayName = ""
     @State private var douyinID = ""
@@ -36,23 +42,37 @@ struct FanAccountView: View {
     @State private var acceptedDataUse = false
     @State private var identityCode = ""
     @State private var loginPassword = ""
+    @State private var invitedDisplayName = ""
+    @State private var invitedDouyinID = ""
+    @State private var currentTemporaryPassword = ""
+    @State private var invitedNewPassword = ""
+    @State private var invitedPasswordConfirmation = ""
+    @State private var acceptedInvitationDataUse = false
     @State private var copiedLabel: String?
     @State private var showDeleteConfirmation = false
     @State private var presentsAdminAccess = false
 
-    init(isAccessGate: Bool = false) {
+    init(
+        isAccessGate: Bool = false,
+        externalAdminAccessPresented: Bool = false
+    ) {
         self.isAccessGate = isAccessGate
+        self.externalAdminAccessPresented = externalAdminAccessPresented
     }
 
     var body: some View {
         ZStack {
             AppTheme.ink.ignoresSafeArea()
             ScrollView {
-                if let profile = account.profile {
-                    profileContent(profile)
-                } else {
-                    authenticationContent
+                Group {
+                    if let profile = account.profile {
+                        profileContent(profile)
+                    } else {
+                        authenticationContent
+                    }
                 }
+                .frame(maxWidth: 680, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
             .scrollIndicators(.hidden)
         }
@@ -61,8 +81,32 @@ struct FanAccountView: View {
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .task { await account.restoreSession() }
-        .task(id: account.profile?.status) {
+        .task(id: "\(account.profile?.status ?? "none"):\(account.profile?.requiresAccountSetup == true)") {
             await monitorPendingApproval()
+        }
+        .onChange(of: account.profile?.userID) { oldUserID, newUserID in
+            guard oldUserID != newUserID else { return }
+            clearAuthenticationPasswords()
+            clearInvitationSetupFields()
+            copiedLabel = nil
+        }
+        .onChange(of: account.profile?.requiresAccountSetup) { _, requiresSetup in
+            if requiresSetup != true { clearInvitationSetupFields() }
+        }
+        .onChange(of: mode) { _, _ in
+            clearAuthenticationPasswords()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { clearAllPasswords() }
+        }
+        .onChange(of: account.isAuthenticated) { _, authenticated in
+            if !authenticated { clearAllPasswords() }
+        }
+        .onChange(of: presentsAdminAccess) { _, presented in
+            if presented { clearAllPasswords() }
+        }
+        .onChange(of: externalAdminAccessPresented) { _, presented in
+            if presented { clearAllPasswords() }
         }
         .confirmationDialog(
             "永久删除粉丝账号？",
@@ -249,7 +293,9 @@ struct FanAccountView: View {
     private func profileContent(_ profile: FanProfile) -> some View {
         VStack(alignment: .leading, spacing: 26) {
             VStack(alignment: .leading, spacing: 9) {
-                Text(profile.status == FanAccountStatus.active.rawValue ? "APPROVED MEMBER" : "ACCESS REVIEW")
+                Text(profile.requiresAccountSetup
+                     ? "SECURE ACCOUNT SETUP"
+                     : (profile.status == FanAccountStatus.active.rawValue ? "APPROVED MEMBER" : "ACCESS REVIEW"))
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
@@ -257,52 +303,61 @@ struct FanAccountView: View {
                     .font(.editorial(38))
                     .accessibilityIdentifier("fan-account-heading")
                 Label(
-                    statusTitle(profile.status),
-                    systemImage: statusIcon(profile.status)
+                    profile.requiresAccountSetup ? "完成本人设置前不会开放 App 内容" : statusTitle(profile.status),
+                    systemImage: profile.requiresAccountSetup ? "key.horizontal.fill" : statusIcon(profile.status)
                 )
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(profile.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
-                    .accessibilityIdentifier("fan-access-status-\(profile.status)")
+                    .foregroundStyle(
+                        !profile.requiresAccountSetup && profile.status == FanAccountStatus.active.rawValue
+                            ? AppTheme.gold : .orange
+                    )
+                    .accessibilityIdentifier(
+                        profile.requiresAccountSetup ? "fan-account-setup-required" : "fan-access-status-\(profile.status)"
+                    )
             }
 
-            if profile.status != FanAccountStatus.active.rawValue {
-                approvalStatusCard(profile.status)
-            }
+            if profile.requiresAccountSetup {
+                requiredAccountSetupForm(profile)
+            } else {
+                if profile.status != FanAccountStatus.active.rawValue {
+                    approvalStatusCard(profile.status)
+                }
 
-            VStack(spacing: 0) {
-                identityRow("粉丝身份码", value: profile.identityCode, copyable: true)
-                Divider().overlay(.white.opacity(0.08))
-                identityRow("抖音 ID", value: profile.douyinID, copyable: false)
-                Divider().overlay(.white.opacity(0.08))
-                identityRow("本机安装码", value: profile.installationCode, copyable: true)
-                Divider().overlay(.white.opacity(0.08))
-                identityRow("身份记录 UUID", value: profile.userID, copyable: true)
-            }
-            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+                VStack(spacing: 0) {
+                    identityRow("粉丝身份码", value: profile.identityCode, copyable: true)
+                    Divider().overlay(.white.opacity(0.08))
+                    identityRow("抖音 ID", value: profile.douyinID, copyable: false)
+                    Divider().overlay(.white.opacity(0.08))
+                    identityRow("本机安装码", value: profile.installationCode, copyable: true)
+                    Divider().overlay(.white.opacity(0.08))
+                    identityRow("身份记录 UUID", value: profile.userID, copyable: true)
+                }
+                .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
 
-            if profile.status == FanAccountStatus.active.rawValue
-                || profile.status == FanAccountStatus.suspended.rawValue {
-                VStack(alignment: .leading, spacing: 15) {
-                    HStack {
-                        Text("已授予权限")
-                            .font(.editorial(26))
-                        Spacer()
-                        Text("\(profile.permissions.count) 项")
-                            .font(.caption)
-                            .foregroundStyle(AppTheme.muted)
-                    }
-
-                    ForEach(FanPermission.allCases) { permission in
-                        HStack(spacing: 12) {
-                            Image(systemName: profile.hasPermission(permission)
-                                  ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(profile.hasPermission(permission)
-                                                 ? AppTheme.gold : AppTheme.muted)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(permission.title).font(.subheadline.weight(.semibold))
-                                Text(permission.detail).font(.caption2).foregroundStyle(AppTheme.muted)
-                            }
+                if profile.status == FanAccountStatus.active.rawValue
+                    || profile.status == FanAccountStatus.suspended.rawValue {
+                    VStack(alignment: .leading, spacing: 15) {
+                        HStack {
+                            Text("已授予权限")
+                                .font(.editorial(26))
                             Spacer()
+                            Text("\(profile.permissions.count) 项")
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.muted)
+                        }
+
+                        ForEach(FanPermission.allCases) { permission in
+                            HStack(spacing: 12) {
+                                Image(systemName: profile.hasPermission(permission)
+                                      ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(profile.hasPermission(permission)
+                                                     ? AppTheme.gold : AppTheme.muted)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(permission.title).font(.subheadline.weight(.semibold))
+                                    Text(permission.detail).font(.caption2).foregroundStyle(AppTheme.muted)
+                                }
+                                Spacer()
+                            }
                         }
                     }
                 }
@@ -321,34 +376,20 @@ struct FanAccountView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            HStack(spacing: 10) {
-                Button {
-                    Task { await account.refreshSession() }
-                } label: {
-                    Label(
-                        profile.status == FanAccountStatus.pending.rawValue
-                            ? "刷新审批状态" : "刷新账号状态",
-                        systemImage: "arrow.clockwise"
-                    )
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 13)
-                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    profileRefreshButton(profile)
+                    profileSignOutButton
                 }
-                .disabled(account.isWorking)
-
-                Button {
-                    Task { await account.signOut() }
-                } label: {
-                    Text("退出登录")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 13)
-                        .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
-                        .foregroundStyle(AppTheme.ink)
+                VStack(spacing: 10) {
+                    profileRefreshButton(profile)
+                    profileSignOutButton
                 }
-                .disabled(account.isWorking)
             }
 
-            Text("请妥善保存身份码。管理员只能看到昵称、抖音 ID、身份码、审批状态和权限，无法查看你的密码。")
+            Text(profile.requiresAccountSetup
+                 ? "管理员只会看到这次生成的临时凭据一次，无法读取你设置的新密码。完成后临时密码和旧会话会立即失效。"
+                 : "请妥善保存身份码。管理员只能看到昵称、抖音 ID、身份码、审批状态和权限，无法查看你的密码。")
                 .font(.caption2)
                 .lineSpacing(4)
                 .foregroundStyle(AppTheme.muted)
@@ -380,7 +421,83 @@ struct FanAccountView: View {
         .padding(.bottom, 54)
     }
 
+    private func requiredAccountSetupForm(_ profile: FanProfile) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(
+                "这是管理员生成的一次性临时账号。请由账号本人完成以下设置。",
+                systemImage: "person.crop.circle.badge.checkmark"
+            )
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(AppTheme.gold)
+
+            if let expiresAt = profile.invitationExpiresAt {
+                Text("临时凭据有效至 \(expiresAt.formatted(date: .abbreviated, time: .shortened))。过期后服务器会删除未完善的临时记录。")
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.muted)
+            }
+
+            identityRow("粉丝身份码", value: profile.identityCode, copyable: true)
+                .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+
+            TextField("本人昵称", text: $invitedDisplayName)
+                .textContentType(.nickname)
+            TextField("本人抖音 ID（必填，不要填链接）", text: $invitedDouyinID)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .accessibilityIdentifier("fan-setup-douyin-id")
+            SecureField("重新输入管理员给你的临时密码", text: $currentTemporaryPassword)
+                .textContentType(.password)
+            SecureField("设置仅本人知道的新密码（至少 10 位）", text: $invitedNewPassword)
+                .textContentType(.newPassword)
+            SecureField("再输入一次新密码", text: $invitedPasswordConfirmation)
+                .textContentType(.newPassword)
+
+            NavigationLink {
+                PrivacyPolicyView()
+            } label: {
+                Label("设置前查看隐私政策与删除规则", systemImage: "hand.raised")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppTheme.gold)
+            }
+            .accessibilityIdentifier("fan-setup-privacy-policy")
+
+            Toggle(isOn: $acceptedInvitationDataUse) {
+                Text("我本人已阅读隐私政策，同意昵称、抖音 ID、随机身份码和安装记录用于账号识别、安全登录与权限分配。")
+                    .font(.caption)
+                    .lineSpacing(4)
+            }
+            .tint(AppTheme.gold)
+            .accessibilityIdentifier("fan-setup-consent")
+
+            Button {
+                Task {
+                    await account.completeRequiredSetup(
+                        displayName: invitedDisplayName,
+                        douyinID: invitedDouyinID,
+                        currentPassword: currentTemporaryPassword,
+                        newPassword: invitedNewPassword,
+                        passwordConfirmation: invitedPasswordConfirmation,
+                        acceptedDataUse: acceptedInvitationDataUse
+                    )
+                    if account.profile?.requiresAccountSetup == false {
+                        currentTemporaryPassword = ""
+                        invitedNewPassword = ""
+                        invitedPasswordConfirmation = ""
+                    }
+                }
+            } label: {
+                accountButtonLabel(account.isWorking ? "正在安全设置" : "同意并设置我的账号")
+            }
+            .disabled(account.isWorking || !acceptedInvitationDataUse)
+            .accessibilityIdentifier("fan-setup-submit")
+        }
+        .padding(16)
+        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+        .textFieldStyle(AccountTextFieldStyle())
+    }
+
     private func profileHeading(_ profile: FanProfile) -> String {
+        if profile.requiresAccountSetup { return "完成首次设置" }
         switch profile.accountStatus {
         case .some(.active): return "你好，\(profile.displayName)"
         case .some(.pending): return "申请已提交"
@@ -434,6 +551,7 @@ struct FanAccountView: View {
 
     private func monitorPendingApproval() async {
         guard isAccessGate,
+              account.profile?.requiresAccountSetup == false,
               account.profile?.accountStatus == .pending else { return }
         while !Task.isCancelled, account.profile?.accountStatus == .pending {
             do {
@@ -444,6 +562,64 @@ struct FanAccountView: View {
             guard !Task.isCancelled else { return }
             await account.refreshSession(showError: false)
         }
+    }
+
+    private func clearInvitationSetupFields() {
+        invitedDisplayName = ""
+        invitedDouyinID = ""
+        currentTemporaryPassword = ""
+        invitedNewPassword = ""
+        invitedPasswordConfirmation = ""
+        acceptedInvitationDataUse = false
+    }
+
+    private func clearAuthenticationPasswords() {
+        registrationPassword = ""
+        passwordConfirmation = ""
+        loginPassword = ""
+    }
+
+    private func clearInvitationPasswords() {
+        currentTemporaryPassword = ""
+        invitedNewPassword = ""
+        invitedPasswordConfirmation = ""
+    }
+
+    private func clearAllPasswords() {
+        clearAuthenticationPasswords()
+        clearInvitationPasswords()
+    }
+
+    private func profileRefreshButton(_ profile: FanProfile) -> some View {
+        Button {
+            Task { await account.refreshSession() }
+        } label: {
+            Label(
+                profile.requiresAccountSetup
+                    ? "刷新临时账号状态"
+                    : profile.status == FanAccountStatus.pending.rawValue
+                    ? "刷新审批状态" : "刷新账号状态",
+                systemImage: "arrow.clockwise"
+            )
+            .lineLimit(2)
+            .minimumScaleFactor(0.8)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+        }
+        .disabled(account.isWorking)
+    }
+
+    private var profileSignOutButton: some View {
+        Button {
+            clearAllPasswords()
+            Task { await account.signOut() }
+        } label: {
+            Text("退出登录")
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
+                .foregroundStyle(AppTheme.ink)
+        }
+        .disabled(account.isWorking)
     }
 
     private func identityRow(_ title: String, value: String, copyable: Bool) -> some View {
@@ -461,7 +637,7 @@ struct FanAccountView: View {
                     copiedLabel = title
                 } label: {
                     Image(systemName: "doc.on.doc")
-                        .frame(width: 36, height: 36)
+                        .frame(width: 44, height: 44)
                         .background(.white.opacity(0.06), in: Circle())
                 }
                 .accessibilityLabel("复制\(title)")
@@ -485,9 +661,17 @@ struct FanAccountView: View {
 
 struct FanAccessAdminView: View {
     @EnvironmentObject private var admin: AdminSessionStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var directory: AdminFanDirectory?
     @State private var searchText = ""
     @State private var isLoading = false
+    @State private var isCreatingInvitations = false
+    @State private var invitationCount = 3
+    @State private var invitations: [AdminFanInvitation] = []
+    @State private var copiedInvitationID: String?
+    @State private var temporaryPasteboardValue: String?
+    @State private var pasteboardClearTask: Task<Void, Never>?
+    @State private var directoryLoadGeneration: UInt64 = 0
     @State private var errorMessage: String?
 
     private var filteredUsers: [AdminFanUser] {
@@ -519,6 +703,8 @@ struct FanAccessAdminView: View {
                         .lineSpacing(4)
                         .foregroundStyle(AppTheme.muted)
                         .padding(.bottom, 4)
+
+                    invitationCreator
 
                     if isLoading, directory == nil {
                         ProgressView("正在读取用户")
@@ -572,6 +758,8 @@ struct FanAccessAdminView: View {
                 }
                 .padding(18)
                 .padding(.bottom, 40)
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
             .refreshable { await load() }
 
@@ -584,6 +772,109 @@ struct FanAccessAdminView: View {
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .searchable(text: $searchText, prompt: "昵称、抖音 ID 或身份码")
         .task { await monitorApplications() }
+        .onChange(of: admin.isAuthenticated) { _, authenticated in
+            if !authenticated {
+                invalidateDirectoryLoad()
+                invitations.removeAll()
+                clearTemporaryPasteboardIfOwned()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { clearTemporaryPasteboardIfOwned() }
+        }
+        .onDisappear {
+            invalidateDirectoryLoad()
+            invitations.removeAll()
+            clearTemporaryPasteboardIfOwned()
+        }
+    }
+
+    private var invitationCreator: some View {
+        VStack(alignment: .leading, spacing: 13) {
+            Label("生成一次性临时账号", systemImage: "person.badge.key.fill")
+                .font(.headline)
+                .foregroundStyle(AppTheme.gold)
+
+            Text("临时凭据仅显示这一次，有效期 24 小时。对方首次登录后必须本人填写抖音 ID、确认隐私政策并设置新密码；在此之前无法访问任何作品内容。")
+                .font(.caption)
+                .lineSpacing(4)
+                .foregroundStyle(AppTheme.muted)
+
+            Stepper("本次生成 \(invitationCount) 个", value: $invitationCount, in: 1...5)
+                .font(.subheadline)
+
+            Button {
+                Task { await createInvitations() }
+            } label: {
+                HStack(spacing: 9) {
+                    if isCreatingInvitations { ProgressView().tint(AppTheme.ink) }
+                    Label(
+                        isCreatingInvitations ? "正在安全生成" : "生成临时身份码与密码",
+                        systemImage: "key.viewfinder"
+                    )
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
+                .foregroundStyle(AppTheme.ink)
+                .font(.system(size: 13, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .disabled(isCreatingInvitations || !admin.isAuthenticated)
+
+            if !invitations.isEmpty {
+                Label(
+                    "请现在复制并分别交给本人。离开此页后这些临时密码无法再次查询。",
+                    systemImage: "exclamationmark.shield.fill"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.orange)
+
+                ForEach(invitations) { invitation in
+                    VStack(alignment: .leading, spacing: 9) {
+                        Text(invitation.identityCode)
+                            .font(.system(.headline, design: .monospaced))
+                            .textSelection(.enabled)
+                        Text(invitation.temporaryPassword)
+                            .font(.system(.subheadline, design: .monospaced))
+                            .privacySensitive()
+                        Text("有效至 \(invitation.expiresAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption2)
+                            .foregroundStyle(AppTheme.muted)
+                        Button {
+                            copyInvitation(invitation)
+                        } label: {
+                            Label(
+                                copiedInvitationID == invitation.id ? "已复制（2 分钟后清除）" : "复制这一组",
+                                systemImage: copiedInvitationID == invitation.id ? "checkmark.circle.fill" : "doc.on.doc"
+                            )
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(AppTheme.gold)
+                            .frame(minHeight: 44)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(13)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 6))
+                }
+
+                if invitations.count > 1 {
+                    Button {
+                        copyAllInvitations()
+                    } label: {
+                        Label("复制全部临时账号", systemImage: "doc.on.doc.fill")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(15)
+        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier("admin-fan-invitation-creator")
     }
 
     private func userLink(_ user: AdminFanUser) -> some View {
@@ -601,16 +892,103 @@ struct FanAccessAdminView: View {
     }
 
     private func load() async {
-        guard admin.isAuthenticated else { return }
+        guard admin.isAuthenticated else {
+            invalidateDirectoryLoad()
+            return
+        }
+        directoryLoadGeneration &+= 1
+        let generation = directoryLoadGeneration
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            if generation == directoryLoadGeneration { isLoading = false }
+        }
         do {
-            directory = try await admin.fetchFanDirectory()
+            let response = try await admin.fetchFanDirectory()
+            guard generation == directoryLoadGeneration,
+                  admin.isAuthenticated else { return }
+            directory = response
             errorMessage = nil
         } catch {
+            guard generation == directoryLoadGeneration,
+                  admin.isAuthenticated else { return }
             errorMessage = (error as? AdminAPIError)?.errorDescription
                 ?? "暂时无法读取用户。"
         }
+    }
+
+    private func invalidateDirectoryLoad() {
+        directoryLoadGeneration &+= 1
+        isLoading = false
+    }
+
+    private func createInvitations() async {
+        guard admin.isAuthenticated, !isCreatingInvitations else {
+            errorMessage = "管理员会话已锁定，请返回后重新登录。"
+            return
+        }
+        isCreatingInvitations = true
+        defer { isCreatingInvitations = false }
+        do {
+            let created = try await admin.createFanInvitations(count: invitationCount)
+            guard admin.isAuthenticated else { return }
+            clearTemporaryPasteboardIfOwned()
+            invitations = created
+            errorMessage = nil
+            await load()
+        } catch {
+            clearTemporaryPasteboardIfOwned()
+            invitations.removeAll()
+            errorMessage = (error as? AdminAPIError)?.errorDescription
+                ?? "临时账号生成失败。"
+        }
+    }
+
+    private func copyInvitation(_ invitation: AdminFanInvitation) {
+        setTemporaryPasteboard(
+            "Hi，梳子临时账号\n身份码：\(invitation.identityCode)\n临时密码：\(invitation.temporaryPassword)\n有效至：\(invitation.expiresAt.formatted(date: .numeric, time: .shortened))"
+        )
+        copiedInvitationID = invitation.id
+    }
+
+    private func copyAllInvitations() {
+        let value = invitations.map {
+            "身份码：\($0.identityCode)\n临时密码：\($0.temporaryPassword)\n有效至：\($0.expiresAt.formatted(date: .numeric, time: .shortened))"
+        }.joined(separator: "\n\n")
+        setTemporaryPasteboard("Hi，梳子临时账号\n\n\(value)")
+        copiedInvitationID = "all"
+    }
+
+    private func setTemporaryPasteboard(_ value: String) {
+        clearTemporaryPasteboardIfOwned()
+        let expirationDate = Date().addingTimeInterval(2 * 60)
+        UIPasteboard.general.setItems(
+            [[UTType.plainText.identifier: value]],
+            options: [
+                .localOnly: true,
+                .expirationDate: expirationDate,
+            ]
+        )
+        temporaryPasteboardValue = value
+        pasteboardClearTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .seconds(120))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            clearTemporaryPasteboardIfOwned()
+        }
+    }
+
+    private func clearTemporaryPasteboardIfOwned() {
+        pasteboardClearTask?.cancel()
+        pasteboardClearTask = nil
+        if let temporaryPasteboardValue,
+           UIPasteboard.general.string == temporaryPasteboardValue {
+            UIPasteboard.general.items = []
+        }
+        temporaryPasteboardValue = nil
+        copiedInvitationID = nil
     }
 
     private func monitorApplications() async {
@@ -660,7 +1038,7 @@ private struct FanAccessDetailView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(user.displayName).font(.editorial(36))
-                        Text("@\(user.douyinID)")
+                        Text(user.requiresAccountSetup ? "抖音 ID 待本人填写" : "@\(user.douyinID)")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(AppTheme.gold)
                         Text(user.identityCode)
@@ -682,7 +1060,18 @@ private struct FanAccessDetailView: View {
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
 
-                        if user.status == FanAccountStatus.pending.rawValue {
+                        if user.requiresAccountSetup {
+                            Label(
+                                "对方尚未完成首次设置。即使账号为待审批状态，也不能提前批准或访问内容。",
+                                systemImage: "key.horizontal.fill"
+                            )
+                            .font(.caption)
+                            .lineSpacing(4)
+                            .foregroundStyle(.orange)
+                            .padding(13)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+                        } else if user.status == FanAccountStatus.pending.rawValue {
                             Button {
                                 Task { await save(status: FanAccountStatus.active.rawValue) }
                             } label: {
@@ -762,13 +1151,19 @@ private struct FanAccessDetailView: View {
                 }
                 .padding(20)
                 .padding(.bottom, 44)
+                .frame(maxWidth: 720, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
 
             if !admin.isAuthenticated {
                 AdministratorLockedView()
             }
         }
-        .navigationTitle(user.status == FanAccountStatus.pending.rawValue ? "审批申请" : "账号权限")
+        .navigationTitle(
+            user.requiresAccountSetup
+                ? "临时账号"
+                : (user.status == FanAccountStatus.pending.rawValue ? "审批申请" : "账号权限")
+        )
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .disabled(isSaving)
@@ -805,7 +1200,9 @@ private struct FanAccessDetailView: View {
     }
 
     private func save(permissions: [String]? = nil, status: String? = nil) async {
-        guard admin.isAuthenticated, !isSaving else {
+        guard permissions != nil || status != nil,
+              admin.isAuthenticated,
+              !isSaving else {
             errorMessage = "管理员会话已锁定，请返回后重新登录。"
             return
         }
@@ -814,8 +1211,8 @@ private struct FanAccessDetailView: View {
         do {
             let updated = try await admin.updateFanAccess(
                 userID: user.userID,
-                permissions: permissions ?? user.permissions,
-                status: status ?? user.status
+                permissions: permissions,
+                status: status
             )
             user = updated
             onUpdate(updated)
@@ -858,7 +1255,9 @@ private struct FanAdminUserRow: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
                 }
-                Text("@\(user.douyinID) · \(user.identityCode)")
+                Text(user.requiresAccountSetup
+                     ? "待本人完成首次设置 · \(user.identityCode)"
+                     : "@\(user.douyinID) · \(user.identityCode)")
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)
                     .lineLimit(1)

@@ -83,17 +83,24 @@ struct RootView: View {
         .tint(AppTheme.gold)
         .protectedFromScreenCapture()
         .task { await restoreAccess() }
-        .task(id: fanAccount.profile?.status) {
+        .task(id: "\(fanAccount.profile?.status ?? "none"):\(fanAccount.profile?.requiresAccountSetup == true)") {
             await monitorApprovedAccess()
         }
         .onChange(of: portfolioStore.portfolios) { _, portfolios in
             recentlyViewed.retainAvailablePortfolios(in: portfolios)
         }
         .onChange(of: fanAccount.profile?.status) { _, status in
-            if status == FanAccountStatus.active.rawValue || shouldBypassAccessGate {
+            if fanAccount.isApproved || shouldBypassAccessGate {
                 Task { await prepareAuthorizedContentIfNeeded() }
             } else if !adminSession.isAuthenticated {
                 resetProtectedPresentation()
+            }
+        }
+        .onChange(of: fanAccount.profile?.requiresAccountSetup) { _, requiresSetup in
+            if requiresSetup == true, !adminSession.isAuthenticated {
+                resetProtectedPresentation()
+            } else if fanAccount.isApproved || shouldBypassAccessGate {
+                Task { await prepareAuthorizedContentIfNeeded() }
             }
         }
         .onChange(of: adminSession.isAuthenticated) { _, authenticated in
@@ -135,6 +142,10 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else {
                 adminSession.lock()
+                return
+            }
+            if fanAccount.clearExpiredSessionIfNeeded() {
+                resetProtectedPresentation()
                 return
             }
             Task {
