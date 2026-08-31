@@ -54,6 +54,31 @@ enum AdminContentEditingPolicy {
     }
 }
 
+/// Resolves an editable collection element by its stable identity on every
+/// access. SwiftUI may keep a control alive for one render pass after its row
+/// is removed or the server replaces the collection; an index-derived binding
+/// would then trap while this binding safely falls back and ignores stale writes.
+enum SafeIdentifiedBinding {
+    static func element<Element: Identifiable>(
+        for fallback: Element,
+        in elements: Binding<[Element]>
+    ) -> Binding<Element> where Element.ID: Equatable {
+        Binding(
+            get: {
+                elements.wrappedValue.first { $0.id == fallback.id } ?? fallback
+            },
+            set: { updated in
+                var current = elements.wrappedValue
+                guard let index = current.firstIndex(where: { $0.id == fallback.id }) else {
+                    return
+                }
+                current[index] = updated
+                elements.wrappedValue = current
+            }
+        )
+    }
+}
+
 struct AdminView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var store: PortfolioStore
@@ -619,55 +644,8 @@ struct AdminView: View {
             }
             .disabled(isPublishing || launchPosterDrafts.count >= 12)
 
-            ForEach($launchPosterDrafts) { $poster in
-                VStack(alignment: .leading, spacing: 13) {
-                    LaunchPosterAdminPreview(poster: poster)
-                        .frame(height: 420)
-                        .frame(maxWidth: .infinity)
-                        .clipShape(RoundedRectangle(cornerRadius: 5))
-
-                    PhotosPicker(
-                        selection: replacementSelection { item in
-                            Task { await replaceLaunchPoster(item, id: poster.id) }
-                        },
-                        matching: .images
-                    ) {
-                        Label("只替换这张海报图片", systemImage: "arrow.triangle.2.circlepath.camera")
-                            .adminSecondaryButton()
-                    }
-                    .disabled(isPublishing)
-
-                    Toggle("启用这张海报", isOn: $poster.isEnabled)
-                        .tint(AppTheme.gold)
-
-                    TextField("英文眉题", text: $poster.eyebrow)
-                    TextField("海报标题", text: $poster.title)
-                    TextField("海报副标题", text: $poster.subtitle)
-
-                    DatePicker(
-                        "开始日期",
-                        selection: $poster.startsAt,
-                        displayedComponents: .date
-                    )
-                    DatePicker(
-                        "结束日期",
-                        selection: $poster.endsAt,
-                        displayedComponents: .date
-                    )
-
-                    Stepper(value: $poster.displaySeconds, in: 1.5...5, step: 0.5) {
-                        Text("展示 \(poster.displaySeconds, specifier: "%.1f") 秒")
-                    }
-
-                    Button(role: .destructive) {
-                        launchPosterDrafts.removeAll { $0.id == poster.id }
-                    } label: {
-                        Label("移除这张海报", systemImage: "minus.circle")
-                    }
-                    .font(.caption)
-                }
-                .padding(14)
-                .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+            ForEach(launchPosterDrafts) { poster in
+                launchPosterCard(poster)
             }
 
             Text("上方预览采用与真实开屏一致的裁切和文案位置。建议使用 9:16 竖版照片，最后点击底部“保存并发布全部修改”。")
@@ -675,6 +653,59 @@ struct AdminView: View {
                 .foregroundStyle(AppTheme.muted)
         }
         .textFieldStyle(AdminTextFieldStyle())
+    }
+
+    private func launchPosterCard(_ snapshot: LaunchPosterContent) -> some View {
+        let poster = SafeIdentifiedBinding.element(for: snapshot, in: $launchPosterDrafts)
+
+        return VStack(alignment: .leading, spacing: 13) {
+            LaunchPosterAdminPreview(poster: poster.wrappedValue)
+                .frame(height: 420)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+
+            PhotosPicker(
+                selection: replacementSelection { item in
+                    Task { await replaceLaunchPoster(item, id: snapshot.id) }
+                },
+                matching: .images
+            ) {
+                Label("只替换这张海报图片", systemImage: "arrow.triangle.2.circlepath.camera")
+                    .adminSecondaryButton()
+            }
+            .disabled(isPublishing)
+
+            Toggle("启用这张海报", isOn: poster.isEnabled)
+                .tint(AppTheme.gold)
+
+            TextField("英文眉题", text: poster.eyebrow)
+            TextField("海报标题", text: poster.title)
+            TextField("海报副标题", text: poster.subtitle)
+
+            DatePicker(
+                "开始日期",
+                selection: poster.startsAt,
+                displayedComponents: .date
+            )
+            DatePicker(
+                "结束日期",
+                selection: poster.endsAt,
+                displayedComponents: .date
+            )
+
+            Stepper(value: poster.displaySeconds, in: 1.5...5, step: 0.5) {
+                Text("展示 \(poster.wrappedValue.displaySeconds, specifier: "%.1f") 秒")
+            }
+
+            Button(role: .destructive) {
+                launchPosterDrafts.removeAll { $0.id == snapshot.id }
+            } label: {
+                Label("移除这张海报", systemImage: "minus.circle")
+            }
+            .font(.caption)
+        }
+        .padding(14)
+        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
     }
 
     private var showreelEditor: some View {
@@ -711,41 +742,8 @@ struct AdminView: View {
 
     private var dramaEditor: some View {
         AdminSection(title: "影视履历", subtitle: "修改剧名、海报与公开跳转") {
-            ForEach($dramaDrafts) { $drama in
-                VStack(alignment: .leading, spacing: 10) {
-                    if let url = URL(string: drama.imageURL),
-                       ContentSecurityPolicy.isTrustedMediaURL(url) {
-                        ArtworkImage(url: url)
-                            .frame(height: 180)
-                            .frame(maxWidth: .infinity)
-                            .clipShape(RoundedRectangle(cornerRadius: 5))
-                    }
-                    PhotosPicker(
-                        selection: replacementSelection { item in
-                            Task { await replaceDramaPoster(item, id: drama.id) }
-                        },
-                        matching: .images
-                    ) {
-                        Label("从手机相册替换海报", systemImage: "photo.badge.plus")
-                            .adminSecondaryButton()
-                    }
-                    .disabled(isPublishing)
-                    TextField("剧名", text: $drama.title)
-                    TextField("海报 HTTPS 地址（高级）", text: $drama.imageURL)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                    TextField("观看页 HTTPS 地址", text: $drama.destinationURL)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                    Button(role: .destructive) {
-                        dramaDrafts.removeAll { $0.id == drama.id }
-                    } label: {
-                        Label("移除这部作品", systemImage: "minus.circle")
-                    }
-                    .font(.caption)
-                }
-                .padding(14)
-                .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+            ForEach(dramaDrafts) { drama in
+                dramaCard(drama)
             }
 
             Button {
@@ -757,6 +755,45 @@ struct AdminView: View {
             .disabled(isPublishing || dramaDrafts.count >= 50)
         }
         .textFieldStyle(AdminTextFieldStyle())
+    }
+
+    private func dramaCard(_ snapshot: DramaDraft) -> some View {
+        let drama = SafeIdentifiedBinding.element(for: snapshot, in: $dramaDrafts)
+
+        return VStack(alignment: .leading, spacing: 10) {
+            if let url = URL(string: drama.wrappedValue.imageURL),
+               ContentSecurityPolicy.isTrustedMediaURL(url) {
+                ArtworkImage(url: url)
+                    .frame(height: 180)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            }
+            PhotosPicker(
+                selection: replacementSelection { item in
+                    Task { await replaceDramaPoster(item, id: snapshot.id) }
+                },
+                matching: .images
+            ) {
+                Label("从手机相册替换海报", systemImage: "photo.badge.plus")
+                    .adminSecondaryButton()
+            }
+            .disabled(isPublishing)
+            TextField("剧名", text: drama.title)
+            TextField("海报 HTTPS 地址（高级）", text: drama.imageURL)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+            TextField("观看页 HTTPS 地址", text: drama.destinationURL)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+            Button(role: .destructive) {
+                dramaDrafts.removeAll { $0.id == snapshot.id }
+            } label: {
+                Label("移除这部作品", systemImage: "minus.circle")
+            }
+            .font(.caption)
+        }
+        .padding(14)
+        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
     }
 
     private var publishControls: some View {

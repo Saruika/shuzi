@@ -1,8 +1,45 @@
 import XCTest
+import SwiftUI
 import WeatherKit
 @testable import Yishu
 
 final class ContentAndAccessTests: XCTestCase {
+    func testSafeIdentifiedBindingFallsBackAfterRowRemoval() {
+        let fallback = ContentCatalog.launchPosters[0]
+        var posters = [fallback]
+        let collection = Binding(
+            get: { posters },
+            set: { posters = $0 }
+        )
+        let row = SafeIdentifiedBinding.element(for: fallback, in: collection)
+
+        posters.removeAll()
+
+        XCTAssertEqual(row.wrappedValue, fallback)
+        var staleUpdate = fallback
+        staleUpdate.isEnabled.toggle()
+        row.wrappedValue = staleUpdate
+        XCTAssertTrue(posters.isEmpty)
+    }
+
+    func testSafeIdentifiedBindingResolvesTheCurrentRowByID() {
+        let fallback = ContentCatalog.launchPosters[0]
+        var current = fallback
+        current.title = "服务器新标题"
+        var posters = [current]
+        let collection = Binding(
+            get: { posters },
+            set: { posters = $0 }
+        )
+        let row = SafeIdentifiedBinding.element(for: fallback, in: collection)
+
+        XCTAssertEqual(row.wrappedValue.title, "服务器新标题")
+        var edited = row.wrappedValue
+        edited.subtitle = "安全写回"
+        row.wrappedValue = edited
+        XCTAssertEqual(posters.first?.subtitle, "安全写回")
+    }
+
     func testWeatherLocationAlwaysKeepsAConcisePlaceName() {
         XCTAssertEqual(WeatherPresentation.conciseLocationText("杭州市"), "杭州")
         XCTAssertEqual(WeatherPresentation.conciseLocationText("香港特别行政区"), "香港")
