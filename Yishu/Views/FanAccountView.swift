@@ -2,13 +2,15 @@ import SwiftUI
 import UIKit
 
 struct AppAccessGateView: View {
+    @State private var presentsAdminAccess = false
+
     var body: some View {
         NavigationStack {
             FanAccountView(isAccessGate: true)
                 .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        NavigationLink {
-                            AdminView()
+                        Button {
+                            presentsAdminAccess = true
                         } label: {
                             Label("管理员", systemImage: "person.badge.key.fill")
                                 .font(.caption.weight(.semibold))
@@ -16,6 +18,9 @@ struct AppAccessGateView: View {
                         .accessibilityIdentifier("access-gate-admin-entry")
                     }
                 }
+        }
+        .fullScreenCover(isPresented: $presentsAdminAccess) {
+            AdminAccessView()
         }
     }
 }
@@ -33,6 +38,7 @@ struct FanAccountView: View {
     @State private var loginPassword = ""
     @State private var copiedLabel: String?
     @State private var showDeleteConfirmation = false
+    @State private var presentsAdminAccess = false
 
     init(isAccessGate: Bool = false) {
         self.isAccessGate = isAccessGate
@@ -69,6 +75,9 @@ struct FanAccountView: View {
             Button("取消", role: .cancel) { }
         } message: {
             Text("身份码、抖音 ID、权限和服务器账号记录都会被删除，且无法恢复。")
+        }
+        .fullScreenCover(isPresented: $presentsAdminAccess) {
+            AdminAccessView()
         }
     }
 
@@ -142,8 +151,8 @@ struct FanAccountView: View {
             }
 
             if isAccessGate {
-                NavigationLink {
-                    AdminView()
+                Button {
+                    presentsAdminAccess = true
                 } label: {
                     Label("管理员审批入口", systemImage: "person.badge.key")
                         .font(.caption.weight(.semibold))
@@ -565,6 +574,10 @@ struct FanAccessAdminView: View {
                 .padding(.bottom, 40)
             }
             .refreshable { await load() }
+
+            if !admin.isAuthenticated {
+                AdministratorLockedView()
+            }
         }
         .navigationTitle("注册审批")
         .navigationBarTitleDisplayMode(.inline)
@@ -750,6 +763,10 @@ private struct FanAccessDetailView: View {
                 .padding(20)
                 .padding(.bottom, 44)
             }
+
+            if !admin.isAuthenticated {
+                AdministratorLockedView()
+            }
         }
         .navigationTitle(user.status == FanAccountStatus.pending.rawValue ? "审批申请" : "账号权限")
         .navigationBarTitleDisplayMode(.inline)
@@ -788,7 +805,10 @@ private struct FanAccessDetailView: View {
     }
 
     private func save(permissions: [String]? = nil, status: String? = nil) async {
-        guard !isSaving else { return }
+        guard admin.isAuthenticated, !isSaving else {
+            errorMessage = "管理员会话已锁定，请返回后重新登录。"
+            return
+        }
         isSaving = true
         defer { isSaving = false }
         do {
@@ -804,6 +824,21 @@ private struct FanAccessDetailView: View {
             errorMessage = (error as? AdminAPIError)?.errorDescription
                 ?? "权限更新失败。"
         }
+    }
+}
+
+private struct AdministratorLockedView: View {
+    var body: some View {
+        ZStack {
+            AppTheme.ink.ignoresSafeArea()
+            ContentUnavailableView(
+                "管理员会话已锁定",
+                systemImage: "lock.shield.fill",
+                description: Text("请返回管理员入口并重新输入访问码。")
+            )
+            .foregroundStyle(AppTheme.warmWhite)
+        }
+        .accessibilityIdentifier("admin-session-locked")
     }
 }
 

@@ -13,7 +13,7 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var heroImages: [URL] = ContentCatalog.heroImages
     @Published private(set) var aboutPortraitURL: URL? = ContentCatalog.aboutPortraitURL
     @Published private(set) var launchPosters: [LaunchPosterContent] = ContentCatalog.launchPosters
-    @Published private(set) var showreel: ShowreelContent = ContentCatalog.showreel
+    @Published private(set) var showreel: ShowreelContent? = ContentCatalog.showreel
     @Published private(set) var dramas: [DramaWork] = ContentCatalog.dramas
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastUpdated: Date?
@@ -22,7 +22,7 @@ final class PortfolioStore: ObservableObject {
 
     /// Disk reads and JSON decoding stay off the main actor. The subsequent
     /// authenticated refresh replaces this snapshot with the latest approved content.
-    func restoreCachedContent() async {
+    func restoreCachedContent(allowVideo: Bool) async {
         guard contentOrigin == .bundled else { return }
         let cache = await Task.detached(priority: .userInitiated) {
             Self.loadCache()
@@ -34,8 +34,8 @@ final class PortfolioStore: ObservableObject {
         heroImages = cache.heroImages ?? ContentCatalog.heroImages
         aboutPortraitURL = cache.aboutPortraitURL ?? ContentCatalog.aboutPortraitURL
         launchPosters = cache.launchPosters ?? ContentCatalog.launchPosters
-        showreel = cache.showreel ?? ContentCatalog.showreel
-        dramas = cache.dramas ?? ContentCatalog.dramas
+        showreel = allowVideo ? cache.showreel : nil
+        dramas = allowVideo ? (cache.dramas ?? []) : []
         lastUpdated = cache.updatedAt
         contentOrigin = .cached
     }
@@ -82,6 +82,33 @@ final class PortfolioStore: ObservableObject {
         )
     }
 
+    /// Permission changes are authoritative before the replacement network
+    /// response arrives. This method only removes content; granting a permission
+    /// still requires a fresh, server-authorized manifest.
+    func enforcePermissionScope(canViewFullGallery: Bool, canViewVideo: Bool) {
+        var didReduceScope = false
+        if !canViewFullGallery {
+            portfolios = Self.offlinePreviewPortfolios(from: portfolios)
+            didReduceScope = true
+        }
+        if !canViewVideo {
+            showreel = nil
+            dramas = []
+            didReduceScope = true
+        }
+
+        guard didReduceScope, let lastUpdated else { return }
+        Self.persistCacheInBackground(
+            portfolios: portfolios,
+            heroImages: heroImages,
+            aboutPortraitURL: aboutPortraitURL,
+            launchPosters: launchPosters,
+            showreel: showreel,
+            dramas: dramas,
+            updatedAt: lastUpdated
+        )
+    }
+
     func discardProtectedContent() {
         portfolios = Portfolio.fallback
         heroImages = ContentCatalog.heroImages
@@ -92,6 +119,10 @@ final class PortfolioStore: ObservableObject {
         lastUpdated = nil
         statusMessage = nil
         contentOrigin = .bundled
+        Self.removeCacheInBackground()
+    }
+
+    private static func removeCacheInBackground() {
         Task.detached(priority: .utility) {
             guard let url = Self.cacheFileURL(createDirectory: false) else { return }
             try? FileManager.default.removeItem(at: url)
@@ -113,7 +144,7 @@ final class PortfolioStore: ObservableObject {
         heroImages: [URL],
         aboutPortraitURL: URL?,
         launchPosters: [LaunchPosterContent],
-        showreel: ShowreelContent,
+        showreel: ShowreelContent?,
         dramas: [DramaWork],
         updatedAt: Date
     ) {
@@ -135,26 +166,13 @@ final class PortfolioStore: ObservableObject {
         heroImages: [URL],
         aboutPortraitURL: URL?,
         launchPosters: [LaunchPosterContent],
-        showreel: ShowreelContent,
+        showreel: ShowreelContent?,
         dramas: [DramaWork],
         updatedAt: Date
     ) {
         // Keep only a small authorized offline preview on disk. The complete
         // live gallery remains an in-memory response.
-        let cachedPortfolios = portfolios.map { portfolio in
-            let preview = Array(portfolio.images.prefix(offlinePreviewImageCount))
-            return Portfolio(
-                id: portfolio.id,
-                title: portfolio.title,
-                subtitle: portfolio.subtitle,
-                eyebrow: portfolio.eyebrow,
-                slug: portfolio.slug,
-                websiteURL: portfolio.websiteURL,
-                coverURL: preview.first?.url ?? portfolio.coverURL,
-                images: preview,
-                totalImageCount: portfolio.displayImageCount
-            )
-        }
+        let cachedPortfolios = offlinePreviewPortfolios(from: portfolios)
         guard let url = cacheFileURL(createDirectory: true),
               let data = try? JSONEncoder().encode(
                 PortfolioCacheEnvelope(
@@ -181,6 +199,25 @@ final class PortfolioStore: ObservableObject {
             try protectedURL.setResourceValues(resourceValues)
         } catch {
             // A failed cache write must never prevent the live catalog from loading.
+        }
+    }
+
+    nonisolated private static func offlinePreviewPortfolios(
+        from portfolios: [Portfolio]
+    ) -> [Portfolio] {
+        portfolios.map { portfolio in
+            let preview = Array(portfolio.images.prefix(offlinePreviewImageCount))
+            return Portfolio(
+                id: portfolio.id,
+                title: portfolio.title,
+                subtitle: portfolio.subtitle,
+                eyebrow: portfolio.eyebrow,
+                slug: portfolio.slug,
+                websiteURL: portfolio.websiteURL,
+                coverURL: preview.first?.url ?? portfolio.coverURL,
+                images: preview,
+                totalImageCount: portfolio.displayImageCount
+            )
         }
     }
 
@@ -225,8 +262,9 @@ enum ContentSecurityPolicy {
             && manifest.heroImages.allSatisfy(isTrustedMediaURL)
             && (manifest.aboutPortraitURL.map(isTrustedMediaURL) ?? true)
             && (manifest.launchPosters ?? []).allSatisfy { isTrustedMediaURL($0.imageURL) }
-            && isTrustedMediaURL(manifest.showreel.videoURL)
-            && isTrustedMediaURL(manifest.showreel.posterURL)
+            && (manifest.showreel.map {
+                isTrustedMediaURL($0.videoURL) && isTrustedMediaURL($0.posterURL)
+            } ?? true)
             && manifest.dramas.allSatisfy {
                 isTrustedMediaURL($0.imageURL) && isTrustedDestinationURL($0.destinationURL)
             }

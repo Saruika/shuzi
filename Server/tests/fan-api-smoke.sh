@@ -64,6 +64,8 @@ cleanup() {
   rm -f "$test_dir/register.json" "$test_dir/session.json" \
     "$test_dir/login.json" "$test_dir/deleted-login.json" \
     "$test_dir/admin-list.json" "$test_dir/admin-update.json" \
+    "$test_dir/anonymous-admin-update.json" "$test_dir/fan-admin-update.json" \
+    "$test_dir/permission-update.json" "$test_dir/permission-content.json" \
     "$test_dir/pending-content.json" "$test_dir/rejected-content.json" \
     "$test_dir/rejected-update.json" "$test_dir/rejected-session.json" \
     "$test_dir/approved-content.json" \
@@ -150,6 +152,33 @@ user_uuid=$(jq -r --arg identityCode "$identity_code" \
   "$test_dir/admin-list.json")
 [[ "$user_uuid" =~ ^[a-f0-9-]{36}$ ]]
 
+anonymous_admin_update_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/anonymous-admin-update.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --data '{"permissions":["gallery_full","video_view"],"status":"active"}' \
+  "${api_root}/app-admin/fans/${user_uuid}")
+[[ "$anonymous_admin_update_status" == '401' ]]
+
+fan_admin_update_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/fan-admin-update.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  --data '{"permissions":["gallery_full","video_view"],"status":"active"}' \
+  "${api_root}/app-admin/fans/${user_uuid}")
+[[ "$fan_admin_update_status" == '401' ]]
+
+unchanged_status=$(curl "${curl_common[@]}" --netrc-file "$test_dir/admin.netrc" \
+  "${api_root}/app-admin/fans" \
+  | jq -r --arg identityCode "$identity_code" \
+    '.users[] | select(.identityCode == $identityCode) | .status')
+[[ "$unchanged_status" == 'pending' ]]
+echo 'fan-api-smoke: anonymous and fan administrator mutations rejected'
+
 reject_status=$(curl "${curl_common[@]}" --output "$test_dir/rejected-update.json" \
   --write-out '%{http_code}' \
   --request POST \
@@ -193,8 +222,38 @@ approved_content_status=$(curl "${curl_common[@]}" --output "$test_dir/approved-
   --header "X-Yishu-Install-ID: ${install_id}" \
   "${api_root}/app-content")
 [[ "$approved_content_status" == '200' ]]
-jq -e '.schemaVersion == 1 and (.portfolios | length > 0)' \
+jq -e '.schemaVersion == 1 and (.portfolios | length > 0) and
+  .showreel == null and (.dramas | length == 0)' \
   "$test_dir/approved-content.json" >/dev/null
+
+permission_update_status=$(curl "${curl_common[@]}" --output "$test_dir/permission-update.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  --data '{"permissions":["video_view"],"status":"active"}' \
+  "${api_root}/app-admin/fans/${user_uuid}")
+[[ "$permission_update_status" == '200' ]]
+
+permission_content_status=$(curl "${curl_common[@]}" --output "$test_dir/permission-content.json" \
+  --write-out '%{http_code}' \
+  --header "Authorization: Bearer ${token}" \
+  --header "X-Yishu-Install-ID: ${install_id}" \
+  "${api_root}/app-content")
+[[ "$permission_content_status" == '200' ]]
+jq -e '(.showreel | type == "object") and (.dramas | length > 0) and
+  all(.portfolios[]; (.images | length) <= 3)' \
+  "$test_dir/permission-content.json" >/dev/null
+
+restore_permissions_status=$(curl "${curl_common[@]}" --output "$test_dir/admin-update.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --netrc-file "$test_dir/admin.netrc" \
+  --header 'Content-Type: application/json' \
+  --data '{"permissions":["gallery_full","early_access"],"status":"active"}' \
+  "${api_root}/app-admin/fans/${user_uuid}")
+[[ "$restore_permissions_status" == '200' ]]
+echo 'fan-api-smoke: existing token obeys immediate gallery and video permission changes'
 
 session_status=$(curl "${curl_common[@]}" --output "$test_dir/session.json" \
   --write-out '%{http_code}' \

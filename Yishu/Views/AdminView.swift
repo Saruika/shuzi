@@ -2,6 +2,58 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Owns the complete administrator navigation scope. Present this view as a
+/// full-screen cover so child approval screens stay inside the same scope and
+/// dismissing the cover can reliably lock credentials and protected content.
+struct AdminAccessView: View {
+    @EnvironmentObject private var admin: AdminSessionStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var hasLockedOnEntry = false
+
+    var body: some View {
+        Group {
+            if hasLockedOnEntry {
+                NavigationStack {
+                    AdminView()
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("关闭") { dismiss() }
+                                    .accessibilityIdentifier("admin-close")
+                            }
+                        }
+                }
+            } else {
+                ZStack {
+                    AppTheme.ink.ignoresSafeArea()
+                    ProgressView().tint(AppTheme.gold)
+                }
+            }
+        }
+        .task {
+            guard !hasLockedOnEntry else { return }
+            admin.lock()
+            hasLockedOnEntry = true
+        }
+        .onDisappear {
+            guard hasLockedOnEntry else { return }
+            admin.lock()
+        }
+    }
+}
+
+enum AdminContentEditingPolicy {
+    static func canEdit(isAuthenticated: Bool, hasLoadedFullManifest: Bool) -> Bool {
+        isAuthenticated && hasLoadedFullManifest
+    }
+
+    static func isFullAdministratorManifest(_ manifest: AppContentManifest) -> Bool {
+        manifest.showreel != nil
+            && manifest.portfolios.allSatisfy {
+                $0.images.count == $0.displayImageCount
+            }
+    }
+}
+
 struct AdminView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var store: PortfolioStore
@@ -29,13 +81,22 @@ struct AdminView: View {
     @State private var operationMessage: String?
     @State private var operationFailed = false
     @State private var pendingFanCount = 0
+    @State private var hasLoadedAdministratorContent = false
+    @State private var isLoadingAdministratorContent = false
+    @State private var administratorContentError: String?
+    @State private var administratorContentLoadID = UUID()
+    @State private var activeOperationID: UUID?
 
     var body: some View {
         ZStack {
             AppTheme.ink.ignoresSafeArea()
             ScrollView {
                 if admin.isAuthenticated {
-                    dashboard
+                    if administratorEditorIsReady {
+                        dashboard
+                    } else {
+                        administratorContentLoadingView
+                    }
                 } else {
                     login
                 }
@@ -47,9 +108,12 @@ struct AdminView: View {
         .toolbar(.visible, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
-        .task {
-            await admin.restoreSession()
-            loadDrafts()
+        .task(id: admin.isAuthenticated) {
+            if admin.isAuthenticated {
+                await loadAdministratorContent()
+            } else {
+                invalidateAdministratorContentLoad()
+            }
         }
         .task(id: admin.isAuthenticated) {
             await monitorPendingFanCount()
@@ -57,9 +121,9 @@ struct AdminView: View {
         .onChange(of: admin.isAuthenticated) { _, authenticated in
             if authenticated {
                 applicationPassword = ""
-                loadDrafts()
                 Task { await refreshPendingFanCount() }
             } else {
+                invalidateAdministratorContentLoad()
                 pendingFanCount = 0
             }
         }
@@ -106,6 +170,57 @@ struct AdminView: View {
         } message: {
             Text("原文件仍保留在 WordPress 媒体库，可由管理员恢复。")
         }
+    }
+
+    private var administratorEditorIsReady: Bool {
+        AdminContentEditingPolicy.canEdit(
+            isAuthenticated: admin.isAuthenticated,
+            hasLoadedFullManifest: hasLoadedAdministratorContent
+        )
+    }
+
+    private var administratorContentLoadingView: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Text("ADMIN CONTENT")
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(3)
+                .foregroundStyle(AppTheme.gold)
+            Text("正在核对完整内容")
+                .font(.editorial(34))
+            Text("编辑器会在管理员全量清单安全载入后开放，避免把粉丝权限范围内的内容误当成发布草稿。")
+                .font(.subheadline)
+                .foregroundStyle(AppTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if isLoadingAdministratorContent || administratorContentError == nil {
+                HStack(spacing: 12) {
+                    ProgressView().tint(AppTheme.gold)
+                    Text("正在从服务器读取管理员内容")
+                }
+                .font(.caption)
+                .foregroundStyle(AppTheme.gold)
+            }
+
+            if let administratorContentError {
+                Label(administratorContentError, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    Task { await loadAdministratorContent() }
+                } label: {
+                    Label("重新载入完整内容", systemImage: "arrow.clockwise")
+                        .adminPrimaryButton()
+                }
+                .disabled(isLoadingAdministratorContent)
+            }
+
+            Button("退出管理员登录") { admin.signOut() }
+                .font(.caption)
+                .foregroundStyle(AppTheme.muted)
+        }
+        .padding(22)
+        .padding(.top, 24)
     }
 
     private var login: some View {
@@ -650,11 +765,12 @@ struct AdminView: View {
                 Label("保存并发布全部修改", systemImage: "icloud.and.arrow.up")
                     .adminPrimaryButton()
             }
-            .disabled(isPublishing)
+            .disabled(isPublishing || !administratorEditorIsReady)
 
             Button("放弃未发布的文字修改") { loadDrafts() }
                 .font(.caption)
                 .foregroundStyle(AppTheme.muted)
+                .disabled(isPublishing || !administratorEditorIsReady)
         }
     }
 
@@ -670,34 +786,108 @@ struct AdminView: View {
         return store.portfolios.first { $0.id == id }
     }
 
+    private func loadAdministratorContent() async {
+        guard admin.isAuthenticated else {
+            invalidateAdministratorContentLoad()
+            return
+        }
+
+        let loadID = UUID()
+        administratorContentLoadID = loadID
+        hasLoadedAdministratorContent = false
+        isLoadingAdministratorContent = true
+        administratorContentError = nil
+        resetAdministratorDrafts()
+        defer {
+            if administratorContentLoadID == loadID {
+                isLoadingAdministratorContent = false
+            }
+        }
+
+        do {
+            let manifest = try await admin.fetchContent()
+            guard administratorContentLoadID == loadID,
+                  admin.isAuthenticated else { return }
+            guard AdminContentEditingPolicy.isFullAdministratorManifest(manifest) else {
+                throw AdminAPIError.invalidResponse
+            }
+            store.applyPublishedManifest(manifest)
+            loadDrafts()
+            hasLoadedAdministratorContent = true
+        } catch {
+            guard administratorContentLoadID == loadID,
+                  admin.isAuthenticated else { return }
+            hasLoadedAdministratorContent = false
+            administratorContentError = (error as? LocalizedError)?.errorDescription
+                ?? "无法安全载入管理员完整内容，请稍后重试。"
+        }
+    }
+
+    private func invalidateAdministratorContentLoad() {
+        administratorContentLoadID = UUID()
+        hasLoadedAdministratorContent = false
+        isLoadingAdministratorContent = false
+        administratorContentError = nil
+        activeOperationID = nil
+        isPublishing = false
+        operationMessage = nil
+        operationFailed = false
+        resetAdministratorDrafts()
+    }
+
+    private func resetAdministratorDrafts() {
+        heroImageURLs = []
+        aboutPortraitURL = nil
+        launchPosterDrafts = []
+        showreelDraft = ContentCatalog.showreel
+        tagsText = ContentCatalog.showreel.tags.joined(separator: "、")
+        dramaDrafts = []
+        selectedPortfolioID = nil
+        isCreatingPortfolio = false
+        selectedPhotos = []
+        selectedHero = nil
+        selectedLaunchPoster = nil
+        selectedAboutPortrait = nil
+        selectedPoster = nil
+        pendingRemoval = nil
+    }
+
     private func loadDrafts() {
         heroImageURLs = store.heroImages
         aboutPortraitURL = store.aboutPortraitURL
         launchPosterDrafts = store.launchPosters
-        showreelDraft = store.showreel
-        tagsText = store.showreel.tags.joined(separator: "、")
+        if let showreel = store.showreel {
+            showreelDraft = showreel
+            tagsText = showreel.tags.joined(separator: "、")
+        }
         dramaDrafts = store.dramas.map(DramaDraft.init)
-        if selectedPortfolioID == nil { selectedPortfolioID = store.portfolios.first?.id }
+        if selectedPortfolioID.flatMap({ selectedID in
+            store.portfolios.first(where: { $0.id == selectedID })
+        }) == nil {
+            selectedPortfolioID = store.portfolios.first?.id
+        }
     }
 
     private func uploadPortfolioPhotos(_ items: [PhotosPickerItem]) async {
         guard let portfolio = selectedPortfolio, !items.isEmpty else { return }
-        await performOperation(success: "\(items.count) 张照片已发布到「\(portfolio.title)」") {
+        await performOperation(success: "\(items.count) 张照片已发布到「\(portfolio.title)」") { contentLoadID in
             var ids = portfolio.images.map(\.id)
             for item in items {
                 guard let data = try await item.loadTransferable(type: Data.self) else {
                     throw AdminAPIError.invalidResponse
                 }
+                try ensureAdministratorOperationIsCurrent(contentLoadID)
                 let type = preferredType(for: item)
                 let media = try await admin.upload(
                     data: data,
                     filename: generatedFilename(prefix: "portfolio", type: type),
                     mimeType: type.preferredMIMEType ?? "image/jpeg"
                 )
+                try ensureAdministratorOperationIsCurrent(contentLoadID)
                 ids.append(media.id)
             }
             let manifest = try await admin.updateGallery(portfolioID: portfolio.id, mediaIDs: ids)
-            store.applyPublishedManifest(manifest)
+            try applyAdministratorManifest(manifest, contentLoadID: contentLoadID)
         }
         selectedPhotos = []
     }
@@ -708,13 +898,13 @@ struct AdminView: View {
         let eyebrow = newPortfolioEyebrow.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
 
-        await performOperation(success: "相册「\(title)」已创建并发布") {
+        await performOperation(success: "相册「\(title)」已创建并发布") { contentLoadID in
             let result = try await admin.createPortfolio(
                 title: title,
                 subtitle: subtitle.isEmpty ? "易姝影像作品" : subtitle,
                 eyebrow: eyebrow.isEmpty ? "PORTFOLIO" : eyebrow
             )
-            store.applyPublishedManifest(result.content)
+            try applyAdministratorManifest(result.content, contentLoadID: contentLoadID)
             selectedPortfolioID = result.portfolioID
             newPortfolioTitle = ""
             newPortfolioSubtitle = "易姝影像作品"
@@ -724,16 +914,18 @@ struct AdminView: View {
     }
 
     private func uploadHeroImage(_ item: PhotosPickerItem) async {
-        await performOperation(success: "主页封面已上传，等待发布") {
+        await performOperation(success: "主页封面已上传，等待发布") { contentLoadID in
             let media = try await uploadImage(item, prefix: "hero")
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
             heroImageURLs.append(media.sourceURL)
         }
         selectedHero = nil
     }
 
     private func replaceHeroImage(_ item: PhotosPickerItem, at index: Int) async {
-        await performOperation(success: "主页第 \(index + 1) 张封面已替换，等待发布") {
+        await performOperation(success: "主页第 \(index + 1) 张封面已替换，等待发布") { contentLoadID in
             let media = try await uploadImage(item, prefix: "hero-replacement")
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
             guard heroImageURLs.indices.contains(index) else { throw AdminAPIError.invalidResponse }
             heroImageURLs[index] = media.sourceURL
         }
@@ -746,16 +938,18 @@ struct AdminView: View {
     }
 
     private func uploadAboutPortrait(_ item: PhotosPickerItem) async {
-        await performOperation(success: "关于页人物图已替换，等待发布") {
+        await performOperation(success: "关于页人物图已替换，等待发布") { contentLoadID in
             let media = try await uploadImage(item, prefix: "about-portrait")
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
             aboutPortraitURL = media.sourceURL
         }
         selectedAboutPortrait = nil
     }
 
     private func uploadLaunchPoster(_ item: PhotosPickerItem) async {
-        await performOperation(success: "开屏海报已上传，设置日期后等待发布") {
+        await performOperation(success: "开屏海报已上传，设置日期后等待发布") { contentLoadID in
             let media = try await uploadImage(item, prefix: "launch-poster")
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
             let start = Calendar.current.startOfDay(for: .now)
             let end = Calendar.current.date(byAdding: .day, value: 30, to: start)
                 ?? start.addingTimeInterval(30 * 86_400)
@@ -777,8 +971,9 @@ struct AdminView: View {
     }
 
     private func replaceLaunchPoster(_ item: PhotosPickerItem, id: String) async {
-        await performOperation(success: "开屏图片已替换，原文案和投放日期保持不变") {
+        await performOperation(success: "开屏图片已替换，原文案和投放日期保持不变") { contentLoadID in
             let media = try await uploadImage(item, prefix: "launch-poster-replacement")
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
             guard let index = launchPosterDrafts.firstIndex(where: { $0.id == id }) else {
                 throw AdminAPIError.invalidResponse
             }
@@ -791,32 +986,33 @@ struct AdminView: View {
         image: PortfolioImage,
         in portfolio: Portfolio
     ) async {
-        await performOperation(success: "「\(portfolio.title)」中的照片已原位替换") {
+        await performOperation(success: "「\(portfolio.title)」中的照片已原位替换") { contentLoadID in
             let media = try await uploadImage(item, prefix: "portfolio-replacement")
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
             var ids = portfolio.images.map(\.id)
             guard let index = ids.firstIndex(of: image.id) else { throw AdminAPIError.invalidResponse }
             ids[index] = media.id
             let manifest = try await admin.updateGallery(portfolioID: portfolio.id, mediaIDs: ids)
-            store.applyPublishedManifest(manifest)
+            try applyAdministratorManifest(manifest, contentLoadID: contentLoadID)
         }
     }
 
     private func remove(_ image: PortfolioImage) async {
         guard let portfolio = selectedPortfolio else { return }
         pendingRemoval = nil
-        await performOperation(success: "照片已移出「\(portfolio.title)」") {
+        await performOperation(success: "照片已移出「\(portfolio.title)」") { contentLoadID in
             let ids = portfolio.images.map(\.id).filter { $0 != image.id }
             let manifest = try await admin.updateGallery(portfolioID: portfolio.id, mediaIDs: ids)
-            store.applyPublishedManifest(manifest)
+            try applyAdministratorManifest(manifest, contentLoadID: contentLoadID)
         }
     }
 
     private func setAsCover(_ image: PortfolioImage, in portfolio: Portfolio) async {
         guard portfolio.images.first?.id != image.id else { return }
-        await performOperation(success: "「\(portfolio.title)」封面已更新") {
+        await performOperation(success: "「\(portfolio.title)」封面已更新") { contentLoadID in
             let ids = [image.id] + portfolio.images.map(\.id).filter { $0 != image.id }
             let manifest = try await admin.updateGallery(portfolioID: portfolio.id, mediaIDs: ids)
-            store.applyPublishedManifest(manifest)
+            try applyAdministratorManifest(manifest, contentLoadID: contentLoadID)
         }
     }
 
@@ -827,23 +1023,25 @@ struct AdminView: View {
         guard ids.indices.contains(targetIndex) else { return }
         ids.swapAt(currentIndex, targetIndex)
 
-        await performOperation(success: "「\(portfolio.title)」照片顺序已更新") {
+        await performOperation(success: "「\(portfolio.title)」照片顺序已更新") { contentLoadID in
             let manifest = try await admin.updateGallery(portfolioID: portfolio.id, mediaIDs: ids)
-            store.applyPublishedManifest(manifest)
+            try applyAdministratorManifest(manifest, contentLoadID: contentLoadID)
         }
     }
 
     private func uploadShowreelPoster(_ item: PhotosPickerItem) async {
-        await performOperation(success: "新海报已上传，等待发布") {
+        await performOperation(success: "新海报已上传，等待发布") { contentLoadID in
             let media = try await uploadImage(item, prefix: "showreel-poster")
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
             showreelDraft.posterURL = media.sourceURL
         }
         selectedPoster = nil
     }
 
     private func replaceDramaPoster(_ item: PhotosPickerItem, id: String) async {
-        await performOperation(success: "影视海报已替换，等待发布") {
+        await performOperation(success: "影视海报已替换，等待发布") { contentLoadID in
             let media = try await uploadImage(item, prefix: "drama-poster")
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
             guard let index = dramaDrafts.firstIndex(where: { $0.id == id }) else {
                 throw AdminAPIError.invalidResponse
             }
@@ -854,13 +1052,14 @@ struct AdminView: View {
     private func uploadShowreelVideo(_ url: URL) async {
         let granted = url.startAccessingSecurityScopedResource()
         defer { if granted { url.stopAccessingSecurityScopedResource() } }
-        await performOperation(success: "新视频已上传，等待发布") {
+        await performOperation(success: "新视频已上传，等待发布") { contentLoadID in
             let type = UTType(filenameExtension: url.pathExtension) ?? .mpeg4Movie
             let media = try await admin.upload(
                 fileURL: url,
                 filename: generatedFilename(prefix: "showreel", type: type),
                 mimeType: type.preferredMIMEType ?? "video/mp4"
             )
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
             showreelDraft.videoURL = media.sourceURL
         }
     }
@@ -901,7 +1100,7 @@ struct AdminView: View {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
-        await performOperation(success: "内容已发布，普通用户下次刷新即可看到") {
+        await performOperation(success: "内容已发布，普通用户下次刷新即可看到") { contentLoadID in
             let manifest = try await admin.publish(
                 heroImages: heroImageURLs,
                 aboutPortraitURL: aboutPortraitURL,
@@ -909,22 +1108,61 @@ struct AdminView: View {
                 showreel: showreelDraft,
                 dramas: dramas
             )
-            store.applyPublishedManifest(manifest)
+            try applyAdministratorManifest(manifest, contentLoadID: contentLoadID)
         }
     }
 
-    private func performOperation(success: String, operation: () async throws -> Void) async {
+    private func performOperation(
+        success: String,
+        operation: (UUID) async throws -> Void
+    ) async {
+        guard administratorEditorIsReady else {
+            operationFailed = true
+            operationMessage = "管理员完整内容尚未安全载入，请重新载入后再试。"
+            return
+        }
+        let contentLoadID = administratorContentLoadID
+        let operationID = UUID()
+        activeOperationID = operationID
         isPublishing = true
         operationMessage = nil
         operationFailed = false
-        defer { isPublishing = false }
+        defer {
+            if activeOperationID == operationID {
+                activeOperationID = nil
+                isPublishing = false
+            }
+        }
         do {
-            try await operation()
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
+            try await operation(contentLoadID)
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
+            guard activeOperationID == operationID else { return }
             operationMessage = success
         } catch {
+            guard activeOperationID == operationID,
+                  administratorContentLoadID == contentLoadID else { return }
             operationFailed = true
             operationMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
+    }
+
+    private func ensureAdministratorOperationIsCurrent(_ contentLoadID: UUID) throws {
+        guard administratorContentLoadID == contentLoadID,
+              administratorEditorIsReady else {
+            throw AdminAPIError.invalidCredentials
+        }
+    }
+
+    private func applyAdministratorManifest(
+        _ manifest: AppContentManifest,
+        contentLoadID: UUID
+    ) throws {
+        try ensureAdministratorOperationIsCurrent(contentLoadID)
+        guard AdminContentEditingPolicy.isFullAdministratorManifest(manifest) else {
+            throw AdminAPIError.invalidResponse
+        }
+        store.applyPublishedManifest(manifest)
     }
 
     private func uploadImage(_ item: PhotosPickerItem, prefix: String) async throws -> UploadedMedia {

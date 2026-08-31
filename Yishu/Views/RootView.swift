@@ -27,6 +27,7 @@ struct RootView: View {
     @State private var hasResolvedAccess = false
     @State private var hasPreparedAuthorizedContent = false
     @State private var isPreparingAuthorizedContent = false
+    @State private var approvedContentRefreshID = UUID()
     private let visualPortfolioTitle: String?
     private let visualTestingDestination: VisualTestingDestination?
 
@@ -91,19 +92,51 @@ struct RootView: View {
         .onChange(of: fanAccount.profile?.status) { _, status in
             if status == FanAccountStatus.active.rawValue || shouldBypassAccessGate {
                 Task { await prepareAuthorizedContentIfNeeded() }
-            } else {
+            } else if !adminSession.isAuthenticated {
                 resetProtectedPresentation()
             }
         }
         .onChange(of: adminSession.isAuthenticated) { _, authenticated in
-            guard authenticated else { return }
-            Task { await refreshAdministratorContentIfAllowed() }
+            invalidateApprovedContentRefresh()
+            // AdminView owns its full-manifest load. Keeping that request out of
+            // the fan root prevents role-specific responses racing here.
+            guard !authenticated else { return }
+
+            // Administrator manifests are unrestricted. Always remove them on
+            // logout, including when no approved fan session exists.
+            portfolioStore.discardProtectedContent()
+            if fanAccount.isApproved {
+                // The local scope is authoritative even when the replacement
+                // fan request fails.
+                enforceCurrentFanPermissionScope()
+                if hasPreparedAuthorizedContent {
+                    Task { await refreshApprovedContent() }
+                } else {
+                    Task { await prepareAuthorizedContentIfNeeded() }
+                }
+            } else {
+                portfolioStore.enforcePermissionScope(
+                    canViewFullGallery: false,
+                    canViewVideo: false
+                )
+            }
+        }
+        .onChange(of: fanAccount.profile?.permissions) { _, _ in
+            if !canViewVideo, selectedTab == .credits { selectedTab = .home }
+            if !canViewFullGallery { portfolioPath = [] }
+            invalidateApprovedContentRefresh()
+            guard fanAccount.isApproved, !adminSession.isAuthenticated else { return }
+            enforceCurrentFanPermissionScope()
+            Task { await refreshApprovedContent() }
         }
         .onChange(of: portfolioStore.launchPosters) { _, _ in
             refreshVisibleLaunchPosterSnapshot()
         }
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active else { return }
+            guard phase == .active else {
+                adminSession.lock()
+                return
+            }
             Task {
                 await fanAccount.refreshIfNeeded(minimumInterval: 0)
                 if fanAccount.isApproved { await refreshApprovedContent() }
@@ -125,11 +158,13 @@ struct RootView: View {
                 .tag(AppTab.portfolio)
                 .tabItem { Label("作品", systemImage: "square.grid.2x2") }
 
-                NavigationStack {
-                    CreditsView()
+                if canViewVideo {
+                    NavigationStack {
+                        CreditsView()
+                    }
+                    .tag(AppTab.credits)
+                    .tabItem { Label("影视", systemImage: "film.stack") }
                 }
-                .tag(AppTab.credits)
-                .tabItem { Label("影视", systemImage: "film.stack") }
 
                 NavigationStack {
                     FavoritesView()
@@ -179,6 +214,14 @@ struct RootView: View {
 
     private var canAccessAppContent: Bool {
         fanAccount.isApproved || shouldBypassAccessGate
+    }
+
+    private var canViewVideo: Bool {
+        shouldBypassAccessGate || fanAccount.hasPermission(.videoView)
+    }
+
+    private var canViewFullGallery: Bool {
+        shouldBypassAccessGate || fanAccount.hasPermission(.galleryFull)
     }
 
     private var shouldBypassAccessGate: Bool {
@@ -243,24 +286,30 @@ struct RootView: View {
     }
 
     private func restoreAccess() async {
-        await adminSession.restoreSession()
         await fanAccount.restoreSession()
         hasResolvedAccess = true
         if canAccessAppContent {
             await prepareAuthorizedContentIfNeeded()
         } else {
             portfolioStore.discardProtectedContent()
+            portfolioStore.enforcePermissionScope(
+                canViewFullGallery: false,
+                canViewVideo: false
+            )
         }
     }
 
     private func prepareAuthorizedContentIfNeeded() async {
         guard canAccessAppContent,
+              !adminSession.isAuthenticated,
               !hasPreparedAuthorizedContent,
               !isPreparingAuthorizedContent else { return }
         isPreparingAuthorizedContent = true
         defer { isPreparingAuthorizedContent = false }
 
-        await portfolioStore.restoreCachedContent()
+        enforceCurrentFanPermissionScope()
+        await portfolioStore.restoreCachedContent(allowVideo: canViewVideo)
+        enforceCurrentFanPermissionScope()
         prepareLaunchPosterIfNeeded(allowBundledFallback: true)
         hasPreparedAuthorizedContent = true
         recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
@@ -272,16 +321,28 @@ struct RootView: View {
     }
 
     private func refreshApprovedContent() async {
+        let refreshID = UUID()
+        approvedContentRefreshID = refreshID
         guard fanAccount.isApproved,
-              let manifest = try? await fanAccount.fetchApprovedContent() else { return }
+              !adminSession.isAuthenticated,
+              let manifest = try? await fanAccount.fetchApprovedContent(),
+              approvedContentRefreshID == refreshID,
+              fanAccount.isApproved,
+              !adminSession.isAuthenticated else { return }
         portfolioStore.applyPublishedManifest(manifest)
+        enforceCurrentFanPermissionScope()
     }
 
-    private func refreshAdministratorContentIfAllowed() async {
-        guard adminSession.isAuthenticated else { return }
-        if let manifest = try? await adminSession.fetchContent() {
-            portfolioStore.applyPublishedManifest(manifest)
-        }
+    private func invalidateApprovedContentRefresh() {
+        approvedContentRefreshID = UUID()
+    }
+
+    private func enforceCurrentFanPermissionScope() {
+        guard !shouldBypassAccessGate else { return }
+        portfolioStore.enforcePermissionScope(
+            canViewFullGallery: canViewFullGallery,
+            canViewVideo: canViewVideo
+        )
     }
 
     private func monitorApprovedAccess() async {
@@ -298,7 +359,12 @@ struct RootView: View {
     }
 
     private func resetProtectedPresentation() {
+        invalidateApprovedContentRefresh()
         portfolioStore.discardProtectedContent()
+        portfolioStore.enforcePermissionScope(
+            canViewFullGallery: false,
+            canViewVideo: false
+        )
         hasPreparedAuthorizedContent = false
         hasPreparedLaunchPoster = false
         isLaunchPosterVisible = false

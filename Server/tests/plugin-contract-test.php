@@ -70,6 +70,9 @@ function rest_sanitize_boolean($value): bool {
 require dirname(__DIR__) . '/shuzijun-app-content.php';
 
 $plugin_source = file_get_contents(dirname(__DIR__) . '/shuzijun-app-content.php');
+$backup_proxy_source = file_get_contents(
+    dirname(__DIR__) . '/nginx/shuzijun-account-api-backup-proxy.conf'
+);
 
 function invoke_plugin_method(string $name, array $arguments = array()) {
     $method = new ReflectionMethod(Shuzijun_App_Content_API::class, $name);
@@ -147,6 +150,43 @@ $unknown_permission = invoke_plugin_method(
     array(array('manage_yishu_app_content'))
 );
 expect_error_code('fan_permission_unknown', $unknown_permission, '粉丝权限不得提权到内容管理');
+
+$_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+$_SERVER['HTTP_X_YISHU_CLIENT_IP'] = '203.0.113.24';
+expect_same(
+    hash('sha256', '203.0.113.24|https://www.shuzijun.com.cn/'),
+    invoke_plugin_method('request_network_fingerprint'),
+    '回环代理必须使用边缘层覆盖的真实客户端地址'
+);
+$_SERVER['REMOTE_ADDR'] = '198.51.100.40';
+$_SERVER['HTTP_X_YISHU_CLIENT_IP'] = '203.0.113.99';
+expect_same(
+    hash('sha256', '198.51.100.40|https://www.shuzijun.com.cn/'),
+    invoke_plugin_method('request_network_fingerprint'),
+    '非受信来源不得伪造真实客户端地址'
+);
+unset($_SERVER['HTTP_X_YISHU_CLIENT_IP']);
+expect_true(
+    is_string($backup_proxy_source)
+        && strpos($backup_proxy_source, 'set $yishu_client_ip $remote_addr;') !== false
+        && strpos(
+            $backup_proxy_source,
+            'if ($remote_addr ~ ^(?:127\\.0\\.0\\.1|::1)$)'
+        ) !== false
+        && strpos(
+            $backup_proxy_source,
+            'set $yishu_client_ip $http_x_yishu_client_ip;'
+        ) !== false
+        && strpos(
+            $backup_proxy_source,
+            'proxy_set_header X-Yishu-Client-IP $yishu_client_ip;'
+        ) !== false
+        && strpos(
+            $backup_proxy_source,
+            'proxy_set_header X-Yishu-Client-IP $http_x_yishu_client_ip;'
+        ) === false,
+    '备用 www 仅允许内部回环链路保留客户端地址头'
+);
 expect_true(
     is_string($plugin_source)
         && strpos($plugin_source, 'FAN_SESSION_OPTION_PREFIX') !== false

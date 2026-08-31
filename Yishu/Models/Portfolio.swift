@@ -62,7 +62,7 @@ struct AppContentManifest: Codable {
     let heroImages: [URL]
     let aboutPortraitURL: URL?
     let launchPosters: [LaunchPosterContent]?
-    let showreel: ShowreelContent
+    let showreel: ShowreelContent?
     let dramas: [DramaWork]
     let portfolios: [Portfolio]
 }
@@ -72,7 +72,7 @@ struct AppContentManifest: Codable {
 /// manifest from creating unbounded SwiftUI collections or pathological text.
 enum ContentManifestPolicy {
     static let currentSchemaVersion = 1
-    static let currentCacheSchemaVersion = 2
+    static let currentCacheSchemaVersion = 3
 
     private static let maximumHeroCount = 5
     private static let maximumLaunchPosterCount = 12
@@ -90,7 +90,7 @@ enum ContentManifestPolicy {
             && isValidUpdateDate(manifest.updatedAt)
             && isValidHeroes(manifest.heroImages)
             && isValidLaunchPosters(manifest.launchPosters ?? [])
-            && isValidShowreel(manifest.showreel)
+            && (manifest.showreel.map(isValidShowreel) ?? true)
             && isValidDramas(manifest.dramas)
             && isValidPortfolios(manifest.portfolios)
     }

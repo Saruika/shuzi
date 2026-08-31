@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned access-controlled content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.5.4
+ * Version: 1.5.5
  * Author: Shuzijun
  */
 
@@ -354,6 +354,7 @@ final class Shuzijun_App_Content_API {
                 : array('fan_approval_required', '账号尚未获得 App 访问授权。');
             return new WP_Error($error[0], $error[1], array('status' => 403));
         }
+        $context['permissions'] = self::fan_permissions_for_user((int) $context['userID']);
         self::$fan_session_context = $context;
         return true;
     }
@@ -589,8 +590,26 @@ final class Shuzijun_App_Content_API {
     }
 
     private static function request_network_fingerprint() {
-        $remote = isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : 'unknown';
+        $remote = isset($_SERVER['REMOTE_ADDR']) ? trim((string) $_SERVER['REMOTE_ADDR']) : '';
+        $trusted_proxies = array('127.0.0.1', '::1', '129.226.202.207');
+        if (in_array($remote, $trusted_proxies, true)) {
+            $forwarded = isset($_SERVER['HTTP_X_YISHU_CLIENT_IP'])
+                ? trim((string) $_SERVER['HTTP_X_YISHU_CLIENT_IP'])
+                : '';
+            if ($forwarded && filter_var($forwarded, FILTER_VALIDATE_IP) !== false) {
+                $remote = $forwarded;
+            }
+        }
+        if (!$remote || filter_var($remote, FILTER_VALIDATE_IP) === false) {
+            $remote = 'unknown';
+        }
         return hash('sha256', $remote . '|' . home_url('/'));
+    }
+
+    private static function fan_permissions_for_user($user_id) {
+        $permissions = get_user_meta((int) $user_id, self::FAN_META_PERMISSIONS, true);
+        $permissions = self::sanitize_fan_permissions(is_array($permissions) ? $permissions : array());
+        return is_wp_error($permissions) ? array() : $permissions;
     }
 
     private static function remove_fan_user($user_id, $douyin_reservation = '') {
@@ -1035,10 +1054,16 @@ final class Shuzijun_App_Content_API {
     }
 
     public static function get_content($request = null) {
-        $audience = self::authenticate_content_manager($request)
-            ? 'admin'
-            : (self::FULL_GALLERY_FOR_APP ? 'app' : 'public');
-        $response = rest_ensure_response(self::manifest($audience));
+        if (self::authenticate_content_manager($request)) {
+            $manifest = self::manifest('admin');
+        } else {
+            $context = self::$fan_session_context;
+            $permissions = is_array($context) && isset($context['permissions'])
+                ? (array) $context['permissions']
+                : array();
+            $manifest = self::manifest('app', $permissions);
+        }
+        $response = rest_ensure_response($manifest);
         $response->header('Cache-Control', 'private, no-store, max-age=0');
         $response->header('Vary', 'Authorization, X-Yishu-Install-ID');
         $response->header('Pragma', 'no-cache');
@@ -1204,19 +1229,25 @@ final class Shuzijun_App_Content_API {
         update_option(self::OPTION_UPDATED, time(), false);
     }
 
-    private static function manifest($audience = 'public') {
+    private static function manifest($audience = 'public', $permissions = array()) {
         $config = self::config();
         $updated = (int) get_option(self::OPTION_UPDATED, 0);
         if ($updated < 1) { $updated = time(); }
+        $is_unrestricted = in_array($audience, array('admin', 'premium'), true);
+        $can_view_full_gallery = $is_unrestricted
+            || ($audience === 'app' && in_array('gallery_full', (array) $permissions, true));
+        $can_view_video = $is_unrestricted
+            || ($audience === 'app' && in_array('video_view', (array) $permissions, true));
+        $portfolio_audience = $can_view_full_gallery ? $audience : 'public';
         return array(
             'schemaVersion' => 1,
             'updatedAt' => gmdate('c', $updated),
             'heroImages' => $config['heroImages'],
             'aboutPortraitURL' => $config['aboutPortraitURL'],
             'launchPosters' => $config['launchPosters'],
-            'showreel' => $config['showreel'],
-            'dramas' => $config['dramas'],
-            'portfolios' => self::portfolios($audience),
+            'showreel' => $can_view_video ? $config['showreel'] : null,
+            'dramas' => $can_view_video ? $config['dramas'] : array(),
+            'portfolios' => self::portfolios($portfolio_audience),
         );
     }
 

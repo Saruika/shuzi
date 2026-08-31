@@ -115,14 +115,18 @@ struct PortfolioGridView: View {
     }
 
     private func refreshContent() async {
-        if admin.isAuthenticated {
-            if let manifest = try? await admin.fetchContent() {
-                store.applyPublishedManifest(manifest)
-            }
-        } else if fanAccount.isApproved,
-                  let manifest = try? await fanAccount.fetchApprovedContent() {
-            store.applyPublishedManifest(manifest)
-        }
+        // AdminView exclusively owns administrator full-manifest requests.
+        // This surface only refreshes the currently approved fan scope.
+        guard !admin.isAuthenticated,
+              fanAccount.isApproved,
+              let manifest = try? await fanAccount.fetchApprovedContent(),
+              !admin.isAuthenticated,
+              fanAccount.isApproved else { return }
+        store.applyPublishedManifest(manifest)
+        store.enforcePermissionScope(
+            canViewFullGallery: fanAccount.hasPermission(.galleryFull),
+            canViewVideo: fanAccount.hasPermission(.videoView)
+        )
     }
 }
 

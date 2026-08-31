@@ -100,18 +100,26 @@ enum AdminUploadPolicy {
 
 @MainActor
 final class AdminSessionStore: ObservableObject {
+    private static let sessionLifetime: TimeInterval = 5 * 60
+
     @Published private(set) var role: AppUserRole = .visitor
     @Published private(set) var isWorking = false
-    @Published private(set) var hasSavedCredential = false
     @Published var errorMessage: String?
 
     private var credential: AdminCredential?
+    private var authenticatedUntil: Date?
+    private var expirationTask: Task<Void, Never>?
+    private var authenticationGeneration: UInt64 = 0
+    private var signInOperationID: UUID?
     private let apiRoot = URL(string: "https://shuzijun.com.cn/wp-json")!
+    private let mediaUploadRoot = URL(string: "https://www.shuzijun.com.cn/wp-json")!
     private let session: URLSession
 
     var isAuthenticated: Bool {
-        if case .administrator = role { return true }
-        return false
+        guard credential != nil,
+              AdminSessionSecurityPolicy.isFresh(expiresAt: authenticatedUntil),
+              case .administrator = role else { return false }
+        return true
     }
 
     init() {
@@ -119,29 +127,10 @@ final class AdminSessionStore: ObservableObject {
             requestTimeout: 120,
             resourceTimeout: 180
         )
-        credential = AdminKeychain.load()
-        hasSavedCredential = credential != nil
-    }
-
-    func restoreSession() async {
-        guard credential != nil, !isAuthenticated else { return }
-        do {
-            let session: AdminSessionResponse = try await authorizedJSON(
-                path: "shuzijun/v1/app-admin/session",
-                method: "GET"
-            )
-            role = .administrator(displayName: session.displayName)
-            errorMessage = nil
-        } catch AdminAPIError.invalidCredentials {
-            AdminKeychain.delete()
-            credential = nil
-            hasSavedCredential = false
-            role = .visitor
-            errorMessage = nil
-        } catch {
-            role = .visitor
-            errorMessage = nil
-        }
+        // Builds before 1.3.18 stored the complete WordPress Application
+        // Password and restored it without user interaction. Delete that
+        // legacy item during migration and keep new credentials in memory only.
+        LegacyAdminKeychain.delete()
     }
 
     func signIn(username: String, applicationPassword: String) async {
@@ -157,35 +146,54 @@ final class AdminSessionStore: ObservableObject {
             return
         }
 
-        isWorking = true
-        defer { isWorking = false }
         let candidate = AdminCredential(username: cleanUsername, applicationPassword: cleanPassword)
-        let previousCredential = credential
+        lock()
+        let attemptGeneration = authenticationGeneration
+        let operationID = UUID()
+        signInOperationID = operationID
+        isWorking = true
+        defer {
+            if signInOperationID == operationID {
+                signInOperationID = nil
+                isWorking = false
+            }
+        }
         credential = candidate
         do {
             let session: AdminSessionResponse = try await authorizedJSON(
                 path: "shuzijun/v1/app-admin/session",
-                method: "GET"
+                method: "GET",
+                authenticationProbe: true
             )
-            try AdminKeychain.save(candidate)
-            hasSavedCredential = true
-            role = .administrator(displayName: session.displayName)
+            guard attemptGeneration == authenticationGeneration,
+                  credential == candidate else { return }
+            establishSession(displayName: session.displayName)
             errorMessage = nil
         } catch {
-            credential = previousCredential
-            hasSavedCredential = previousCredential != nil
-            role = .visitor
+            guard attemptGeneration == authenticationGeneration else { return }
+            lock()
             errorMessage = (error as? AdminAPIError)?.errorDescription
                 ?? AdminAPIError.networkUnavailable.errorDescription
         }
     }
 
     func signOut() {
-        AdminKeychain.delete()
-        credential = nil
-        hasSavedCredential = false
-        role = .visitor
+        lock()
         errorMessage = nil
+    }
+
+    /// Immediately invalidates the local administrator unlock. The server still
+    /// independently checks the Application Password and capability on every
+    /// request; this prevents a previously unlocked phone from silently reusing it.
+    func lock() {
+        authenticationGeneration &+= 1
+        signInOperationID = nil
+        isWorking = false
+        expirationTask?.cancel()
+        expirationTask = nil
+        credential = nil
+        authenticatedUntil = nil
+        role = .visitor
     }
 
     func upload(data: Data, filename: String, mimeType: String) async throws -> UploadedMedia {
@@ -195,6 +203,7 @@ final class AdminSessionStore: ObservableObject {
             throw AdminAPIError.unsupportedFileType
         }
         let safeFilename = try AdminUploadPolicy.sanitizedFilename(filename, mimeType: safeMIMEType)
+        let requestGeneration = authenticationGeneration
         var request = try authorizedRequest(path: "wp/v2/media", method: "POST")
         request.setValue(safeMIMEType, forHTTPHeaderField: "Content-Type")
         request.setValue(
@@ -208,6 +217,7 @@ final class AdminSessionStore: ObservableObject {
         } catch {
             throw AdminAPIError.networkUnavailable
         }
+        try validateActiveRequest(generation: requestGeneration)
         let media = try decodeResponse(UploadedMedia.self, data: responseData, response: response)
         guard ContentSecurityPolicy.isTrustedMediaURL(media.sourceURL) else {
             throw AdminAPIError.invalidResponse
@@ -231,6 +241,7 @@ final class AdminSessionStore: ObservableObject {
             throw AdminAPIError.unsupportedFileType
         }
         let safeFilename = try AdminUploadPolicy.sanitizedFilename(filename, mimeType: safeMIMEType)
+        let requestGeneration = authenticationGeneration
         var request = try authorizedRequest(path: "wp/v2/media", method: "POST")
         request.setValue(safeMIMEType, forHTTPHeaderField: "Content-Type")
         request.setValue(
@@ -244,6 +255,7 @@ final class AdminSessionStore: ObservableObject {
         } catch {
             throw AdminAPIError.networkUnavailable
         }
+        try validateActiveRequest(generation: requestGeneration)
         let media = try decodeResponse(UploadedMedia.self, data: responseData, response: response)
         guard ContentSecurityPolicy.isTrustedMediaURL(media.sourceURL) else {
             throw AdminAPIError.invalidResponse
@@ -373,9 +385,15 @@ final class AdminSessionStore: ObservableObject {
     private func authorizedJSON<T: Decodable>(
         path: String,
         method: String,
-        body: Data? = nil
+        body: Data? = nil,
+        authenticationProbe: Bool = false
     ) async throws -> T {
-        var request = try authorizedRequest(path: path, method: method)
+        let requestGeneration = authenticationGeneration
+        var request = try authorizedRequest(
+            path: path,
+            method: method,
+            authenticationProbe: authenticationProbe
+        )
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -387,10 +405,27 @@ final class AdminSessionStore: ObservableObject {
         } catch {
             throw AdminAPIError.networkUnavailable
         }
-        return try decodeResponse(T.self, data: data, response: response)
+        if !authenticationProbe {
+            try validateActiveRequest(generation: requestGeneration)
+        }
+        return try decodeResponse(
+            T.self,
+            data: data,
+            response: response,
+            lockOnAuthorizationFailure: !authenticationProbe
+        )
     }
 
-    private func authorizedRequest(path: String, method: String) throws -> URLRequest {
+    private func authorizedRequest(
+        path: String,
+        method: String,
+        authenticationProbe: Bool = false
+    ) throws -> URLRequest {
+        if !authenticationProbe,
+           !AdminSessionSecurityPolicy.isFresh(expiresAt: authenticatedUntil) {
+            lock()
+            throw AdminAPIError.invalidCredentials
+        }
         guard let credential else { throw AdminAPIError.invalidCredentials }
         guard !path.isEmpty,
               !path.hasPrefix("/"),
@@ -401,8 +436,9 @@ final class AdminSessionStore: ObservableObject {
             throw AdminAPIError.invalidResponse
         }
         let token = Data("\(credential.username):\(credential.applicationPassword)".utf8).base64EncodedString()
-        let endpoint = apiRoot.appending(path: path)
-        guard AppNetworkSecurityPolicy.isTrustedAdminAPIURL(endpoint) else {
+        let endpointRoot = path == "wp/v2/media" ? mediaUploadRoot : apiRoot
+        let endpoint = endpointRoot.appending(path: path)
+        guard AppNetworkSecurityPolicy.isTrustedAdminRequestURL(endpoint) else {
             throw AdminAPIError.invalidResponse
         }
         var request = URLRequest(url: endpoint)
@@ -418,17 +454,24 @@ final class AdminSessionStore: ObservableObject {
         return request
     }
 
-    private func decodeResponse<T: Decodable>(_ type: T.Type, data: Data, response: URLResponse) throws -> T {
+    private func decodeResponse<T: Decodable>(
+        _ type: T.Type,
+        data: Data,
+        response: URLResponse,
+        lockOnAuthorizationFailure: Bool = true
+    ) throws -> T {
         guard data.count <= 8 * 1024 * 1024 else { throw AdminAPIError.invalidResponse }
         guard let http = response as? HTTPURLResponse,
-              AppNetworkSecurityPolicy.isTrustedAdminAPIURL(http.url) else {
+              AppNetworkSecurityPolicy.isTrustedAdminRequestURL(http.url) else {
             throw AdminAPIError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 401 {
+                if lockOnAuthorizationFailure { lock() }
                 throw AdminAPIError.invalidCredentials
             }
             if http.statusCode == 403 {
+                if lockOnAuthorizationFailure { lock() }
                 throw AdminAPIError.insufficientPermission
             }
             let isJSON = AppNetworkSecurityPolicy.isJSONMIMEType(
@@ -471,9 +514,54 @@ final class AdminSessionStore: ObservableObject {
             ? "发布失败（HTTP \(statusCode)）。"
             : String(normalized.prefix(180))
     }
+
+    private func establishSession(displayName: String) {
+        let expiry = Date().addingTimeInterval(Self.sessionLifetime)
+        authenticatedUntil = expiry
+        role = .administrator(displayName: displayName)
+        expirationTask?.cancel()
+        let expiryGeneration = authenticationGeneration
+        expirationTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(Self.sessionLifetime))
+            } catch {
+                return
+            }
+            guard let self,
+                  self.authenticationGeneration == expiryGeneration else { return }
+            self.lock()
+        }
+    }
+
+    private func validateActiveRequest(generation: UInt64) throws {
+        guard credential != nil,
+              AdminSessionSecurityPolicy.canAcceptResponse(
+                requestGeneration: generation,
+                currentGeneration: authenticationGeneration,
+                expiresAt: authenticatedUntil
+              ) else {
+            throw AdminAPIError.invalidCredentials
+        }
+    }
 }
 
-private struct AdminCredential: Codable {
+enum AdminSessionSecurityPolicy {
+    static func isFresh(expiresAt: Date?, now: Date = .now) -> Bool {
+        guard let expiresAt else { return false }
+        return now < expiresAt
+    }
+
+    static func canAcceptResponse(
+        requestGeneration: UInt64,
+        currentGeneration: UInt64,
+        expiresAt: Date?,
+        now: Date = .now
+    ) -> Bool {
+        requestGeneration == currentGeneration && isFresh(expiresAt: expiresAt, now: now)
+    }
+}
+
+private struct AdminCredential: Codable, Equatable {
     let username: String
     let applicationPassword: String
 }
@@ -522,45 +610,9 @@ private struct WordPressError: Decodable {
     let message: String
 }
 
-private enum AdminKeychain {
+private enum LegacyAdminKeychain {
     private static let service = "cn.com.shuzijun.yishu.wordpress-admin"
     private static let account = "wordpress-content-manager"
-
-    static func load() -> AdminCredential? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return try? JSONDecoder().decode(AdminCredential.self, from: data)
-    }
-
-    static func save(_ credential: AdminCredential) throws {
-        let data = try JSONEncoder().encode(credential)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        let attributes: [String: Any] = [
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-        ]
-        let status: OSStatus
-        if SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess {
-            status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        } else {
-            status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
-        }
-        guard status == errSecSuccess else {
-            throw AdminAPIError.server("无法把访问码保存到设备 Keychain。")
-        }
-    }
 
     static func delete() {
         let query: [String: Any] = [

@@ -6,6 +6,7 @@ struct AboutView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
     @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @State private var presentsAdminAccess = false
 
     var body: some View {
         ZStack {
@@ -43,6 +44,9 @@ struct AboutView: View {
         }
         .dynamicTypeSize(...DynamicTypeSize.accessibility2)
         .toolbar(.hidden, for: .navigationBar)
+        .fullScreenCover(isPresented: $presentsAdminAccess) {
+            AdminAccessView()
+        }
     }
 
     private var profileDetails: some View {
@@ -251,16 +255,16 @@ struct AboutView: View {
     }
 
     private var adminAccess: some View {
-        NavigationLink {
-            AdminView()
+        Button {
+            presentsAdminAccess = true
         } label: {
             HStack(spacing: 5) {
-                Text(admin.isAuthenticated ? "内容管理" : "管理员入口")
+                Text("管理员入口")
                 Image(systemName: "chevron.right")
                     .font(.system(size: 8, weight: .semibold))
             }
             .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.white.opacity(admin.isAuthenticated ? 0.42 : 0.22))
+            .foregroundStyle(.white.opacity(0.22))
             .frame(maxWidth: .infinity, alignment: .trailing)
             .contentShape(Rectangle())
         }

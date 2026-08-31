@@ -38,6 +38,15 @@ enum AppNetworkSecurityPolicy {
         return url.path == "/wp-json" || url.path.hasPrefix("/wp-json/")
     }
 
+    static func isTrustedAdminMediaUploadURL(_ url: URL?) -> Bool {
+        guard isTrustedHTTPSOrigin(url), let url else { return false }
+        return url.path == "/wp-json/wp/v2/media" && url.query == nil
+    }
+
+    static func isTrustedAdminRequestURL(_ url: URL?) -> Bool {
+        isTrustedAdminAPIURL(url) || isTrustedAdminMediaUploadURL(url)
+    }
+
     private static func isTrustedAPIOrigin(_ url: URL?) -> Bool {
         guard let url else { return false }
         return url.scheme?.lowercased() == "https"

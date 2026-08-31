@@ -115,9 +115,9 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(ContentManifestPolicy.isValid(invalidTiming))
         XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(nil))
         XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(1))
-        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(0))
-        XCTAssertTrue(ContentManifestPolicy.isSupportedCacheSchemaVersion(2))
-        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(3))
+        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(2))
+        XCTAssertTrue(ContentManifestPolicy.isSupportedCacheSchemaVersion(3))
+        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(4))
     }
 
     func testInsecureOrUnknownMediaHostsAreRejected() {
@@ -204,6 +204,169 @@ final class ContentAndAccessTests: XCTestCase {
             AppNetworkSecurityPolicy.isTrustedAdminAPIURL(
                 URL(string: "https://www.shuzijun.com.cn/wp-json/shuzijun/v1/app-admin/session")
             )
+        )
+
+        XCTAssertTrue(
+            AppNetworkSecurityPolicy.isTrustedAdminMediaUploadURL(
+                URL(string: "https://www.shuzijun.com.cn/wp-json/wp/v2/media")
+            )
+        )
+        XCTAssertFalse(
+            AppNetworkSecurityPolicy.isTrustedAdminMediaUploadURL(
+                URL(string: "https://www.shuzijun.com.cn/wp-json/wp/v2/users")
+            )
+        )
+        XCTAssertFalse(
+            AppNetworkSecurityPolicy.isTrustedAdminMediaUploadURL(
+                URL(string: "https://shuzijun.com.cn/wp-json/wp/v2/media")
+            )
+        )
+    }
+
+    func testAdministratorUnlockAlwaysExpiresAndMissingExpiryIsLocked() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertFalse(AdminSessionSecurityPolicy.isFresh(expiresAt: nil, now: now))
+        XCTAssertFalse(
+            AdminSessionSecurityPolicy.isFresh(
+                expiresAt: Date(timeIntervalSince1970: 999),
+                now: now
+            )
+        )
+        XCTAssertTrue(
+            AdminSessionSecurityPolicy.isFresh(
+                expiresAt: Date(timeIntervalSince1970: 1_001),
+                now: now
+            )
+        )
+        XCTAssertFalse(
+            AdminSessionSecurityPolicy.canAcceptResponse(
+                requestGeneration: 7,
+                currentGeneration: 8,
+                expiresAt: Date(timeIntervalSince1970: 1_001),
+                now: now
+            )
+        )
+        XCTAssertTrue(
+            AdminSessionSecurityPolicy.canAcceptResponse(
+                requestGeneration: 8,
+                currentGeneration: 8,
+                expiresAt: Date(timeIntervalSince1970: 1_001),
+                now: now
+            )
+        )
+    }
+
+    func testPermissionScopedManifestCanOmitAllVideoMetadata() {
+        let full = makeManifest(aboutPortraitURL: nil)
+        let scoped = AppContentManifest(
+            schemaVersion: full.schemaVersion,
+            updatedAt: full.updatedAt,
+            heroImages: full.heroImages,
+            aboutPortraitURL: full.aboutPortraitURL,
+            launchPosters: full.launchPosters,
+            showreel: nil,
+            dramas: [],
+            portfolios: full.portfolios
+        )
+
+        XCTAssertTrue(ContentManifestPolicy.isValid(scoped))
+        XCTAssertTrue(ContentSecurityPolicy.isTrusted(scoped))
+    }
+
+    @MainActor
+    func testPermissionDowngradeFailsClosedInMemoryAndCannotExpandLocally() {
+        let store = PortfolioStore()
+        let full = makeManifest(aboutPortraitURL: nil, imageCount: 6)
+        defer { store.discardProtectedContent() }
+
+        store.applyPublishedManifest(full)
+        XCTAssertEqual(store.portfolios.first?.images.count, 6)
+        XCTAssertNotNil(store.showreel)
+        XCTAssertFalse(store.dramas.isEmpty)
+
+        store.enforcePermissionScope(canViewFullGallery: false, canViewVideo: false)
+        XCTAssertEqual(store.portfolios.first?.images.count, 3)
+        XCTAssertEqual(store.portfolios.first?.displayImageCount, 6)
+        XCTAssertNil(store.showreel)
+        XCTAssertTrue(store.dramas.isEmpty)
+
+        // A local permission flag change must not resurrect removed URLs. Only a
+        // new server-authorized manifest can expand the in-memory catalog again.
+        store.enforcePermissionScope(canViewFullGallery: true, canViewVideo: true)
+        XCTAssertEqual(store.portfolios.first?.images.count, 3)
+        XCTAssertNil(store.showreel)
+        XCTAssertTrue(store.dramas.isEmpty)
+
+        store.applyPublishedManifest(full)
+        XCTAssertEqual(store.portfolios.first?.images.count, 6)
+        XCTAssertNotNil(store.showreel)
+        XCTAssertFalse(store.dramas.isEmpty)
+    }
+
+    func testAdministratorEditorRequiresAuthenticationAndFullManifest() {
+        XCTAssertFalse(
+            AdminContentEditingPolicy.canEdit(
+                isAuthenticated: false,
+                hasLoadedFullManifest: false
+            )
+        )
+        XCTAssertFalse(
+            AdminContentEditingPolicy.canEdit(
+                isAuthenticated: true,
+                hasLoadedFullManifest: false
+            )
+        )
+        XCTAssertFalse(
+            AdminContentEditingPolicy.canEdit(
+                isAuthenticated: false,
+                hasLoadedFullManifest: true
+            )
+        )
+        XCTAssertTrue(
+            AdminContentEditingPolicy.canEdit(
+                isAuthenticated: true,
+                hasLoadedFullManifest: true
+            )
+        )
+
+        let full = makeManifest(aboutPortraitURL: nil, imageCount: 6)
+        let fanScoped = AppContentManifest(
+            schemaVersion: full.schemaVersion,
+            updatedAt: full.updatedAt,
+            heroImages: full.heroImages,
+            aboutPortraitURL: full.aboutPortraitURL,
+            launchPosters: full.launchPosters,
+            showreel: nil,
+            dramas: [],
+            portfolios: full.portfolios
+        )
+        let fullPortfolio = full.portfolios[0]
+        let galleryPreview = Portfolio(
+            id: fullPortfolio.id,
+            title: fullPortfolio.title,
+            subtitle: fullPortfolio.subtitle,
+            eyebrow: fullPortfolio.eyebrow,
+            slug: fullPortfolio.slug,
+            websiteURL: fullPortfolio.websiteURL,
+            coverURL: fullPortfolio.coverURL,
+            images: Array(fullPortfolio.images.prefix(3)),
+            totalImageCount: fullPortfolio.images.count
+        )
+        let videoEnabledFanScope = AppContentManifest(
+            schemaVersion: full.schemaVersion,
+            updatedAt: full.updatedAt,
+            heroImages: full.heroImages,
+            aboutPortraitURL: full.aboutPortraitURL,
+            launchPosters: full.launchPosters,
+            showreel: full.showreel,
+            dramas: full.dramas,
+            portfolios: [galleryPreview]
+        )
+        XCTAssertTrue(AdminContentEditingPolicy.isFullAdministratorManifest(full))
+        XCTAssertFalse(AdminContentEditingPolicy.isFullAdministratorManifest(fanScoped))
+        XCTAssertFalse(
+            AdminContentEditingPolicy.isFullAdministratorManifest(videoEnabledFanScope)
         )
     }
 
@@ -447,7 +610,7 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
-    private func makeManifest(aboutPortraitURL: URL?) -> AppContentManifest {
+    private func makeManifest(aboutPortraitURL: URL?, imageCount: Int = 3) -> AppContentManifest {
         AppContentManifest(
             schemaVersion: 1,
             updatedAt: .now,
@@ -456,7 +619,7 @@ final class ContentAndAccessTests: XCTestCase {
             launchPosters: ContentCatalog.launchPosters,
             showreel: ContentCatalog.showreel,
             dramas: ContentCatalog.dramas,
-            portfolios: [makePortfolio(imageCount: 3)]
+            portfolios: [makePortfolio(imageCount: imageCount)]
         )
     }
 }

@@ -16,7 +16,9 @@ struct CreditsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 32) {
                     header
-                    showreel
+                    if let showreel = store.showreel {
+                        showreelSection(showreel)
+                    }
                     credits
                     collaboration
                 }
@@ -73,7 +75,7 @@ struct CreditsView: View {
         .padding(.top, 8)
     }
 
-    private var showreel: some View {
+    private func showreelSection(_ showreel: ShowreelContent) -> some View {
         Group {
             if let inlinePlayer {
                 ZStack(alignment: .bottomTrailing) {
@@ -108,20 +110,20 @@ struct CreditsView: View {
             } else {
                 Button { playInline() } label: {
                     ZStack(alignment: .bottomLeading) {
-                        ArtworkImage(url: store.showreel.posterURL, contentMode: .fit)
+                        ArtworkImage(url: showreel.posterURL, contentMode: .fit)
                             .aspectRatio(1.5, contentMode: .fit)
                             .frame(maxWidth: .infinity)
                             .accessibilityHidden(true)
                         LinearGradient(colors: [.clear, .black.opacity(0.86)], startPoint: .center, endPoint: .bottom)
                         HStack(alignment: .bottom) {
                             VStack(alignment: .leading, spacing: 7) {
-                                Text(store.showreel.eyebrow)
+                                Text(showreel.eyebrow)
                                     .font(.system(size: 9, weight: .semibold))
                                     .tracking(1.7)
                                     .foregroundStyle(AppTheme.gold)
-                                Text(store.showreel.title)
+                                Text(showreel.title)
                                     .font(.editorial(25))
-                                Text(store.showreel.tags.joined(separator: " · "))
+                                Text(showreel.tags.joined(separator: " · "))
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.68))
                             }
@@ -173,9 +175,10 @@ struct CreditsView: View {
     }
 
     private func playInline() {
+        guard let showreel = store.showreel else { return }
         showVideoPlaybackError = false
         VideoAudioSession.activate()
-        let player = AVPlayer(url: store.showreel.videoURL)
+        let player = AVPlayer(url: showreel.videoURL)
         player.isMuted = false
         player.volume = 1
         inlinePlayer = player

@@ -41,7 +41,11 @@ after a deliberate disaster-recovery promotion and final database sync.
 Because the CDN can still retry 401/403 responses against the backup origin,
 the Singapore Nginx server also uses
 `shuzijun-account-api-backup-proxy.conf` to forward this namespace to
-Shanghai. Both controls are removed together during a deliberate promotion.
+Shanghai. Only the backup apex server's loopback hop may preserve its
+edge-overwritten client-address header; the public backup `www` server replaces
+the same header on CDN or direct-origin requests to prevent network rate-limit
+identity spoofing. Both controls are removed together during a deliberate
+promotion.
 The iOS client itself uses the direct `https://shuzijun.com.cn/wp-json/...`
 route installed by `install-apex-account-api-route.py`; this avoids CDN
 per-response fallback entirely for normal App traffic. The public website still

@@ -23,8 +23,11 @@ real-time multi-primary, the backup must forward `/wp-json/shuzijun/v1/` to
 the authoritative Shanghai origin rather than answer from its local database.
 The proxy validates the Shanghai TLS certificate, preserves authorization and
 installation headers, disables proxy caching, and fails closed if Shanghai is
-unavailable. Remove it only as part of a deliberate disaster-recovery
-promotion after a final database sync.
+unavailable. Its client-address header is preserved only when the immediate
+peer is loopback (the backup apex route); CDN and direct-origin requests always
+overwrite that header with their immediate peer address so callers cannot
+forge network rate-limit identities. Remove it only as part of a deliberate
+disaster-recovery promotion after a final database sync.
 
 `shuzijun-account-api-apex-route.conf` is included in the
 `shuzijun.com.cn` TLS server on both nodes. The App uses this direct, non-CDN
