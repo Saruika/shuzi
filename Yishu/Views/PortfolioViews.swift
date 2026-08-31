@@ -232,11 +232,15 @@ private struct PortfolioGridCard: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(portfolio.eyebrow)
                     .font(.caption2.weight(.semibold))
-                    .tracking(1.1)
+                    .tracking(0.7)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutPriority(1)
                     .foregroundStyle(AppTheme.ink)
                 Text(portfolio.title)
                     .font(.system(.title3, design: .serif))
                     .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
                     .foregroundStyle(AppTheme.ink)
             }
             .padding(.horizontal, 9)
