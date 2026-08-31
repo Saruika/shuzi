@@ -6,30 +6,24 @@ struct AboutView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
     @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var presentsAdminAccess = false
 
     var body: some View {
         ZStack {
             AppTheme.ink.ignoresSafeArea()
-            GeometryReader { proxy in
-                ScrollView {
-                    if horizontalSizeClass == .regular,
-                       proxy.size.width >= 760,
-                       !dynamicTypeSize.isAccessibilitySize {
-                        let availableWidth = min(max(0, proxy.size.width - 48), 1_164)
-                        let portraitWidth = min(580, max(320, availableWidth * 0.52))
-                        let detailsWidth = max(300, availableWidth - portraitWidth - 24)
-
+            ScrollView {
+                Group {
+                    if usesTwoColumnLayout {
                         HStack(alignment: .top, spacing: 24) {
                             portrait
-                                .frame(width: portraitWidth)
+                                .frame(maxWidth: .infinity)
                             profileDetails
-                                .frame(width: detailsWidth)
+                                .frame(maxWidth: .infinity)
                                 .padding(.top, 48)
                         }
-                        .frame(width: availableWidth, alignment: .top)
-                        .frame(maxWidth: .infinity, alignment: .top)
+                        .frame(maxWidth: 1_164)
                         .padding(.horizontal, 24)
                     } else {
                         VStack(spacing: 0) {
@@ -37,13 +31,15 @@ struct AboutView: View {
                                 .frame(maxWidth: 720)
                                 .frame(maxWidth: .infinity)
                             profileDetails
+                                .frame(maxWidth: 720)
+                                .frame(maxWidth: .infinity)
                         }
                     }
                 }
-                .scrollIndicators(.hidden)
-                .contentMargins(.bottom, 84, for: .scrollContent)
-                .ignoresSafeArea(.container, edges: .top)
+                .frame(maxWidth: .infinity, alignment: .top)
             }
+            .scrollIndicators(.hidden)
+            .floatingTabBarScrollClearance()
         }
         .toolbar(.hidden, for: .navigationBar)
         .fullScreenCover(isPresented: $presentsAdminAccess) {
@@ -56,6 +52,11 @@ struct AboutView: View {
                     .environmentObject(portfolioStore)
             }
         }
+    }
+
+    private var usesTwoColumnLayout: Bool {
+        !dynamicTypeSize.isAccessibilitySize
+            && (horizontalSizeClass == .regular || verticalSizeClass == .compact)
     }
 
     private var profileDetails: some View {
@@ -87,16 +88,21 @@ struct AboutView: View {
             LinearGradient(colors: [.clear, AppTheme.ink], startPoint: .center, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 8) {
                 Text("YI SHU")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                     .tracking(4)
                     .foregroundStyle(AppTheme.gold)
                 Text("易姝")
                     .font(.system(.largeTitle, design: .serif))
                 Text("短剧演员 / 模特 / 视频创作者")
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.7))
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.78)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.black)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 2)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 6)
+                    .background(
+                        AppTheme.warmWhite,
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
             }
             .padding(22)
         }
@@ -108,28 +114,40 @@ struct AboutView: View {
             Text("关于")
                 .font(.system(.title, design: .serif))
                 .accessibilityIdentifier("about-heading")
+                .accessibilityAddTraits(.isHeader)
             Text("专注于短剧表演、时尚摄影与艺术创作。希望通过克制而真实的情绪、东方气质与镜头表现，让每个角色留下属于自己的余韵。")
-                .font(.system(size: 16))
+                .font(.body)
                 .lineSpacing(9)
                 .foregroundStyle(.white.opacity(0.76))
+                .fixedSize(horizontal: false, vertical: true)
 
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 8) {
                     PillLabel(text: "短剧表演")
                     PillLabel(text: "古装造型")
                     PillLabel(text: "情绪表达")
                     PillLabel(text: "平面拍摄")
                     PillLabel(text: "品牌合作")
                 }
-                VStack(alignment: .leading, spacing: 8) {
+            } else {
+                ViewThatFits(in: .horizontal) {
                     HStack(spacing: 8) {
                         PillLabel(text: "短剧表演")
                         PillLabel(text: "古装造型")
                         PillLabel(text: "情绪表达")
-                    }
-                    HStack(spacing: 8) {
                         PillLabel(text: "平面拍摄")
                         PillLabel(text: "品牌合作")
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            PillLabel(text: "短剧表演")
+                            PillLabel(text: "古装造型")
+                            PillLabel(text: "情绪表达")
+                        }
+                        HStack(spacing: 8) {
+                            PillLabel(text: "平面拍摄")
+                            PillLabel(text: "品牌合作")
+                        }
                     }
                 }
             }
@@ -206,11 +224,12 @@ struct AboutView: View {
     private var copyrightNotice: some View {
         VStack(alignment: .leading, spacing: 13) {
             Label("版权与授权", systemImage: "c.circle")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(AppTheme.gold)
+                .accessibilityAddTraits(.isHeader)
 
             Text("本 App 展示的照片与影像均已取得合法展示授权，相关著作权、肖像权及其他权利归各自权利人所有。未经书面许可，不得下载、复制、截图传播、转载、改编、二次创作或用于商业用途。")
-                .font(.system(size: 13))
+                .font(.footnote)
                 .lineSpacing(6)
                 .foregroundStyle(.white.opacity(0.68))
                 .fixedSize(horizontal: false, vertical: true)
@@ -225,6 +244,8 @@ struct AboutView: View {
                 }
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(AppTheme.warmWhite)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
@@ -246,13 +267,13 @@ struct AboutView: View {
             HStack(spacing: 14) {
                 Image(systemName: fanAccount.isAuthenticated
                       ? "person.crop.circle.badge.checkmark" : "person.crop.circle.badge.plus")
-                    .font(.system(size: 19))
+                    .font(.title3)
                     .foregroundStyle(AppTheme.gold)
                     .frame(width: 38, height: 38)
                     .background(.white.opacity(0.055), in: Circle())
                 VStack(alignment: .leading, spacing: 3) {
                     Text(fanAccount.profile?.displayName ?? "粉丝账号")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                     Text(fanAccount.profile?.identityCode ?? "注册身份码 · 获取远程权限")
                         .font(.caption)
                         .foregroundStyle(AppTheme.muted)
@@ -300,13 +321,13 @@ struct AboutView: View {
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: "hand.raised")
-                    .font(.system(size: 16))
+                    .font(.body)
                     .foregroundStyle(AppTheme.gold)
                     .frame(width: 34, height: 34)
                     .background(.white.opacity(0.055), in: Circle())
                 VStack(alignment: .leading, spacing: 3) {
                     Text("隐私政策与数据选择")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.footnote.weight(.semibold))
                     Text("查看数据用途 · 账号可在 App 内永久删除")
                         .font(.caption2)
                         .foregroundStyle(AppTheme.muted)
@@ -316,9 +337,10 @@ struct AboutView: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.35))
             }
-            .foregroundStyle(AppTheme.warmWhite)
-            .padding(14)
-            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
+                .foregroundStyle(AppTheme.warmWhite)
+                .padding(14)
+                .frame(minHeight: 44)
+                .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("about-privacy-policy")
@@ -337,7 +359,7 @@ struct AboutView: View {
                             image.resizable().scaledToFit()
                         } else {
                             Text(localWeather.weatherProviderName)
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.caption.weight(.semibold))
                         }
                     }
                     .frame(width: 108, height: 28, alignment: .leading)
@@ -351,7 +373,7 @@ struct AboutView: View {
                 }
                 .foregroundStyle(AppTheme.warmWhite)
                 .padding(.horizontal, 15)
-                .padding(.vertical, 12)
+                .frame(minHeight: 48)
                 .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
             }
             .buttonStyle(.plain)
@@ -377,13 +399,13 @@ struct AboutView: View {
         Link(destination: url) {
             HStack(spacing: 14) {
                 Image(systemName: icon)
-                    .font(.system(size: 16))
+                    .font(.body)
                     .foregroundStyle(AppTheme.gold)
                     .frame(width: 36, height: 36)
                     .background(.white.opacity(0.055), in: Circle())
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(.subheadline.weight(.medium))
                     Text(detail)
                         .font(.caption)
                         .foregroundStyle(AppTheme.muted)
@@ -395,6 +417,7 @@ struct AboutView: View {
             }
             .foregroundStyle(AppTheme.warmWhite)
             .padding(15)
+            .frame(minHeight: 48)
             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)

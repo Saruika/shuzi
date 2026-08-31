@@ -21,6 +21,7 @@ struct RootView: View {
     @EnvironmentObject private var adminSession: AdminSessionStore
     @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedTab: AppTab
     @State private var portfolioPath: [Portfolio] = []
     @State private var launchPosterSnapshot: LaunchPosterContent?
@@ -192,7 +193,7 @@ struct RootView: View {
                 HomeView(showPortfolio: { selectedTab = .portfolio })
                     .ignoresSafeArea(.container, edges: .top)
                     .tag(AppTab.home)
-                    .tabItem { Label("首页", systemImage: "play.rectangle") }
+                    .tabItem { Label("首页", systemImage: "house") }
 
                 NavigationStack(path: $portfolioPath) {
                     PortfolioGridView()
@@ -217,7 +218,6 @@ struct RootView: View {
                 NavigationStack {
                     visualAboutContent
                 }
-                .ignoresSafeArea(.container, edges: .top)
                 .tag(AppTab.about)
                 .tabItem { Label("关于", systemImage: "person.crop.rectangle") }
             }
@@ -227,12 +227,16 @@ struct RootView: View {
                     .zIndex(19_999)
             } else if isLaunchPosterVisible, let poster = displayedLaunchPoster {
                 LaunchPosterView(poster: poster) {
-                    withAnimation(.easeOut(duration: 0.35)) {
+                    if reduceMotion {
                         isLaunchPosterVisible = false
+                    } else {
+                        withAnimation(.easeOut(duration: 0.35)) {
+                            isLaunchPosterVisible = false
+                        }
                     }
                 }
                 .id(poster)
-                .transition(.opacity)
+                .transition(reduceMotion ? .identity : .opacity)
                 .zIndex(20_000)
             }
         }
@@ -243,7 +247,7 @@ struct RootView: View {
             AppTheme.ink.ignoresSafeArea()
             VStack(spacing: 18) {
                 Image(systemName: "lock.shield.fill")
-                    .font(.system(size: 32, weight: .light))
+                    .font(.title.weight(.regular))
                     .foregroundStyle(AppTheme.gold)
                 ProgressView().tint(AppTheme.gold)
                 Text("正在验证访问授权")

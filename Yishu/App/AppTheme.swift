@@ -13,17 +13,46 @@ enum AppTheme {
 enum AppWindowMetrics {
     static func topInsetForLayout(measured: CGFloat) -> CGFloat {
         if measured > 0 { return measured }
-        return UIDevice.current.userInterfaceIdiom == .phone ? 62 : 24
+        return activeWindow?.safeAreaInsets.top ?? 0
     }
 
     static func bottomInsetForLayout(measured: CGFloat) -> CGFloat {
         if measured > 0 { return measured }
-        return UIDevice.current.userInterfaceIdiom == .phone ? 34 : 20
+        return activeWindow?.safeAreaInsets.bottom ?? 0
+    }
+
+    private static var activeWindow: UIWindow? {
+        let foregroundScenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter {
+                $0.activationState == .foregroundActive
+                    || $0.activationState == .foregroundInactive
+            }
+
+        return foregroundScenes
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)
+            ?? foregroundScenes
+                .flatMap(\.windows)
+                .first(where: { !$0.isHidden && $0.alpha > 0 })
     }
 }
 
-extension Font {
-    static func editorial(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
-        .system(size: size, weight: weight, design: .serif)
+private struct FloatingTabBarScrollClearance: ViewModifier {
+    let height: CGFloat
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *), UIDevice.current.userInterfaceIdiom == .phone {
+            content.padding(.bottom, 24)
+        } else {
+            content.contentMargins(.bottom, height, for: .scrollContent)
+        }
+    }
+}
+
+extension View {
+    func floatingTabBarScrollClearance(_ height: CGFloat = 84) -> some View {
+        modifier(FloatingTabBarScrollClearance(height: height))
     }
 }

@@ -45,6 +45,40 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "00-apple-first-use", app: app)
     }
 
+    func testLaunchPosterRespectsSafeAreaAndAccessibilityReadingTime() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-disable-screen-protection-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityXXXL",
+        ]
+        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launch()
+
+        let skip = element("launch-poster-skip", in: app)
+        let copy = element("launch-poster-copy", in: app)
+        XCTAssertTrue(skip.waitForExistence(timeout: 12), "开屏跳过按钮没有出现")
+        XCTAssertTrue(copy.waitForExistence(timeout: 5), "辅助功能字号下开屏文案没有出现")
+        assertMinimumTapTarget(skip, named: "开屏跳过")
+        let statusBar = app.statusBars.firstMatch
+        if statusBar.exists {
+            XCTAssertGreaterThanOrEqual(
+                skip.frame.minY,
+                statusBar.frame.maxY - 1,
+                "开屏跳过按钮侵入状态栏或灵动岛安全区域"
+            )
+        }
+
+        // Accessibility XXXL disables automatic dismissal so the user has
+        // enough reading time. Verify the poster remains rather than racing
+        // the screenshot after the ordinary timeout.
+        Thread.sleep(forTimeInterval: 3)
+        XCTAssertTrue(copy.exists, "辅助功能字号下开屏仍被自动关闭")
+        attachScreenshot(named: "00-launch-poster-accessibility", app: app)
+    }
+
     func testPrimaryTabsExposeTheirCoreContent() {
         let app = launchApp()
 
@@ -66,6 +100,15 @@ final class YishuUITests: XCTestCase {
 
         openTab("关于", in: app)
         assertExists("about-heading", in: app)
+        let aboutPortrait = element("about-portrait", in: app)
+        let statusBar = app.statusBars.firstMatch
+        if statusBar.exists {
+            XCTAssertGreaterThanOrEqual(
+                aboutPortrait.frame.minY,
+                statusBar.frame.maxY - 1,
+                "关于页人物图侵入了状态栏或灵动岛安全区域"
+            )
+        }
         attachScreenshot(named: "05-about", app: app)
     }
 
@@ -94,6 +137,82 @@ final class YishuUITests: XCTestCase {
         assertExists("gallery-viewer", in: app, timeout: 8)
         XCTAssertTrue(app.buttons["收藏照片"].exists || app.buttons["取消收藏"].exists)
         attachScreenshot(named: "07-gallery-viewer", app: app)
+    }
+
+    func testCustomShowreelControlsRemainUsable() {
+        let app = launchApp(arguments: [
+            "-open-credits-for-visual-testing",
+            "-play-showreel-for-visual-testing",
+        ])
+
+        let progress = element("showreel-progress", in: app)
+        let playback = element("showreel-playback-control", in: app)
+        let mute = element("showreel-mute-control", in: app)
+        assertMinimumTapTarget(progress, named: "Showreel 播放进度")
+        assertMinimumTapTarget(playback, named: "Showreel 播放控制")
+        assertMinimumTapTarget(mute, named: "Showreel 静音控制")
+        XCTAssertTrue(playback.isHittable, "Showreel 播放控制不可点击")
+        XCTAssertTrue(mute.isHittable, "Showreel 静音控制不可点击")
+        playback.tap()
+        mute.tap()
+        attachScreenshot(named: "04-custom-showreel-controls", app: app)
+    }
+
+    func testPortfolioSearchStaysNearTheSafeAreaAndCanClearAndCancel() {
+        let app = launchApp(arguments: ["-open-portfolio-for-visual-testing"])
+        assertExists("portfolio-heading", in: app)
+
+        let searchField = element("portfolio-search-field", in: app)
+        XCTAssertTrue(searchField.waitForExistence(timeout: 8), "作品搜索框没有出现")
+        let maximumTopRatio: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 0.13 : 0.095
+        XCTAssertLessThan(
+            searchField.frame.minY,
+            app.windows.firstMatch.frame.height * maximumTopRatio,
+            "作品搜索框距离顶部过远"
+        )
+        let statusBar = app.statusBars.firstMatch
+        if statusBar.exists {
+            XCTAssertGreaterThanOrEqual(
+                searchField.frame.minY,
+                statusBar.frame.maxY - 1,
+                "作品搜索框侵入了状态栏或灵动岛安全区域"
+            )
+        }
+
+        let cards = app.buttons
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-"))
+        XCTAssertGreaterThan(cards.count, 0, "搜索前应显示作品卡片")
+
+        searchField.tap()
+        searchField.typeText("不存在的主题")
+        let emptyExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "count == 0"),
+            object: cards
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [emptyExpectation], timeout: 5),
+            .completed,
+            "无匹配搜索仍显示了作品卡片"
+        )
+
+        let clear = app.buttons["清除搜索"]
+        XCTAssertTrue(clear.waitForExistence(timeout: 5), "输入搜索内容后没有清除按钮")
+        clear.tap()
+        XCTAssertTrue(cards.firstMatch.waitForExistence(timeout: 5), "清除搜索后作品卡片没有恢复")
+
+        let cancel = app.buttons["取消"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5), "聚焦搜索时没有取消按钮")
+        cancel.tap()
+        let cancelDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: cancel
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [cancelDismissed], timeout: 2),
+            .completed,
+            "取消搜索后按钮仍停留在界面上"
+        )
+        attachScreenshot(named: "02-portfolio-search", app: app)
     }
 
     func testCollaborationAndAdministratorRoutesRemainReachable() {
@@ -138,11 +257,7 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "10-admin-login", app: app)
     }
 
-    func testIPadSupportsLandscapeAndKeepsAdaptiveContentVisible() throws {
-        guard UIDevice.current.userInterfaceIdiom == .pad else {
-            throw XCTSkip("横屏窗口回归仅在 iPad 上执行")
-        }
-
+    func testSupportedLandscapeKeepsAdaptiveContentVisible() {
         let app = launchApp(arguments: ["-open-about-for-visual-testing"])
         addTeardownBlock {
             XCUIDevice.shared.orientation = .portrait
@@ -160,13 +275,30 @@ final class YishuUITests: XCTestCase {
         XCTAssertEqual(
             XCTWaiter.wait(for: [landscapeExpectation], timeout: 8),
             .completed,
-            "iPad 窗口没有切换到横屏布局"
+            "窗口没有切换到横屏布局"
         )
 
-        assertExists("about-heading", in: app)
+        let aboutHeading = element("about-heading", in: app)
+        XCTAssertTrue(aboutHeading.waitForExistence(timeout: 8), "横屏下关于页标题没有出现")
         assertExists("about-portrait", in: app)
+        let rightColumnExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                guard window.exists, aboutHeading.exists else { return false }
+                let windowFrame = window.frame
+                let headingFrame = aboutHeading.frame
+                return headingFrame.minX > windowFrame.minX + windowFrame.width * 0.45
+                    && headingFrame.maxX <= windowFrame.maxX + 1
+            },
+            object: aboutHeading
+        )
+        let rightColumnResult = XCTWaiter.wait(for: [rightColumnExpectation], timeout: 8)
+        attachScreenshot(named: "10-landscape-about", app: app)
+        XCTAssertEqual(
+            rightColumnResult,
+            .completed,
+            "关于页横屏后没有形成“左图右文”自适应布局，可能仍保留了竖屏内容宽度"
+        )
         XCTAssertTrue(tabButton("首页", in: app).isHittable, "横屏下主导航不可点击")
-        attachScreenshot(named: "10-ipad-landscape-about", app: app)
     }
 
     func testEmptyLibraryCanReturnToPortfolio() {
@@ -203,6 +335,75 @@ final class YishuUITests: XCTestCase {
 
         assertExists("gallery-viewer", in: app, timeout: 8)
         XCTAssertTrue(app.buttons["收藏照片"].exists || app.buttons["取消收藏"].exists)
+    }
+
+    func testAccessibilityTextSizeKeepsPrimaryActionsComfortable() {
+        let app = launchApp(arguments: [
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityXXXL",
+        ])
+
+        let weather = element("home-weather", in: app)
+        let portfolioAction = element("home-open-portfolio", in: app)
+        assertMinimumTapTarget(weather, named: "首页天气")
+        assertMinimumTapTarget(portfolioAction, named: "查看作品")
+        XCTAssertTrue(portfolioAction.isHittable, "辅助功能大字号下首页主操作不可点击")
+
+        portfolioAction.tap()
+        let searchField = element("portfolio-search-field", in: app)
+        XCTAssertTrue(searchField.waitForExistence(timeout: 8), "大字号下作品搜索框未出现")
+        assertMinimumTapTarget(searchField, named: "作品搜索")
+        attachScreenshot(named: "11-accessibility-xxxl", app: app)
+    }
+
+    func testLandscapeWithAccessibilityTextKeepsHomeControlsVisible() {
+        let app = launchApp(arguments: [
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityXXXL",
+        ])
+        addTeardownBlock {
+            XCUIDevice.shared.orientation = .portrait
+        }
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let window = app.windows.firstMatch
+        let landscapeExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                let frame = window.frame
+                return window.exists && frame.width > frame.height
+            },
+            object: window
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [landscapeExpectation], timeout: 8),
+            .completed,
+            "辅助功能大字号下窗口没有切换到横屏"
+        )
+
+        let weather = element("home-weather", in: app)
+        let portfolioAction = element("home-open-portfolio", in: app)
+        assertMinimumTapTarget(weather, named: "横屏首页天气")
+        assertMinimumTapTarget(portfolioAction, named: "横屏查看作品")
+        XCTAssertTrue(weather.isHittable, "横屏辅助功能大字号下天气入口不可点击")
+        XCTAssertTrue(portfolioAction.isHittable, "横屏辅助功能大字号下查看作品不可点击")
+        XCTAssertTrue(window.frame.contains(weather.frame), "横屏天气入口超出可视区域")
+        XCTAssertTrue(window.frame.contains(portfolioAction.frame), "横屏查看作品超出可视区域")
+        attachScreenshot(named: "12-landscape-accessibility-xxxl", app: app)
+    }
+
+    func testPrimaryPagesMeetFocusedAppleAccessibilityAudit() throws {
+        let app = launchApp()
+
+        assertExists("home-open-portfolio", in: app)
+        try auditAppleAccessibilityBaseline(pageNamed: "首页", in: app)
+
+        openTab("作品", in: app)
+        assertExists("portfolio-heading", in: app)
+        try auditAppleAccessibilityBaseline(pageNamed: "作品", in: app)
+
+        openTab("关于", in: app)
+        assertExists("about-heading", in: app)
+        try auditAppleAccessibilityBaseline(pageNamed: "关于", in: app)
     }
 
     private func launchApp(arguments: [String] = []) -> XCUIApplication {
@@ -247,6 +448,28 @@ final class YishuUITests: XCTestCase {
             file: file,
             line: line
         )
+    }
+
+    private func assertMinimumTapTarget(
+        _ element: XCUIElement,
+        named name: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertTrue(element.waitForExistence(timeout: 8), "\(name)不存在", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(element.frame.width, 43.5, "\(name)宽度不足 44pt", file: file, line: line)
+        XCTAssertGreaterThanOrEqual(element.frame.height, 43.5, "\(name)高度不足 44pt", file: file, line: line)
+    }
+
+    private func auditAppleAccessibilityBaseline(
+        pageNamed pageName: String,
+        in app: XCUIApplication
+    ) throws {
+        try XCTContext.runActivity(named: "\(pageName)辅助功能审计") { _ in
+            try app.performAccessibilityAudit(
+                for: [.contrast, .hitRegion, .textClipped, .trait]
+            )
+        }
     }
 
     private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication) {

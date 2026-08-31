@@ -8,12 +8,13 @@ struct PrivacyPolicyView: View {
                 VStack(alignment: .leading, spacing: 28) {
                     VStack(alignment: .leading, spacing: 9) {
                         Text("PRIVACY")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.caption2.weight(.semibold))
                             .tracking(3)
                             .foregroundStyle(AppTheme.gold)
                         Text("隐私政策")
-                            .font(.editorial(38))
+                            .font(.system(.largeTitle, design: .serif))
                             .accessibilityIdentifier("privacy-policy-heading")
+                            .accessibilityAddTraits(.isHeader)
                         Text("生效日期：2026 年 8 月 31 日")
                             .font(.caption)
                             .foregroundStyle(AppTheme.muted)
@@ -54,8 +55,7 @@ struct PrivacyPolicyView: View {
                     Link(destination: ContentCatalog.privacyPolicyURL) {
                         Label("查看网页版隐私政策", systemImage: "arrow.up.right")
                             .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
+                            .frame(maxWidth: .infinity, minHeight: 48)
                             .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
                             .foregroundStyle(AppTheme.ink)
                     }
@@ -76,9 +76,11 @@ struct PrivacyPolicyView: View {
 
     private func policySection(_ title: String, text: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(title).font(.editorial(24))
+            Text(title)
+                .font(.system(.title2, design: .serif))
+                .accessibilityAddTraits(.isHeader)
             Text(text)
-                .font(.system(size: 14))
+                .font(.body)
                 .lineSpacing(6)
                 .foregroundStyle(.white.opacity(0.72))
                 .fixedSize(horizontal: false, vertical: true)
@@ -87,7 +89,9 @@ struct PrivacyPolicyView: View {
 
     private func policySection(_ title: String, bullets: [String]) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            Text(title).font(.editorial(24))
+            Text(title)
+                .font(.system(.title2, design: .serif))
+                .accessibilityAddTraits(.isHeader)
             ForEach(Array(bullets.enumerated()), id: \.offset) { _, bullet in
                 HStack(alignment: .top, spacing: 9) {
                     Circle()
@@ -95,7 +99,7 @@ struct PrivacyPolicyView: View {
                         .frame(width: 4, height: 4)
                         .padding(.top, 8)
                     Text(bullet)
-                        .font(.system(size: 14))
+                        .font(.body)
                         .lineSpacing(6)
                         .foregroundStyle(.white.opacity(0.72))
                         .fixedSize(horizontal: false, vertical: true)

@@ -80,12 +80,13 @@ struct CollaborationInquiryView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("COLLABORATION")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption2.weight(.semibold))
                 .tracking(3)
                 .foregroundStyle(AppTheme.gold)
             Text("合作邀约")
-                .font(.editorial(40))
+                .font(.system(.largeTitle, design: .serif))
                 .accessibilityIdentifier("collaboration-heading")
+                .accessibilityAddTraits(.isHeader)
             Text("填写简要信息后，可以通过邮件或任意聊天应用发送。")
                 .font(.subheadline)
                 .foregroundStyle(AppTheme.muted)
@@ -97,14 +98,15 @@ struct CollaborationInquiryView: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("易姝")
-                        .font(.editorial(28))
+                        .font(.system(.title, design: .serif))
+                        .accessibilityAddTraits(.isHeader)
                     Text("短剧演员 · 模特 · 视频创作者")
                         .font(.caption)
                         .foregroundStyle(AppTheme.muted)
                 }
                 Spacer()
                 Image(systemName: "person.text.rectangle")
-                    .font(.system(size: 22, weight: .light))
+                    .font(.title2.weight(.regular))
                     .foregroundStyle(AppTheme.gold)
             }
 
@@ -118,6 +120,8 @@ struct CollaborationInquiryView: View {
                     copiedItem = .profile
                 }
                 .foregroundStyle(AppTheme.gold)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
             .font(.caption)
         }
@@ -128,7 +132,8 @@ struct CollaborationInquiryView: View {
     private var inquiryForm: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("邀约信息")
-                .font(.editorial(26))
+                .font(.system(.title2, design: .serif))
+                .accessibilityAddTraits(.isHeader)
 
             field("联系人 / 称呼", text: $contactName, prompt: "必填")
             field("手机 / 微信 / 邮箱", text: $contactMethod, prompt: "必填")
@@ -219,6 +224,8 @@ struct CollaborationInquiryView: View {
                 Text("复制邀约内容")
                     .font(.caption)
                     .foregroundStyle(AppTheme.muted)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }

@@ -29,7 +29,10 @@ Scripts/ci-release-analyze.sh
 - 管理员目录可以加载 `accountSource=apple` 且 `requiresAppleRegistration=true` 的未完成申请，显示“等待绑定抖音 ID”；抖音 ID 为空但缺少该精确标记、来源错误或完整 profile 仍带标记时必须拒绝，且未完成资料的用户没有批准为 active 的入口。
 - 账号单元回归覆盖恢复状态未完成前失败关闭、主动改密的当前/新密码校验、会话目录的唯一当前设备约束，以及换令牌时丢弃迟到响应。
 - 收藏与最近浏览单元回归覆盖账号 A/B 相互隔离、退出后不读写、删除只清理指定账号及非法 UUID 失败关闭。
-- 相同用例同时在 iPhone 与 iPad 上执行，iPad 还会旋转至横屏验证自适应布局，并在 `.xcresult` 中保留关键页截图。
+- 相同用例同时在 iPhone 与 iPad 上执行，两类设备都会旋转至横屏验证自适应布局，并在 `.xcresult` 中保留关键页截图。
+- 辅助功能大字号回归会使用 Accessibility XXXL 重新打开首页与作品搜索，并再旋转到横屏，确认天气、主操作和搜索区依然可见、可点击、不越界且不小于 44pt。
+- 聚焦 Apple 辅助功能审计会遍历首页、作品与关于页，直接检查对比度、触控区域、文字裁切和语义；不设置宽泛忽略规则，任何真实问题都会使 UI 测试失败。
+- 开屏回归在 Accessibility XXXL 下确认文案不会被定时关闭、跳过按钮位于状态栏安全区且不小于 44pt；Showreel 回归验证自绘进度、播放和静音控制可见可用，不依赖系统播放器外壳。
 
 UI 测试仅在 Debug 构建中使用参数关闭截屏保护；需要遍历主内容的视觉用例还会启用仅 Debug 编译存在的已批准夹具。门禁用例不启用该夹具，并单独验证未登录用户无法看见主导航。Release 构建中这些参数全部不生效。
 
@@ -66,10 +69,11 @@ Server/tests/fan-api-smoke.sh
 
 GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服务器密钥；外部 Action 固定到完整 commit SHA。失败时保留七天 `.xcresult` 供排查。
 
-## Build 33 发布前验收
+## Build 34 发布前验收
 
-1. 确认构建设置为 `1.3.22 (33)`、Bundle ID `cn.com.shuzijun.yishu`，且 App ID 与本次签名描述文件同时包含 Sign in with Apple 和 WeatherKit。
+1. 确认构建设置为 `1.3.23 (34)`、Bundle ID `cn.com.shuzijun.yishu`，且 App ID 与本次签名描述文件同时包含 Sign in with Apple 和 WeatherKit；能力变更后必须重新生成签名描述文件。
 2. 服务端运行锁定依赖的 `composer install --no-dev --classmap-authoritative`；Apple `.p8` 位于 Web 根目录外，只通过 `YISHU_APPLE_TEAM_ID`、`YISHU_APPLE_KEY_ID`、`YISHU_APPLE_PRIVATE_KEY_PATH` 引用。测试日志和仓库不得出现私钥、client secret、identity token、authorization code、nonce、state 或 Apple subject。
 3. 确认服务器可通过 HTTPS 访问 `appleid.apple.com/auth/keys`、`/auth/token` 和 `/auth/revoke`，WP-Cron 或等价计划任务能执行撤销重试；反向代理继续转发 `Authorization` 与安装记录头。
 4. 在真实 TestFlight 安装执行：新 Apple 账号 → 必填抖音 ID → 待审批 → 管理员批准 → 主内容；同一 Apple ID 重复登录；取消授权、网络失败与重新前台；其他设备会话撤销；onboarding 和已批准状态分别永久删号。
 5. 删除后确认 App 本机收藏/最近浏览分区消失、原 bearer 不可使用、Apple 账号可按产品规则重新申请；App Store 隐私标签与 App 内政策须包含昵称、用户 ID、设备级随机标识和粗略位置，不声明未请求的 Apple 邮箱。
+6. 在 iPhone、iPad 横竖屏和辅助功能字体下检查作品页：搜索框紧贴状态栏下方的系统安全区域，且聚焦、输入、清除、取消、空结果、下拉刷新和详情返回均正常。同时开启 VoiceOver、减少动态效果和减少透明度，确认保护遮罩不会让底层内容被聚焦。

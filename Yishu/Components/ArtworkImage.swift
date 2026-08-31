@@ -234,7 +234,7 @@ struct DownsampledAsyncImage<Content: View>: View {
             if error != nil {
                 Button(action: retry) {
                     Label("重新加载", systemImage: "arrow.clockwise")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 16)
                         .frame(minWidth: 44, minHeight: 44)
                         .foregroundStyle(AppTheme.warmWhite)
@@ -345,12 +345,13 @@ struct SectionHeading: View {
         HStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 7) {
                 Text(eyebrow)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                     .tracking(2.2)
                     .foregroundStyle(AppTheme.gold)
                 Text(title)
-                    .font(.editorial(30))
+                    .font(.system(.title2, design: .serif))
                     .foregroundStyle(AppTheme.warmWhite)
+                    .accessibilityAddTraits(.isHeader)
             }
             Spacer()
             if let trailing {
@@ -367,7 +368,7 @@ struct PillLabel: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 10, weight: .medium))
+            .font(.caption2.weight(.medium))
             .tracking(1.2)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -466,6 +467,7 @@ enum VideoAudioSession {
 
 private struct ScreenCaptureProtectionModifier: ViewModifier {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isCaptureActive = false
     @State private var hasEnteredActiveState = false
     @State private var isPrivacyCoverVisible = false
@@ -475,6 +477,12 @@ private struct ScreenCaptureProtectionModifier: ViewModifier {
     func body(content: Content) -> some View {
         ZStack {
             content
+                // When the privacy cover is visible, protected controls and
+                // descriptions must not remain reachable behind it in the
+                // VoiceOver rotor. This changes accessibility exposure only;
+                // the secure rendering hierarchy remains unchanged.
+                .accessibilityHidden(shouldShowProtectionCover)
+                .allowsHitTesting(!shouldShowProtectionCover)
 
             if shouldShowProtectionCover {
                 CaptureProtectionCover()
@@ -524,14 +532,22 @@ private struct ScreenCaptureProtectionModifier: ViewModifier {
     private func showScreenshotWarning() {
         guard !disablesProtectionForVisualTesting else { return }
         screenshotWarningTask?.cancel()
-        withAnimation(.easeOut(duration: 0.12)) {
+        if reduceMotion {
             isScreenshotWarningVisible = true
+        } else {
+            withAnimation(.easeOut(duration: 0.12)) {
+                isScreenshotWarningVisible = true
+            }
         }
         screenshotWarningTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.8))
             guard !Task.isCancelled, scenePhase == .active, !isCaptureActive else { return }
-            withAnimation(.easeIn(duration: 0.2)) {
+            if reduceMotion {
                 isScreenshotWarningVisible = false
+            } else {
+                withAnimation(.easeIn(duration: 0.2)) {
+                    isScreenshotWarningVisible = false
+                }
             }
         }
     }
@@ -580,53 +596,62 @@ struct CaptureProtectionCover: View {
 
             protectionPattern
 
-            VStack(spacing: 0) {
-                Text("狐狸姐姐温馨提示")
-                    .font(.system(size: 12, weight: .semibold))
-                    .tracking(2.4)
-                    .foregroundStyle(AppTheme.gold)
+            GeometryReader { proxy in
+                ScrollView {
+                    VStack(spacing: 0) {
+                        Text("狐狸姐姐温馨提示")
+                            .font(.caption.weight(.semibold))
+                            .tracking(2.4)
+                            .foregroundStyle(AppTheme.gold)
 
-                ZStack {
-                    Circle()
-                        .stroke(AppTheme.gold.opacity(0.22), lineWidth: 1)
-                        .frame(width: 108, height: 108)
-                    Circle()
-                        .fill(AppTheme.gold.opacity(0.1))
-                        .frame(width: 82, height: 82)
-                    Image(systemName: "lock.shield.fill")
-                        .font(.system(size: 34, weight: .light))
-                        .foregroundStyle(AppTheme.gold)
+                        ZStack {
+                            Circle()
+                                .stroke(AppTheme.gold.opacity(0.22), lineWidth: 1)
+                                .frame(width: 108, height: 108)
+                            Circle()
+                                .fill(AppTheme.gold.opacity(0.1))
+                                .frame(width: 82, height: 82)
+                            Image(systemName: "lock.shield.fill")
+                                .font(.largeTitle.weight(.regular))
+                                .foregroundStyle(AppTheme.gold)
+                        }
+                        .padding(.top, 36)
+
+                        Text("影像内容已保护")
+                            .font(.system(.title, design: .serif))
+                            .foregroundStyle(AppTheme.warmWhite)
+                            .padding(.top, 28)
+
+                        Text("为尊重肖像权与作品版权\n此 APP 不支持截屏、录屏或保存")
+                            .font(.subheadline)
+                            .multilineTextAlignment(.center)
+                            .lineSpacing(7)
+                            .foregroundStyle(.white.opacity(0.58))
+                            .padding(.top, 16)
+
+                        Capsule()
+                            .fill(AppTheme.gold.opacity(0.7))
+                            .frame(width: 32, height: 1)
+                            .padding(.top, 28)
+
+                        Text("PROTECTED CONTENT · YI SHU")
+                            .font(.caption2.weight(.semibold))
+                            .tracking(2.1)
+                            .foregroundStyle(.white.opacity(0.28))
+                            .padding(.top, 18)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: proxy.size.height)
+                    .padding(.horizontal, 30)
+                    .padding(.vertical, 24)
                 }
-                .padding(.top, 36)
-
-                Text("影像内容已保护")
-                    .font(.editorial(31))
-                    .foregroundStyle(AppTheme.warmWhite)
-                    .padding(.top, 28)
-
-                Text("为尊重肖像权与作品版权\n此 APP 不支持截屏、录屏或保存")
-                    .font(.system(size: 13, weight: .regular))
-                    .multilineTextAlignment(.center)
-                    .lineSpacing(7)
-                    .foregroundStyle(.white.opacity(0.58))
-                    .padding(.top, 16)
-
-                Capsule()
-                    .fill(AppTheme.gold.opacity(0.7))
-                    .frame(width: 32, height: 1)
-                    .padding(.top, 28)
-
-                Text("PROTECTED CONTENT · YI SHU")
-                    .font(.system(size: 8, weight: .semibold))
-                    .tracking(2.1)
-                    .foregroundStyle(.white.opacity(0.28))
-                    .padding(.top, 18)
+                .scrollIndicators(.hidden)
             }
-            .padding(.horizontal, 30)
         }
         .ignoresSafeArea()
         .accessibilityElement(children: .combine)
         .accessibilityLabel("狐狸姐姐温馨提示：影像内容已保护，此 APP 不支持截屏、录屏或保存")
+        .accessibilityAddTraits(.isHeader)
     }
 
     private var protectionPattern: some View {
@@ -966,15 +991,16 @@ private struct ScreenProtectionUnavailableView: View {
 
             VStack(spacing: 18) {
                 Image(systemName: "exclamationmark.shield.fill")
-                    .font(.system(size: 42, weight: .light))
+                    .font(.largeTitle.weight(.regular))
                     .foregroundStyle(AppTheme.gold)
 
                 Text("安全显示暂不可用")
-                    .font(.editorial(29))
+                    .font(.system(.title2, design: .serif))
                     .foregroundStyle(AppTheme.warmWhite)
+                    .accessibilityAddTraits(.isHeader)
 
                 Text("未能启用影像保护，受保护内容已隐藏。\n请关闭后重新打开此 APP。")
-                    .font(.system(size: 14))
+                    .font(.body)
                     .multilineTextAlignment(.center)
                     .lineSpacing(6)
                     .foregroundStyle(.white.opacity(0.66))
@@ -984,6 +1010,7 @@ private struct ScreenProtectionUnavailableView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(AppTheme.gold)
                         .foregroundStyle(AppTheme.ink)
+                        .frame(minHeight: 44)
                         .padding(.top, 8)
                 }
             }

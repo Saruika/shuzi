@@ -201,12 +201,13 @@ struct FanAccountView: View {
         VStack(alignment: .leading, spacing: 24) {
             VStack(alignment: .leading, spacing: 9) {
                 Text(isAccessGate ? "MEMBER ACCESS" : "FAN IDENTITY")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
                 Text(isAccessGate ? "申请访问" : "粉丝身份")
-                    .font(.editorial(38))
+                    .font(.system(.largeTitle, design: .serif))
                     .accessibilityIdentifier("fan-account-heading")
+                    .accessibilityAddTraits(.isHeader)
                 Text(isAccessGate
                      ? "请先注册并提交申请。管理员审批通过后，才能进入首页、作品、影视、收藏和关于页面。"
                      : "注册后会生成独立身份码和本机安装记录码，管理员可按账号远程分配权限。")
@@ -255,6 +256,8 @@ struct FanAccountView: View {
                     Text("使用 Apple 登录前查看隐私政策")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(AppTheme.gold)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .accessibilityIdentifier("fan-apple-prelogin-privacy")
             }
@@ -264,6 +267,7 @@ struct FanAccountView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.updatesFrequently)
             }
 
             if let notice = account.noticeMessage {
@@ -317,12 +321,13 @@ struct FanAccountView: View {
         VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 9) {
                 Text("APPLE ID VERIFIED")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
                 Text("完成账号申请")
-                    .font(.editorial(36))
+                    .font(.system(.largeTitle, design: .serif))
                     .accessibilityIdentifier("fan-apple-registration-required")
+                    .accessibilityAddTraits(.isHeader)
                 Text("你的 Apple 身份已通过服务器验证。请主动填写以下资料；管理员批准前不会开放主页和媒体内容。")
                     .font(.subheadline)
                     .lineSpacing(5)
@@ -332,10 +337,12 @@ struct FanAccountView: View {
             VStack(alignment: .leading, spacing: 13) {
                 TextField("昵称", text: $appleRegistrationDraft.displayName)
                     .textContentType(.nickname)
+                    .accessibilityLabel("昵称")
                     .accessibilityIdentifier("fan-apple-display-name")
                 TextField("抖音 ID（必填，不要填链接）", text: $appleRegistrationDraft.douyinID)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .accessibilityLabel("抖音 ID，必填，请不要填写链接")
                     .accessibilityIdentifier("fan-apple-douyin-id")
 
                 Text("抖音 ID 只用于管理员核验身份和分配权限，不会在粉丝之间公开。")
@@ -348,6 +355,8 @@ struct FanAccountView: View {
                     Label("申请前查看隐私政策与删除规则", systemImage: "hand.raised")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(AppTheme.gold)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .accessibilityIdentifier("fan-apple-privacy-policy")
 
@@ -382,6 +391,7 @@ struct FanAccountView: View {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
+                    .accessibilityAddTraits(.updatesFrequently)
             }
 
             Button {
@@ -414,14 +424,18 @@ struct FanAccountView: View {
         VStack(alignment: .leading, spacing: 13) {
             TextField("昵称", text: $displayName)
                 .textContentType(.nickname)
+                .accessibilityLabel("昵称")
             TextField("抖音 ID（必填，不要填链接）", text: $douyinID)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .accessibilityLabel("抖音 ID，必填，请不要填写链接")
                 .accessibilityIdentifier("fan-register-douyin-id")
             SecureField("设置密码（至少 10 位）", text: $registrationPassword)
                 .textContentType(.newPassword)
+                .accessibilityLabel("设置密码，至少 10 位")
             SecureField("再输入一次密码", text: $passwordConfirmation)
                 .textContentType(.newPassword)
+                .accessibilityLabel("确认密码")
 
             Text("抖音 ID 只用于管理员核验身份和分配权限，不会在粉丝之间公开。")
                 .font(.caption2)
@@ -433,6 +447,8 @@ struct FanAccountView: View {
                 Label("注册前查看隐私政策与删除规则", systemImage: "hand.raised")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(AppTheme.gold)
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
             }
             .accessibilityIdentifier("fan-register-privacy-policy")
 
@@ -472,8 +488,11 @@ struct FanAccountView: View {
                 .textInputAutocapitalization(.characters)
                 .autocorrectionDisabled()
                 .textContentType(.username)
+                .accessibilityLabel("粉丝身份码")
+                .accessibilityHint("格式示例，HS-ABCD-2345")
             SecureField("密码", text: $loginPassword)
                 .textContentType(.password)
+                .accessibilityLabel("密码")
 
             Button {
                 Task {
@@ -497,12 +516,13 @@ struct FanAccountView: View {
                         ? "PASSWORD RECOVERY"
                         : (profile.status == FanAccountStatus.active.rawValue
                             ? "APPROVED MEMBER" : "ACCESS REVIEW")))
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
                 Text(profileHeading(profile))
-                    .font(.editorial(38))
+                    .font(.system(.largeTitle, design: .serif))
                     .accessibilityIdentifier("fan-account-heading")
+                    .accessibilityAddTraits(.isHeader)
                 Label(
                     profile.requiresAccountSetup
                         ? "完成本人设置前不会开放 App 内容"
@@ -552,7 +572,8 @@ struct FanAccountView: View {
                     VStack(alignment: .leading, spacing: 15) {
                         HStack {
                             Text("已授予权限")
-                                .font(.editorial(26))
+                                .font(.system(.title2, design: .serif))
+                                .accessibilityAddTraits(.isHeader)
                             Spacer()
                             Text("\(profile.permissions.count) 项")
                                 .font(.caption)
@@ -602,6 +623,7 @@ struct FanAccountView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.updatesFrequently)
             }
 
             ViewThatFits(in: .horizontal) {
@@ -675,16 +697,21 @@ struct FanAccountView: View {
 
             TextField("本人昵称", text: $invitedDisplayName)
                 .textContentType(.nickname)
+                .accessibilityLabel("本人昵称")
             TextField("本人抖音 ID（必填，不要填链接）", text: $invitedDouyinID)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
+                .accessibilityLabel("本人抖音 ID，必填，请不要填写链接")
                 .accessibilityIdentifier("fan-setup-douyin-id")
             SecureField("重新输入管理员给你的临时密码", text: $currentTemporaryPassword)
                 .textContentType(.password)
+                .accessibilityLabel("管理员提供的临时密码")
             SecureField("设置仅本人知道的新密码（至少 10 位）", text: $invitedNewPassword)
                 .textContentType(.newPassword)
+                .accessibilityLabel("设置新密码，至少 10 位")
             SecureField("再输入一次新密码", text: $invitedPasswordConfirmation)
                 .textContentType(.newPassword)
+                .accessibilityLabel("确认新密码")
 
             NavigationLink {
                 PrivacyPolicyView()
@@ -692,6 +719,8 @@ struct FanAccountView: View {
                 Label("设置前查看隐私政策与删除规则", systemImage: "hand.raised")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(AppTheme.gold)
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
             }
             .accessibilityIdentifier("fan-setup-privacy-policy")
 
@@ -749,10 +778,13 @@ struct FanAccountView: View {
                 .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
             SecureField("重新输入管理员给你的临时密码", text: $recoveryTemporaryPassword)
                 .textContentType(.password)
+                .accessibilityLabel("管理员提供的临时恢复密码")
             SecureField("设置仅本人知道的新密码（至少 10 位）", text: $recoveryNewPassword)
                 .textContentType(.newPassword)
+                .accessibilityLabel("设置新密码，至少 10 位")
             SecureField("再输入一次新密码", text: $recoveryPasswordConfirmation)
                 .textContentType(.newPassword)
+                .accessibilityLabel("确认新密码")
 
             Button {
                 Task {
@@ -894,9 +926,9 @@ struct FanAccountView: View {
                     ? "刷新审批状态" : "刷新账号状态",
                 systemImage: "arrow.clockwise"
             )
-            .lineLimit(2)
-            .minimumScaleFactor(0.8)
-            .frame(maxWidth: .infinity, minHeight: 44)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 44)
             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
         }
         .disabled(account.isWorking)
@@ -920,7 +952,7 @@ struct FanAccountView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(title).font(.caption).foregroundStyle(AppTheme.muted)
                 Text(value)
-                    .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    .font(.system(.subheadline, design: .monospaced).weight(.semibold))
                     .textSelection(.enabled)
             }
             Spacer(minLength: 8)
@@ -985,7 +1017,7 @@ struct FanAccountView: View {
             if account.isWorking { ProgressView().tint(AppTheme.ink) }
             Text(title)
         }
-        .font(.system(size: 14, weight: .semibold))
+        .font(.subheadline.weight(.semibold))
         .frame(maxWidth: .infinity)
         .padding(.vertical, 14)
         .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
@@ -1045,17 +1077,22 @@ private struct FanAccountSecurityView: View {
                         usesAppleSignIn: account.usesAppleSignIn
                     ) {
                         VStack(alignment: .leading, spacing: 13) {
-                            Text("修改密码").font(.editorial(27))
+                            Text("修改密码")
+                                .font(.system(.title2, design: .serif))
+                                .accessibilityAddTraits(.isHeader)
                             Text("修改成功后会撤销所有旧会话，并为当前设备立即换发新会话。")
                                 .font(.caption)
                                 .lineSpacing(4)
                                 .foregroundStyle(AppTheme.muted)
                             SecureField("当前密码", text: $currentPassword)
                                 .textContentType(.password)
+                                .accessibilityLabel("当前密码")
                             SecureField("新密码（至少 10 位）", text: $newPassword)
                                 .textContentType(.newPassword)
+                                .accessibilityLabel("新密码，至少 10 位")
                             SecureField("再输入一次新密码", text: $passwordConfirmation)
                                 .textContentType(.newPassword)
+                                .accessibilityLabel("确认新密码")
                             Button {
                                 Task {
                                     await account.changePassword(
@@ -1070,7 +1107,7 @@ private struct FanAccountSecurityView: View {
                                 }
                             } label: {
                                 Label("更新密码", systemImage: "key.horizontal")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(.subheadline.weight(.semibold))
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 13)
                                     .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
@@ -1097,7 +1134,9 @@ private struct FanAccountSecurityView: View {
 
                     VStack(alignment: .leading, spacing: 13) {
                         HStack {
-                            Text("登录设备与会话").font(.editorial(27))
+                            Text("登录设备与会话")
+                                .font(.system(.title2, design: .serif))
+                                .accessibilityAddTraits(.isHeader)
                             Spacer()
                             Button {
                                 Task { await account.fetchSessions() }
@@ -1161,6 +1200,7 @@ private struct FanAccountSecurityView: View {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
                             .foregroundStyle(.orange)
+                            .accessibilityAddTraits(.updatesFrequently)
                     }
                 }
                 .padding(20)
@@ -1252,6 +1292,7 @@ struct FanAccessAdminView: View {
                                 Label("待审批申请", systemImage: "bell.badge.fill")
                                     .font(.headline)
                                     .foregroundStyle(AppTheme.gold)
+                                    .accessibilityAddTraits(.isHeader)
                                 Spacer()
                                 Text("\(pendingUsers.count)")
                                     .font(.caption.bold())
@@ -1271,6 +1312,7 @@ struct FanAccessAdminView: View {
                             Text(pendingUsers.isEmpty ? "全部用户" : "已处理用户")
                                 .font(.headline)
                                 .padding(.top, pendingUsers.isEmpty ? 0 : 14)
+                                .accessibilityAddTraits(.isHeader)
                             ForEach(reviewedUsers) { user in
                                 userLink(user)
                             }
@@ -1281,6 +1323,7 @@ struct FanAccessAdminView: View {
                         Label(errorMessage, systemImage: "exclamationmark.triangle")
                             .font(.caption)
                             .foregroundStyle(.orange)
+                            .accessibilityAddTraits(.updatesFrequently)
                     }
                 }
                 .padding(18)
@@ -1344,7 +1387,7 @@ struct FanAccessAdminView: View {
                 .padding(.vertical, 13)
                 .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
                 .foregroundStyle(AppTheme.ink)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.subheadline.weight(.semibold))
             }
             .buttonStyle(.plain)
             .disabled(isCreatingInvitations || !admin.isAuthenticated)
@@ -1569,7 +1612,9 @@ private struct FanAccessDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     VStack(alignment: .leading, spacing: 7) {
-                        Text(user.displayName).font(.editorial(36))
+                        Text(user.displayName)
+                            .font(.system(.largeTitle, design: .serif))
+                            .accessibilityAddTraits(.isHeader)
                         Text(user.requiresAppleRegistration
                              ? "等待绑定抖音 ID"
                              : user.requiresAccountSetup
@@ -1590,7 +1635,9 @@ private struct FanAccessDetailView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 16) {
-                        Text("审批状态").font(.editorial(25))
+                        Text("审批状态")
+                            .font(.system(.title2, design: .serif))
+                            .accessibilityAddTraits(.isHeader)
                         Label(adminStatusTitle(user.status), systemImage: adminStatusIcon(user.status))
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
@@ -1654,7 +1701,9 @@ private struct FanAccessDetailView: View {
                     if !user.requiresIdentityCompletion,
                        user.accountSource != FanAccountSource.apple.rawValue {
                         VStack(alignment: .leading, spacing: 13) {
-                            Text("密码恢复").font(.editorial(25))
+                            Text("密码恢复")
+                                .font(.system(.title2, design: .serif))
+                                .accessibilityAddTraits(.isHeader)
                             Text("生成后会立即撤销该账号所有旧会话和旧密码。临时恢复凭据仅显示一次，有效期 15 分钟。")
                                 .font(.caption)
                                 .lineSpacing(4)
@@ -1702,7 +1751,9 @@ private struct FanAccessDetailView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 18) {
-                        Text("功能权限").font(.editorial(25))
+                        Text("功能权限")
+                            .font(.system(.title2, design: .serif))
+                            .accessibilityAddTraits(.isHeader)
                         ForEach(catalog) { permission in
                             Toggle(isOn: permissionBinding(permission.code)) {
                                 VStack(alignment: .leading, spacing: 3) {
@@ -1725,6 +1776,7 @@ private struct FanAccessDetailView: View {
                         Label(errorMessage, systemImage: "exclamationmark.triangle")
                             .font(.caption)
                             .foregroundStyle(.orange)
+                            .accessibilityAddTraits(.updatesFrequently)
                     }
 
                     Text("审批或权限保存后立即在服务器生效。待审批用户的申请页会自动刷新；批准后会直接进入 App。")
@@ -1893,14 +1945,14 @@ private struct FanAdminUserRow: View {
     var body: some View {
         HStack(spacing: 13) {
             Image(systemName: rowIcon)
-                .font(.system(size: 27))
+                .font(.title)
                 .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
                 .frame(width: 42)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(user.displayName).font(.subheadline.weight(.semibold))
                     Text(rowStatus)
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
                 }
                 Text(user.requiresAppleRegistration
@@ -1953,7 +2005,7 @@ private struct AccountTextFieldStyle: TextFieldStyle {
     func _body(configuration: TextField<Self._Label>) -> some View {
         configuration
             .padding(.horizontal, 13)
-            .padding(.vertical, 12)
+            .frame(minHeight: 48)
             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
             .overlay {
                 RoundedRectangle(cornerRadius: 6)

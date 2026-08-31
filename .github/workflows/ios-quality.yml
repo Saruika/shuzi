@@ -28,6 +28,7 @@ jobs:
         with:
           php-version: '8.3'
           coverage: none
+          tools: composer:v2
 
       - name: Validate repository security boundary
         run: Scripts/security-check.sh

@@ -71,7 +71,7 @@ struct FavoritesView: View {
                 }
                 .padding(.bottom, 30)
             }
-            .contentMargins(.bottom, 84, for: .scrollContent)
+            .floatingTabBarScrollClearance()
         }
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: Portfolio.self) { portfolio in
@@ -102,7 +102,7 @@ struct FavoritesView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("YOUR EDIT")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption2.weight(.semibold))
                 .tracking(3)
                 .foregroundStyle(AppTheme.gold)
 
@@ -110,23 +110,24 @@ struct FavoritesView: View {
                 Text("收藏")
                     .font(.system(.largeTitle, design: .serif))
                     .accessibilityIdentifier("favorites-heading")
+                    .accessibilityAddTraits(.isHeader)
                 Spacer()
                 if selectedSection == .favorites, !entries.isEmpty {
                     ShareLink(item: favoritesShareText) {
                         Label("分享片单", systemImage: "square.and.arrow.up")
                             .labelStyle(.iconOnly)
-                            .font(.system(size: 15, weight: .medium))
+                            .font(.body.weight(.medium))
                             .foregroundStyle(AppTheme.gold)
-                            .frame(width: 38, height: 38)
+                            .frame(width: 44, height: 44)
                             .background(.white.opacity(0.06), in: Circle())
                     }
                     .accessibilityLabel("分享收藏片单")
                 } else if selectedSection == .history, !recentPortfolios.isEmpty {
                     Button { showClearHistoryConfirmation = true } label: {
                         Image(systemName: "trash")
-                            .font(.system(size: 14, weight: .medium))
+                            .font(.body.weight(.medium))
                             .foregroundStyle(AppTheme.muted)
-                            .frame(width: 38, height: 38)
+                            .frame(width: 44, height: 44)
                             .background(.white.opacity(0.06), in: Circle())
                     }
                     .buttonStyle(.plain)
@@ -147,16 +148,16 @@ struct FavoritesView: View {
             ForEach(LibrarySection.allCases) { section in
                 Button { selectedSection = section } label: {
                     Text(section.title)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.caption.weight(.semibold))
                         .foregroundStyle(selectedSection == section ? AppTheme.ink : AppTheme.muted)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                         .background(
                             selectedSection == section ? AppTheme.warmWhite : Color.clear,
                             in: RoundedRectangle(cornerRadius: 5)
                         )
                 }
                 .buttonStyle(.plain)
+                .accessibilityAddTraits(selectedSection == section ? .isSelected : [])
             }
         }
         .padding(3)
@@ -228,11 +229,11 @@ struct FavoritesView: View {
                             )
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(portfolio.eyebrow)
-                                    .font(.system(size: 7, weight: .semibold))
+                                    .font(.caption2.weight(.semibold))
                                     .tracking(1)
                                     .foregroundStyle(AppTheme.gold)
                                 Text(portfolio.title)
-                                    .font(.editorial(22))
+                                    .font(.system(.title3, design: .serif))
                             }
                             .foregroundStyle(.white)
                             .padding(12)
@@ -254,7 +255,7 @@ struct FavoritesView: View {
     ) -> some View {
         VStack(spacing: 18) {
             Image(systemName: icon)
-                .font(.system(size: 34, weight: .light))
+                .font(.largeTitle.weight(.regular))
                 .foregroundStyle(AppTheme.gold)
             Text(title)
                 .font(.system(.title, design: .serif))

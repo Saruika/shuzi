@@ -14,7 +14,8 @@ source backups, any file with a suffix appended after `.php`, database/key/env
 files, package metadata, source-control internals, editor swap files and
 similarly named residue. Backups belong under a root-only directory outside the
 document root; blocking URLs is a second boundary, not a substitute for moving
-the files.
+the files. The same snippet denies every PHP path below writable `uploads` and
+`cache` trees, irrespective of filename case.
 
 `shuzijun-account-api-backup-proxy.conf` is only for the Singapore backup
 node's `www.shuzijun.com.cn` TLS server. Tencent CDN may retry a 401/403 from

@@ -18,6 +18,7 @@ struct AdminAccessView: View {
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
                                 Button("关闭") { dismiss() }
+                                    .frame(minWidth: 44, minHeight: 44)
                                     .accessibilityIdentifier("admin-close")
                             }
                         }
@@ -86,6 +87,7 @@ struct AdminView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var store: PortfolioStore
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var username = "yishu_app_manager"
     @State private var applicationPassword = ""
     @State private var heroImageURLs = ContentCatalog.heroImages
@@ -221,11 +223,12 @@ struct AdminView: View {
     private var administratorContentLoadingView: some View {
         VStack(alignment: .leading, spacing: 22) {
             Text("ADMIN CONTENT")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption2.weight(.semibold))
                 .tracking(3)
                 .foregroundStyle(AppTheme.gold)
             Text("正在核对完整内容")
-                .font(.editorial(34))
+                .font(.system(.largeTitle, design: .serif))
+                .accessibilityAddTraits(.isHeader)
             Text("编辑器会在管理员全量清单安全载入后开放，避免把粉丝权限范围内的内容误当成发布草稿。")
                 .font(.subheadline)
                 .foregroundStyle(AppTheme.muted)
@@ -245,6 +248,7 @@ struct AdminView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.updatesFrequently)
                 Button {
                     Task { await loadAdministratorContent() }
                 } label: {
@@ -257,6 +261,7 @@ struct AdminView: View {
             Button("退出管理员登录") { admin.signOut() }
                 .font(.caption)
                 .foregroundStyle(AppTheme.muted)
+                .frame(minHeight: 44)
         }
         .padding(22)
         .padding(.top, 24)
@@ -266,12 +271,13 @@ struct AdminView: View {
         VStack(alignment: .leading, spacing: 26) {
             VStack(alignment: .leading, spacing: 10) {
                 Text("ADMIN ACCESS")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
                 Text("管理员登录")
-                    .font(.editorial(40))
+                    .font(.system(.largeTitle, design: .serif))
                     .accessibilityIdentifier("admin-login-heading")
+                    .accessibilityAddTraits(.isHeader)
                 Text("普通用户需先注册并通过审批。这里用于注册审批、权限分配和内容发布。")
                     .font(.subheadline)
                     .foregroundStyle(AppTheme.muted)
@@ -282,8 +288,10 @@ struct AdminView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .textContentType(.username)
+                    .accessibilityLabel("管理员账号")
                 SecureField("管理员访问码", text: $applicationPassword)
                     .textContentType(.password)
+                    .accessibilityLabel("管理员访问码")
                     .submitLabel(.go)
                     .onSubmit {
                         guard !admin.isWorking else { return }
@@ -314,6 +322,7 @@ struct AdminView: View {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
+                    .accessibilityAddTraits(.updatesFrequently)
             }
 
             Label("账号与访问码仅用于本次验证，只在内存中保留；App 进入后台或 5 分钟后会自动锁定。", systemImage: "lock.shield")
@@ -344,16 +353,18 @@ struct AdminView: View {
     private var dashboardHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("CONTENT STUDIO")
-                .font(.system(size: 10, weight: .semibold))
+                .font(.caption2.weight(.semibold))
                 .tracking(3)
                 .foregroundStyle(AppTheme.gold)
             Text("内容工作台")
-                .font(.editorial(38))
+                .font(.system(.largeTitle, design: .serif))
+                .accessibilityAddTraits(.isHeader)
             HStack {
                 Label("管理员模式", systemImage: "checkmark.shield")
                 Spacer()
                 Button("退出") { admin.signOut() }
                     .disabled(isPublishing)
+                    .frame(minHeight: 44)
             }
             .font(.caption)
             .foregroundStyle(AppTheme.muted)
@@ -369,6 +380,7 @@ struct AdminView: View {
                 Label(operationMessage, systemImage: operationFailed ? "exclamationmark.triangle" : "checkmark.circle")
                     .font(.caption)
                     .foregroundStyle(operationFailed ? .orange : AppTheme.gold)
+                    .accessibilityAddTraits(.updatesFrequently)
             }
         }
     }
@@ -385,8 +397,12 @@ struct AdminView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
+                if reduceMotion {
                     isCreatingPortfolio.toggle()
+                } else {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isCreatingPortfolio.toggle()
+                    }
                 }
             } label: {
                 Label(
@@ -431,7 +447,7 @@ struct AdminView: View {
             .disabled(isPublishing || selectedPortfolio == nil)
 
             if let portfolio = selectedPortfolio {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 148), spacing: 8)], spacing: 8) {
                     ForEach(Array(portfolio.images.enumerated()), id: \.element.id) { index, image in
                         ZStack {
                             ArtworkImage(url: image.url)
@@ -443,7 +459,7 @@ struct AdminView: View {
                                 HStack(alignment: .top) {
                                     if index == 0 {
                                         Label("封面", systemImage: "star.fill")
-                                            .font(.system(size: 9, weight: .semibold))
+                                            .font(.caption2.weight(.semibold))
                                             .padding(.horizontal, 7)
                                             .padding(.vertical, 5)
                                             .background(.black.opacity(0.68), in: Capsule())
@@ -455,6 +471,8 @@ struct AdminView: View {
                                             .symbolRenderingMode(.palette)
                                             .foregroundStyle(.white, .black.opacity(0.72))
                                             .font(.title3)
+                                            .frame(width: 44, height: 44)
+                                            .contentShape(Rectangle())
                                     }
                                     .accessibilityLabel("从作品集中移除照片")
                                 }
@@ -472,6 +490,8 @@ struct AdminView: View {
                                             .symbolRenderingMode(.palette)
                                             .foregroundStyle(.white, .black.opacity(0.72))
                                             .font(.title3)
+                                            .frame(width: 44, height: 44)
+                                            .contentShape(Rectangle())
                                     }
                                     .accessibilityLabel("替换这张照片")
                                     Spacer()
@@ -501,6 +521,8 @@ struct AdminView: View {
                                             .symbolRenderingMode(.palette)
                                             .foregroundStyle(.white, .black.opacity(0.72))
                                             .font(.title3)
+                                            .frame(width: 44, height: 44)
+                                            .contentShape(Rectangle())
                                     }
                                     .accessibilityLabel("调整照片")
                                 }
@@ -572,7 +594,7 @@ struct AdminView: View {
             }
             .disabled(isPublishing || heroImageURLs.count >= 5)
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 92), spacing: 8)], spacing: 8) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 148), spacing: 8)], spacing: 8) {
                 ForEach(Array(heroImageURLs.enumerated()), id: \.offset) { index, url in
                     ZStack {
                         ArtworkImage(url: url)
@@ -583,7 +605,7 @@ struct AdminView: View {
                         VStack {
                             HStack {
                                 Text("第 \(index + 1) 张")
-                                    .font(.system(size: 9, weight: .semibold))
+                                    .font(.caption2.weight(.semibold))
                                     .padding(.horizontal, 7)
                                     .padding(.vertical, 5)
                                     .background(.black.opacity(0.68), in: Capsule())
@@ -594,6 +616,8 @@ struct AdminView: View {
                                             .symbolRenderingMode(.palette)
                                             .foregroundStyle(.white, .black.opacity(0.72))
                                             .font(.title3)
+                                            .frame(width: 44, height: 44)
+                                            .contentShape(Rectangle())
                                     }
                                     .accessibilityLabel("移除主页封面")
                                 }
@@ -609,16 +633,24 @@ struct AdminView: View {
                                     matching: .images
                                 ) {
                                     Image(systemName: "arrow.triangle.2.circlepath.camera.fill")
+                                        .frame(width: 44, height: 44)
+                                        .contentShape(Rectangle())
                                 }
                                 .accessibilityLabel("替换第 \(index + 1) 张主页封面")
                                 Spacer()
                                 Button { moveHero(at: index, by: -1) } label: {
                                     Image(systemName: "arrow.left.circle.fill")
+                                        .frame(width: 44, height: 44)
+                                        .contentShape(Rectangle())
                                 }
+                                .accessibilityLabel("将第 \(index + 1) 张主页封面前移")
                                 .disabled(index == 0)
                                 Button { moveHero(at: index, by: 1) } label: {
                                     Image(systemName: "arrow.right.circle.fill")
+                                        .frame(width: 44, height: 44)
+                                        .contentShape(Rectangle())
                                 }
+                                .accessibilityLabel("将第 \(index + 1) 张主页封面后移")
                                 .disabled(index == heroImageURLs.count - 1)
                             }
                             .font(.title3)
@@ -726,6 +758,8 @@ struct AdminView: View {
                 launchPosterDrafts.removeAll { $0.id == snapshot.id }
             } label: {
                 Label("移除这张海报", systemImage: "minus.circle")
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
             }
             .font(.caption)
         }
@@ -814,6 +848,8 @@ struct AdminView: View {
                 dramaDrafts.removeAll { $0.id == snapshot.id }
             } label: {
                 Label("移除这部作品", systemImage: "minus.circle")
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
             }
             .font(.caption)
         }
@@ -832,6 +868,7 @@ struct AdminView: View {
             Button("放弃未发布的文字修改") { loadDrafts() }
                 .font(.caption)
                 .foregroundStyle(AppTheme.muted)
+                .frame(minHeight: 44)
                 .disabled(isPublishing || !administratorEditorIsReady)
         }
     }
@@ -1318,7 +1355,9 @@ private struct AdminSection<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.editorial(27))
+                Text(title)
+                    .font(.system(.title2, design: .serif))
+                    .accessibilityAddTraits(.isHeader)
                 Text(subtitle).font(.caption).foregroundStyle(AppTheme.muted)
             }
             content
@@ -1330,7 +1369,7 @@ private struct AdminTextFieldStyle: TextFieldStyle {
     func _body(configuration: TextField<Self._Label>) -> some View {
         configuration
             .padding(.horizontal, 13)
-            .padding(.vertical, 12)
+            .frame(minHeight: 48)
             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
             .overlay {
                 RoundedRectangle(cornerRadius: 6)
@@ -1345,7 +1384,8 @@ private extension View {
             .padding(.vertical, 14)
             .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
             .foregroundStyle(AppTheme.ink)
-            .font(.system(size: 14, weight: .semibold))
+            .font(.subheadline.weight(.semibold))
+            .frame(minHeight: 48)
     }
 
     nonisolated func adminSecondaryButton() -> some View {
@@ -1353,6 +1393,7 @@ private extension View {
             .padding(.vertical, 12)
             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
             .foregroundStyle(AppTheme.warmWhite)
-            .font(.system(size: 13, weight: .medium))
+            .font(.subheadline.weight(.medium))
+            .frame(minHeight: 44)
     }
 }

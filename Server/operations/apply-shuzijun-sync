@@ -34,6 +34,8 @@ RSYNC_FILTERS=(
     --exclude='*.dump*'
     --exclude='*.pem'
     --exclude='*.key'
+    --exclude='*.p8'
+    --exclude='*.P8'
     --exclude='*.p12'
     --exclude='*.pfx'
     --exclude='*.jks'
@@ -63,8 +65,36 @@ wp db export "$DEST/wordpress.sql" --add-drop-table --allow-root >/dev/null
 gzip -9 "$DEST/wordpress.sql"
 cp -a wp-config.php "$DEST/wp-config.php"
 
-rsync -a --delete "${RSYNC_FILTERS[@]}" \
+wp_content="$SITE/wp-content"
+install -d -o root -g www-data -m 755 "$wp_content"
+
+# The receiver starts from a verified immutable code tree. Do not preserve
+# sender ownership or writable modes: doing so could hand PHP ownership of a
+# code directory during rsync, before the post-sync verifier runs.
+rsync -a --delete --no-owner --no-group --chmod=D755,F644 \
+    "${RSYNC_FILTERS[@]}" \
     "$STAGE/wp-content/" "$SITE/wp-content/"
+
+# Only explicit runtime trees are writable by WordPress. The wp-content parent
+# and every other entry (plugins, themes, MU plugins and root-level drop-ins)
+# stay root-owned so the PHP worker cannot rename or replace executable code.
+find "$wp_content" -mindepth 1 -maxdepth 1 \
+    ! -name uploads ! -name cache \
+    -exec chown -R root:www-data {} +
+find "$wp_content" \
+    \( -path "$wp_content/uploads" -o -path "$wp_content/cache" \) -prune -o \
+    -type d -exec chmod 755 {} +
+find "$wp_content" \
+    \( -path "$wp_content/uploads" -o -path "$wp_content/cache" \) -prune -o \
+    -type f -exec chmod 644 {} +
+for runtime_dir in uploads cache; do
+    runtime_path="$wp_content/$runtime_dir"
+    if [[ -d "$runtime_path" ]]; then
+        chown -R www-data:www-data "$runtime_path"
+        find "$runtime_path" -type d -exec chmod 755 {} +
+        find "$runtime_path" -type f -exec chmod 644 {} +
+    fi
+done
 "$VERIFY" "$SITE"
 gunzip -c "$DATABASE" > "$STAGE/shuzijun-sync.sql"
 wp db import "$STAGE/shuzijun-sync.sql" --allow-root >/dev/null
@@ -75,7 +105,6 @@ wp core update-db --allow-root >/dev/null
 # serving the previous launch poster and update timestamp indefinitely.
 wp cache flush --allow-root >/dev/null
 
-chown -R www-data:www-data "$SITE/wp-content"
 chown root:www-data "$SITE/wp-config.php"
 chmod 640 "$SITE/wp-config.php"
 nginx -t

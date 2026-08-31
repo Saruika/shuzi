@@ -22,7 +22,8 @@ fi
 
 if find "$site_root" -xdev -type f \
     \( -iname '*.sql' -o -iname '*.sql.gz' -o -iname '*.dump' \
-    -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' \
+    -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p8' \
+    -o -iname '*.p12' \
     -o -iname '*.pfx' -o -iname '*.jks' -o -iname '.env*' \
     -o -iname '*.zip' -o -iname '*.tar' -o -iname '*.tar.gz' \
     -o -iname '*.tgz' -o -iname '*.7z' -o -iname '*.rar' \
@@ -63,17 +64,51 @@ if find "$site_root" -maxdepth 1 -type f -name '*.php' \
     exit 1
 fi
 
-if find "$site_root" -xdev -xtype l -print -quit | grep -q .; then
-    printf 'webroot-security: broken symbolic link remains in document root\n' >&2
+if find "$site_root" -xdev -type l -print -quit | grep -q .; then
+    printf 'webroot-security: symbolic link remains in document root\n' >&2
+    exit 1
+fi
+
+if find "$site_root" -xdev -type f -iname '*.php' ! -name '*.php' \
+    -print -quit | grep -q .; then
+    printf 'webroot-security: mixed-case PHP filename remains in document root\n' >&2
     exit 1
 fi
 
 test "$(stat -c '%a %U:%G' "$site_root/wp-config.php")" = '640 root:www-data'
 
+wp_content="$site_root/wp-content"
+test "$(stat -c '%a %U:%G' "$wp_content")" = '755 root:www-data'
+
+# Only media uploads and cache data may be writable by the PHP worker. Keeping
+# the wp-content parent root-owned is essential: a writable parent can replace
+# an otherwise read-only plugins, themes or mu-plugins directory by rename.
+if find "$wp_content" -xdev \
+    \( -path "$wp_content/uploads" -o -path "$wp_content/cache" \) -prune -o \
+    \( ! -user root -o ! -group www-data -o -perm /022 \) \
+    -print -quit | grep -q .; then
+    printf 'webroot-security: WordPress code tree is writable by the PHP worker\n' >&2
+    exit 1
+fi
+
+for runtime_dir in uploads cache; do
+    runtime_path="$wp_content/$runtime_dir"
+    # Runtime files may be owner-writable, but the PHP identity and group must
+    # be explicit and no group/other write bit is allowed.
+    if [[ -d "$runtime_path" ]] && find "$runtime_path" -xdev \
+        \( ! -user www-data -o ! -group www-data -o -perm /0022 \) \
+        -print -quit | grep -q .; then
+        printf 'webroot-security: WordPress runtime tree has unsafe ownership\n' >&2
+        exit 1
+    fi
+done
+
 grep -qF 'include /etc/nginx/snippets/shuzijun-sensitive-files-deny.conf;' "$nginx_site"
 grep -qF 'wp-config\.php' "$deny_snippet"
 grep -qF '\.php[^/]+$' "$deny_snippet"
+grep -qF 'wp-content/(?:uploads|cache)' "$deny_snippet"
 grep -qF '\.env' "$deny_snippet"
+grep -qF '|p8|' "$deny_snippet"
 grep -qF 'return 404;' "$deny_snippet"
 nginx -t >/dev/null
 

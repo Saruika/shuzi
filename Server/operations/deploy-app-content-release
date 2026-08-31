@@ -1,0 +1,830 @@
+#!/bin/bash
+set -Eeuo pipefail
+umask 077
+
+# A root deployment must not inherit command lookup, locale, proxy or Composer
+# authentication settings from the invoking shell.  Individual networked
+# commands below receive only the environment they actually need.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+IFS=$' \t\n'
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy \
+    NO_PROXY no_proxy COMPOSER_AUTH GITHUB_TOKEN GITLAB_TOKEN || true
+
+readonly SITE=/var/www/html/shuzijun.com.cn
+readonly TARGET_DIR="$SITE/wp-content/mu-plugins"
+readonly STAGING_ROOT=/var/lib/shuzijun-app-content/releases
+readonly BACKUP_ROOT=/var/backups/shuzijun-app-content
+# flock(2) works on the already-existing staging directory descriptor.  This
+# coordinates apply and dry-run without creating or opening a lock file for
+# writing, so dry-run has no persistent filesystem mutation.
+readonly LOCK_PATH="$STAGING_ROOT"
+readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+readonly FPM_SERVICE=php8.3-fpm
+readonly HEALTH_HOST=www.shuzijun.com.cn
+# The query-form REST route deliberately misses the backup node's pretty-URL
+# proxy location and therefore exercises that node's local WordPress/plugin.
+readonly HEALTH_URL="https://$HEALTH_HOST/?rest_route=%2Fshuzijun%2Fv1%2Fapp-content"
+readonly MANIFEST_NAME=release.sha256
+readonly JWT_README=vendor/firebase/php-jwt/README.md
+readonly JWT_README_SHA256=8e2392c48204a21ad0d73068fb273b7ec1f79ccf13eab3fe6f256382f741dc39
+
+MODE=dry-run
+BUNDLE_INPUT=
+EXPECTED_MANIFEST_SHA256=
+BUNDLE=
+MANIFEST=
+PHP_BIN=
+COMPOSER_BIN=
+BACKUP_DIR=
+BACKUP_MANIFEST=
+ROLLBACK_READY=0
+CODE_MUTATED=0
+FPM_WAS_ACTIVE=0
+MODE_SEEN=0
+BUNDLE_SEEN=0
+MANIFEST_SHA_SEEN=0
+
+usage() {
+    cat <<'EOF'
+Usage:
+  deploy-app-content-release --bundle ABSOLUTE_PATH \
+      --manifest-sha256 SHA256 [--dry-run|--apply]
+
+The default mode is --dry-run. The bundle must be a canonical, root-owned
+directory immediately below /var/lib/shuzijun-app-content/releases and contain
+only these release entries plus release.sha256:
+  shuzijun-app-content.php
+  composer.json
+  composer.lock
+  vendor/
+EOF
+}
+
+fail() {
+    printf 'app-content-release: %s\n' "$1" >&2
+    return 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "required command unavailable: $1"
+}
+
+# `find ... | grep` cannot distinguish "no match" from a failed filesystem
+# scan.  The final empty NUL record is emitted only after a successful find,
+# so every security rejection also fails closed on I/O/traversal errors.
+reject_find_match() {
+    local failure_message=$1
+    local entry found=0 scan_complete=0
+    shift
+
+    while IFS= read -r -d '' entry; do
+        if [[ -z "$entry" ]]; then
+            scan_complete=1
+        else
+            found=1
+        fi
+    done < <(find "$@" -print0 -quit && printf '\0')
+
+    if [[ "$scan_complete" -ne 1 ]]; then
+        fail 'filesystem safety scan did not complete'
+        return 1
+    fi
+    if [[ "$found" -ne 0 ]]; then
+        fail "$failure_message"
+        return 1
+    fi
+    return 0
+}
+
+is_outside_site() {
+    local candidate=$1
+    [[ "$candidate" != "$SITE" && "$candidate" != "$SITE/"* ]]
+}
+
+validate_staging_lock_path() {
+    [[ "$(realpath -e -- "$STAGING_ROOT")" == "$STAGING_ROOT" \
+        && -d "$STAGING_ROOT" && ! -L "$STAGING_ROOT" ]] \
+        || fail 'staging root is not a canonical directory'
+    [[ "$(stat -c '%u' "$STAGING_ROOT")" == 0 ]] \
+        || fail 'staging root must be owned by root'
+    reject_find_match 'staging root is writable by a non-root identity' \
+        "$STAGING_ROOT" -maxdepth 0 -perm /022
+}
+
+validate_fixed_paths() {
+    local site_real target_real staging_real backup_real
+    site_real=$(realpath -e -- "$SITE")
+    target_real=$(realpath -e -- "$TARGET_DIR")
+    staging_real=$(realpath -e -- "$STAGING_ROOT")
+    backup_real=$(realpath -e -- "$BACKUP_ROOT")
+
+    [[ "$site_real" == "$SITE" ]] || fail 'site path is not canonical'
+    [[ "$target_real" == "$TARGET_DIR" ]] || fail 'target path is not canonical'
+    [[ "$staging_real" == "$STAGING_ROOT" ]] || fail 'staging root is not canonical'
+    [[ "$backup_real" == "$BACKUP_ROOT" ]] || fail 'backup root is not canonical'
+    [[ ! -L "$SITE" && ! -L "$TARGET_DIR" && ! -L "$STAGING_ROOT" \
+        && -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" ]] \
+        || fail 'fixed release path must not be a symbolic link'
+    is_outside_site "$STAGING_ROOT" || fail 'staging root must be outside the webroot'
+    is_outside_site "$BACKUP_ROOT" || fail 'backup root must be outside the webroot'
+    [[ "$(stat -c '%u' "$SITE")" == 0 \
+        && "$(stat -c '%u' "$TARGET_DIR")" == 0 \
+        && "$(stat -c '%u' "$STAGING_ROOT")" == 0 \
+        && "$(stat -c '%u' "$BACKUP_ROOT")" == 0 ]] \
+        || fail 'fixed release paths must be owned by root'
+    reject_find_match 'staging root is writable by a non-root identity' \
+        "$STAGING_ROOT" -maxdepth 0 -perm /022
+    reject_find_match 'backup root is writable by a non-root identity' \
+        "$BACKUP_ROOT" -maxdepth 0 -perm /022
+    [[ "$(realpath -e -- /var/backups)" == /var/backups && ! -L /var/backups ]] \
+        || fail 'backup parent is unsafe'
+    [[ "$(stat -c '%u' /var/backups)" == 0 ]] || fail 'backup parent must be owned by root'
+    reject_find_match 'backup parent is writable by a non-root identity' \
+        /var/backups -maxdepth 0 -perm /022
+}
+
+validate_bundle_path() {
+    [[ "$BUNDLE_INPUT" == /* ]] || fail 'bundle path must be absolute'
+    [[ "$BUNDLE_INPUT" != *'//'*
+        && "$BUNDLE_INPUT" != *'/./'*
+        && "$BUNDLE_INPUT" != */.
+        && "$BUNDLE_INPUT" != *'/../'*
+        && "$BUNDLE_INPUT" != */.. ]] || fail 'bundle path is not canonical'
+
+    BUNDLE=$(realpath -e -- "$BUNDLE_INPUT")
+    [[ "$BUNDLE" == "$BUNDLE_INPUT" ]] || fail 'bundle path must not traverse or resolve links'
+    [[ "$BUNDLE" == "$STAGING_ROOT/"* ]] || fail 'bundle is outside the fixed staging root'
+    [[ "${BUNDLE#$STAGING_ROOT/}" != */* ]] \
+        || fail 'bundle must be an immediate child of the staging root'
+    [[ "${BUNDLE##*/}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+        || fail 'bundle directory name is unsafe'
+    [[ -d "$BUNDLE" && ! -L "$BUNDLE" ]] || fail 'bundle is not a regular directory'
+    [[ "$(stat -c '%u' "$BUNDLE")" == 0 ]] || fail 'bundle must be owned by root'
+
+    MANIFEST="$BUNDLE/$MANIFEST_NAME"
+    [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] || fail 'release manifest is missing or unsafe'
+    reject_find_match 'bundle is writable by a non-root identity' \
+        "$BUNDLE" \( ! -uid 0 -o -perm /022 \)
+    reject_find_match 'bundle contains a symbolic link' "$BUNDLE" -type l
+    reject_find_match 'bundle contains a non-regular entry' \
+        "$BUNDLE" ! -type d ! -type f
+    reject_find_match 'bundle contains a hard-linked file' \
+        "$BUNDLE" -type f -links +1
+}
+
+validate_relative_path() {
+    local relative=$1
+    [[ "$relative" =~ ^[A-Za-z0-9._/-]+$ ]] || fail 'manifest contains an unsafe filename'
+    [[ "$relative" != /*
+        && "$relative" != ./*
+        && "$relative" != *'//'*
+        && "$relative" != *'/./'*
+        && "$relative" != */.
+        && "$relative" != ..
+        && "$relative" != ../*
+        && "$relative" != *'/../'*
+        && "$relative" != */.. ]] || fail 'manifest contains path traversal'
+    case "$relative" in
+        shuzijun-app-content.php|composer.json|composer.lock|vendor/*) ;;
+        *) fail 'manifest contains an entry outside the fixed release unit' ;;
+    esac
+}
+
+validate_bundle_tree() {
+    local entry relative bundle_device scan_complete=0
+    bundle_device=$(stat -c '%d' "$BUNDLE")
+    while IFS= read -r -d '' entry; do
+        if [[ -z "$entry" ]]; then
+            scan_complete=1
+            continue
+        fi
+        relative=${entry#"$BUNDLE/"}
+        [[ "$relative" =~ ^[A-Za-z0-9._/-]+$ ]] || fail 'bundle contains an unsafe filename'
+        [[ "$(stat -c '%d' "$entry")" == "$bundle_device" ]] \
+            || fail 'bundle crosses a filesystem boundary'
+        case "$relative" in
+            "$MANIFEST_NAME"|shuzijun-app-content.php|composer.json|composer.lock|vendor|vendor/*) ;;
+            *) fail 'bundle contains an entry outside the fixed release unit' ;;
+        esac
+    done < <(find "$BUNDLE" -mindepth 1 -print0 && printf '\0')
+    [[ "$scan_complete" -eq 1 ]] || fail 'bundle tree scan did not complete'
+
+    for entry in shuzijun-app-content.php composer.json composer.lock vendor/autoload.php; do
+        [[ -f "$BUNDLE/$entry" && ! -L "$BUNDLE/$entry" ]] \
+            || fail 'bundle is missing a required release file'
+    done
+
+    reject_find_match 'bundle contains a forbidden secret or database filename' \
+        "$BUNDLE" -type f \
+        \( -iname '*.p8' -o -iname '*.pem' -o -iname '*.key' \
+        -o -iname '*.p12' -o -iname '*.pfx' -o -iname '*.jks' \
+        -o -iname '.env*' -o -iname 'auth.json' \
+        -o -iname 'credentials*.json' -o -iname 'service-account*.json' \
+        -o -iname '*.sql' -o -iname '*.sql.gz' -o -iname '*.dump' \)
+    reject_find_match 'bundle contains a mixed-case PHP filename' \
+        "$BUNDLE" -type f -iname '*.php' ! -name '*.php'
+    reject_find_match 'bundle contains executable backup or editor residue' \
+        "$BUNDLE" -type f \
+        \( -name '*.php?*' -o -name '*.php.*' -o -name '*.php_*' \
+        -o -name '*.php-*' -o -name '*.php~' -o -name '*.bak*' \
+        -o -name '*.backup*' -o -name '*.old*' -o -name '*.orig*' \
+        -o -name '*.save*' -o -name '*.swp*' -o -name '*.tmp*' \)
+}
+
+validate_manifest() {
+    local actual_manifest_sha line digest relative previous_relative='' file
+    local actual_file_count=0 scan_complete=0
+    declare -A manifest_paths=()
+
+    [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[a-f0-9]{64}$ ]] \
+        || fail 'expected manifest SHA256 must be 64 lowercase hexadecimal characters'
+    LC_ALL=C tail -c 1 -- "$MANIFEST" | grep -qx '' \
+        || fail 'release manifest must be nonempty and end with one newline'
+    actual_manifest_sha=$(sha256sum -- "$MANIFEST")
+    actual_manifest_sha=${actual_manifest_sha%% *}
+    [[ "$actual_manifest_sha" == "$EXPECTED_MANIFEST_SHA256" ]] \
+        || fail 'release manifest SHA256 does not match the trusted value'
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^([a-f0-9]{64})\ \ ([A-Za-z0-9._/-]+)$ ]] \
+            || fail 'release manifest has an invalid record'
+        digest=${BASH_REMATCH[1]}
+        relative=${BASH_REMATCH[2]}
+        validate_relative_path "$relative"
+        [[ -z "$previous_relative" || "$relative" > "$previous_relative" ]] \
+            || fail 'release manifest paths must be unique and bytewise sorted'
+        [[ -z "${manifest_paths[$relative]+present}" ]] \
+            || fail 'release manifest contains a duplicate path'
+        manifest_paths["$relative"]=$digest
+        previous_relative=$relative
+    done < "$MANIFEST"
+
+    for relative in shuzijun-app-content.php composer.json composer.lock vendor/autoload.php; do
+        [[ -n "${manifest_paths[$relative]+present}" ]] \
+            || fail 'release manifest omits a required file'
+    done
+
+    while IFS= read -r -d '' file; do
+        if [[ -z "$file" ]]; then
+            scan_complete=1
+            continue
+        fi
+        relative=${file#"$BUNDLE/"}
+        [[ "$relative" == "$MANIFEST_NAME" ]] && continue
+        actual_file_count=$((actual_file_count + 1))
+        [[ -n "${manifest_paths[$relative]+present}" ]] \
+            || fail 'release manifest does not allow every bundle file'
+    done < <(find "$BUNDLE" -type f -print0 && printf '\0')
+    [[ "$scan_complete" -eq 1 ]] || fail 'bundle file scan did not complete'
+    [[ "$actual_file_count" -eq "${#manifest_paths[@]}" ]] \
+        || fail 'release manifest contains a missing or extra file'
+
+    (
+        cd "$BUNDLE"
+        sha256sum --strict --quiet --check "$MANIFEST"
+    ) >/dev/null
+}
+
+validate_secret_content() {
+    local file relative actual_sha grep_status scan_complete=0
+    local secret_pattern='AKID[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN ([A-Z0-9 ]+)?PRIVATE KEY-----|Secret(Key|Id)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9/+_.=-]{16,}'
+
+    while IFS= read -r -d '' file; do
+        if [[ -z "$file" ]]; then
+            scan_complete=1
+            continue
+        fi
+        relative=${file#"$BUNDLE/"}
+        [[ "$relative" == "$MANIFEST_NAME" ]] && continue
+        if [[ "$relative" == "$JWT_README" ]]; then
+            actual_sha=$(sha256sum -- "$file")
+            actual_sha=${actual_sha%% *}
+            [[ "$actual_sha" == "$JWT_README_SHA256" ]] \
+                || fail 'reviewed upstream JWT documentation hash changed'
+            continue
+        fi
+        if [[ -s "$file" ]]; then
+            grep_status=0
+            LC_ALL=C grep -I -q '^' "$file" || grep_status=$?
+            [[ "$grep_status" -eq 0 ]] \
+                || fail 'bundle contains a binary or unreadable release file'
+        fi
+        grep_status=0
+        LC_ALL=C grep -I -q -E "$secret_pattern" "$file" || grep_status=$?
+        case "$grep_status" in
+            0) fail 'bundle contains content resembling a long-lived credential' ;;
+            1) ;;
+            *) fail 'credential content scan did not complete' ;;
+        esac
+    done < <(find "$BUNDLE" -type f -print0 && printf '\0')
+    [[ "$scan_complete" -eq 1 ]] || fail 'credential file scan did not complete'
+}
+
+resolve_runtime_tools() {
+    local candidate candidate_parent binary_parent
+    for candidate in /usr/bin/php8.3 /usr/local/bin/php8.3 /usr/bin/php /usr/local/bin/php; do
+        if [[ -x "$candidate" ]]; then
+            PHP_BIN=$candidate
+            break
+        fi
+    done
+    [[ -n "$PHP_BIN" ]] || fail 'PHP 8.3 is unavailable'
+    candidate_parent=${PHP_BIN%/*}
+    PHP_BIN=$(realpath -e -- "$PHP_BIN")
+    binary_parent=${PHP_BIN%/*}
+    [[ -f "$PHP_BIN" && ! -L "$PHP_BIN" ]] || fail 'PHP binary path is unsafe'
+    for candidate in "$candidate_parent" "$binary_parent"; do
+        [[ "$(realpath -e -- "$candidate")" == "$candidate" \
+            && "$(stat -c '%u' "$candidate")" == 0 ]] \
+            || fail 'PHP binary directory is unsafe'
+        reject_find_match 'PHP binary directory is writable by a non-root identity' \
+            "$candidate" -maxdepth 0 -perm /022
+    done
+    "$PHP_BIN" -n -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 3 ? 0 : 1);' \
+        || fail 'PHP runtime must be version 8.3'
+
+    for candidate in /usr/bin/composer /usr/local/bin/composer; do
+        if [[ -x "$candidate" ]]; then
+            COMPOSER_BIN=$candidate
+            break
+        fi
+    done
+    [[ -n "$COMPOSER_BIN" ]] || fail 'Composer is unavailable'
+    candidate_parent=${COMPOSER_BIN%/*}
+    COMPOSER_BIN=$(realpath -e -- "$COMPOSER_BIN")
+    binary_parent=${COMPOSER_BIN%/*}
+    [[ -f "$COMPOSER_BIN" && ! -L "$COMPOSER_BIN" ]] \
+        || fail 'Composer binary path is unsafe'
+    for candidate in "$candidate_parent" "$binary_parent"; do
+        [[ "$(realpath -e -- "$candidate")" == "$candidate" \
+            && "$(stat -c '%u' "$candidate")" == 0 ]] \
+            || fail 'Composer binary directory is unsafe'
+        reject_find_match 'Composer binary directory is writable by a non-root identity' \
+            "$candidate" -maxdepth 0 -perm /022
+    done
+    [[ "$(stat -c '%u' "$PHP_BIN")" == 0 \
+        && "$(stat -c '%u' "$COMPOSER_BIN")" == 0 ]] \
+        || fail 'runtime tools must be owned by root'
+    reject_find_match 'runtime tool is writable by a non-root identity' \
+        "$PHP_BIN" "$COMPOSER_BIN" -maxdepth 0 -perm /022
+}
+
+run_composer() {
+    env -i \
+        PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
+        COMPOSER_HOME=/dev/null COMPOSER_CACHE_DIR=/dev/null \
+        COMPOSER_ALLOW_SUPERUSER=1 COMPOSER_NO_INTERACTION=1 \
+        "$PHP_BIN" "$COMPOSER_BIN" --no-interaction --no-ansi --no-cache \
+        --no-plugins --no-scripts "$@"
+}
+
+preflight_release() {
+    local file scan_complete=0
+    while IFS= read -r -d '' file; do
+        if [[ -z "$file" ]]; then
+            scan_complete=1
+            continue
+        fi
+        env -i PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
+            "$PHP_BIN" -n -l "$file" >/dev/null
+    done < <(find "$BUNDLE" -type f -name '*.php' -print0 && printf '\0')
+    [[ "$scan_complete" -eq 1 ]] || fail 'PHP source scan did not complete'
+
+    run_composer --working-dir="$BUNDLE" validate \
+        --strict --no-check-publish >/dev/null
+    run_composer --working-dir="$BUNDLE" audit \
+        --locked --no-dev --format=summary >/dev/null
+    run_composer --working-dir="$BUNDLE" check-platform-reqs \
+        --no-dev >/dev/null
+    env -i PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
+        "$PHP_BIN" -n -d allow_url_fopen=0 -d "open_basedir=$BUNDLE" -r '
+        $root = $argv[1];
+        $lock = json_decode(file_get_contents($root . "/composer.lock"), true, 512, JSON_THROW_ON_ERROR);
+        $packages = $lock["packages"] ?? array();
+        if (count($packages) !== 1
+            || ($packages[0]["name"] ?? "") !== "firebase/php-jwt"
+            || ($packages[0]["version"] ?? "") !== "v7.1.0"
+            || !empty($lock["packages-dev"] ?? array())) { exit(2); }
+        $psr4 = file_get_contents($root . "/vendor/composer/autoload_psr4.php");
+        if (!is_string($psr4)
+            || !str_contains($psr4, "Firebase\\\\JWT\\\\")
+            || !is_file($root . "/vendor/firebase/php-jwt/src/JWT.php")
+            || !is_file($root . "/vendor/firebase/php-jwt/src/JWK.php")) { exit(3); }
+        exit(0);
+    ' "$BUNDLE"
+
+    # The release code above is deliberately constrained, but validating the
+    # trusted manifest again also detects any package/tool mutation or TOCTOU
+    # change before dry-run success or the first live write.
+    validate_manifest
+}
+
+verify_installed_jwt_autoload() {
+    # Only after installation, when files are root-owned 0644/0755, execute the
+    # autoloader as the PHP worker rather than root.  FPM is still stopped and
+    # any failure triggers the verified code-only rollback.
+    timeout --signal=KILL 20s runuser -u www-data -- env -i \
+        PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
+        "$PHP_BIN" -n -d allow_url_fopen=0 -d "open_basedir=$TARGET_DIR" \
+        -d 'disable_functions=exec,passthru,shell_exec,system,proc_open,popen,putenv,mail,pcntl_exec,dl,link,symlink,rename,unlink,rmdir,mkdir,chmod,chown,chgrp,touch,copy,file_put_contents,fsockopen,pfsockopen,stream_socket_client' \
+        -r '
+        $root = $argv[1];
+        require $root . "/vendor/autoload.php";
+        exit(class_exists("Firebase\\JWT\\JWT") && class_exists("Firebase\\JWT\\JWK") ? 0 : 3);
+    ' "$TARGET_DIR"
+}
+
+validate_target_boundary() {
+    if ! [[ "$TARGET_DIR" == /var/www/html/shuzijun.com.cn/wp-content/mu-plugins \
+        && -d "$TARGET_DIR" && ! -L "$TARGET_DIR" \
+        && "$(realpath -e -- "$TARGET_DIR")" == "$TARGET_DIR" \
+        && "$(stat -c '%u' "$TARGET_DIR")" == 0 ]]; then
+        fail 'live release target boundary is unsafe'
+        return 1
+    fi
+    return 0
+}
+
+validate_current_release_unit() {
+    local entry target_device scan_complete=0
+    local -a release_paths=(
+        "$TARGET_DIR/shuzijun-app-content.php"
+        "$TARGET_DIR/composer.json"
+        "$TARGET_DIR/composer.lock"
+        "$TARGET_DIR/vendor"
+    )
+
+    validate_target_boundary || return 1
+    if ! [[ -f "${release_paths[0]}" && ! -L "${release_paths[0]}" \
+        && -f "${release_paths[1]}" && ! -L "${release_paths[1]}" \
+        && -f "${release_paths[2]}" && ! -L "${release_paths[2]}" \
+        && -d "${release_paths[3]}" && ! -L "${release_paths[3]}" ]]; then
+        fail 'current release unit is incomplete or unsafe'
+        return 1
+    fi
+    reject_find_match 'current release unit contains a symbolic link' \
+        "${release_paths[@]}" -type l || return 1
+    reject_find_match 'current release unit contains a non-regular entry' \
+        "${release_paths[@]}" ! -type d ! -type f || return 1
+    reject_find_match 'current release unit contains a hard-linked file' \
+        "${release_paths[@]}" -type f -links +1 || return 1
+    reject_find_match 'current release unit has unsafe ownership or write access' \
+        "${release_paths[@]}" \( ! -uid 0 -o -perm /022 \) || return 1
+
+    target_device=$(stat -c '%d' "$TARGET_DIR")
+    while IFS= read -r -d '' entry; do
+        if [[ -z "$entry" ]]; then
+            scan_complete=1
+            continue
+        fi
+        if [[ "$(stat -c '%d' "$entry")" != "$target_device" ]]; then
+            fail 'current release unit crosses a filesystem boundary'
+            return 1
+        fi
+    done < <(find "${release_paths[@]}" -print0 && printf '\0')
+    if [[ "$scan_complete" -ne 1 ]]; then
+        fail 'current release unit scan did not complete'
+        return 1
+    fi
+    return 0
+}
+
+verify_current_webroot() {
+    [[ -x "$VERIFY" ]] || fail 'webroot verifier is unavailable'
+    "$VERIFY" "$SITE"
+    nginx -t >/dev/null
+    systemctl is-active --quiet "$FPM_SERVICE"
+    validate_current_release_unit
+}
+
+probe_unauthorized_api() {
+    local attempt status headers
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        headers=
+        if headers=$(curl -q --silent --show-error --dump-header - --output /dev/null \
+            --request GET --proto '=https' --tlsv1.2 \
+            --connect-timeout 5 --max-time 15 --noproxy '*' \
+            --header 'Authorization:' --header 'X-Yishu-Install-ID:' \
+            --resolve "$HEALTH_HOST:443:127.0.0.1" "$HEALTH_URL"); then
+            status=$(printf '%s\n' "$headers" | awk \
+                'toupper($1) ~ /^HTTP\// { code=$2 } END { print code }')
+            if [[ "$status" == 401 ]] \
+                && printf '%s\n' "$headers" | grep -Eiq \
+                    '^content-type:[[:space:]]*application/json([;[:space:]]|$)' \
+                && printf '%s\n' "$headers" | grep -Eiq \
+                    '^x-robots-tag:[[:space:]]*noindex,[[:space:]]*nofollow[[:space:]]*$' \
+                && printf '%s\n' "$headers" | grep -Eiq \
+                    '^vary:.*authorization.*x-yishu-install-id'; then
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    fail 'local unauthenticated App API probe did not identify the protected local plugin route'
+}
+
+verify_live_release_hashes() {
+    validate_current_release_unit
+    (
+        cd "$TARGET_DIR"
+        sha256sum --strict --quiet --check "$MANIFEST"
+    ) >/dev/null
+}
+
+write_backup_manifest() {
+    local relative scan_complete=0
+    BACKUP_MANIFEST="$BACKUP_DIR/$MANIFEST_NAME"
+    (
+        cd "$BACKUP_DIR"
+        while IFS= read -r -d '' relative; do
+            if [[ -z "$relative" ]]; then
+                scan_complete=1
+                continue
+            fi
+            sha256sum "$relative"
+        done < <(find shuzijun-app-content.php composer.json composer.lock vendor \
+            -xdev -type f -print0 | sort -z && printf '\0')
+        [[ "$scan_complete" -eq 1 ]] || fail 'backup file scan did not complete'
+    ) > "$BACKUP_MANIFEST"
+    chmod 600 "$BACKUP_MANIFEST"
+}
+
+create_code_backup() {
+    local stamp
+    validate_current_release_unit
+    [[ -d "$BACKUP_ROOT" && ! -L "$BACKUP_ROOT" \
+        && "$(realpath -e -- "$BACKUP_ROOT")" == "$BACKUP_ROOT" \
+        && "$(stat -c '%u' "$BACKUP_ROOT")" == 0 ]] \
+        || fail 'backup root is unsafe'
+    reject_find_match 'backup root is writable by a non-root identity' \
+        "$BACKUP_ROOT" -maxdepth 0 -perm /022
+
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    BACKUP_DIR="$BACKUP_ROOT/${stamp}-${EXPECTED_MANIFEST_SHA256:0:12}-$$"
+    mkdir -m 0700 "$BACKUP_DIR"
+    [[ "$(realpath -e -- "$BACKUP_DIR")" == "$BACKUP_DIR" \
+        && "${BACKUP_DIR#$BACKUP_ROOT/}" != */* \
+        && "$(stat -c '%u' "$BACKUP_DIR")" == 0 ]] \
+        || fail 'new backup directory boundary is unsafe'
+    cp -a -- "$TARGET_DIR/shuzijun-app-content.php" "$BACKUP_DIR/"
+    cp -a -- "$TARGET_DIR/composer.json" "$BACKUP_DIR/"
+    cp -a -- "$TARGET_DIR/composer.lock" "$BACKUP_DIR/"
+    cp -a -- "$TARGET_DIR/vendor" "$BACKUP_DIR/"
+    write_backup_manifest
+    (
+        cd "$BACKUP_DIR"
+        sha256sum --strict --quiet --check "$BACKUP_MANIFEST"
+    ) >/dev/null
+    ROLLBACK_READY=1
+}
+
+remove_live_vendor() {
+    local live_vendor="$TARGET_DIR/vendor"
+    validate_target_boundary || return 1
+    if [[ "$live_vendor" != /var/www/html/shuzijun.com.cn/wp-content/mu-plugins/vendor ]]; then
+        fail 'live vendor removal target is unsafe'
+        return 1
+    fi
+    if [[ -e "$live_vendor" || -L "$live_vendor" ]]; then
+        if ! [[ -d "$live_vendor" && ! -L "$live_vendor" \
+            && "$(realpath -e -- "$live_vendor")" == "$live_vendor" \
+            && "$(stat -c '%d' "$live_vendor")" == "$(stat -c '%d' "$TARGET_DIR")" ]]; then
+            fail 'live vendor tree boundary is unsafe'
+            return 1
+        fi
+        rm -rf --one-file-system -- "$live_vendor" || return 1
+    fi
+    if [[ -e "$live_vendor" || -L "$live_vendor" ]]; then
+        fail 'live vendor tree could not be removed safely'
+        return 1
+    fi
+    return 0
+}
+
+remove_live_metadata() {
+    local path relative
+    validate_target_boundary || return 1
+    for relative in shuzijun-app-content.php composer.json composer.lock; do
+        path="$TARGET_DIR/$relative"
+        if [[ "$path" != /var/www/html/shuzijun.com.cn/wp-content/mu-plugins/* ]]; then
+            fail 'live metadata removal target is unsafe'
+            return 1
+        fi
+        if [[ -e "$path" || -L "$path" ]]; then
+            if ! [[ -f "$path" && ! -L "$path" ]]; then
+                fail 'live metadata removal target is not a regular file'
+                return 1
+            fi
+        fi
+    done
+    rm -f -- "$TARGET_DIR/shuzijun-app-content.php" \
+        "$TARGET_DIR/composer.json" "$TARGET_DIR/composer.lock" || return 1
+    for relative in shuzijun-app-content.php composer.json composer.lock; do
+        if [[ -e "$TARGET_DIR/$relative" || -L "$TARGET_DIR/$relative" ]]; then
+            fail 'live metadata could not be removed safely'
+            return 1
+        fi
+    done
+    return 0
+}
+
+install_release_unit() {
+    validate_target_boundary
+
+    CODE_MUTATED=1
+    remove_live_vendor
+    install -d -o root -g www-data -m 0755 "$TARGET_DIR/vendor"
+    cp -R -- "$BUNDLE/vendor/." "$TARGET_DIR/vendor/"
+    chown -R root:www-data "$TARGET_DIR/vendor"
+    find "$TARGET_DIR/vendor" -xdev -type d -exec chmod 0755 {} +
+    find "$TARGET_DIR/vendor" -xdev -type f -exec chmod 0644 {} +
+
+    install -o root -g www-data -m 0644 "$BUNDLE/composer.json" "$TARGET_DIR/composer.json"
+    install -o root -g www-data -m 0644 "$BUNDLE/composer.lock" "$TARGET_DIR/composer.lock"
+
+    # Install the entry point last, after its complete autoloader is in place.
+    install -o root -g www-data -m 0644 \
+        "$BUNDLE/shuzijun-app-content.php" "$TARGET_DIR/shuzijun-app-content.php"
+}
+
+restore_code_backup() {
+    local restore_status=0
+    [[ "$ROLLBACK_READY" -eq 1 && -n "$BACKUP_DIR" ]] || return 0
+
+    [[ "$BACKUP_DIR" == "$BACKUP_ROOT/"* \
+        && "${BACKUP_DIR#$BACKUP_ROOT/}" != */* \
+        && -d "$BACKUP_DIR" && ! -L "$BACKUP_DIR" \
+        && "$(realpath -e -- "$BACKUP_DIR")" == "$BACKUP_DIR" ]] || return 1
+    (
+        cd "$BACKUP_DIR"
+        sha256sum --strict --quiet --check "$BACKUP_MANIFEST"
+    ) >/dev/null 2>&1 || return 1
+
+    if [[ "$CODE_MUTATED" -eq 1 ]]; then
+        systemctl stop "$FPM_SERVICE" >/dev/null 2>&1 || true
+        if systemctl is-active --quiet "$FPM_SERVICE"; then
+            return 1
+        fi
+        remove_live_vendor >/dev/null 2>&1 || restore_status=1
+        remove_live_metadata >/dev/null 2>&1 || restore_status=1
+        if [[ "$restore_status" -eq 0 ]]; then
+            cp -a -- "$BACKUP_DIR/vendor" "$TARGET_DIR/vendor" || restore_status=1
+            cp -a -- "$BACKUP_DIR/shuzijun-app-content.php" "$TARGET_DIR/" \
+                || restore_status=1
+            cp -a -- "$BACKUP_DIR/composer.json" "$TARGET_DIR/" || restore_status=1
+            cp -a -- "$BACKUP_DIR/composer.lock" "$TARGET_DIR/" || restore_status=1
+        fi
+        if [[ "$restore_status" -eq 0 ]]; then
+            validate_current_release_unit >/dev/null 2>&1 || restore_status=1
+            (
+                cd "$TARGET_DIR"
+                sha256sum --strict --quiet --check "$BACKUP_MANIFEST"
+            ) >/dev/null 2>&1 || restore_status=1
+        fi
+    fi
+
+    # Never restart PHP-FPM with a partial or unverified rollback.  Leaving it
+    # stopped is the fail-closed state and prevents mismatched plugin/vendor
+    # code from serving requests while an operator restores the known backup.
+    if [[ "$restore_status" -eq 0 && "$FPM_WAS_ACTIVE" -eq 1 ]]; then
+        systemctl start "$FPM_SERVICE" >/dev/null 2>&1 || restore_status=1
+        systemctl is-active --quiet "$FPM_SERVICE" || restore_status=1
+    fi
+    return "$restore_status"
+}
+
+handle_failure() {
+    local status=$1
+    trap - ERR
+    trap '' INT TERM HUP
+    set +e
+    [[ "$status" -ne 0 ]] || status=1
+    if [[ "$ROLLBACK_READY" -eq 1 ]]; then
+        printf 'app-content-release: failure detected; restoring previous code release\n' >&2
+        if restore_code_backup \
+            && "$VERIFY" "$SITE" >/dev/null 2>&1 \
+            && nginx -t >/dev/null 2>&1 \
+            && systemctl is-active --quiet "$FPM_SERVICE" \
+            && probe_unauthorized_api; then
+            printf 'app-content-release: previous code release restored; backup=%s\n' "$BACKUP_DIR" >&2
+        else
+            # A restored tree is not safe to serve until every post-rollback
+            # check succeeds.  This also covers a probe/verifier failure that
+            # happens after restore_code_backup already restarted the service.
+            systemctl stop "$FPM_SERVICE" >/dev/null 2>&1
+            if systemctl is-active --quiet "$FPM_SERVICE"; then
+                printf 'app-content-release: rollback was not fully verified and PHP-FPM could not be stopped; immediate manual isolation required; backup=%s\n' \
+                    "$BACKUP_DIR" >&2
+            else
+                printf 'app-content-release: rollback was not fully verified; PHP-FPM left stopped; manual recovery required from %s\n' \
+                    "$BACKUP_DIR" >&2
+            fi
+        fi
+    elif [[ "$FPM_WAS_ACTIVE" -eq 1 ]]; then
+        systemctl start "$FPM_SERVICE" >/dev/null 2>&1
+    fi
+    exit "$status"
+}
+
+trap 'handle_failure $?' ERR
+trap 'handle_failure 130' INT TERM HUP
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --bundle)
+            [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+            [[ "$BUNDLE_SEEN" -eq 0 ]] || fail 'bundle option may be specified only once'
+            BUNDLE_INPUT=$2
+            BUNDLE_SEEN=1
+            shift 2
+            ;;
+        --manifest-sha256)
+            [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+            [[ "$MANIFEST_SHA_SEEN" -eq 0 ]] \
+                || fail 'manifest SHA256 option may be specified only once'
+            EXPECTED_MANIFEST_SHA256=$2
+            MANIFEST_SHA_SEEN=1
+            shift 2
+            ;;
+        --dry-run)
+            [[ "$MODE_SEEN" -eq 0 ]] || fail 'release mode may be specified only once'
+            MODE=dry-run
+            MODE_SEEN=1
+            shift
+            ;;
+        --apply)
+            [[ "$MODE_SEEN" -eq 0 ]] || fail 'release mode may be specified only once'
+            MODE=apply
+            MODE_SEEN=1
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+[[ "$EUID" -eq 0 ]] || fail 'must run as root'
+[[ -n "$BUNDLE_INPUT" && -n "$EXPECTED_MANIFEST_SHA256" ]] \
+    || { usage >&2; exit 2; }
+
+for command_name in realpath stat find grep awk sha256sum flock nginx systemctl curl \
+    install cp rm sort date mkdir chmod chown sleep tail env timeout runuser; do
+    require_command "$command_name"
+done
+
+validate_staging_lock_path
+exec 9<"$LOCK_PATH"
+flock -n 9 || fail 'another App content release is in progress'
+
+validate_fixed_paths
+validate_bundle_path
+validate_bundle_tree
+validate_manifest
+validate_secret_content
+resolve_runtime_tools
+preflight_release
+verify_current_webroot
+
+if [[ "$MODE" == dry-run ]]; then
+    printf 'app-content-release: dry-run passed manifest=%s\n' "$EXPECTED_MANIFEST_SHA256"
+    exit 0
+fi
+
+# HTTP itself can update access logs, caches, schedules or role metadata, so it
+# is deliberately outside the no-persistent-write dry-run branch.  Apply checks
+# the local route both before mutation and after FPM returns.
+probe_unauthorized_api
+systemctl is-active --quiet "$FPM_SERVICE" || fail 'PHP-FPM must be active before deployment'
+FPM_WAS_ACTIVE=1
+# Close the last validation-to-use gap before any live or backup write.
+validate_bundle_path
+validate_bundle_tree
+validate_manifest
+create_code_backup
+systemctl stop "$FPM_SERVICE"
+if systemctl is-active --quiet "$FPM_SERVICE"; then
+    fail 'PHP-FPM did not stop; live code was not modified'
+fi
+install_release_unit
+verify_live_release_hashes
+verify_installed_jwt_autoload
+systemctl start "$FPM_SERVICE"
+systemctl is-active --quiet "$FPM_SERVICE"
+
+"$VERIFY" "$SITE"
+nginx -t >/dev/null
+probe_unauthorized_api
+
+ROLLBACK_READY=0
+trap - ERR INT TERM HUP
+printf 'app-content-release: applied manifest=%s backup=%s\n' \
+    "$EXPECTED_MANIFEST_SHA256" "$BACKUP_DIR"

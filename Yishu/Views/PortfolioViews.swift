@@ -35,11 +35,12 @@ struct PortfolioGridView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     VStack(alignment: .leading, spacing: 10) {
                         Text("PORTFOLIO")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(.caption2.weight(.semibold))
                             .tracking(3)
                             .foregroundStyle(AppTheme.gold)
                         Text("作品")
-                            .font(.editorial(42))
+                            .font(.system(.largeTitle, design: .serif))
+                            .accessibilityAddTraits(.isHeader)
                             .accessibilityIdentifier("portfolio-heading")
                         Text("每一组影像，都是一次人物叙事。")
                             .font(.subheadline)
@@ -63,6 +64,7 @@ struct PortfolioGridView: View {
                                 Text("全部作品开放浏览")
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(AppTheme.warmWhite)
+                                    .accessibilityAddTraits(.isHeader)
                                 Text("相册持续更新 · 影像内容受版权保护")
                                     .font(.caption2)
                                     .foregroundStyle(AppTheme.muted)
@@ -106,15 +108,21 @@ struct PortfolioGridView: View {
                 }
                 .padding(.bottom, 36)
             }
-            .contentMargins(.bottom, 84, for: .scrollContent)
+            .floatingTabBarScrollClearance()
             .refreshable { await refreshContent() }
         }
         .navigationBarTitleDisplayMode(.inline)
         .navigationDestination(for: Portfolio.self) { portfolio in
             PortfolioDetailView(portfolio: portfolio)
         }
-        .searchable(text: $searchText, prompt: "搜索主题、风格或描述")
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            PortfolioSearchBar(text: $searchText)
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
+                .background(AppTheme.ink)
+        }
+        .toolbar(.hidden, for: .navigationBar)
     }
 
     private func refreshContent() async {
@@ -143,6 +151,75 @@ struct PortfolioGridView: View {
     }
 }
 
+private struct PortfolioSearchBar: View {
+    @Binding var text: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(AppTheme.muted)
+                    .accessibilityHidden(true)
+
+                TextField(
+                    "",
+                    text: $text,
+                    prompt: Text("搜索作品")
+                        .foregroundStyle(AppTheme.muted)
+                )
+                    .font(.body)
+                    .layoutPriority(1)
+                    .focused($isFocused)
+                    .submitLabel(.search)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .accessibilityLabel("搜索作品")
+                    .accessibilityIdentifier("portfolio-search-field")
+
+                if !text.isEmpty {
+                    Button {
+                        text = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(AppTheme.muted)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+                    .accessibilityLabel("清除搜索")
+                }
+            }
+            .padding(.horizontal, 15)
+            .frame(minHeight: 48)
+            .background(AppTheme.elevatedInk, in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(.white.opacity(0.1), lineWidth: 1)
+            }
+
+            if isFocused {
+                Button("取消") {
+                    text = ""
+                    isFocused = false
+                }
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(AppTheme.gold)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+                .transition(
+                    reduceMotion
+                        ? .opacity
+                        : .opacity.combined(with: .move(edge: .trailing))
+                )
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isFocused)
+    }
+}
+
 private struct PortfolioGridCard: View {
     let portfolio: Portfolio
 
@@ -154,14 +231,24 @@ private struct PortfolioGridCard: View {
             LinearGradient(colors: [.clear, .black.opacity(0.82)], startPoint: .center, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 5) {
                 Text(portfolio.eyebrow)
-                    .font(.system(size: 7, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                     .tracking(1.1)
-                    .foregroundStyle(AppTheme.gold)
+                    .foregroundStyle(AppTheme.ink)
                 Text(portfolio.title)
                     .font(.system(.title3, design: .serif))
                     .lineLimit(2)
+                    .foregroundStyle(AppTheme.ink)
             }
-            .foregroundStyle(.white)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 7)
+            .background(
+                AppTheme.warmWhite,
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(AppTheme.gold.opacity(0.35), lineWidth: 0.5)
+            }
             .padding(14)
 
         }
@@ -228,6 +315,7 @@ struct PortfolioDetailView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("\(currentPortfolio.displayImageCount) 帧影像")
                                 .foregroundStyle(AppTheme.warmWhite)
+                                .accessibilityAddTraits(.isHeader)
                             Text(accessDescription)
                                 .font(.caption2)
                         }
@@ -280,6 +368,7 @@ struct PortfolioDetailView: View {
         .accessibilityIdentifier("portfolio-detail-\(currentPortfolio.id)")
         .navigationTitle(currentPortfolio.title)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
         .toolbarBackground(.hidden, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .onAppear {
@@ -323,7 +412,7 @@ private struct PortfolioHeroArtwork: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 Text(portfolio.eyebrow)
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.caption2.weight(.semibold))
                     .tracking(2)
                     .foregroundStyle(AppTheme.gold)
                 Text(portfolio.title)
@@ -350,7 +439,7 @@ private struct PortfolioGalleryTile: View {
             EditorialArtworkImage(url: image.url)
 
             Text(String(format: "%02d", number))
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .font(.system(.caption2, design: .monospaced).weight(.semibold))
                 .tracking(0.8)
                 .foregroundStyle(.white.opacity(0.84))
                 .padding(.horizontal, 8)
@@ -401,7 +490,8 @@ private struct PortfolioEmptyArtwork: View {
                 .font(.largeTitle)
                 .foregroundStyle(AppTheme.gold)
             Text(portfolio.title)
-                .font(.editorial(34))
+                .font(.system(.title, design: .serif))
+                .accessibilityAddTraits(.isHeader)
             Text("暂无可浏览照片")
                 .font(.caption)
                 .foregroundStyle(AppTheme.muted)
@@ -456,8 +546,9 @@ struct GalleryViewer: View {
                     }
                     Spacer()
                     Text("\(selectedIndex) / \(accessibleImages.count)")
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .font(.system(.caption, design: .monospaced).weight(.medium))
                         .foregroundStyle(.white.opacity(0.7))
+                        .accessibilityLabel("第 \(selectedIndex) 张，共 \(accessibleImages.count) 张")
                     Spacer()
                     Button {
                         if let selected { favorites.toggle(selected) }
@@ -472,7 +563,8 @@ struct GalleryViewer: View {
                 Spacer()
                 VStack(spacing: 6) {
                     Text(portfolio.title)
-                        .font(.editorial(23))
+                        .font(.system(.title3, design: .serif))
+                        .accessibilityAddTraits(.isHeader)
                     Text("双指缩放 · 左右翻页")
                         .font(.caption2)
                         .foregroundStyle(.white.opacity(0.5))
@@ -494,6 +586,7 @@ struct GalleryViewer: View {
 
 private struct ZoomableArtwork: View {
     let image: PortfolioImage
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
@@ -510,7 +603,7 @@ private struct ZoomableArtwork: View {
                     including: scale > 1.01 ? .all : .none
                 )
                 .onTapGesture(count: 2) {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                    updateTransform {
                         if scale > 1.01 {
                             resetTransform()
                         } else {
@@ -521,8 +614,33 @@ private struct ZoomableArtwork: View {
                         }
                     }
                 }
+                // Keep the image loader's retry control reachable if loading
+                // fails while exposing zoom actions on the containing photo.
+                .accessibilityElement(children: .contain)
                 .accessibilityLabel(image.altText)
-                .accessibilityHint("双指缩放；放大后可拖动查看")
+                .accessibilityValue("缩放 \(Int((scale * 100).rounded()))%")
+                .accessibilityHint("上下轻扫调整缩放；放大后可拖动查看")
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment:
+                        zoomIn(in: proxy.size)
+                    case .decrement:
+                        zoomOut(in: proxy.size)
+                    @unknown default:
+                        break
+                    }
+                }
+                .accessibilityAction(named: "放大照片") {
+                    zoomIn(in: proxy.size)
+                }
+                .accessibilityAction(named: "缩小照片") {
+                    zoomOut(in: proxy.size)
+                }
+                .accessibilityAction(named: "恢复原始大小") {
+                    updateTransform {
+                        resetTransform()
+                    }
+                }
         }
     }
 
@@ -534,7 +652,7 @@ private struct ZoomableArtwork: View {
             }
             .onEnded { _ in
                 if scale < 1.05 {
-                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                    updateTransform {
                         resetTransform()
                     }
                 } else {
@@ -575,5 +693,39 @@ private struct ZoomableArtwork: View {
         lastScale = 1
         offset = .zero
         lastOffset = .zero
+    }
+
+    private func zoomIn(in size: CGSize) {
+        updateTransform {
+            setScale(min(4, max(2, scale + 1)), in: size)
+        }
+    }
+
+    private func zoomOut(in size: CGSize) {
+        updateTransform {
+            let nextScale = max(1, scale - 1)
+            if nextScale < 1.05 {
+                resetTransform()
+            } else {
+                setScale(nextScale, in: size)
+            }
+        }
+    }
+
+    private func setScale(_ newScale: CGFloat, in size: CGSize) {
+        scale = newScale
+        lastScale = newScale
+        offset = constrained(offset, scale: newScale, in: size)
+        lastOffset = offset
+    }
+
+    private func updateTransform(_ updates: () -> Void) {
+        if reduceMotion {
+            updates()
+        } else {
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                updates()
+            }
+        }
     }
 }
