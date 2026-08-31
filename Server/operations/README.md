@@ -13,3 +13,9 @@ the App content API can indefinitely serve an older launch poster and
 `updatedAt` value from Redis. The script verifies the transfer checksum, creates
 a pre-sync database/config backup, validates Nginx and fails closed via
 `set -euo pipefail`.
+
+`verify-webroot-security` is the post-deployment guard for both production
+nodes. It fails when common backup/config/database/private-key residue exists
+under the document root, when the Nginx deny include is absent, or when the
+resulting Nginx configuration is invalid. Recovery copies must use a root-only
+directory under `/var/backups` and must never be placed next to the live site.

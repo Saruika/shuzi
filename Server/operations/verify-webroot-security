@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+site_root=${1:-/var/www/html/shuzijun.com.cn}
+nginx_site=${2:-/etc/nginx/sites-available/shuzijun-ssl.conf}
+deny_snippet=${3:-/etc/nginx/snippets/shuzijun-sensitive-files-deny.conf}
+
+test -d "$site_root"
+test -f "$nginx_site"
+test -f "$deny_snippet"
+
+if find "$site_root" -xdev -type f \
+    \( -name '*.bak*' -o -name '*.backup*' -o -name '*.old' \
+    -o -name '*.orig' -o -name '*.save' -o -name '*.swp' \
+    -o -name '*.before-*' -o -name '*~' \) -print -quit | grep -q .; then
+    printf 'webroot-security: backup residue remains in document root\n' >&2
+    exit 1
+fi
+
+if find "$site_root" -xdev -type f \
+    \( -iname '*.sql' -o -iname '*.sql.gz' -o -iname '*.dump' \
+    -o -iname '*.pem' -o -iname '*.key' -o -iname '*.p12' \
+    -o -iname '.env*' -o -iname 'debug.log' \) -print -quit | grep -q .; then
+    printf 'webroot-security: sensitive material remains in document root\n' >&2
+    exit 1
+fi
+
+grep -qF 'include /etc/nginx/snippets/shuzijun-sensitive-files-deny.conf;' "$nginx_site"
+grep -qF 'wp-config\.php' "$deny_snippet"
+grep -qF 'return 404;' "$deny_snippet"
+nginx -t >/dev/null
+
+printf 'webroot-security: passed\n'
