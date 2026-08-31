@@ -22,18 +22,31 @@
 - 官网和图片 CDN 配置上海主源与新加坡备用源；状态型账号、审批和内容清单请求则通过非 CDN 域名直达上海权威数据库，并由备用节点同命名空间反向代理兜底，避免逐请求切换到未实时同步的数据副本。
 - 粉丝账号与 WordPress 管理身份严格分离：注册用户只是内部随机用户名的 `subscriber`，粉丝权限白名单不包含内容管理 capability。
 - 粉丝注册必填抖音 ID，限制格式和唯一性，并通过网络/安装双维度注册限流及网络/身份码双维度登录限流抑制滥用。客户端地址只会从回环或固定备用节点的受信链路接受；备用节点公网/CDN 入口会覆盖自定义地址头，防止伪造限流身份。
+- 原生 Apple 登录不接受客户端自报的 Apple user ID。客户端先请求绑定安装记录、purpose 和短 TTL 的服务端 challenge；服务端只保存 nonce/state/安装记录的哈希并单次消费。客户端先恒时比对回调 state，再上传 Apple identity token、authorization code、challenge ID、state 和安装记录；token/code/nonce/state 不落盘、不写日志。
+- 服务端验证 Apple JWT 的签名、issuer、audience、nonce、签发/到期时间，并以 HMAC 后的 subject 关联账号；authorization code 只发往 Apple token 端点。Apple refresh token 加密保存，只用于维持登录关联和删号时撤销 Apple 授权，不能作为 App bearer token 使用。
+- Apple 登录形成三重门禁：一是 Apple 签名身份验证，二是本人填写必填抖音 ID 并确认当前隐私政策，三是管理员人工批准。第一步只签发短时 `apple_onboarding` 会话；完成第二步前内容接口失败关闭，管理员目录只能显示“等待绑定抖音 ID”，客户端和服务端都不允许提前批准为 active。
 - 粉丝会话使用 256-bit 随机 bearer token；原令牌只保存在 ThisDeviceOnly Keychain，服务器只持久化 SHA-256 哈希并绑定本机随机安装标识哈希。会话有效期 30 天，每账号最多 8 个，不依赖 Redis 存活。
 - 会话目录只返回不可用于登录的公开会话 ID、安装记录码、登录/到期时间和当前设备标志，不返回令牌或令牌哈希。普通会话可撤销任一其他设备，不允许用相同接口撤销当前会话。
 - 新注册账号默认 `pending`，管理员可批准或拒绝；App 启动与每次回到前台都会复核状态，未批准时采用失败关闭策略并丢弃旧版受保护目录缓存。
+- Apple 会话冷启动在展示任何受保护缓存前先调用系统 credential state。明确的 revoked/notFound/transferred 或未知状态会使用对应提示并失败关闭；Apple 系统查询本身暂时失败时不伪装成“已撤销”，而是继续以仍有效的服务端 profile/token 为权威，并采用 15 秒、60 秒、5 分钟的有界退避，退到后台立即取消。
 - 管理员邀请使用 24 小时有效、只显示一次的随机临时密码。临时登录只签发 10 分钟 onboarding scope 会话；本人设置真实抖音 ID、新密码并确认当前隐私政策前，客户端和服务端都拒绝受保护内容。完成设置会递增凭据版本、撤销全部旧会话并使临时密码失效。
 - 管理员密码恢复使用 15 分钟有效、只显示一次的随机临时密码；服务器不保存可读明文。创建时立即撤销全部旧会话；首次领取绑定安装记录，其他设备重放被拒绝，同一安装重新登录会撤销上一恢复会话。恢复会话只有 10 分钟且不能读取内容或会话目录；用户完成强制改密后才换发普通会话。
 - 用户主动改密必须在锁内重新验证当前密码，新密码需符合强度策略且不得与当前密码相同。成功后轮换凭据版本、撤销全部旧会话，只向当前安装换发新会话。
 - 粉丝创建、审批与权限管理使用独立 `manage_yishu_fan_accounts` capability；内容发布能力本身不能创建或激活粉丝账号。普通审批接口不能把未完成首次设置的邀请提前激活。
 - 暂停账号、退出、到期和完整删除都会撤销现有内容会话。暂停账号不剝夺用户重新验证并进入账号管理的能力。用户在待审批、被拒绝、暂停、首次设置或密码恢复状态下仍可永久删除账号；服务端会按普通、首次设置或恢复 scope 在账号锁内分别重验当前 token、安装记录、状态标记和当前密码；错误尝试受网络和账号双维度限流。成功后删除账号、抖音 ID、身份码、权限、恢复记录、安装记录和全部会话，不以“暂停”代替删除。
+- Apple 账号在已完成资料和仍处于 onboarding 两种状态下都可在 App 内删除。删除必须重新取得 purpose=`delete_account` 的服务端 challenge、携带当前 bearer，并由 Apple 原生界面重新认证同一 subject；服务端先尝试撤销 Apple refresh token，完成账号删除后将短暂失败项写入有界重试队列，并清除申请、会话和本机账号分区。退出登录不冒充永久删除。
 - 客户端收藏和最近浏览按服务器账号 UUID 分区；未登录或 UUID 异常时不读写，换号不会互相暴露本机记录，账号删除成功后同步清除对应本地分区。
 - App 主内容必须注册并获得批准；注册页和 App 内“关于”均有隐私政策入口，注册前需明示确认数据用途。
 
 管理员审批和内容清单鉴权可以阻止未授权 App 客户端取得完整目录，但目前部分历史媒体文件与随 App 打包的备用素材并非端到端加密资产。它们迁移到私有对象存储和短时签名 URL 前，不能把审批门禁描述为防止所有直接文件访问的绝对 DRM。
+
+## Build 33 Apple 登录上线前置
+
+- Apple Developer 的显式 App ID `cn.com.shuzijun.yishu` 必须启用 Sign in with Apple 与 WeatherKit；开发、Ad Hoc 和 App Store 描述文件须在能力开启后重新生成。归档中应同时存在 `com.apple.developer.applesignin` 和 WeatherKit entitlement。
+- Apple 登录私钥仅放在 Web 根目录外的受限路径，通过 `YISHU_APPLE_TEAM_ID`、`YISHU_APPLE_KEY_ID`、`YISHU_APPLE_PRIVATE_KEY_PATH` 引用；仓库、构建产物、日志和巡检报告均不得包含 `.p8`、client secret 或任何 Apple 用户凭据。
+- 生产服务器必须安装 `Server/composer.lock` 锁定的非开发依赖，并允许受控出站 HTTPS 访问 Apple JWKS、token 与 revoke 端点。WP-Cron 或等价任务必须能执行 Apple 授权撤销重试与过期 challenge 清理。
+- 发布前须运行 iPhone/iPad 单元与 UI 回归、Release 分析和实际 `.app` 敏感文件扫描，再在 TestFlight 真机完整验收 Apple 新注册、强制抖音 ID、审批、重复登录、凭据撤销、网络中断、onboarding 删号和已批准账号删号。
+- App Store Connect 隐私标签、App 内政策和网页版政策必须一致说明昵称、抖音 ID、用户/安装标识、短时 Apple token/code、加密 refresh token 与 Apple 登录处理关系；客户端不请求 `.fullName` 或 `.email`，因此不得宣称收集 Apple 返回的姓名或邮箱。
 
 ## 恢复付费订阅前必须完成
 

@@ -1,4 +1,5 @@
 import XCTest
+import AuthenticationServices
 import SwiftUI
 import UIKit
 import WeatherKit
@@ -629,6 +630,154 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(FanDeletionFailurePolicy.shouldFailClosed(after: .server("当前密码不正确。")))
     }
 
+    func testAppleNonceHashAndConstantTimeStateValidation() {
+        XCTAssertEqual(
+            AppleSignInSecurity.sha256Hex("test-nonce"),
+            "ed04c4e9ea6c49cf9ceb39098787c5b9842524f96b07ef45305476a11caec9b4"
+        )
+        XCTAssertTrue(AppleSignInSecurity.statesMatch("same-state", "same-state"))
+        XCTAssertFalse(AppleSignInSecurity.statesMatch("same-state-x", "same-state"))
+        XCTAssertFalse(AppleSignInSecurity.statesMatch(nil, "same-state"))
+    }
+
+    func testAppleChallengeRejectsExpiredAndOverlongTTL() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let valid = FanAppleChallenge(
+            challengeID: String(repeating: "c", count: 24),
+            nonce: String(repeating: "n", count: 43),
+            state: String(repeating: "s", count: 43),
+            expiresAt: now.addingTimeInterval(300)
+        )
+        XCTAssertTrue(valid.isValid(now: now))
+        XCTAssertFalse(FanAppleChallenge(
+            challengeID: valid.challengeID,
+            nonce: valid.nonce,
+            state: valid.state,
+            expiresAt: now
+        ).isValid(now: now))
+        XCTAssertFalse(FanAppleChallenge(
+            challengeID: valid.challengeID,
+            nonce: valid.nonce,
+            state: valid.state,
+            expiresAt: now.addingTimeInterval(601)
+        ).isValid(now: now))
+    }
+
+    func testAppleAuthRequestSendsOnlyServerChallengeProof() throws {
+        let request = FanAppleAuthRequest(
+            identityToken: "header.payload.signature",
+            authorizationCode: "authorization-code",
+            challengeID: String(repeating: "c", count: 24),
+            state: String(repeating: "s", count: 43),
+            installID: "00000000-0000-4000-8000-000000000001"
+        )
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(object.keys),
+            ["identityToken", "authorizationCode", "challengeID", "state", "installID"]
+        )
+        XCTAssertNil(object["user"])
+        XCTAssertNil(object["nonce"])
+    }
+
+    func testAppleRegistrationRequiresExplicitNameDouyinAndConsent() throws {
+        XCTAssertEqual(
+            try FanAccountValidation.validatedAppleRegistration(
+                displayName: " 梳子粉丝 ",
+                douyinID: " @fan_2026 ",
+                acceptedDataUse: true
+            ),
+            FanAppleRegistrationInput(displayName: "梳子粉丝", douyinID: "fan_2026")
+        )
+        XCTAssertThrowsError(try FanAccountValidation.validatedAppleRegistration(
+            displayName: "梳子粉丝",
+            douyinID: "fan_2026",
+            acceptedDataUse: false
+        ))
+        XCTAssertThrowsError(try FanAccountValidation.validatedAppleRegistration(
+            displayName: "",
+            douyinID: "fan_2026",
+            acceptedDataUse: true
+        ))
+    }
+
+    func testAppleCredentialRevocationPolicyFailsClosed() {
+        XCTAssertEqual(FanAppleCredentialStatePolicy.decision(for: .authorized), .authorize)
+        XCTAssertEqual(FanAppleCredentialStatePolicy.decision(for: .revoked), .revoke)
+        XCTAssertEqual(FanAppleCredentialStatePolicy.decision(for: .notFound), .revoke)
+        XCTAssertEqual(FanAppleCredentialStatePolicy.decision(for: .transferred), .transfer)
+        XCTAssertEqual(
+            FanAppleCredentialStatePolicy.queryDisposition(hasError: true),
+            .retryKeepingSession
+        )
+        XCTAssertEqual(
+            FanAppleCredentialStatePolicy.queryDisposition(hasError: false),
+            .evaluateCredential
+        )
+        XCTAssertFalse(FanAppleCredentialAccessPolicy.canUseValidServerSession(
+            usesAppleSignIn: true,
+            state: .checking
+        ))
+        XCTAssertTrue(FanAppleCredentialAccessPolicy.canUseValidServerSession(
+            usesAppleSignIn: true,
+            state: .retryRequired
+        ))
+        XCTAssertTrue(FanAppleCredentialAccessPolicy.canUseValidServerSession(
+            usesAppleSignIn: true,
+            state: .verified
+        ))
+    }
+
+    func testAppleRegistrationDraftClearsAcrossAccountTransition() {
+        var draft = FanAppleRegistrationDraft(
+            displayName: "上一位用户",
+            douyinID: "previous_fan",
+            acceptedDataUse: true
+        )
+
+        draft.clear()
+
+        XCTAssertEqual(draft, FanAppleRegistrationDraft())
+    }
+
+    func testAppleOnlyAccountDoesNotOfferPasswordChange() {
+        XCTAssertFalse(
+            FanAccountSecurityCapabilities.supportsPasswordChange(usesAppleSignIn: true)
+        )
+        XCTAssertTrue(
+            FanAccountSecurityCapabilities.supportsPasswordChange(usesAppleSignIn: false)
+        )
+    }
+
+    func testAppleOnboardingSessionCanSelfDeleteBeforeApproval() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let onboarding = FanAppleRegistrationState(expiresAt: now.addingTimeInterval(600))
+
+        XCTAssertTrue(FanAppleDeletionEligibility.canBegin(
+            hasToken: true,
+            usesAppleSignIn: true,
+            hasProfile: false,
+            registration: onboarding,
+            now: now
+        ))
+        XCTAssertFalse(FanAppleDeletionEligibility.canBegin(
+            hasToken: true,
+            usesAppleSignIn: true,
+            hasProfile: false,
+            registration: onboarding,
+            now: now.addingTimeInterval(601)
+        ))
+        XCTAssertFalse(FanAppleDeletionEligibility.canBegin(
+            hasToken: false,
+            usesAppleSignIn: true,
+            hasProfile: false,
+            registration: onboarding,
+            now: now
+        ))
+    }
+
     func testFanSessionDirectoryRejectsForeignCurrentOrDuplicateSession() {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let current = FanSessionRecord(
@@ -791,11 +940,15 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(profile.invitationExpiresAt)
         XCTAssertFalse(profile.requiresPasswordChange)
         XCTAssertNil(profile.passwordRecoveryExpiresAt)
+        XCTAssertEqual(profile.accountSource, FanAccountSource.password.rawValue)
+        XCTAssertFalse(profile.requiresAppleRegistration)
         XCTAssertTrue(profile.isApproved)
         XCTAssertFalse(admin.requiresAccountSetup)
         XCTAssertNil(admin.invitationExpiresAt)
         XCTAssertFalse(admin.requiresPasswordChange)
         XCTAssertNil(admin.passwordRecoveryExpiresAt)
+        XCTAssertEqual(admin.accountSource, FanAccountSource.password.rawValue)
+        XCTAssertFalse(admin.requiresAppleRegistration)
         XCTAssertTrue(FanAccountValidation.isValidAdminFanUser(admin))
 
         let invitedAdmin = AdminFanUser(
@@ -823,6 +976,76 @@ final class ContentAndAccessTests: XCTestCase {
             reviewedAt: nil
         )
         XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(unmarkedPlaceholder))
+    }
+
+    func testAdminDirectoryAcceptsOnlyMarkedIncompleteAppleRegistration() throws {
+        let data = Data(
+            """
+            {
+              "userID":"00000000-0000-4000-8000-000000000003",
+              "identityCode":"HS-CDEF-4567",
+              "displayName":"Apple 新用户",
+              "douyinID":"",
+              "permissions":[],
+              "status":"pending",
+              "registeredAt":"2026-08-31T00:00:00Z",
+              "reviewedAt":null,
+              "accountSource":"apple",
+              "requiresAppleRegistration":true
+            }
+            """.utf8
+        )
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let user = try decoder.decode(AdminFanUser.self, from: data)
+
+        XCTAssertTrue(user.requiresIdentityCompletion)
+        XCTAssertTrue(FanAccountValidation.isValidAdminFanUser(user))
+
+        let unmarked = AdminFanUser(
+            userID: user.userID,
+            identityCode: user.identityCode,
+            displayName: user.displayName,
+            douyinID: "",
+            permissions: [],
+            status: user.status,
+            registeredAt: user.registeredAt,
+            reviewedAt: nil,
+            accountSource: FanAccountSource.apple.rawValue,
+            requiresAppleRegistration: false
+        )
+        XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(unmarked))
+
+        let wrongSource = AdminFanUser(
+            userID: user.userID,
+            identityCode: user.identityCode,
+            displayName: user.displayName,
+            douyinID: "",
+            permissions: [],
+            status: user.status,
+            registeredAt: user.registeredAt,
+            reviewedAt: nil,
+            accountSource: FanAccountSource.password.rawValue,
+            requiresAppleRegistration: true
+        )
+        XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(wrongSource))
+    }
+
+    func testNormalProfileRejectsIncompleteAppleRegistrationMarker() {
+        let profile = FanProfile(
+            userID: "00000000-0000-4000-8000-000000000004",
+            identityCode: "HS-DEFG-5678",
+            displayName: "Apple 粉丝",
+            douyinID: "apple_fan",
+            installationCode: "IN-ABC-234",
+            permissions: [],
+            status: FanAccountStatus.pending.rawValue,
+            sessionExpiresAt: Date().addingTimeInterval(3_600),
+            accountSource: FanAccountSource.apple.rawValue,
+            requiresAppleRegistration: true
+        )
+
+        XCTAssertFalse(FanAccountValidation.isValidProfile(profile))
     }
 
     func testInvitationResponseValidationRejectsMalformedOrReplayedBatchShapes() throws {

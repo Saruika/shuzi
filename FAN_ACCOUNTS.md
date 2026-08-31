@@ -50,6 +50,20 @@ App 不读取手机硬件 UDID，也不使用 IDFA。本机随机安装标识和
 - `rejected`：申请未通过，仍可登录查看结果和主动删除资料；
 - `suspended`：已批准账号被暂停，现有内容会话立即撤销，但仍可重新验证后删除资料。
 
+## 使用 Apple ID 登录
+
+Build 33 在原有“身份码 + 密码”之外增加原生“使用 Apple 登录”。它不是内容审批的捷径：Apple 身份验证成功后，新账号只获得 10 分钟的 `apple_onboarding` 会话，必须由本人填写真实抖音 ID 并同意当前隐私政策，随后仍保持 `pending`，直到管理员批准才能读取首页、相册和影视。
+
+安全契约：
+
+- App 先请求 5 分钟有效的服务端 challenge；nonce、state、安装记录和用途相互绑定，且 challenge 一次性消费。
+- 服务器使用 Apple JWKS 与锁定版本的 `firebase/php-jwt` 严格验证 RS256 签名、issuer、单一 audience、时间和 nonce，并将 authorization code 交给 Apple 单次兑换后再次校验同一 subject。密钥或 Apple 验证配置缺失时失败关闭，不会降级为相信客户端标识。
+- Apple subject 仅以服务端 HMAC 摘要绑定且唯一预留；不根据邮箱、姓名或抖音 ID 自动合并账号。管理员只看到 `accountSource=apple` 和是否已补齐资料，看不到 Apple subject、token 或 authorization code。
+- identity token 和 authorization code 只用于当次验证，不持久化。Apple refresh token 仅为删号或授权终止时向 Apple 撤销授权而使用，并以 authenticated encryption 加密保存。
+- Apple 账号删除需要同一 Apple subject 的全新原生授权；尚未填写抖音 ID 的待完成申请也可自主删除。Apple 撤销端点短暂失败不阻断本服务删号；只会保留无法回链用户的加密 token 重试任务，最长 7 天且有限次重试。
+- 用户 Apple 删号或 Apple 签名的撤销/删除通知会在 subject 锁内先写入最小 30 天 tombstone，再删除账号。因此删除/事件时间前已验证但正在等待锁的旧请求无法复活账号；只有 `iat` 严格晚于该时间的新 Apple 授权可重新发起申请。
+- S2S 签名通知先写 durable pending inbox 再确认接收；subject 锁忙或处理暂时失败会后台指数退避重试，`init` cursor sweeper 会修复丢失的 Cron。处理成功后删除 subject/事件明细，仅保留 30 天 processed marker 防重放。
+
 ## 管理员分配权限
 
 路径：注册门禁页的“管理员审批入口”，或已进入 App 后的 `关于 → 管理员入口 → 注册审批`。

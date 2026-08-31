@@ -15,6 +15,7 @@ install_id=$(cat /proc/sys/kernel/random/uuid)
 second_install_id=$(cat /proc/sys/kernel/random/uuid)
 invitation_install_id=$(cat /proc/sys/kernel/random/uuid)
 deletion_invitation_install_id=$(cat /proc/sys/kernel/random/uuid)
+apple_install_id=$(cat /proc/sys/kernel/random/uuid)
 suffix=$(openssl rand -hex 6)
 douyin_id="codex_test_${suffix}"
 password="Fan-${suffix}-2026!"
@@ -33,6 +34,7 @@ cleanup_invitation_placeholder=''
 deletion_invitation_user_uuid=''
 app_password_name="codex-fan-smoke-${suffix}"
 app_password_uuid=''
+apple_challenge_option=''
 curl_common=(--silent --show-error --http1.1 --retry 2 --retry-delay 1 --retry-all-errors)
 
 revoke_temporary_app_password() {
@@ -116,6 +118,11 @@ cleanup() {
       "yishu_fan_invite_login_failure_${invitation_failure_hash}" >/dev/null 2>&1 || true
   fi
 
+  if [[ "$apple_challenge_option" =~ ^yishu_fan_apple_challenge_[a-f0-9]{64}$ ]]; then
+    sudo -u www-data wp --path="$wordpress_root" option delete \
+      "$apple_challenge_option" >/dev/null 2>&1 || true
+  fi
+
   revoke_temporary_app_password
 
   if [[ -n "$test_dir" && "$test_dir" =~ ^/tmp/yishu-fan-api-smoke\.[A-Za-z0-9]+$ \
@@ -124,6 +131,87 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+apple_challenge_status=$(curl "${curl_common[@]}" \
+  --dump-header "$test_dir/apple-challenge.headers" \
+  --output "$test_dir/apple-challenge.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${apple_install_id}" \
+  --data "$(jq -nc --arg installID "$apple_install_id" \
+    '{purpose:"sign_in",installID:$installID}')" \
+  "${api_root}/fan/apple-challenge")
+[[ "$apple_challenge_status" == '201' ]]
+grep -Eiq '^cache-control:.*no-store' "$test_dir/apple-challenge.headers"
+grep -Eiq '^cache-control:.*max-age=0' "$test_dir/apple-challenge.headers"
+grep -Eiq '^pragma:[[:space:]]*no-cache' "$test_dir/apple-challenge.headers"
+jq -e '
+  (.challengeID | test("^[A-Za-z0-9_-]{43}$")) and
+  (.nonce | test("^[a-f0-9]{64}$")) and
+  (.state | test("^[A-Za-z0-9_-]{32}$")) and
+  .purpose == "sign_in" and (.expiresAt | type == "string")
+' "$test_dir/apple-challenge.json" >/dev/null
+apple_challenge_id=$(jq -r '.challengeID' "$test_dir/apple-challenge.json")
+apple_challenge_state=$(jq -r '.state' "$test_dir/apple-challenge.json")
+apple_challenge_hash=$(printf '%s' "$apple_challenge_id" | sha256sum | awk '{print $1}')
+apple_state_hash=$(printf '%s' "$apple_challenge_state" | sha256sum | awk '{print $1}')
+apple_install_hash=$(printf '%s' "$apple_install_id" | sha256sum | awk '{print $1}')
+apple_challenge_option="yishu_fan_apple_challenge_${apple_challenge_hash}"
+sudo -u www-data wp --path="$wordpress_root" option get \
+  "$apple_challenge_option" --format=json > "$test_dir/apple-challenge-meta.json"
+jq -e --arg challengeID "$apple_challenge_id" --arg state "$apple_challenge_state" \
+  --arg stateHash "$apple_state_hash" --arg installHash "$apple_install_hash" '
+  .purpose == "sign_in" and
+  (.nonceHash | test("^[a-f0-9]{64}$")) and
+  (.stateHash == $stateHash) and
+  (.installHash == $installHash) and
+  (tostring | contains($challengeID) | not) and
+  (tostring | contains($state) | not) and
+  (has("nonce") | not)
+' "$test_dir/apple-challenge-meta.json" >/dev/null
+
+fake_identity_token="$(printf 'a%.0s' {1..40}).$(printf 'b%.0s' {1..40}).$(printf 'c%.0s' {1..40})"
+apple_invalid_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/apple-invalid.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${apple_install_id}" \
+  --data "$(jq -nc \
+    --arg identityToken "$fake_identity_token" \
+    --arg authorizationCode 'invalid-test-code' \
+    --arg challengeID "$apple_challenge_id" \
+    --arg state "$apple_challenge_state" \
+    --arg installID "$apple_install_id" \
+    '{identityToken:$identityToken,authorizationCode:$authorizationCode,challengeID:$challengeID,state:$state,installID:$installID}')" \
+  "${api_root}/fan/apple-auth")
+[[ "$apple_invalid_status" == '401' ]]
+jq -e '.code == "fan_apple_credential_invalid"' "$test_dir/apple-invalid.json" >/dev/null
+apple_challenge_option=''
+if sudo -u www-data wp --path="$wordpress_root" option get \
+  "yishu_fan_apple_challenge_${apple_challenge_hash}" >/dev/null 2>&1; then
+  echo 'fan-api-smoke: consumed Apple challenge remained in storage' >&2
+  exit 1
+fi
+apple_replay_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/apple-replay.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${apple_install_id}" \
+  --data "$(jq -nc \
+    --arg identityToken "$fake_identity_token" \
+    --arg authorizationCode 'invalid-test-code' \
+    --arg challengeID "$apple_challenge_id" \
+    --arg state "$apple_challenge_state" \
+    --arg installID "$apple_install_id" \
+    '{identityToken:$identityToken,authorizationCode:$authorizationCode,challengeID:$challengeID,state:$state,installID:$installID}')" \
+  "${api_root}/fan/apple-auth")
+[[ "$apple_replay_status" == '401' ]]
+jq -e '.code == "fan_apple_challenge_invalid"' "$test_dir/apple-replay.json" >/dev/null
+unset fake_identity_token apple_challenge_state
+echo 'fan-api-smoke: Apple challenge hash-only storage, fail-closed verification and replay rejection passed'
 
 register_status=$(curl "${curl_common[@]}" --output "$test_dir/register.json" \
   --write-out '%{http_code}' \

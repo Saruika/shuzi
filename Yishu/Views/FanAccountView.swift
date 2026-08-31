@@ -1,6 +1,17 @@
+import AuthenticationServices
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
+
+struct FanAppleRegistrationDraft: Equatable {
+    var displayName = ""
+    var douyinID = ""
+    var acceptedDataUse = false
+
+    mutating func clear() {
+        self = FanAppleRegistrationDraft()
+    }
+}
 
 struct AppAccessGateView: View {
     @EnvironmentObject private var admin: AdminSessionStore
@@ -70,6 +81,9 @@ struct FanAccountView: View {
     @State private var showDeleteConfirmation = false
     @State private var deleteCurrentPassword = ""
     @State private var presentsAdminAccess = false
+    @StateObject private var appleSignIn = AppleSignInCoordinator()
+    @State private var appleRegistrationDraft = FanAppleRegistrationDraft()
+    @State private var showAppleDeleteConfirmation = false
 
     init(
         isAccessGate: Bool = false,
@@ -86,6 +100,8 @@ struct FanAccountView: View {
                 Group {
                     if let profile = account.profile {
                         profileContent(profile)
+                    } else if account.appleRegistration != nil {
+                        appleRegistrationContent
                     } else {
                         authenticationContent
                     }
@@ -107,8 +123,12 @@ struct FanAccountView: View {
             guard oldUserID != newUserID else { return }
             clearAuthenticationPasswords()
             clearInvitationSetupFields()
+            clearAppleRegistrationFields()
             deleteCurrentPassword = ""
             copiedLabel = nil
+        }
+        .onChange(of: account.appleRegistration != nil) { _, _ in
+            clearAppleRegistrationFields()
         }
         .onChange(of: account.profile?.requiresAccountSetup) { _, requiresSetup in
             if requiresSetup != true { clearInvitationSetupFields() }
@@ -120,10 +140,17 @@ struct FanAccountView: View {
             clearAuthenticationPasswords()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { clearAllPasswords() }
+            if phase != .active {
+                appleSignIn.cancel()
+                clearAllPasswords()
+                clearAppleRegistrationFields()
+            }
         }
         .onChange(of: account.isAuthenticated) { _, authenticated in
-            if !authenticated { clearAllPasswords() }
+            if !authenticated {
+                clearAllPasswords()
+                clearAppleRegistrationFields()
+            }
         }
         .onChange(of: presentsAdminAccess) { _, presented in
             if presented { clearAllPasswords() }
@@ -146,6 +173,17 @@ struct FanAccountView: View {
             Button("取消", role: .cancel) { deleteCurrentPassword = "" }
         } message: {
             Text("请重新输入当前密码。身份码、抖音 ID、权限和服务器账号记录都会被删除，且无法恢复。")
+        }
+        .alert("通过 Apple 重新验证并删除账号？", isPresented: $showAppleDeleteConfirmation) {
+            Button("继续 Apple 验证", role: .destructive) {
+                beginAppleAuthorization(
+                    purpose: .deleteAccount,
+                    presentationAnchor: currentPresentationWindow
+                )
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("验证通过后，身份码、抖音 ID、权限和服务器账号记录都会被永久删除。")
         }
         .fullScreenCover(isPresented: $presentsAdminAccess) {
             SecureCaptureSurface(
@@ -191,6 +229,35 @@ struct FanAccountView: View {
                 }
             }
             .textFieldStyle(AccountTextFieldStyle())
+
+            VStack(spacing: 10) {
+                HStack(spacing: 10) {
+                    Rectangle().fill(.white.opacity(0.12)).frame(height: 1)
+                    Text("或").font(.caption).foregroundStyle(AppTheme.muted)
+                    Rectangle().fill(.white.opacity(0.12)).frame(height: 1)
+                }
+
+                NativeAppleSignInButton { window in
+                    beginAppleAuthorization(purpose: .signIn, presentationAnchor: window)
+                }
+                .frame(height: 50)
+                .disabled(account.isWorking || appleSignIn.isWorking)
+                .opacity(account.isWorking || appleSignIn.isWorking ? 0.55 : 1)
+
+                Text("首次通过 Apple 验证后，仍需填写昵称和抖音 ID，并等待管理员审批。")
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.muted)
+                    .multilineTextAlignment(.center)
+
+                NavigationLink {
+                    PrivacyPolicyView()
+                } label: {
+                    Text("使用 Apple 登录前查看隐私政策")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(AppTheme.gold)
+                }
+                .accessibilityIdentifier("fan-apple-prelogin-privacy")
+            }
 
             if let error = account.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -241,6 +308,103 @@ struct FanAccountView: View {
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("access-gate-admin-link")
             }
+        }
+        .padding(22)
+        .padding(.bottom, 54)
+    }
+
+    private var appleRegistrationContent: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            VStack(alignment: .leading, spacing: 9) {
+                Text("APPLE ID VERIFIED")
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(3)
+                    .foregroundStyle(AppTheme.gold)
+                Text("完成账号申请")
+                    .font(.editorial(36))
+                    .accessibilityIdentifier("fan-apple-registration-required")
+                Text("你的 Apple 身份已通过服务器验证。请主动填写以下资料；管理员批准前不会开放主页和媒体内容。")
+                    .font(.subheadline)
+                    .lineSpacing(5)
+                    .foregroundStyle(AppTheme.muted)
+            }
+
+            VStack(alignment: .leading, spacing: 13) {
+                TextField("昵称", text: $appleRegistrationDraft.displayName)
+                    .textContentType(.nickname)
+                    .accessibilityIdentifier("fan-apple-display-name")
+                TextField("抖音 ID（必填，不要填链接）", text: $appleRegistrationDraft.douyinID)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .accessibilityIdentifier("fan-apple-douyin-id")
+
+                Text("抖音 ID 只用于管理员核验身份和分配权限，不会在粉丝之间公开。")
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.muted)
+
+                NavigationLink {
+                    PrivacyPolicyView()
+                } label: {
+                    Label("申请前查看隐私政策与删除规则", systemImage: "hand.raised")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AppTheme.gold)
+                }
+                .accessibilityIdentifier("fan-apple-privacy-policy")
+
+                Toggle(isOn: $appleRegistrationDraft.acceptedDataUse) {
+                    Text("我已阅读隐私政策：昵称、抖音 ID、随机身份码和安装记录用于账号识别、安全登录与权限分配。")
+                        .font(.caption)
+                        .lineSpacing(4)
+                }
+                .tint(AppTheme.gold)
+                .accessibilityIdentifier("fan-apple-consent")
+
+                Button {
+                    Task {
+                        await account.completeAppleRegistration(
+                            displayName: appleRegistrationDraft.displayName,
+                            douyinID: appleRegistrationDraft.douyinID,
+                            acceptedDataUse: appleRegistrationDraft.acceptedDataUse
+                        )
+                        if account.appleRegistration == nil {
+                            clearAppleRegistrationFields()
+                        }
+                    }
+                } label: {
+                    accountButtonLabel(account.isWorking ? "正在提交" : "同意并提交审批")
+                }
+                .disabled(account.isWorking || !appleRegistrationDraft.acceptedDataUse)
+                .accessibilityIdentifier("fan-apple-registration-submit")
+            }
+            .textFieldStyle(AccountTextFieldStyle())
+
+            if let error = account.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            Button {
+                clearAppleRegistrationFields()
+                Task { await account.signOut() }
+            } label: {
+                Text("退出登录")
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+            }
+            .disabled(account.isWorking)
+
+            Button(role: .destructive) {
+                showAppleDeleteConfirmation = true
+            } label: {
+                Label("永久删除账号申请", systemImage: "trash")
+                    .font(.caption.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+            }
+            .disabled(account.isWorking || appleSignIn.isWorking)
+            .accessibilityIdentifier("fan-apple-delete-onboarding")
         }
         .padding(22)
         .padding(.bottom, 54)
@@ -414,7 +578,10 @@ struct FanAccountView: View {
                 NavigationLink {
                     FanAccountSecurityView()
                 } label: {
-                    Label("密码与登录设备", systemImage: "lock.shield")
+                    Label(
+                        account.usesAppleSignIn ? "登录设备与会话" : "密码与登录设备",
+                        systemImage: "lock.shield"
+                    )
                         .font(.caption.weight(.semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
@@ -469,7 +636,11 @@ struct FanAccountView: View {
             .buttonStyle(.plain)
 
             Button(role: .destructive) {
-                showDeleteConfirmation = true
+                if account.usesAppleSignIn {
+                    showAppleDeleteConfirmation = true
+                } else {
+                    showDeleteConfirmation = true
+                }
             } label: {
                 Label("永久删除账号与个人资料", systemImage: "trash")
                     .font(.caption.weight(.semibold))
@@ -708,6 +879,10 @@ struct FanAccountView: View {
         deleteCurrentPassword = ""
     }
 
+    private func clearAppleRegistrationFields() {
+        appleRegistrationDraft.clear()
+    }
+
     private func profileRefreshButton(_ profile: FanProfile) -> some View {
         Button {
             Task { await account.refreshSession() }
@@ -764,6 +939,47 @@ struct FanAccountView: View {
         .padding(15)
     }
 
+    private var currentPresentationWindow: UIWindow? {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }
+    }
+
+    private func beginAppleAuthorization(
+        purpose: FanAppleChallengePurpose,
+        presentationAnchor: UIWindow?
+    ) {
+        Task {
+            guard let challenge = await account.requestAppleChallenge(purpose: purpose) else {
+                return
+            }
+            guard scenePhase == .active else { return }
+            appleSignIn.start(
+                challenge: challenge,
+                presentationAnchor: presentationAnchor ?? currentPresentationWindow
+            ) { result in
+                switch result {
+                case .success(let submission):
+                    Task {
+                        if purpose == .deleteAccount {
+                            await account.deleteAppleAccount(submission)
+                            if account.appleRegistration == nil {
+                                clearAppleRegistrationFields()
+                            }
+                        } else {
+                            await account.signInWithApple(submission)
+                            clearAppleRegistrationFields()
+                        }
+                    }
+                case .failure(let error):
+                    account.errorMessage = (error as? LocalizedError)?.errorDescription
+                        ?? "Apple 登录未完成，请重试。"
+                }
+            }
+        }
+    }
+
     private func accountButtonLabel(_ title: String) -> some View {
         HStack(spacing: 9) {
             if account.isWorking { ProgressView().tint(AppTheme.ink) }
@@ -774,6 +990,42 @@ struct FanAccountView: View {
         .padding(.vertical, 14)
         .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
         .foregroundStyle(AppTheme.ink)
+    }
+}
+
+private struct NativeAppleSignInButton: UIViewRepresentable {
+    let action: (UIWindow?) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeUIView(context: Context) -> ASAuthorizationAppleIDButton {
+        let button = ASAuthorizationAppleIDButton(type: .signIn, style: .white)
+        button.cornerRadius = 6
+        button.accessibilityIdentifier = "fan-sign-in-with-apple"
+        button.addTarget(
+            context.coordinator,
+            action: #selector(Coordinator.activate(_:)),
+            for: .touchUpInside
+        )
+        return button
+    }
+
+    func updateUIView(_ uiView: ASAuthorizationAppleIDButton, context: Context) {
+        context.coordinator.action = action
+    }
+
+    final class Coordinator: NSObject {
+        var action: (UIWindow?) -> Void
+
+        init(action: @escaping (UIWindow?) -> Void) {
+            self.action = action
+        }
+
+        @objc func activate(_ sender: ASAuthorizationAppleIDButton) {
+            action(sender.window)
+        }
     }
 }
 
@@ -789,44 +1041,59 @@ private struct FanAccountSecurityView: View {
             AppTheme.ink.ignoresSafeArea()
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 13) {
-                        Text("修改密码").font(.editorial(27))
-                        Text("修改成功后会撤销所有旧会话，并为当前设备立即换发新会话。")
-                            .font(.caption)
-                            .lineSpacing(4)
-                            .foregroundStyle(AppTheme.muted)
-                        SecureField("当前密码", text: $currentPassword)
-                            .textContentType(.password)
-                        SecureField("新密码（至少 10 位）", text: $newPassword)
-                            .textContentType(.newPassword)
-                        SecureField("再输入一次新密码", text: $passwordConfirmation)
-                            .textContentType(.newPassword)
-                        Button {
-                            Task {
-                                await account.changePassword(
-                                    currentPassword: currentPassword,
-                                    newPassword: newPassword,
-                                    passwordConfirmation: passwordConfirmation
-                                )
-                                if account.errorMessage == nil {
-                                    clearPasswords()
-                                    await account.fetchSessions()
+                    if FanAccountSecurityCapabilities.supportsPasswordChange(
+                        usesAppleSignIn: account.usesAppleSignIn
+                    ) {
+                        VStack(alignment: .leading, spacing: 13) {
+                            Text("修改密码").font(.editorial(27))
+                            Text("修改成功后会撤销所有旧会话，并为当前设备立即换发新会话。")
+                                .font(.caption)
+                                .lineSpacing(4)
+                                .foregroundStyle(AppTheme.muted)
+                            SecureField("当前密码", text: $currentPassword)
+                                .textContentType(.password)
+                            SecureField("新密码（至少 10 位）", text: $newPassword)
+                                .textContentType(.newPassword)
+                            SecureField("再输入一次新密码", text: $passwordConfirmation)
+                                .textContentType(.newPassword)
+                            Button {
+                                Task {
+                                    await account.changePassword(
+                                        currentPassword: currentPassword,
+                                        newPassword: newPassword,
+                                        passwordConfirmation: passwordConfirmation
+                                    )
+                                    if account.errorMessage == nil {
+                                        clearPasswords()
+                                        await account.fetchSessions()
+                                    }
                                 }
+                            } label: {
+                                Label("更新密码", systemImage: "key.horizontal")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 13)
+                                    .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
+                                    .foregroundStyle(AppTheme.ink)
                             }
-                        } label: {
-                            Label("更新密码", systemImage: "key.horizontal")
-                                .font(.system(size: 14, weight: .semibold))
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 13)
-                                .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
-                                .foregroundStyle(AppTheme.ink)
+                            .buttonStyle(.plain)
+                            .disabled(account.isWorking)
                         }
-                        .buttonStyle(.plain)
-                        .disabled(account.isWorking)
+                        .padding(16)
+                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+                        .textFieldStyle(AccountTextFieldStyle())
+                    } else {
+                        Label(
+                            "此账号通过 Apple 登录，不在本 App 内设置密码。你仍可查看并撤销其他设备会话。",
+                            systemImage: "apple.logo"
+                        )
+                        .font(.caption)
+                        .lineSpacing(4)
+                        .foregroundStyle(AppTheme.muted)
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
                     }
-                    .padding(16)
-                    .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
-                    .textFieldStyle(AccountTextFieldStyle())
 
                     VStack(alignment: .leading, spacing: 13) {
                         HStack {
@@ -902,7 +1169,7 @@ private struct FanAccountSecurityView: View {
                 .frame(maxWidth: .infinity)
             }
         }
-        .navigationTitle("账号安全")
+        .navigationTitle(account.usesAppleSignIn ? "登录设备" : "账号安全")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .task { await account.fetchSessions() }
@@ -1303,7 +1570,10 @@ private struct FanAccessDetailView: View {
                 VStack(alignment: .leading, spacing: 24) {
                     VStack(alignment: .leading, spacing: 7) {
                         Text(user.displayName).font(.editorial(36))
-                        Text(user.requiresAccountSetup ? "抖音 ID 待本人填写" : "@\(user.douyinID)")
+                        Text(user.requiresAppleRegistration
+                             ? "等待绑定抖音 ID"
+                             : user.requiresAccountSetup
+                             ? "抖音 ID 待本人填写" : "@\(user.douyinID)")
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(AppTheme.gold)
                         Text(user.identityCode)
@@ -1325,10 +1595,13 @@ private struct FanAccessDetailView: View {
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
 
-                        if user.requiresAccountSetup {
+                        if user.requiresIdentityCompletion {
                             Label(
-                                "对方尚未完成首次设置。即使账号为待审批状态，也不能提前批准或访问内容。",
-                                systemImage: "key.horizontal.fill"
+                                user.requiresAppleRegistration
+                                    ? "对方已通过 Apple 验证，但尚未填写抖音 ID 并提交申请；现在不能批准或开放内容。"
+                                    : "对方尚未完成首次设置。即使账号为待审批状态，也不能提前批准或访问内容。",
+                                systemImage: user.requiresAppleRegistration
+                                    ? "apple.logo" : "key.horizontal.fill"
                             )
                             .font(.caption)
                             .lineSpacing(4)
@@ -1378,7 +1651,8 @@ private struct FanAccessDetailView: View {
                         }
                     }
 
-                    if !user.requiresAccountSetup {
+                    if !user.requiresIdentityCompletion,
+                       user.accountSource != FanAccountSource.apple.rawValue {
                         VStack(alignment: .leading, spacing: 13) {
                             Text("密码恢复").font(.editorial(25))
                             Text("生成后会立即撤销该账号所有旧会话和旧密码。临时恢复凭据仅显示一次，有效期 15 分钟。")
@@ -1629,7 +1903,9 @@ private struct FanAdminUserRow: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
                 }
-                Text(user.requiresAccountSetup
+                Text(user.requiresAppleRegistration
+                     ? "等待绑定抖音 ID · \(user.identityCode)"
+                     : user.requiresAccountSetup
                      ? "待本人完成首次设置 · \(user.identityCode)"
                      : "@\(user.douyinID) · \(user.identityCode)")
                     .font(.caption2)

@@ -18,9 +18,31 @@ final class YishuUITests: XCTestCase {
 
         assertExists("fan-account-heading", in: app, timeout: 12)
         assertExists("fan-register-douyin-id", in: app)
+        assertExists("fan-sign-in-with-apple", in: app)
+        assertExists("fan-apple-prelogin-privacy", in: app)
         assertExists("access-gate-admin-entry", in: app)
         XCTAssertFalse(app.tabBars.buttons["首页"].exists, "未审批用户不应看到主导航")
         attachScreenshot(named: "00-access-gate", app: app)
+    }
+
+    func testAppleFirstUseStillRequiresRegistrationAndApproval() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-skip-launch-poster-for-visual-testing",
+            "-disable-screen-protection-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-simulate-apple-registration-for-visual-testing",
+        ]
+        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launch()
+
+        assertExists("fan-apple-registration-required", in: app, timeout: 12)
+        assertExists("fan-apple-display-name", in: app)
+        assertExists("fan-apple-douyin-id", in: app)
+        assertExists("fan-apple-consent", in: app)
+        assertExists("fan-apple-delete-onboarding", in: app)
+        XCTAssertFalse(app.tabBars.buttons["首页"].exists, "Apple 首次申请不得直接进入主页")
+        attachScreenshot(named: "00-apple-first-use", app: app)
     }
 
     func testPrimaryTabsExposeTheirCoreContent() {

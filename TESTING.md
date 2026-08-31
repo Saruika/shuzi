@@ -23,6 +23,10 @@ Scripts/ci-release-analyze.sh
 - 影视页 UI 验证播放、暂停与静音入口；用真机或网络调试工具模拟慢网后，另行检查视频缓冲、播放停滞和超时都会出现可见重试，不会静默卡在加载状态。
 - “发送合作邀约”可进入完整表单，管理员入口可进入安全登录页。
 - 粉丝注册入口可达，抖音 ID 必填字段、管理员审批说明和注册前隐私政策可读。
+- 原生“通过 Apple 登录”入口可达；首次 Apple 验证夹具只能进入昵称、必填抖音 ID 和隐私同意表单，主导航保持不可见，并同时提供退出和永久删除申请。
+- Apple 登录安全单元回归覆盖 nonce SHA-256、state 恒时比对、challenge 过期/单次使用形状、凭据字段最小化、credential state 的授权/撤销/转移决策，以及系统查询失败时继续使用有效服务端会话的连续性边界。
+- Apple 注册草稿在完成、退出、删号、换号、撤销凭据和 App 离开前台时清空；Apple-only 账号不出现密码修改，但登录设备与会话管理仍可用。
+- 管理员目录可以加载 `accountSource=apple` 且 `requiresAppleRegistration=true` 的未完成申请，显示“等待绑定抖音 ID”；抖音 ID 为空但缺少该精确标记、来源错误或完整 profile 仍带标记时必须拒绝，且未完成资料的用户没有批准为 active 的入口。
 - 账号单元回归覆盖恢复状态未完成前失败关闭、主动改密的当前/新密码校验、会话目录的唯一当前设备约束，以及换令牌时丢弃迟到响应。
 - 收藏与最近浏览单元回归覆盖账号 A/B 相互隔离、退出后不读写、删除只清理指定账号及非法 UUID 失败关闭。
 - 相同用例同时在 iPhone 与 iPad 上执行，iPad 还会旋转至横屏验证自适应布局，并在 `.xcresult` 中保留关键页截图。
@@ -41,6 +45,9 @@ Server/tests/fan-api-smoke.sh
 - 主动改密需当前密码，成功后旧会话和旧密码都失效；
 - 管理员密码恢复只显示一次、服务器不保存明文，第一台设备领取后会拒绝第二台设备重放；同一安装的后一恢复会话会撤销前一个，完成改密前无法读取内容或管理普通会话；
 - 删除账号支持普通、首次设置和密码恢复三种 scope；每种状态都需匹配当前安装记录、当前凭据代次并重新验证对应密码，错误密码会被拒绝，成功后账号、会话和抖音 ID 保留位都不可再使用。
+- Apple challenge 绑定 purpose、安装记录、nonce/state 哈希、TTL 并在第一次认证尝试时消费；伪造凭据失败后同一 challenge 不可重放。
+- Apple 首次认证只能取得 `apple_onboarding` 会话；未绑定抖音 ID 时 `/fan/session` 只能返回 `appleRegistration`，管理员目录仍可读取该申请但服务端和客户端都拒绝提前批准或读取内容。
+- Apple 删号必须使用 `delete_account` challenge、当前 bearer 会话和同一 Apple subject 的近期重新认证；成功后撤销或排队重试撤销 Apple refresh token，并删除 onboarding/账号/会话数据。
 
 脚本结束时自动删除测试账号和临时管理员访问码。
 
@@ -58,3 +65,11 @@ Server/tests/fan-api-smoke.sh
 - Release 构建完成后再次扫描实际 `.app` 包，确认没有私钥、云密钥、环境文件或意外打包的敏感资源。
 
 GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服务器密钥；外部 Action 固定到完整 commit SHA。失败时保留七天 `.xcresult` 供排查。
+
+## Build 33 发布前验收
+
+1. 确认构建设置为 `1.3.22 (33)`、Bundle ID `cn.com.shuzijun.yishu`，且 App ID 与本次签名描述文件同时包含 Sign in with Apple 和 WeatherKit。
+2. 服务端运行锁定依赖的 `composer install --no-dev --classmap-authoritative`；Apple `.p8` 位于 Web 根目录外，只通过 `YISHU_APPLE_TEAM_ID`、`YISHU_APPLE_KEY_ID`、`YISHU_APPLE_PRIVATE_KEY_PATH` 引用。测试日志和仓库不得出现私钥、client secret、identity token、authorization code、nonce、state 或 Apple subject。
+3. 确认服务器可通过 HTTPS 访问 `appleid.apple.com/auth/keys`、`/auth/token` 和 `/auth/revoke`，WP-Cron 或等价计划任务能执行撤销重试；反向代理继续转发 `Authorization` 与安装记录头。
+4. 在真实 TestFlight 安装执行：新 Apple 账号 → 必填抖音 ID → 待审批 → 管理员批准 → 主内容；同一 Apple ID 重复登录；取消授权、网络失败与重新前台；其他设备会话撤销；onboarding 和已批准状态分别永久删号。
+5. 删除后确认 App 本机收藏/最近浏览分区消失、原 bearer 不可使用、Apple 账号可按产品规则重新申请；App Store 隐私标签与 App 内政策须包含昵称、用户 ID、设备级随机标识和粗略位置，不声明未请求的 Apple 邮箱。

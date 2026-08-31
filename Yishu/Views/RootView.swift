@@ -1,3 +1,4 @@
+import AuthenticationServices
 import SwiftUI
 
 private enum AppTab: Hashable {
@@ -112,6 +113,13 @@ struct RootView: View {
                 Task { await prepareAuthorizedContentIfNeeded() }
             }
         }
+        .onChange(of: fanAccount.appleCredentialAccessState) { _, state in
+            if fanAccount.isApproved || shouldBypassAccessGate {
+                Task { await prepareAuthorizedContentIfNeeded() }
+            } else if state != .notRequired, !adminSession.isAuthenticated {
+                resetProtectedPresentation()
+            }
+        }
         .onChange(of: adminSession.isAuthenticated) { _, authenticated in
             invalidateApprovedContentRefresh()
             // AdminView owns its full-manifest load. Keeping that request out of
@@ -151,6 +159,7 @@ struct RootView: View {
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else {
                 adminSession.lock()
+                fanAccount.pauseAppleCredentialRetry()
                 return
             }
             if fanAccount.clearExpiredSessionIfNeeded() {
@@ -158,9 +167,22 @@ struct RootView: View {
                 return
             }
             Task {
+                await fanAccount.revalidateAppleCredentialIfNeeded(resetRetrySchedule: true)
+                guard fanAccount.isApproved || shouldBypassAccessGate else {
+                    resetProtectedPresentation()
+                    return
+                }
                 await fanAccount.refreshIfNeeded(minimumInterval: 0)
                 if fanAccount.isApproved { await refreshApprovedContent() }
             }
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(
+                for: ASAuthorizationAppleIDProvider.credentialRevokedNotification
+            )
+        ) { _ in
+            fanAccount.handleAppleCredentialRevoked()
+            resetProtectedPresentation()
         }
     }
 
@@ -307,6 +329,7 @@ struct RootView: View {
 
     private func restoreAccess() async {
         await fanAccount.restoreSession()
+        await fanAccount.revalidateAppleCredentialIfNeeded(resetRetrySchedule: true)
         hasResolvedAccess = true
         if canAccessAppContent {
             await prepareAuthorizedContentIfNeeded()

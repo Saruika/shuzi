@@ -1,3 +1,4 @@
+import AuthenticationServices
 import Foundation
 import Security
 
@@ -32,6 +33,12 @@ enum FanAccountStatus: String, CaseIterable {
     case suspended
 }
 
+enum FanAccountSource: String {
+    case password
+    case invitation
+    case apple
+}
+
 struct FanProfile: Codable, Equatable {
     let userID: String
     let identityCode: String
@@ -45,6 +52,8 @@ struct FanProfile: Codable, Equatable {
     let invitationExpiresAt: Date?
     let requiresPasswordChange: Bool
     let passwordRecoveryExpiresAt: Date?
+    let accountSource: String
+    let requiresAppleRegistration: Bool
 
     init(
         userID: String,
@@ -58,7 +67,9 @@ struct FanProfile: Codable, Equatable {
         requiresAccountSetup: Bool = false,
         invitationExpiresAt: Date? = nil,
         requiresPasswordChange: Bool = false,
-        passwordRecoveryExpiresAt: Date? = nil
+        passwordRecoveryExpiresAt: Date? = nil,
+        accountSource: String = FanAccountSource.password.rawValue,
+        requiresAppleRegistration: Bool = false
     ) {
         self.userID = userID
         self.identityCode = identityCode
@@ -72,6 +83,8 @@ struct FanProfile: Codable, Equatable {
         self.invitationExpiresAt = invitationExpiresAt
         self.requiresPasswordChange = requiresPasswordChange
         self.passwordRecoveryExpiresAt = passwordRecoveryExpiresAt
+        self.accountSource = accountSource
+        self.requiresAppleRegistration = requiresAppleRegistration
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -87,6 +100,8 @@ struct FanProfile: Codable, Equatable {
         case invitationExpiresAt
         case requiresPasswordChange
         case passwordRecoveryExpiresAt
+        case accountSource
+        case requiresAppleRegistration
     }
 
     init(from decoder: Decoder) throws {
@@ -118,6 +133,14 @@ struct FanProfile: Codable, Equatable {
             Date.self,
             forKey: .passwordRecoveryExpiresAt
         )
+        accountSource = try container.decodeIfPresent(
+            String.self,
+            forKey: .accountSource
+        ) ?? FanAccountSource.password.rawValue
+        requiresAppleRegistration = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresAppleRegistration
+        ) ?? false
     }
 
     var accountStatus: FanAccountStatus? { FanAccountStatus(rawValue: status) }
@@ -152,6 +175,24 @@ struct FanRequiredSetupInput: Equatable {
     let douyinID: String
     let currentPassword: String
     let newPassword: String
+}
+
+struct FanAppleRegistrationState: Codable, Equatable {
+    let expiresAt: Date
+
+    func isValid(now: Date = Date()) -> Bool {
+        expiresAt > now && expiresAt.timeIntervalSince(now) <= 30 * 60
+    }
+}
+
+enum FanAppleChallengePurpose: String, Encodable {
+    case signIn = "sign_in"
+    case deleteAccount = "delete_account"
+}
+
+struct FanAppleRegistrationInput: Equatable {
+    let displayName: String
+    let douyinID: String
 }
 
 struct FanPasswordChangeInput: Equatable {
@@ -300,6 +341,8 @@ enum FanAccountValidation {
         UUID(uuidString: profile.userID) != nil
             && normalizedIdentityCode(profile.identityCode) == profile.identityCode
             && normalizedDouyinID(profile.douyinID) == profile.douyinID
+            && FanAccountSource(rawValue: profile.accountSource) != nil
+            && !profile.requiresAppleRegistration
             && FanAccountStatus(rawValue: profile.status) != nil
             && profile.sessionExpiresAt > now
             && (!profile.requiresPasswordChange
@@ -308,10 +351,19 @@ enum FanAccountValidation {
     }
 
     static func isValidAdminFanUser(_ user: AdminFanUser) -> Bool {
-        UUID(uuidString: user.userID) != nil
-            && normalizedIdentityCode(user.identityCode) == user.identityCode
-            && normalizedDouyinID(user.douyinID) == user.douyinID
-            && FanAccountStatus(rawValue: user.status) != nil
+        guard UUID(uuidString: user.userID) != nil,
+              normalizedIdentityCode(user.identityCode) == user.identityCode,
+              let source = FanAccountSource(rawValue: user.accountSource),
+              FanAccountStatus(rawValue: user.status) != nil else { return false }
+        if user.requiresAppleRegistration {
+            return source == .apple
+                && user.douyinID.isEmpty
+                && !user.requiresAccountSetup
+                && user.invitationExpiresAt == nil
+                && !user.requiresPasswordChange
+                && user.passwordRecoveryExpiresAt == nil
+        }
+        return normalizedDouyinID(user.douyinID) == user.douyinID
             && hasConsistentSecuritySetupState(
                 douyinID: user.douyinID,
                 requiresAccountSetup: user.requiresAccountSetup,
@@ -351,6 +403,21 @@ enum FanAccountValidation {
             newPassword: newPassword
         )
     }
+
+    static func validatedAppleRegistration(
+        displayName: String,
+        douyinID: String,
+        acceptedDataUse: Bool
+    ) throws -> FanAppleRegistrationInput {
+        let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidDisplayName(cleanName) else { throw FanAccountError.invalidDisplayName }
+        guard let cleanDouyinID = normalizedDouyinID(douyinID),
+              !isInvitationPlaceholderDouyinID(cleanDouyinID) else {
+            throw FanAccountError.invalidDouyinID
+        }
+        guard acceptedDataUse else { throw FanAccountError.consentRequired }
+        return FanAppleRegistrationInput(displayName: cleanName, douyinID: cleanDouyinID)
+    }
 }
 
 enum FanAccountError: LocalizedError {
@@ -368,6 +435,11 @@ enum FanAccountError: LocalizedError {
     case passwordRecoveryRequired
     case passwordRecoveryExpired
     case currentSessionCannotBeRevoked
+    case appleRegistrationRequired
+    case appleCredentialRevoked
+    case appleCredentialTransferred
+    case appleCredentialUnavailable
+    case appleCredentialCheckFailed
     case sessionExpired
     case approvalPending
     case approvalRejected
@@ -393,6 +465,11 @@ enum FanAccountError: LocalizedError {
         case .passwordRecoveryRequired: "请使用临时恢复凭据设置一个新密码。"
         case .passwordRecoveryExpired: "密码恢复凭据已过期，请联系管理员重新生成。"
         case .currentSessionCannotBeRevoked: "当前设备请使用退出登录。"
+        case .appleRegistrationRequired: "请先填写昵称和抖音 ID，完成账号申请。"
+        case .appleCredentialRevoked: "Apple 登录授权已撤销，请重新登录。"
+        case .appleCredentialTransferred: "Apple 登录关系已转移，请重新通过 Apple 登录确认账号。"
+        case .appleCredentialUnavailable: "无法确认当前 Apple 登录凭据，请重新通过 Apple 登录。"
+        case .appleCredentialCheckFailed: "Apple 凭据状态检查暂时失败；当前有效的服务器会话会继续使用，并将在稍后重试检查。"
         case .sessionExpired: "登录已失效，请重新登录。"
         case .approvalPending: "注册申请正在等待管理员审批。"
         case .approvalRejected: "注册申请未通过审批。"
@@ -425,9 +502,49 @@ enum FanDeletionFailurePolicy {
     }
 }
 
+enum FanAppleCredentialAccessState: Equatable {
+    case notRequired
+    case checking
+    case verified
+    case retryRequired
+}
+
+enum FanAppleCredentialAccessPolicy {
+    static func canUseValidServerSession(
+        usesAppleSignIn: Bool,
+        state: FanAppleCredentialAccessState
+    ) -> Bool {
+        guard usesAppleSignIn else { return true }
+        return state == .verified || state == .retryRequired
+    }
+}
+
+enum FanAccountSecurityCapabilities {
+    static func supportsPasswordChange(usesAppleSignIn: Bool) -> Bool {
+        !usesAppleSignIn
+    }
+}
+
+enum FanAppleDeletionEligibility {
+    static func canBegin(
+        hasToken: Bool,
+        usesAppleSignIn: Bool,
+        hasProfile: Bool,
+        registration: FanAppleRegistrationState?,
+        now: Date = Date()
+    ) -> Bool {
+        hasToken
+            && usesAppleSignIn
+            && (hasProfile || registration?.isValid(now: now) == true)
+    }
+}
+
 @MainActor
 final class FanAccountStore: ObservableObject {
     @Published private(set) var profile: FanProfile?
+    @Published private(set) var appleRegistration: FanAppleRegistrationState?
+    @Published private(set) var usesAppleSignIn = false
+    @Published private(set) var appleCredentialAccessState: FanAppleCredentialAccessState = .notRequired
     @Published private(set) var sessions: [FanSessionRecord] = []
     @Published private(set) var removedAccountUserID: String?
     @Published private(set) var isWorking = false
@@ -441,13 +558,20 @@ final class FanAccountStore: ObservableObject {
     private var token: String?
     private var lastSuccessfulRefresh: Date?
     private var sessionExpiryTask: Task<Void, Never>?
+    private var appleCredentialRetryTask: Task<Void, Never>?
+    private var appleCredentialRetryAttempt = 0
     private var refreshGeneration: UInt64 = 0
 
     var isAuthenticated: Bool {
         token != nil && profile.map { $0.sessionExpiresAt > Date() } == true
     }
     var isApproved: Bool {
-        token != nil && profile?.isApproved(at: Date()) == true
+        token != nil
+            && profile?.isApproved(at: Date()) == true
+            && FanAppleCredentialAccessPolicy.canUseValidServerSession(
+                usesAppleSignIn: usesAppleSignIn,
+                state: appleCredentialAccessState
+            )
     }
 
     init() {
@@ -456,14 +580,25 @@ final class FanAccountStore: ObservableObject {
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-reset-fan-session-for-visual-testing") {
             FanAccountKeychain.deleteToken()
+            FanAccountKeychain.deleteAppleUserID()
         }
 #endif
         token = FanAccountKeychain.loadToken()
+        usesAppleSignIn = FanAccountKeychain.loadAppleUserID() != nil
+        appleCredentialAccessState = usesAppleSignIn ? .checking : .notRequired
         hasSavedSession = token != nil
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-simulate-apple-registration-for-visual-testing") {
+            appleRegistration = FanAppleRegistrationState(
+                expiresAt: Date().addingTimeInterval(20 * 60)
+            )
+            hasSavedSession = true
+        }
+#endif
     }
 
     func hasPermission(_ permission: FanPermission) -> Bool {
-        token != nil && profile?.hasPermission(permission, at: Date()) == true
+        isApproved && profile?.hasPermission(permission, at: Date()) == true
     }
 
     /// Clears an expired session without waiting for a network round trip. This
@@ -471,7 +606,10 @@ final class FanAccountStore: ObservableObject {
     /// an unavailable server can never extend access from stale memory.
     @discardableResult
     func clearExpiredSessionIfNeeded(now: Date = Date()) -> Bool {
-        guard let profile, profile.sessionExpiresAt <= now else { return false }
+        let isExpired = profile.map { $0.sessionExpiresAt <= now }
+            ?? appleRegistration.map { $0.expiresAt <= now }
+            ?? false
+        guard isExpired else { return false }
         clearLocalSession()
         errorMessage = FanAccountError.sessionExpired.errorDescription
         noticeMessage = nil
@@ -479,7 +617,7 @@ final class FanAccountStore: ObservableObject {
     }
 
     func restoreSession() async {
-        guard token != nil, profile == nil else { return }
+        guard token != nil, profile == nil, appleRegistration == nil else { return }
         await refreshSession(showError: false)
     }
 
@@ -507,12 +645,22 @@ final class FanAccountStore: ObservableObject {
                 method: "GET",
                 authorized: true
             )
-            guard FanAccountValidation.isValidProfile(response.profile) else {
-                throw FanAccountError.invalidResponse
-            }
             guard generation == refreshGeneration,
                   token == refreshToken else { return }
-            profile = response.profile
+            switch (response.profile, response.appleRegistration) {
+            case let (.some(profile), .none):
+                guard FanAccountValidation.isValidProfile(profile) else {
+                    throw FanAccountError.invalidResponse
+                }
+                self.profile = profile
+                appleRegistration = nil
+            case let (.none, .some(registration)):
+                guard registration.isValid() else { throw FanAccountError.invalidResponse }
+                profile = nil
+                appleRegistration = registration
+            default:
+                throw FanAccountError.invalidResponse
+            }
             lastSuccessfulRefresh = Date()
             scheduleSessionExpiration()
             errorMessage = nil
@@ -601,6 +749,7 @@ final class FanAccountStore: ObservableObject {
                 currentToken: token
             ) else { return }
             try accept(response)
+            clearAppleCredentialReference()
             noticeMessage = "注册申请已提交，请等待管理员审批。"
         } catch {
             guard FanAccountOperationGuard.canAccept(
@@ -651,6 +800,7 @@ final class FanAccountStore: ObservableObject {
                 currentToken: token
             ) else { return }
             try accept(response)
+            clearAppleCredentialReference()
         } catch {
             guard FanAccountOperationGuard.canAccept(
                 requestGeneration: operationGeneration,
@@ -661,6 +811,239 @@ final class FanAccountStore: ObservableObject {
             errorMessage = (error as? FanAccountError)?.errorDescription
                 ?? FanAccountError.unavailable.errorDescription
         }
+    }
+
+    func requestAppleChallenge(
+        purpose: FanAppleChallengePurpose = .signIn
+    ) async -> FanAppleChallenge? {
+        noticeMessage = nil
+        errorMessage = nil
+        if purpose == .deleteAccount, (token == nil || !usesAppleSignIn) {
+            errorMessage = FanAccountError.sessionExpired.errorDescription
+            return nil
+        }
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        let expectedToken = token
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let body = try JSONEncoder().encode(FanAppleChallengeRequest(
+                installID: installID.uuidString.lowercased(),
+                purpose: purpose
+            ))
+            let response: FanAppleChallenge = try await perform(
+                path: "shuzijun/v1/fan/apple-challenge",
+                method: "POST",
+                body: body,
+                authorized: purpose == .deleteAccount
+            )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return nil }
+            guard response.isValid() else { throw FanAccountError.invalidResponse }
+            return response
+        } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return nil }
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.unavailable.errorDescription
+            return nil
+        }
+    }
+
+    func signInWithApple(_ submission: FanAppleCredentialSubmission) async {
+        noticeMessage = nil
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        let expectedToken = token
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let body = try JSONEncoder().encode(FanAppleAuthRequest(
+                identityToken: submission.identityToken,
+                authorizationCode: submission.authorizationCode,
+                challengeID: submission.challengeID,
+                state: submission.state,
+                installID: installID.uuidString.lowercased()
+            ))
+            let response: FanAppleAuthResponse = try await perform(
+                path: "shuzijun/v1/fan/apple-auth",
+                method: "POST",
+                body: body,
+                authorized: false
+            )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
+            try acceptApple(response, localAppleUserID: submission.localAppleUserID)
+            noticeMessage = profile == nil
+                ? "Apple 身份已验证，请完成账号申请。"
+                : nil
+        } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.unavailable.errorDescription
+        }
+    }
+
+    func completeAppleRegistration(
+        displayName: String,
+        douyinID: String,
+        acceptedDataUse: Bool
+    ) async {
+        noticeMessage = nil
+        let input: FanAppleRegistrationInput
+        do {
+            input = try FanAccountValidation.validatedAppleRegistration(
+                displayName: displayName,
+                douyinID: douyinID,
+                acceptedDataUse: acceptedDataUse
+            )
+        } catch {
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.invalidResponse.errorDescription
+            return
+        }
+        guard let expectedToken = token,
+              let registration = appleRegistration,
+              registration.isValid() else {
+            errorMessage = FanAccountError.sessionExpired.errorDescription
+            return
+        }
+
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let body = try JSONEncoder().encode(FanAppleRegistrationRequest(
+                displayName: input.displayName,
+                douyinID: input.douyinID,
+                installID: installID.uuidString.lowercased(),
+                consentVersion: "2026-08-31-approval-v2"
+            ))
+            let response: FanAuthResponse = try await perform(
+                path: "shuzijun/v1/fan/complete-apple-registration",
+                method: "POST",
+                body: body,
+                authorized: true
+            )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), response.profile.accountStatus == .pending,
+               !response.profile.requiresAccountSetup,
+               !response.profile.requiresPasswordChange else {
+                throw FanAccountError.invalidResponse
+            }
+            try accept(response, requiringTokenRotation: true)
+            appleRegistration = nil
+            noticeMessage = "账号申请已提交，请等待管理员审批。"
+        } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.unavailable.errorDescription
+        }
+    }
+
+    func handleAppleCredentialRevoked() {
+        guard usesAppleSignIn else { return }
+        clearLocalSession()
+        errorMessage = FanAccountError.appleCredentialRevoked.errorDescription
+        noticeMessage = nil
+    }
+
+    func revalidateAppleCredentialIfNeeded(resetRetrySchedule: Bool = false) async {
+        if resetRetrySchedule { appleCredentialRetryAttempt = 0 }
+        guard usesAppleSignIn else {
+            appleCredentialAccessState = .notRequired
+            return
+        }
+        guard let localUserID = FanAccountKeychain.loadAppleUserID() else {
+            clearLocalSession()
+            errorMessage = FanAccountError.appleCredentialUnavailable.errorDescription
+            noticeMessage = nil
+            return
+        }
+        appleCredentialRetryTask?.cancel()
+        appleCredentialRetryTask = nil
+        // Cold launch begins in `.checking` and stays fail-closed until the
+        // first query finishes. Later foreground/retry checks keep an already
+        // usable server session visible while Apple's asynchronous query runs.
+        if !FanAppleCredentialAccessPolicy.canUseValidServerSession(
+            usesAppleSignIn: true,
+            state: appleCredentialAccessState
+        ) {
+            appleCredentialAccessState = .checking
+        }
+        let generation = refreshGeneration
+        let expectedToken = token
+        let result = await withCheckedContinuation { continuation in
+            ASAuthorizationAppleIDProvider().getCredentialState(forUserID: localUserID) {
+                state, error in continuation.resume(returning: (state, error))
+            }
+        }
+        guard FanAccountOperationGuard.canAccept(
+            requestGeneration: generation,
+            currentGeneration: refreshGeneration,
+            expectedToken: expectedToken,
+            currentToken: token
+        ) else { return }
+        guard FanAppleCredentialStatePolicy.queryDisposition(
+            hasError: result.1 != nil
+        ) == .evaluateCredential else {
+            appleCredentialAccessState = .retryRequired
+            errorMessage = FanAccountError.appleCredentialCheckFailed.errorDescription
+            noticeMessage = nil
+            scheduleAppleCredentialRetry()
+            return
+        }
+        switch FanAppleCredentialStatePolicy.decision(for: result.0) {
+        case .authorize:
+            appleCredentialRetryAttempt = 0
+            appleCredentialAccessState = .verified
+            if errorMessage == FanAccountError.appleCredentialCheckFailed.errorDescription {
+                errorMessage = nil
+            }
+        case .revoke:
+            handleAppleCredentialRevoked()
+        case .transfer:
+            clearLocalSession()
+            errorMessage = FanAccountError.appleCredentialTransferred.errorDescription
+            noticeMessage = nil
+        case .unknown:
+            clearLocalSession()
+            errorMessage = FanAccountError.appleCredentialUnavailable.errorDescription
+            noticeMessage = nil
+        }
+    }
+
+    func pauseAppleCredentialRetry() {
+        appleCredentialRetryTask?.cancel()
+        appleCredentialRetryTask = nil
     }
 
     func completeRequiredSetup(
@@ -1070,8 +1453,84 @@ final class FanAccountStore: ObservableObject {
         }
     }
 
+    func deleteAppleAccount(_ submission: FanAppleCredentialSubmission) async {
+        guard let expectedToken = token,
+              FanAppleDeletionEligibility.canBegin(
+                hasToken: true,
+                usesAppleSignIn: usesAppleSignIn,
+                hasProfile: profile != nil,
+                registration: appleRegistration
+              ) else {
+            errorMessage = FanAccountError.sessionExpired.errorDescription
+            return
+        }
+        let deletingUserID = profile?.userID
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let body = try JSONEncoder().encode(FanAppleDeletionRequest(
+                identityToken: submission.identityToken,
+                authorizationCode: submission.authorizationCode,
+                challengeID: submission.challengeID,
+                state: submission.state,
+                installID: installID.uuidString.lowercased(),
+                confirmation: "DELETE_ACCOUNT"
+            ))
+            let response: FanLogoutResponse = try await perform(
+                path: "shuzijun/v1/fan/apple-delete",
+                method: "POST",
+                body: body,
+                authorized: true
+            )
+            guard response.ok else { throw FanAccountError.invalidResponse }
+            if let deletingUserID { removedAccountUserID = deletingUserID }
+            let isSameAccountContext: Bool
+            if let deletingUserID {
+                isSameAccountContext = profile?.userID == deletingUserID
+            } else {
+                isSameAccountContext = profile == nil && appleRegistration != nil
+            }
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), isSameAccountContext else { return }
+            clearLocalSession()
+            errorMessage = nil
+            noticeMessage = "账号与关联个人资料已永久删除。"
+        } catch {
+            let isSameAccountContext: Bool
+            if let deletingUserID {
+                isSameAccountContext = profile?.userID == deletingUserID
+            } else {
+                isSameAccountContext = profile == nil && appleRegistration != nil
+            }
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), isSameAccountContext else { return }
+            let accountError = error as? FanAccountError ?? .unavailable
+            if FanDeletionFailurePolicy.shouldFailClosed(after: accountError) {
+                clearLocalSession()
+                if let deletingUserID { removedAccountUserID = deletingUserID }
+                errorMessage = "删除请求的远端结果未能确认。为保护你的资料，本机已退出并清除该账号内容；请重新登录确认账号状态。"
+                noticeMessage = nil
+                return
+            }
+            errorMessage = accountError.errorDescription
+        }
+    }
+
     func fetchApprovedContent() async throws -> AppContentManifest {
         guard isApproved else {
+            if appleRegistration != nil {
+                throw FanAccountError.appleRegistrationRequired
+            }
             if profile?.requiresAccountSetup == true {
                 throw FanAccountError.accountSetupRequired
             }
@@ -1123,22 +1582,99 @@ final class FanAccountStore: ObservableObject {
         noticeMessage = nil
     }
 
+    private func acceptApple(
+        _ response: FanAppleAuthResponse,
+        localAppleUserID: String
+    ) throws {
+        guard response.token.range(
+            of: #"^[A-Za-z0-9_-]{43,128}$"#,
+            options: .regularExpression
+        ) != nil,
+              !localAppleUserID.isEmpty,
+              localAppleUserID.count <= 1_024 else {
+            throw FanAccountError.invalidResponse
+        }
+        switch (response.profile, response.appleRegistration) {
+        case let (.some(profile), .none):
+            guard FanAccountValidation.isValidProfile(profile) else {
+                throw FanAccountError.invalidResponse
+            }
+        case let (.none, .some(registration)):
+            guard registration.isValid() else { throw FanAccountError.invalidResponse }
+        default:
+            throw FanAccountError.invalidResponse
+        }
+
+        try FanAccountKeychain.saveToken(response.token)
+        do {
+            try FanAccountKeychain.saveAppleUserID(localAppleUserID)
+        } catch {
+            FanAccountKeychain.deleteToken()
+            throw error
+        }
+        refreshGeneration &+= 1
+        token = response.token
+        hasSavedSession = true
+        usesAppleSignIn = true
+        appleCredentialAccessState = .verified
+        profile = response.profile
+        appleRegistration = response.appleRegistration
+        sessions.removeAll()
+        lastSuccessfulRefresh = Date()
+        scheduleSessionExpiration()
+        errorMessage = nil
+        noticeMessage = nil
+    }
+
+    private func clearAppleCredentialReference() {
+        appleCredentialRetryTask?.cancel()
+        appleCredentialRetryTask = nil
+        appleCredentialRetryAttempt = 0
+        FanAccountKeychain.deleteAppleUserID()
+        usesAppleSignIn = false
+        appleCredentialAccessState = .notRequired
+    }
+
     private func clearLocalSession() {
         refreshGeneration &+= 1
         sessionExpiryTask?.cancel()
         sessionExpiryTask = nil
         FanAccountKeychain.deleteToken()
+        clearAppleCredentialReference()
         token = nil
         profile = nil
+        appleRegistration = nil
         sessions.removeAll()
         hasSavedSession = false
         lastSuccessfulRefresh = nil
     }
 
+    private func scheduleAppleCredentialRetry() {
+        appleCredentialRetryTask?.cancel()
+        let delays: [Duration] = [.seconds(15), .seconds(60), .seconds(300)]
+        guard appleCredentialRetryAttempt < delays.count else {
+            appleCredentialRetryTask = nil
+            return
+        }
+        let delay = delays[appleCredentialRetryAttempt]
+        appleCredentialRetryAttempt += 1
+        appleCredentialRetryTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self,
+                  self.usesAppleSignIn,
+                  self.appleCredentialAccessState == .retryRequired else { return }
+            await self.revalidateAppleCredentialIfNeeded(resetRetrySchedule: false)
+        }
+    }
+
     private func scheduleSessionExpiration() {
         sessionExpiryTask?.cancel()
         sessionExpiryTask = nil
-        guard let expiresAt = profile?.sessionExpiresAt else { return }
+        guard let expiresAt = profile?.sessionExpiresAt ?? appleRegistration?.expiresAt else { return }
         let delay = expiresAt.timeIntervalSinceNow
         guard delay > 0 else {
             _ = clearExpiredSessionIfNeeded()
@@ -1279,6 +1815,8 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
     let invitationExpiresAt: Date?
     let requiresPasswordChange: Bool
     let passwordRecoveryExpiresAt: Date?
+    let accountSource: String
+    let requiresAppleRegistration: Bool
 
     init(
         userID: String,
@@ -1292,7 +1830,9 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
         requiresAccountSetup: Bool = false,
         invitationExpiresAt: Date? = nil,
         requiresPasswordChange: Bool = false,
-        passwordRecoveryExpiresAt: Date? = nil
+        passwordRecoveryExpiresAt: Date? = nil,
+        accountSource: String = FanAccountSource.password.rawValue,
+        requiresAppleRegistration: Bool = false
     ) {
         self.userID = userID
         self.identityCode = identityCode
@@ -1306,6 +1846,8 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
         self.invitationExpiresAt = invitationExpiresAt
         self.requiresPasswordChange = requiresPasswordChange
         self.passwordRecoveryExpiresAt = passwordRecoveryExpiresAt
+        self.accountSource = accountSource
+        self.requiresAppleRegistration = requiresAppleRegistration
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1321,6 +1863,8 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
         case invitationExpiresAt
         case requiresPasswordChange
         case passwordRecoveryExpiresAt
+        case accountSource
+        case requiresAppleRegistration
     }
 
     init(from decoder: Decoder) throws {
@@ -1349,9 +1893,20 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
             Date.self,
             forKey: .passwordRecoveryExpiresAt
         )
+        accountSource = try container.decodeIfPresent(
+            String.self,
+            forKey: .accountSource
+        ) ?? FanAccountSource.password.rawValue
+        requiresAppleRegistration = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresAppleRegistration
+        ) ?? false
     }
 
     var id: String { userID }
+    var requiresIdentityCompletion: Bool {
+        requiresAccountSetup || requiresAppleRegistration
+    }
     var hasConsistentAccountSetupState: Bool {
         FanAccountValidation.hasConsistentSecuritySetupState(
             douyinID: douyinID,
@@ -1390,6 +1945,35 @@ private struct FanLoginRequest: Encodable {
     let installID: String
 }
 
+private struct FanAppleChallengeRequest: Encodable {
+    let installID: String
+    let purpose: FanAppleChallengePurpose
+}
+
+struct FanAppleAuthRequest: Encodable, Equatable {
+    let identityToken: String
+    let authorizationCode: String
+    let challengeID: String
+    let state: String
+    let installID: String
+}
+
+private struct FanAppleRegistrationRequest: Encodable {
+    let displayName: String
+    let douyinID: String
+    let installID: String
+    let consentVersion: String
+}
+
+private struct FanAppleDeletionRequest: Encodable {
+    let identityToken: String
+    let authorizationCode: String
+    let challengeID: String
+    let state: String
+    let installID: String
+    let confirmation: String
+}
+
 private struct FanInvitationCompletionRequest: Encodable {
     let displayName: String
     let douyinID: String
@@ -1420,8 +2004,15 @@ private struct FanAuthResponse: Decodable {
     let profile: FanProfile
 }
 
-private struct FanSessionResponse: Decodable {
-    let profile: FanProfile
+struct FanAppleAuthResponse: Decodable {
+    let token: String
+    let profile: FanProfile?
+    let appleRegistration: FanAppleRegistrationState?
+}
+
+struct FanSessionResponse: Decodable {
+    let profile: FanProfile?
+    let appleRegistration: FanAppleRegistrationState?
 }
 
 private struct FanSessionDirectoryResponse: Decodable {
@@ -1446,6 +2037,7 @@ private enum FanAccountKeychain {
     private static let service = "cn.com.shuzijun.yishu.fan-account"
     private static let installAccount = "installation-id"
     private static let tokenAccount = "session-token"
+    private static let appleUserAccount = "apple-user-id"
 
     static func loadOrCreateInstallID() -> UUID {
         if let data = load(account: installAccount),
@@ -1474,6 +2066,26 @@ private enum FanAccountKeychain {
 
     static func deleteToken() {
         delete(account: tokenAccount)
+    }
+
+    static func loadAppleUserID() -> String? {
+        guard let data = load(account: appleUserAccount),
+              data.count <= 4_096,
+              let value = String(data: data, encoding: .utf8),
+              !value.isEmpty,
+              value.count <= 1_024 else { return nil }
+        return value
+    }
+
+    static func saveAppleUserID(_ value: String) throws {
+        guard !value.isEmpty, value.count <= 1_024 else {
+            throw FanAccountError.invalidResponse
+        }
+        try save(Data(value.utf8), account: appleUserAccount)
+    }
+
+    static func deleteAppleUserID() {
+        delete(account: appleUserAccount)
     }
 
     private static func load(account: String) -> Data? {
