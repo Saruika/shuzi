@@ -49,6 +49,79 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(WeatherPresentation.conciseLocationText("  "), "当前位置")
     }
 
+    func testWeatherAttributionAlwaysHasAnOfficialLegalFallback() {
+        XCTAssertEqual(
+            WeatherAttributionPresentation.officialLegalURL.absoluteString,
+            "https://developer.apple.com/weatherkit/data-source-attribution/"
+        )
+        XCTAssertEqual(
+            WeatherAttributionPresentation.legalURL(from: nil),
+            WeatherAttributionPresentation.officialLegalURL
+        )
+        XCTAssertEqual(
+            WeatherAttributionPresentation.legalURL(
+                from: URL(string: "http://weatherkit.apple.com/legal-attribution.html")
+            ),
+            WeatherAttributionPresentation.officialLegalURL
+        )
+        XCTAssertEqual(
+            WeatherAttributionPresentation.legalURL(
+                from: URL(string: "https://weatherkit.apple.com/legal-attribution.html")
+            ).host,
+            "weatherkit.apple.com"
+        )
+    }
+
+    func testWeatherAttributionProviderNameNeverDisappears() {
+        XCTAssertEqual(WeatherAttributionPresentation.providerName(nil), "Apple Weather")
+        XCTAssertEqual(WeatherAttributionPresentation.providerName("  \n"), "Apple Weather")
+        XCTAssertEqual(
+            WeatherAttributionPresentation.providerName("Apple Weather"),
+            "Apple Weather"
+        )
+    }
+
+    func testPrivacyManifestCoversAdminMediaAndSecurityDiagnostics() throws {
+        let manifestURL = try XCTUnwrap(
+            Bundle.main.url(forResource: "PrivacyInfo", withExtension: "xcprivacy")
+        )
+        let data = try Data(contentsOf: manifestURL)
+        let manifest = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: data, format: nil)
+                as? [String: Any]
+        )
+        let declarations = try XCTUnwrap(
+            manifest["NSPrivacyCollectedDataTypes"] as? [[String: Any]]
+        )
+        var declarationsByType: [String: [String: Any]] = [:]
+        for declaration in declarations {
+            guard let type = declaration["NSPrivacyCollectedDataType"] as? String else {
+                XCTFail("PrivacyInfo.xcprivacy 包含缺少类型的数据声明")
+                continue
+            }
+            XCTAssertNil(declarationsByType[type], "PrivacyInfo.xcprivacy 重复声明 \(type)")
+            declarationsByType[type] = declaration
+        }
+
+        let expectedLinkedFunctionalTypes = [
+            "NSPrivacyCollectedDataTypePhotosorVideos",
+            "NSPrivacyCollectedDataTypeOtherDiagnosticData",
+            "NSPrivacyCollectedDataTypeOtherDataTypes",
+        ]
+        for type in expectedLinkedFunctionalTypes {
+            let declaration = try XCTUnwrap(
+                declarationsByType[type],
+                "PrivacyInfo.xcprivacy 缺少 \(type)"
+            )
+            XCTAssertEqual(declaration["NSPrivacyCollectedDataTypeLinked"] as? Bool, true)
+            XCTAssertEqual(declaration["NSPrivacyCollectedDataTypeTracking"] as? Bool, false)
+            XCTAssertEqual(
+                declaration["NSPrivacyCollectedDataTypePurposes"] as? [String],
+                ["NSPrivacyCollectedDataTypePurposeAppFunctionality"]
+            )
+        }
+    }
+
     func testLoadedPortfolioExposesEveryImage() {
         let portfolio = makePortfolio(imageCount: 6)
 

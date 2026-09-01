@@ -89,11 +89,21 @@ xcodebuild -project Yishu.xcodeproj \
 - 永久删除前，密码账号要求近期密码验证，Apple 账号要求原生 Apple 重新授权；删除会撤销 Apple 授权、清除服务器账号资料、恢复状态和全部会话，并清除本机该账号的收藏与最近浏览。
 - 完整图片 URL 仅在运行时内存中使用，磁盘目录缓存每册只保留 3 张离线预览，不后台预取整册照片。
 - 录屏、投屏或 App 失去活动状态时会显示黑色保护遮罩。
-- 位置仅在用户主动启用天气时请求；定位管理器采用约三公里精度，不持久化位置，也不在后台持续定位。天气由 Apple WeatherKit 提供，并在“关于”页展示 Apple 要求的数据来源与许可入口。
+- 位置仅在用户主动启用天气时请求；定位管理器采用约三公里精度，不持久化位置，也不在后台持续定位。天气由 Apple WeatherKit 提供；首页天气入口直接标明 Apple Weather，天气详情与“关于”页均提供 Apple 要求的数据来源与许可链接，元数据请求失败时使用 Apple 官方来源页兜底。
 - 仓库忽略 `.env`、Apple 私钥、证书、描述文件和本地构建产物。
 - App 明示照片与影像均已取得合法展示授权；相关版权和肖像权归各自权利人所有，未经许可不得下载、复制、传播、改编或商业使用。
 
 截图保护是 iOS 系统能力限制下的尽力防护，无法阻止另一台设备拍摄屏幕；已公开过的 WordPress 原图在迁移到私有对象存储前，也不能承诺绝对无法下载。完整安全边界和上线前 P0 清单见 [`SECURITY.md`](SECURITY.md)。
+
+## v1.3.23-build34.1
+
+- 首页 WeatherKit 胶囊新增系统天气详情页、Apple Weather 数据来源与许可入口，并补齐 Dynamic Type、44pt 触控区和 VoiceOver 语义。
+- 隐私清单与中英文可见政策同步披露管理员主动上传的照片、视频和封面，以及安全日志、哈希化网络指纹和诊断信息的用途、关联性与保存规则。
+- 作品搜索区与影视外链补齐容器级触控门禁、剧名标签和提示；影像保护页的辅助文字提高到可读对比度。
+- UI 回归采用 Apple 官方 UI configuration 机制，独立覆盖横竖屏、明暗外观、iPadOS 窗口化、Accessibility XXXL、安全区、44pt 与 VoiceOver，并保留 iPhone 系统辅助功能审计。
+- 账号与内容 API 改为服务器 root-only 固定角色标记控制的上海单写权威模型；备用节点对所有本地 pretty/query-form 绕过路径统一以明确 503 失败关闭，不能由 Host、转发头、数据库、`wp-config.php` 或回环地址提升权限。
+- 主备发布器新增强制 `authority` / `standby` 角色验收，严格核对 HTTP 状态、JSON 错误码、安全响应头和响应体上限；发布回滚保持相同失败关闭边界。
+- 新增版本化、加固的每日主备同步 systemd service/timer，所有自动与人工同步共用 `/run/shuzijun-sync.lock`，并由安全合同测试验证安装顺序与恢复条件。
 
 ## v1.3.23
 
@@ -104,7 +114,7 @@ xcodebuild -project Yishu.xcodeproj \
 - 开屏在浅色照片上使用与安全区联动的状态栏遮罩，首页轮播在 VoiceOver 下停止自动切换；横屏与辅助功能超大字号组合也保留完整文案和主操作。
 - 自绘 Showreel 播放器保持无系统播放器外壳，同时完整显示画面，并提供暂停、静音、播放进度、拖动与重播等无障碍控制。
 - iPhone 与 iPad 均支持横竖屏；iOS 26 采用系统原生自适应标签栏材质，旧系统保留高对比深色回退。
-- UI 回归直接运行 Apple 辅助功能审计，检查首页、作品和关于页的对比度、触控区域、文字裁切与语义，不以忽略规则掩盖问题。
+- UI 回归在 iPhone 直接运行 Apple 辅助功能审计，iPad 则运行安全区、44pt、VoiceOver、Accessibility XXXL 与 Apple UI 配置（横竖屏/窗口化）的确定性门禁；两端都不以忽略规则或吞掉失败来掩盖问题。
 - Apple Developer 已为 `cn.com.shuzijun.yishu` 开启 Sign in with Apple 与 WeatherKit；服务端通知与专用签名密钥按仓库外安全配置部署。
 - 安全门禁继续扫描一方代码、资源与第三方 `vendor` 中的长期凭据，仅排除已锁定 JWT 依赖文档中的公开测试样例；CI 强制执行 Composer 漏洞审计并由 Dependabot 每周检查锁定依赖。
 - 主备同步、Web 根目录检查与 Nginx 规则新增 Apple `.p8` 私钥防护；`wp-content` 与全部插件/主题代码保持 root 所有，仅上传和缓存目录允许 PHP worker 写入且禁止执行 PHP。

@@ -1,61 +1,442 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true
 
 SITE=/var/www/html/shuzijun.com.cn
-STAGE=/tmp/shuzijun-stage
-DATABASE="$STAGE/shuzijun-sync.sql.gz"
-MANIFEST="$STAGE/shuzijun-sync.sha256"
 LOG=/var/log/shuzijun-sync-receiver.log
 VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
-
-RSYNC_FILTERS=(
-    --exclude='cache/'
-    --exclude='debug.log'
-    --exclude='*.php?*'
-    --exclude='*.php.*'
-    --exclude='*.php_*'
-    --exclude='*.php-*'
-    --exclude='*.php~'
-    --exclude='*.bak*'
-    --exclude='*.backup*'
-    --exclude='*.old*'
-    --exclude='*.orig*'
-    --exclude='*.save*'
-    --exclude='*.swp*'
-    --exclude='*.tmp*'
-    --exclude='*.copy*'
-    --exclude='*.disabled*'
-    --exclude='*.corrupt*'
-    --exclude='*.fixbak*'
-    --exclude='*.before-*'
-    --exclude='*~'
-    --exclude='.env*'
-    --exclude='*.sql*'
-    --exclude='*.dump*'
-    --exclude='*.pem'
-    --exclude='*.key'
-    --exclude='*.p8'
-    --exclude='*.P8'
-    --exclude='*.p12'
-    --exclude='*.pfx'
-    --exclude='*.jks'
-    --exclude='*.zip'
-    --exclude='*.tar'
-    --exclude='*.tar.gz'
-    --exclude='*.tgz'
-    --exclude='*.7z'
-    --exclude='*.rar'
-)
+AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
+AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
+SYNC_ALLOWED_SIGNERS=/etc/shuzijun/sync-signers
+SYNC_ROOT=/var/lib/shuzijun-sync
+CLAIM_ROOT=/var/lib/shuzijun-sync/incoming
+STATE_ROOT=/var/lib/shuzijun-sync/state
+LAST_ACCEPTED_GENERATION="$STATE_ROOT/highest-accepted-generation"
+SELF=/usr/local/sbin/apply-shuzijun-sync
+SYNC_PROTOCOL=shuzijun-sync-receiver-v3-signed-uploads-only
 
 test "$SITE" = /var/www/html/shuzijun.com.cn
-test "$STAGE" = /tmp/shuzijun-stage
-for file in "$DATABASE" "$MANIFEST"; do test -f "$file"; done
 test -x "$VERIFY"
 
-"$VERIFY" "$SITE"
+verify_authority_role() {
+    local expected_role=$1 verifier_fd_path=/proc/self/fd/7 verifier_sha256
+    local authority_verify_parent authority_verify_parent_mode verifier_status=0
+    test -f "$AUTHORITY_VERIFY" && test -x "$AUTHORITY_VERIFY" && test ! -L "$AUTHORITY_VERIFY"
+    test "$(realpath -e -- "$AUTHORITY_VERIFY")" = "$AUTHORITY_VERIFY"
+    for authority_verify_parent in /usr /usr/local /usr/local/sbin; do
+        test "$(realpath -e -- "$authority_verify_parent")" = "$authority_verify_parent"
+        test -d "$authority_verify_parent" && test ! -L "$authority_verify_parent"
+        test "$(stat -c '%u' "$authority_verify_parent")" = 0
+        authority_verify_parent_mode=$(stat -c '%a' "$authority_verify_parent")
+        (( (8#$authority_verify_parent_mode & 8#022) == 0 ))
+    done
+    exec 7<"$AUTHORITY_VERIFY"
+    test "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" = '0:0:1:755'
+    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }')
+    test "$verifier_sha256" = "$AUTHORITY_VERIFY_SHA256"
+    if ! env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I "$verifier_fd_path" "$expected_role"; then
+        verifier_status=1
+    fi
+    exec 7<&-
+    return "$verifier_status"
+}
 
-cd "$STAGE"
-sha256sum -c "$MANIFEST"
+validate_allowed_signers() {
+    local parent parent_mode
+    for parent in /etc /etc/shuzijun; do
+        test "$(realpath -e -- "$parent")" = "$parent"
+        test -d "$parent" && test ! -L "$parent"
+        test "$(stat -c '%u:%g:%a' "$parent")" = '0:0:755'
+    done
+    test -f "$SYNC_ALLOWED_SIGNERS" && test ! -L "$SYNC_ALLOWED_SIGNERS"
+    test "$(realpath -e -- "$SYNC_ALLOWED_SIGNERS")" = "$SYNC_ALLOWED_SIGNERS"
+    test "$(stat -c '%u:%g:%h:%a' "$SYNC_ALLOWED_SIGNERS")" = '0:0:1:644'
+}
+
+validate_sync_state_roots() {
+    local parent state_directory
+    for parent in /var /var/lib; do
+        test "$(realpath -e -- "$parent")" = "$parent"
+        test -d "$parent" && test ! -L "$parent"
+        test "$(stat -c '%u:%g:%a' "$parent")" = '0:0:755'
+    done
+    for state_directory in "$SYNC_ROOT" "$CLAIM_ROOT" "$STATE_ROOT"; do
+        test "$(realpath -e -- "$state_directory")" = "$state_directory"
+        test -d "$state_directory" && test ! -L "$state_directory"
+        test "$(stat -c '%u:%g:%a' "$state_directory")" = '0:0:700'
+    done
+}
+
+read_control_frame() {
+    local claim=$1
+    # Python source is carried on fd 9 so stdin remains the encrypted SSH
+    # transport. Read only two bounded control records before authentication.
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 "$claim" 9<<'PY'
+import os
+import stat
+import struct
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700):
+    raise SystemExit(1)
+
+def read_exact(size):
+    payload = bytearray()
+    while len(payload) < size:
+        chunk = os.read(0, size - len(payload))
+        if not chunk:
+            raise SystemExit(1)
+        payload.extend(chunk)
+    return bytes(payload)
+
+def receive(name, maximum):
+    size = struct.unpack(">Q", read_exact(8))[0]
+    if size == 0 or size > maximum:
+        raise SystemExit(1)
+    descriptor = os.open(
+        root / name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    try:
+        remaining = size
+        while remaining:
+            chunk = read_exact(min(remaining, 1024 * 1024))
+            view = memoryview(chunk)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise SystemExit(1)
+                view = view[written:]
+            remaining -= len(chunk)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+receive("shuzijun-sync-manifest.json", 32 * 1024 * 1024)
+receive("shuzijun-sync-manifest.json.sig", 64 * 1024)
+directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
+verify_control_signature() {
+    local claim=$1 manifest="$claim/shuzijun-sync-manifest.json"
+    local signature="$manifest.sig"
+    validate_allowed_signers
+    test -f "$manifest" && test ! -L "$manifest"
+    test -f "$signature" && test ! -L "$signature"
+    test "$(stat -c '%u:%g:%h:%a' "$manifest")" = '0:0:1:600'
+    test "$(stat -c '%u:%g:%h:%a' "$signature")" = '0:0:1:600'
+    ssh-keygen -Y verify -f "$SYNC_ALLOWED_SIGNERS" -I shuzijun-sync \
+        -n shuzijun-sync -s "$signature" < "$manifest" >/dev/null
+}
+
+ingest_signed_payload() {
+    local claim=$1
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 "$claim" 9<<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+from pathlib import Path, PurePosixPath
+
+MAX_FILES = 100_000
+MAX_FILE_BYTES = 8 * 1024 * 1024 * 1024
+MAX_BATCH_BYTES = 64 * 1024 * 1024 * 1024
+MIN_FREE_RESERVE = 1024 * 1024 * 1024
+FORBIDDEN_UPLOAD_NAMES = {".htaccess", ".user.ini"}
+FORBIDDEN_UPLOAD_SUFFIXES = {
+    ".cgi", ".pl", ".py", ".rb", ".sh", ".bash", ".zsh", ".fish",
+    ".exe", ".com", ".bat", ".cmd", ".ps1", ".jar", ".war",
+}
+
+root = Path(sys.argv[1]).resolve(strict=True)
+raw = (root / "shuzijun-sync-manifest.json").read_bytes()
+document = json.loads(raw.decode("utf-8"))
+if set(document) != {"files", "generation", "version"} or document["version"] != 2:
+    raise SystemExit(1)
+canonical = (json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode()
+generation = document["generation"]
+files = document["files"]
+if (canonical != raw or not isinstance(files, list) or len(files) > MAX_FILES
+        or isinstance(generation, bool) or not isinstance(generation, int)
+        or generation < 1 or generation >= 2**63):
+    raise SystemExit(1)
+
+previous = None
+total_size = 0
+database_seen = False
+validated = []
+for item in files:
+    if not isinstance(item, dict) or set(item) != {"path", "sha256", "size"}:
+        raise SystemExit(1)
+    relative, digest, size = item["path"], item["sha256"], item["size"]
+    if (not isinstance(relative, str) or not isinstance(digest, str)
+            or isinstance(size, bool) or not isinstance(size, int)
+            or size < 0 or size > MAX_FILE_BYTES):
+        raise SystemExit(1)
+    path = PurePosixPath(relative)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise SystemExit(1)
+    is_database = relative == "shuzijun-sync.sql.gz"
+    is_upload = relative.startswith("wp-content/uploads/")
+    if not is_database and not is_upload:
+        raise SystemExit(1)
+    if is_database:
+        if database_seen:
+            raise SystemExit(1)
+        database_seen = True
+    else:
+        name = path.name.lower()
+        if (name in FORBIDDEN_UPLOAD_NAMES or ".php" in name or ".phtml" in name
+                or ".phar" in name
+                or any(name.endswith(suffix) for suffix in FORBIDDEN_UPLOAD_SUFFIXES)):
+            raise SystemExit(1)
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise SystemExit(1)
+    if previous is not None and relative <= previous:
+        raise SystemExit(1)
+    previous = relative
+    total_size += size
+    if total_size > MAX_BATCH_BYTES:
+        raise SystemExit(1)
+    validated.append((path, digest, size))
+if not database_seen:
+    raise SystemExit(1)
+
+filesystem = os.statvfs(root)
+if (filesystem.f_bavail * filesystem.f_frsize < total_size + MIN_FREE_RESERVE
+        or filesystem.f_favail < len(validated) + 1024):
+    raise SystemExit(1)
+
+def read_exact(size):
+    payload = bytearray()
+    while len(payload) < size:
+        chunk = os.read(0, min(size - len(payload), 1024 * 1024))
+        if not chunk:
+            raise SystemExit(1)
+        payload.extend(chunk)
+    return bytes(payload)
+
+for relative, expected_digest, size in validated:
+    destination = root.joinpath(*relative.parts)
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(
+        destination,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+        0o600,
+    )
+    digest = hashlib.sha256()
+    try:
+        remaining = size
+        while remaining:
+            chunk = read_exact(min(remaining, 1024 * 1024))
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise SystemExit(1)
+                view = view[written:]
+            remaining -= len(chunk)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if digest.hexdigest() != expected_digest:
+        raise SystemExit(1)
+if os.read(0, 1):
+    raise SystemExit(1)
+for directory, directory_names, _ in os.walk(root, topdown=False):
+    descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+print(generation)
+PY
+}
+
+accept_generation() {
+    local generation=$1
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" "$LAST_ACCEPTED_GENERATION" "$generation" 9<<'PY'
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+state_path = Path(sys.argv[2])
+candidate_text = sys.argv[3]
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700):
+    raise SystemExit(1)
+if not re.fullmatch(r"[1-9][0-9]{0,18}", candidate_text):
+    raise SystemExit(1)
+candidate = int(candidate_text)
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(state_path, flags)
+try:
+    current_metadata = os.fstat(descriptor)
+    payload = os.read(descriptor, 32)
+    if os.read(descriptor, 1):
+        raise SystemExit(1)
+finally:
+    os.close(descriptor)
+if (not stat.S_ISREG(current_metadata.st_mode) or current_metadata.st_uid != 0
+        or current_metadata.st_gid != 0 or stat.S_IMODE(current_metadata.st_mode) != 0o600
+        or current_metadata.st_nlink != 1 or not re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", payload)):
+    raise SystemExit(1)
+current = int(payload)
+if candidate <= current:
+    raise SystemExit(1)
+
+temp_descriptor, temp_name = tempfile.mkstemp(prefix=".highest-accepted.", dir=root)
+temp_path = Path(temp_name)
+try:
+    os.fchmod(temp_descriptor, 0o600)
+    encoded = f"{candidate}\n".encode("ascii")
+    view = memoryview(encoded)
+    while view:
+        written = os.write(temp_descriptor, view)
+        if written <= 0:
+            raise SystemExit(1)
+        view = view[written:]
+    os.fsync(temp_descriptor)
+    os.close(temp_descriptor)
+    temp_descriptor = -1
+    os.replace(temp_path, state_path)
+    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if temp_descriptor >= 0:
+        os.close(temp_descriptor)
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        pass
+PY
+}
+
+probe_standby_api() {
+    local body status url
+    body=$(mktemp /tmp/shuzijun-standby-probe.XXXXXX) || return 1
+    for url in \
+        'https://www.shuzijun.com.cn/?rest_route=%2Fshuzijun%2Fv1%2Fapp-content' \
+        'https://www.shuzijun.com.cn/index.php?rest_route=%2Fshuzijun%2Fv1%2Fapp-content'; do
+        status=$(curl -q --silent --show-error --output "$body" --write-out '%{http_code}' \
+            --proto '=https' --tlsv1.2 --connect-timeout 5 --max-time 20 --noproxy '*' \
+            --header 'Authorization:' --header 'X-Yishu-Install-ID:' \
+            --resolve 'www.shuzijun.com.cn:443:127.0.0.1' "$url") \
+            || { rm -f -- "$body"; return 1; }
+        if [[ "$status" != 503 ]]; then
+            rm -f -- "$body"
+            return 1
+        fi
+        if ! env -i PATH="$PATH" LC_ALL=C LANG=C /usr/bin/python3 -I - "$body" <<'PY'
+import json
+import pathlib
+import sys
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+raise SystemExit(0 if isinstance(payload, dict) and payload.get("code") == "yishu_account_authority_unavailable" else 1)
+PY
+        then
+            rm -f -- "$body"
+            return 1
+        fi
+    done
+    rm -f -- "$body"
+    return 0
+}
+
+isolate_failed_fpm() {
+    local failed=0 load_state= active_state= sub_state= enabled_state=
+    systemctl mask --now php8.3-fpm >/dev/null 2>&1 || failed=1
+    systemctl stop php8.3-fpm >/dev/null 2>&1 || failed=1
+    if ! load_state=$(systemctl show php8.3-fpm --property=LoadState --value); then
+        failed=1
+    fi
+    if ! active_state=$(systemctl show php8.3-fpm --property=ActiveState --value); then
+        failed=1
+    fi
+    if ! sub_state=$(systemctl show php8.3-fpm --property=SubState --value); then
+        failed=1
+    fi
+    if ! enabled_state=$(systemctl is-enabled php8.3-fpm 2>/dev/null); then
+        [[ "$enabled_state" == masked ]] || failed=1
+    fi
+    [[ "$load_state" == masked && "$active_state" == inactive \
+        && "$sub_state" == dead && "$enabled_state" == masked ]] || failed=1
+    ! systemctl is-active --quiet php8.3-fpm || failed=1
+    [[ "$failed" -eq 0 ]]
+}
+
+# Share the site-directory read-only lock with the deployer/configurator. The
+# attestation/protocol queries are intentionally read-only and prove the
+# receiver itself is running on a verified standby before the sender exports.
+exec 8<"$SITE"
+flock -n 8
+verify_authority_role standby
+test "$SELF" = /usr/local/sbin/apply-shuzijun-sync
+test "$0" = "$SELF"
+test -f "$SELF" && test ! -L "$SELF"
+test "$(realpath -e -- "$SELF")" = "$SELF"
+test "$(stat -c '%u:%g:%h:%a' "$SELF")" = '0:0:1:755'
+if [[ $# -eq 1 && "$1" == --attest ]]; then
+    sha256sum "$SELF"
+    exit 0
+fi
+if [[ $# -eq 1 && "$1" == --protocol ]]; then
+    printf '%s\n' "$SYNC_PROTOCOL"
+    exit 0
+fi
+[[ $# -eq 1 && "$1" == --ingest ]] \
+    || { printf 'usage: apply-shuzijun-sync --attest|--protocol|--ingest\n' >&2; exit 2; }
+
+"$VERIFY" "$SITE"
+probe_standby_api
+validate_allowed_signers
+validate_sync_state_roots
+
+# The SSH stream lands directly in a root-only claim. Only bounded control
+# records are accepted before signature verification; signed per-file sizes,
+# aggregate limits, free-space reserve and hashes gate the remaining stream.
+CLAIM=$(mktemp -d "$CLAIM_ROOT/batch.XXXXXX")
+trap 'rm -rf --one-file-system -- "$CLAIM"' EXIT
+read_control_frame "$CLAIM"
+verify_control_signature "$CLAIM"
+GENERATION=$(ingest_signed_payload "$CLAIM")
+install -d -o root -g root -m 0700 "$CLAIM/wp-content/uploads"
+accept_generation "$GENERATION"
+DATABASE="$CLAIM/shuzijun-sync.sql.gz"
+MANIFEST="$CLAIM/shuzijun-sync-manifest.json"
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 DEST=/var/backups/pre-sync-$STAMP
@@ -64,23 +445,21 @@ cd "$SITE"
 wp db export "$DEST/wordpress.sql" --add-drop-table --allow-root >/dev/null
 gzip -9 "$DEST/wordpress.sql"
 cp -a wp-config.php "$DEST/wp-config.php"
+( cd "$DEST" && sha256sum wordpress.sql.gz wp-config.php > backup.sha256 )
+sync -f "$DEST"
+sync -f /var/backups
 
 wp_content="$SITE/wp-content"
 install -d -o root -g www-data -m 755 "$wp_content"
 
-# The receiver starts from a verified immutable code tree. Do not preserve
-# sender ownership or writable modes: doing so could hand PHP ownership of a
-# code directory during rsync, before the post-sync verifier runs.
+# Only the fixed, signed uploads subtree is synchronized. The destination is
+# scoped to uploads itself, so --delete cannot touch plugins, themes or config;
+# forbidden legacy upload files absent from the signed claim are removed.
 rsync -a --delete --no-owner --no-group --chmod=D755,F644 \
-    "${RSYNC_FILTERS[@]}" \
-    "$STAGE/wp-content/" "$SITE/wp-content/"
+    "$CLAIM/wp-content/uploads/" "$SITE/wp-content/uploads/"
 
-# Only explicit runtime trees are writable by WordPress. The wp-content parent
-# and every other entry (plugins, themes, MU plugins and root-level drop-ins)
-# stay root-owned so the PHP worker cannot rename or replace executable code.
 find "$wp_content" -mindepth 1 -maxdepth 1 \
-    ! -name uploads ! -name cache \
-    -exec chown -R root:www-data {} +
+    ! -name uploads ! -name cache -exec chown -R root:www-data {} +
 find "$wp_content" \
     \( -path "$wp_content/uploads" -o -path "$wp_content/cache" \) -prune -o \
     -type d -exec chmod 755 {} +
@@ -96,21 +475,29 @@ for runtime_dir in uploads cache; do
     fi
 done
 "$VERIFY" "$SITE"
-gunzip -c "$DATABASE" > "$STAGE/shuzijun-sync.sql"
-wp db import "$STAGE/shuzijun-sync.sql" --allow-root >/dev/null
+SQL="$CLAIM/shuzijun-sync.sql"
+test ! -e "$SQL" && test ! -L "$SQL"
+gunzip -c "$DATABASE" > "$SQL"
+wp db import "$SQL" --allow-root >/dev/null
 wp core update-db --allow-root >/dev/null
-
-# The backup node uses a persistent Redis object cache. A database import does
-# not invalidate cached `options`, so without this flush the API can keep
-# serving the previous launch poster and update timestamp indefinitely.
 wp cache flush --allow-root >/dev/null
 
+verify_authority_role standby
 chown root:www-data "$SITE/wp-config.php"
 chmod 640 "$SITE/wp-config.php"
 nginx -t
 systemctl reload nginx
 systemctl restart php8.3-fpm
+if ! probe_standby_api; then
+    if isolate_failed_fpm; then
+        printf 'sync receiver: standby runtime probe failed; PHP-FPM verified inactive/dead and persistently masked\n' >&2
+    else
+        printf 'sync receiver: CRITICAL standby runtime probe failed and PHP-FPM isolation could not be verified; immediate manual isolation required\n' >&2
+    fi
+    exit 1
+fi
 
-rm -f "$DATABASE" "$MANIFEST" "$STAGE/shuzijun-sync.sql"
-printf '[%s] incremental sync applied; backup=%s\n' "$(date '+%F %T')" "$DEST" >> "$LOG"
-printf 'sync-applied backup=%s cache=flushed\n' "$DEST"
+printf '[%s] signed uploads/database sync applied; generation=%s backup=%s\n' \
+    "$(date '+%F %T')" "$GENERATION" "$DEST" >> "$LOG"
+printf 'sync-applied generation=%s backup=%s cache=flushed signed=true uploads-only=true\n' \
+    "$GENERATION" "$DEST"

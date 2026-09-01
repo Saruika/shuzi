@@ -199,6 +199,8 @@ private struct PortfolioSearchBar: View {
                 Capsule()
                     .stroke(.white.opacity(0.1), lineWidth: 1)
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("portfolio-search-control")
 
             if isFocused {
                 Button("取消") {

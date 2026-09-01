@@ -30,8 +30,11 @@ readonly LIVE_PHP="$TARGET_DIR/shuzijun-app-content.php"
 readonly STAGING_ROOT=/var/lib/shuzijun-app-content/releases
 readonly BACKUP_ROOT=/var/backups/shuzijun-app-content
 readonly LOCK_PATH="$STAGING_ROOT"
+readonly AUTHORITY_LOCK_PATH="$SITE"
 readonly DEPLOYER=/usr/local/sbin/deploy-app-content-release
 readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
+readonly AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 readonly FPM_SERVICE=php8.3-fpm
 readonly HEALTH_HOST=www.shuzijun.com.cn
 readonly HEALTH_URL="https://$HEALTH_HOST/?rest_route=%2Fshuzijun%2Fv1%2Fapp-content"
@@ -43,6 +46,7 @@ MODE=dry-run
 BUNDLE_INPUT=
 EXPECTED_MANIFEST_SHA256=
 EXPECTED_LEGACY_PHP_SHA256=
+AUTHORITY_ROLE=
 BUNDLE=
 MANIFEST=
 PHP_BIN=
@@ -56,12 +60,14 @@ MODE_SEEN=0
 BUNDLE_SEEN=0
 MANIFEST_SHA_SEEN=0
 LEGACY_SHA_SEEN=0
+AUTHORITY_ROLE_SEEN=0
 
 usage() {
     cat <<'EOF'
 Usage:
   bootstrap-legacy-app-content-release --bundle ABSOLUTE_PATH \
       --manifest-sha256 SHA256 --legacy-php-sha256 SHA256 \
+      --authority-role authority \
       [--dry-run|--apply]
 
 The default mode is --dry-run. The trusted bundle must be the complete,
@@ -70,7 +76,8 @@ target must contain the exact root-owned 1.5.7 PHP entry point. The three
 support entries may be absent or may form any byte-exact subset of the trusted
 bundle after an interrupted run. --apply publishes only missing support
 entries with same-filesystem atomic renames and never replaces PHP or stops
-PHP-FPM.
+PHP-FPM. This bridge is authority-only: the legacy entry point predates the
+fixed standby marker and therefore must never run on a standby node.
 EOF
 }
 
@@ -122,10 +129,11 @@ validate_tool_path() {
     local tool=$1 label=$2
     [[ -f "$tool" && ! -L "$tool" && "$(realpath -e -- "$tool")" == "$tool" \
         && "$(stat -c '%h' "$tool")" == 1 ]] \
-        || fail "$label path is unsafe"
-    [[ "$(stat -c '%u' "$tool")" == 0 ]] || fail "$label must be owned by root"
+        || { fail "$label path is unsafe"; return 1; }
+    [[ "$(stat -c '%u' "$tool")" == 0 ]] \
+        || { fail "$label must be owned by root"; return 1; }
     reject_find_match "$label is writable by a non-root identity" \
-        "$tool" -maxdepth 0 -perm /022
+        "$tool" -maxdepth 0 -perm /022 || return 1
 }
 
 validate_fixed_paths() {
@@ -155,6 +163,49 @@ validate_staging_lock_path() {
         || fail 'staging root is not a canonical root-owned directory'
     reject_find_match 'staging root is writable by a non-root identity' \
         "$STAGING_ROOT" -maxdepth 0 -perm /022
+}
+
+validate_authority_lock_path() {
+    [[ "$AUTHORITY_LOCK_PATH" == /var/www/html/shuzijun.com.cn \
+        && -d "$AUTHORITY_LOCK_PATH" && ! -L "$AUTHORITY_LOCK_PATH" \
+        && "$(realpath -e -- "$AUTHORITY_LOCK_PATH")" == "$AUTHORITY_LOCK_PATH" \
+        && "$(stat -c '%u' "$AUTHORITY_LOCK_PATH")" == 0 ]] \
+        || { fail 'account-authority lock path is unsafe'; return 1; }
+    reject_find_match 'account-authority lock path is writable by a non-root identity' \
+        "$AUTHORITY_LOCK_PATH" -maxdepth 0 -perm /022 || return 1
+}
+
+validate_authority_verifier() {
+    local verifier_parent verifier_sha256 verifier_fd_path=/proc/self/fd/7
+    validate_tool_path "$AUTHORITY_VERIFY" 'account-authority verifier' || return 1
+    for verifier_parent in /usr /usr/local /usr/local/sbin; do
+        [[ "$(realpath -e -- "$verifier_parent")" == "$verifier_parent" \
+            && -d "$verifier_parent" && ! -L "$verifier_parent" \
+            && "$(stat -c '%u' "$verifier_parent")" == 0 ]] \
+            || { fail 'account-authority verifier parent is unsafe'; return 1; }
+        reject_find_match 'account-authority verifier parent is writable by a non-root identity' \
+            "$verifier_parent" -maxdepth 0 -perm /022 || return 1
+    done
+    exec 7<"$AUTHORITY_VERIFY" \
+        || { fail 'account-authority verifier cannot be opened'; return 1; }
+    [[ -f "$verifier_fd_path" \
+        && "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" == '0:0:1:755' ]] \
+        || { fail 'opened account-authority verifier metadata is unsafe'; exec 7<&-; return 1; }
+    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }') \
+        || { exec 7<&-; return 1; }
+    [[ "$verifier_sha256" == "$AUTHORITY_VERIFY_SHA256" ]] \
+        || { fail 'account-authority verifier does not match the reviewed release'; exec 7<&-; return 1; }
+}
+
+verify_authority_role() {
+    local verifier_status=0
+    validate_authority_verifier || return 1
+    if ! env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/7 "$AUTHORITY_ROLE"; then
+        verifier_status=1
+    fi
+    exec 7<&-
+    return "$verifier_status"
 }
 
 validate_relative_path() {
@@ -840,6 +891,14 @@ while [[ $# -gt 0 ]]; do
             LEGACY_SHA_SEEN=1
             shift 2
             ;;
+        --authority-role)
+            [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+            [[ "$AUTHORITY_ROLE_SEEN" -eq 0 ]] \
+                || fail 'authority role option may be specified only once'
+            AUTHORITY_ROLE=$2
+            AUTHORITY_ROLE_SEEN=1
+            shift 2
+            ;;
         --dry-run)
             [[ "$MODE_SEEN" -eq 0 ]] || fail 'bootstrap mode may be specified only once'
             MODE=dry-run
@@ -866,6 +925,8 @@ done
 [[ "$EUID" -eq 0 ]] || fail 'must run as root'
 [[ -n "$BUNDLE_INPUT" && -n "$EXPECTED_MANIFEST_SHA256" \
     && -n "$EXPECTED_LEGACY_PHP_SHA256" ]] || { usage >&2; exit 2; }
+[[ "$AUTHORITY_ROLE" == authority ]] \
+    || fail '--authority-role authority is mandatory; standby legacy bootstrap is prohibited'
 validate_digest "$EXPECTED_MANIFEST_SHA256" 'expected manifest SHA256'
 validate_digest "$EXPECTED_LEGACY_PHP_SHA256" 'expected legacy PHP SHA256'
 
@@ -873,6 +934,11 @@ for command_name in realpath stat find grep awk sha256sum flock nginx systemctl 
     install cp mv rm date mkdir chmod chown sleep tail env timeout runuser id sync; do
     require_command "$command_name"
 done
+
+validate_authority_lock_path
+exec 8<"$AUTHORITY_LOCK_PATH"
+flock -n 8 || fail 'account-authority configuration change is in progress'
+verify_authority_role
 
 validate_tool_path "$DEPLOYER" 'release deployer'
 "$DEPLOYER" --bundle "$BUNDLE_INPUT" \
@@ -893,6 +959,7 @@ if [[ "$MODE" == apply ]]; then
     clear_atomic_stage
 fi
 verify_baseline_no_http
+verify_authority_role
 
 if [[ "$MODE" == dry-run ]]; then
     printf 'app-content-bootstrap: dry-run passed legacy-php=%s manifest=%s support=%s/3\n' \
@@ -909,6 +976,7 @@ probe_unauthorized_api
 systemctl is-active --quiet "$FPM_SERVICE" || fail 'PHP-FPM must be active before bootstrap'
 validate_locked_bundle
 validate_resumable_support_state
+verify_authority_role
 create_legacy_backup
 verify_legacy_backup
 install_support_unit
@@ -917,6 +985,7 @@ verify_installed_jwt_autoload
 systemctl is-active --quiet "$FPM_SERVICE"
 
 "$VERIFY" "$SITE"
+verify_authority_role
 nginx -t >/dev/null
 probe_direct_plugin_blocked
 probe_unauthorized_api

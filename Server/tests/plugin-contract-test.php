@@ -6,6 +6,11 @@ declare(strict_types=1);
 define('ABSPATH', __DIR__ . '/');
 define('WP_ENVIRONMENT_TYPE', 'local');
 define('YISHU_APPLE_TEST_MODE', true);
+$authority_test_path = tempnam(sys_get_temp_dir(), 'yishu-authority-role-');
+if (!is_string($authority_test_path)) { throw new RuntimeException('无法创建角色标记测试文件'); }
+file_put_contents($authority_test_path, "standby\n");
+chmod($authority_test_path, 0644);
+define('YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH', $authority_test_path);
 define('HOUR_IN_SECONDS', 3600);
 define('DAY_IN_SECONDS', 86400);
 define('MINUTE_IN_SECONDS', 60);
@@ -31,16 +36,27 @@ class WP_Post {}
 class WP_REST_Request {
     private array $parameters;
     private array $headers;
+    private string $route;
+    private string $method;
 
-    public function __construct(array $parameters = array(), array $headers = array()) {
+    public function __construct(
+        array $parameters = array(),
+        array $headers = array(),
+        string $route = '',
+        string $method = 'GET'
+    ) {
         $this->parameters = $parameters;
         $this->headers = array_change_key_case($headers, CASE_LOWER);
+        $this->route = $route;
+        $this->method = strtoupper($method);
     }
 
     public function get_param(string $name) { return $this->parameters[$name] ?? null; }
     public function get_header(string $name): string {
         return (string) ($this->headers[strtolower($name)] ?? '');
     }
+    public function get_route(): string { return $this->route; }
+    public function get_method(): string { return $this->method; }
 }
 class WP_REST_Response {
     public $data;
@@ -58,6 +74,8 @@ class WP_REST_Response {
 $GLOBALS['yishu_test_options'] = array();
 $GLOBALS['yishu_test_filters'] = array();
 $GLOBALS['yishu_test_scheduled'] = array();
+$GLOBALS['yishu_test_registered_actions'] = array();
+$GLOBALS['yishu_test_registered_filters'] = array();
 $GLOBALS['yishu_test_lock_result'] = '1';
 $GLOBALS['yishu_test_lock_results'] = array();
 
@@ -93,8 +111,12 @@ final class Yishu_Test_WPDB {
 
 $GLOBALS['wpdb'] = new Yishu_Test_WPDB();
 
-function add_action(...$args): void {}
-function add_filter(...$args): void {}
+function add_action(...$args): void {
+    $GLOBALS['yishu_test_registered_actions'][] = $args;
+}
+function add_filter(...$args): void {
+    $GLOBALS['yishu_test_registered_filters'][] = $args;
+}
 function apply_filters(string $hook, $value, ...$args) {
     $callback = $GLOBALS['yishu_test_filters'][$hook] ?? null;
     return is_callable($callback) ? $callback($value, ...$args) : $value;
@@ -214,6 +236,140 @@ function expect_error_code(string $code, $actual, string $message): void {
     expect_true($actual instanceof WP_Error, $message . '（未返回 WP_Error）');
     expect_same($code, $actual->get_error_code(), $message . '（错误代码不符）');
 }
+
+$registered_action_names = array_map(
+    static fn (array $record): string => (string) ($record[0] ?? ''),
+    $GLOBALS['yishu_test_registered_actions']
+);
+expect_true(
+    !in_array('yishu_process_fan_apple_event', $registered_action_names, true)
+        && !in_array('yishu_retry_fan_apple_revocation', $registered_action_names, true)
+        && !in_array('delete_user', $registered_action_names, true)
+        && !in_array('save_post_portfolio', $registered_action_names, true)
+        && !in_array('init', $registered_action_names, true),
+    '未配置权威节点时不得注册异步账号写入回调'
+);
+$authority_filters = array_values(array_filter(
+    $GLOBALS['yishu_test_registered_filters'],
+    static function (array $record): bool {
+        return ($record[0] ?? '') === 'rest_pre_dispatch'
+            && is_array($record[1] ?? null)
+            && ($record[1][1] ?? '') === 'enforce_account_authority';
+    }
+));
+expect_true(
+    count($authority_filters) === 1 && ($authority_filters[0][2] ?? null) === 0,
+    '权威节点门禁必须在其他 App REST pre-dispatch 过滤器之前执行'
+);
+expect_true(
+    Shuzijun_App_Content_API::account_authority_enabled() === false,
+    '固定角色标记为 standby 时必须默认非权威节点'
+);
+
+$_SERVER['HTTP_HOST'] = 'www.shuzijun.com.cn';
+$_SERVER['REMOTE_ADDR'] = '127.0.0.1';
+$_SERVER['HTTP_X_FORWARDED_FOR'] = '101.43.79.80';
+$spoofed_authority_request = new WP_REST_Request(
+    array(),
+    array(
+        'Host' => 'www.shuzijun.com.cn',
+        'X-Forwarded-For' => '101.43.79.80',
+        'X-Account-Node' => 'primary',
+    ),
+    '/shuzijun/v1/fan/register',
+    'POST'
+);
+$standby_denial = Shuzijun_App_Content_API::enforce_account_authority(
+    new WP_REST_Response(array('unsafe' => true)),
+    null,
+    $spoofed_authority_request
+);
+expect_error_code(
+    'yishu_account_authority_unavailable',
+    $standby_denial,
+    '伪造 Host、回环地址或转发头不得提升备用节点'
+);
+expect_same(
+    array('status' => 503),
+    $standby_denial->get_error_data(),
+    '备用节点必须以明确的 503 失败关闭'
+);
+foreach (array(
+    '/shuzijun/v1/app-content',
+    '/shuzijun/v1/app-admin/fans',
+    '/shuzijun/v1/fan/apple-notifications',
+) as $protected_route) {
+    expect_error_code(
+        'yishu_account_authority_unavailable',
+        Shuzijun_App_Content_API::enforce_account_authority(
+            null,
+            null,
+            new WP_REST_Request(array(), array(), $protected_route, 'GET')
+        ),
+        '备用节点必须拒绝 App 敏感读取与写入路由'
+    );
+}
+$outside_result = new WP_REST_Response(array('ok' => true));
+expect_same(
+    $outside_result,
+    Shuzijun_App_Content_API::enforce_account_authority(
+        $outside_result,
+        null,
+        new WP_REST_Request(array(), array(), '/wp/v2/posts', 'GET')
+    ),
+    '权威节点门禁不得影响插件命名空间以外的 REST 路由'
+);
+
+chmod($authority_test_path, 0644);
+file_put_contents($authority_test_path, "authority\n");
+chmod($authority_test_path, 0644);
+expect_true(
+    Shuzijun_App_Content_API::account_authority_enabled() === true,
+    '仅当固定角色标记精确为 authority 时允许权威账号路由'
+);
+$authority_passthrough = new WP_REST_Response(array('authority' => true));
+expect_same(
+    $authority_passthrough,
+    Shuzijun_App_Content_API::enforce_account_authority(
+        $authority_passthrough,
+        null,
+        new WP_REST_Request(array(), array(), '/shuzijun/v1/app-content', 'GET')
+    ),
+    '明确配置的权威节点必须保持 App REST 处理链'
+);
+Shuzijun_App_Content_API::init();
+$authority_action_names = array_map(
+    static fn (array $record): string => (string) ($record[0] ?? ''),
+    $GLOBALS['yishu_test_registered_actions']
+);
+expect_true(
+    in_array('yishu_process_fan_apple_event', $authority_action_names, true)
+        && in_array('yishu_retry_fan_apple_revocation', $authority_action_names, true)
+        && in_array('delete_user', $authority_action_names, true)
+        && in_array('save_post_portfolio', $authority_action_names, true)
+        && in_array('init', $authority_action_names, true),
+    '权威节点必须注册账号清理、撤销和删除回调'
+);
+
+$authority_method_start = strpos($plugin_source, 'public static function account_authority_enabled');
+$authority_method_end = strpos($plugin_source, 'public static function block_fan_wordpress_login', $authority_method_start);
+$authority_method_source = ($authority_method_start === false || $authority_method_end === false)
+    ? ''
+    : substr($plugin_source, $authority_method_start, $authority_method_end - $authority_method_start);
+expect_true(
+    $authority_method_source !== ''
+        && strpos($plugin_source, "const ACCOUNT_AUTHORITY_ROLE_PATH = '/etc/shuzijun/account-authority-role';") !== false
+        && strpos($authority_method_source, 'self::ACCOUNT_AUTHORITY_ROLE_PATH') !== false
+        && strpos($authority_method_source, '$payload === "authority\\n"') !== false
+        && strpos($authority_method_source, 'wp-config.php') === false
+        && strpos($authority_method_source, "(int) ($opened['uid'] ?? -1) !== 0") !== false
+        && strpos($authority_method_source, "(int) ($opened['gid'] ?? -1) !== 0") !== false
+        && strpos($authority_method_source, "($opened['mode'] & 0777) !== 0644") !== false
+        && strpos($authority_method_source, "(int) ($opened['nlink'] ?? 0) !== 1") !== false
+        && strpos($authority_method_source, '$request->get_header') === false
+        && strpos($authority_method_source, '$_SERVER[') === false,
+    '权威判定只能依赖服务器所有的固定精确角色标记'
+);
 
 function valid_launch_poster(string $id): array {
     return array(
@@ -1108,7 +1264,11 @@ expect_true(
         && strpos($privacy_policy_source, '最长 30 天保留') !== false
         && strpos($privacy_policy_source, '旧授权并发重建账号') !== false
         && strpos($privacy_policy_source, 'Apple 是 Apple ID 登录身份验证的处理方') !== false
-        && strpos($privacy_policy_source, '尚未补填抖音 ID 的 Apple 待完成申请也可删除') !== false,
+        && strpos($privacy_policy_source, '尚未补填抖音 ID 的 Apple 待完成申请也可删除') !== false
+        && strpos($privacy_policy_source, '管理员内容上传') !== false
+        && strpos($privacy_policy_source, '照片、视频和封面') !== false
+        && strpos($privacy_policy_source, '哈希化网络指纹') !== false
+        && strpos($privacy_policy_source, '不用于跟踪或广告') !== false,
     'Build 33 公开隐私政策必须与 Apple 即时验证、加密撤销凭据和自主删除实现一致'
 );
 $rate_limit_start = strpos($plugin_source, 'private static function rate_limit');
@@ -1532,4 +1692,5 @@ expect_same($defaults['launchPosters'], $recovered_config['launchPosters'], '损
 expect_same($defaults['showreel'], $recovered_config['showreel'], '损坏的 Showreel 应独立回退');
 expect_same($defaults['dramas'], $recovered_config['dramas'], '损坏的影视履历应独立回退');
 
+@unlink($authority_test_path);
 fwrite(STDOUT, "plugin-contract-test: passed\n");

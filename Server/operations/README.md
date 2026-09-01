@@ -135,11 +135,99 @@ sha256sum release.sha256
 调用时还必须从可信的 CI/Git 发布记录单独取得
 清单本身的 SHA-256，不能只信任与包一起上传的清单。
 
+账号数据是严格的单写者拓扑。每台节点都必须有固定、由服务器 root
+管理的 `/etc/shuzijun/account-authority-role`：上海主节点的内容必须精确为
+`authority\n`，新加坡备用节点必须精确为 `standby\n`。文件必须是
+root:root、模式精确 `0644`、无符号/硬链接的唯一普通文件；`/etc` 与
+`/etc/shuzijun` 必须是正规 root:root 目录且模式精确 `0755`。缺失、多一个字节、
+CRLF、大小写不同或不安全元数据都是失败关闭。
+
+插件只读这个固定 marker，不从 Host、`REMOTE_ADDR`、代理头、主机名、
+WordPress option、数据库或 PHP 运行时常量推断角色；因此整站或数据库同步
+不会把备用节点提升成写节点。备用节点的 pretty
+`/wp-json/shuzijun/v1/` 仍由 Nginx 代理到上海；能绕过 path proxy 的
+`/?rest_route=` 和 `/index.php?rest_route=` 会在应用层固定返回 503
+`yishu_account_authority_unavailable`，也不会注册会改写账号数据的
+Cron/delete hooks。
+
+两个节点都必须安装同一版本的固定只读角色验证器：
+
+```bash
+sudo install -o root -g root -m 0755 \
+  Server/operations/verify-account-authority-role.py \
+  /usr/local/sbin/verify-shuzijun-account-authority-role
+```
+
+它以隔离模式 Python 运行，只通过 `O_NOFOLLOW` 读取上述固定 marker，
+并检查精确负载、父目录、UID/GID、权限、文件类型和链接数。所有会调用它的
+发布、bootstrap、配置与同步工具都钉住同一个已审核 SHA-256；更新验证器时
+必须同步更新这些钉住值，并先在两个节点原子替换验证器，不能混用旧版。
+
+发布器会校验验证器本身与 `/usr/local/sbin` 均为 root 所有且非 root
+不可写。dry-run/apply 和独立配置事务会在站点根目录的只读文件描述符上
+共用同一个独占 `flock`；不创建锁文件，且发布全程不能并发切换配置。
+发布器然后在 dry-run 成功前将实际 marker 与 `--authority-role`
+比对。Apply 会在第一次 HTTP 探针前完成同一检查，在创建备份/改写
+代码前再检，在 FPM 仍停止时对新插件启动前再检，上线验收时继续复验。
+自动回滚也必须在重启 FPM 前通过同一个离线门禁。声明角色与 marker 不符时，
+dry-run 和 apply 都会在任何业务探针、备份或代码写入之前失败。
+发布器从不创建、删除或更改角色 marker。
+
+角色 marker 只能由独立、显式、可回滚的配置工具改变。工具不推断主机身份；
+设置 `authority` 必须额外传入 `--confirm-single-writer`。它在同一个站点目录锁内
+重验当前字节，先持久化 root-only 备份，再通过同目录临时文件原子替换 marker；
+后置验证失败会恢复原字节，原来缺失则恢复为缺失。配置工具可安装在两节点，
+但备节点平时只能配成 `standby`；任何提升都必须先确认旧 authority 已被隔离或降级。
+工具还强制 `--confirm-writers-drained`，并在 dry-run/apply 中都严格确认
+`php8.3-fpm` 是持久 `masked` 且完全停止的 `inactive/dead`。传入该确认前，操作者
+还必须停止同步定时器、等待正在执行的 WP-CLI/Cron/帐号请求结束，并完成跨节点
+fencing；这个参数不表示本机能自动证明远端已隔离。
+
+```bash
+# 两节点一次性准备；/etc/shuzijun 必须让 PHP worker 可遍历/可读 marker
+sudo install -d -o root -g root -m 0755 /etc/shuzijun
+sudo install -d -o root -g root -m 0700 /var/backups/shuzijun-account-authority
+sudo install -o root -g root -m 0755 \
+  Server/operations/configure-account-authority.py \
+  /usr/local/sbin/configure-shuzijun-account-authority
+
+# 同步、WP-CLI/Cron 与远端写入者排空后，dry-run 前就必须持久隔离 FPM。
+sudo systemctl mask --now php8.3-fpm
+
+# 先在备节点初始化 standby（先 dry-run，再用相同参数 apply）
+sudo /usr/local/sbin/configure-shuzijun-account-authority \
+  --role standby --expected-current-sha256 absent \
+  --backup-dir /var/backups/shuzijun-account-authority/<备节点唯一事务名> \
+  --confirm-writers-drained \
+  --dry-run
+
+# 备节点验证完成后，再在主节点初始化 authority
+sudo /usr/local/sbin/configure-shuzijun-account-authority \
+  --role authority --confirm-single-writer --expected-current-sha256 absent \
+  --backup-dir /var/backups/shuzijun-account-authority/<主节点唯一事务名> \
+  --confirm-writers-drained \
+  --dry-run
+
+# 审核 candidate-sha256 后原样重跑，只把 --dry-run 改成 --apply。
+# 已存在 marker 的任何切换必须改用当前已审核的 64 位小写 SHA-256，
+# 并使用新的备份事务名；不能使用 absent 覆盖现有 marker。
+# 配置工具不会解除 mask。保持 FPM masked，直到两节点角色、路由与单写者
+# 验收全部完成，再由操作者显式 unmask/start；不得在事务中途启动。
+```
+
+计划内切换时，先暂停账号写入，在旧 authority 仍是唯一写者时完成最终数据库
+同步；然后把旧节点切到 `standby` 并验证，再把新节点切到 `authority`，
+最后切换 Nginx/CDN 路由。旧主节点不可达时，必须先完成基础设施 fencing，确认它无法再写，
+才能在备节点使用 `--confirm-single-writer` 提升。任何时刻都不允许两个 `authority`。
+
 如果节点仍运行历史 1.5.7 单文件插件，并且还没有 `composer.json`、
 `composer.lock` 与 `vendor/`，不能直接执行普通发布器。先完成新版 Nginx
 敏感路由、代码所有权、最新版 verifier、Composer、staging 和 backup
 边界的部署，再使用一次性 `bootstrap-legacy-app-content-release` 建立可回滚
-基线。它要求操作者同时提供 Git 中已核对的 1.5.7 PHP SHA-256 和 Build 34
+基线。该 bridge **只允许在 authority 节点使用**；1.5.7 不识别固定 standby marker，
+因此备节点不得 bootstrap 或在线运行它。历史备节点必须先从路由中移除、停止并持久
+mask FPM，由已审核的完整发布镜像重建为 fail-closed 版本；不得用整站同步补齐代码。
+它要求操作者同时提供 Git 中已核对的 1.5.7 PHP SHA-256 和 Build 34
 清单 SHA-256；默认 dry-run，`--apply` 只补齐已验证 bundle 的 Composer
 元数据与 `vendor/`，绝不替换旧 PHP：
 
@@ -148,18 +236,23 @@ sudo /usr/local/sbin/bootstrap-legacy-app-content-release \
   --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
   --manifest-sha256 <CI 记录的 release.sha256 哈希> \
   --legacy-php-sha256 <Git 中已核对的 1.5.7 PHP 哈希> \
+  --authority-role authority \
   --dry-run
 
 sudo /usr/local/sbin/bootstrap-legacy-app-content-release \
   --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
   --manifest-sha256 <同一个已核对哈希> \
   --legacy-php-sha256 <同一个已核对的 1.5.7 PHP 哈希> \
+  --authority-role authority \
   --apply
 ```
 
 Bootstrap 会先调用发布器的只读 `--bundle-preflight`，完成完整包、PHP、
 Composer、锁定依赖和漏洞审计；随后在同一个 staging `flock` 下再次验证全部
-字节。Apply 前后都要求插件入口和 `vendor/autoload.php` 的直接 URL 返回 404，
+字节。它与普通发布器使用同一个站点根目录只读锁，必须显式提供
+`--authority-role authority`，任何 standby 参数在触发 HTTP、备份或发布前即被拒绝。
+它在 dry-run 成功前、创建备份/发布支持文件前和事后
+重复执行固定静态验证器。Apply 前后都要求插件入口和 `vendor/autoload.php` 的直接 URL 返回 404，
 query-form App API 仍返回受保护的 401。它先在 Web 根目录外建立 root-only
 旧 PHP 审计备份，并确认可信 1.5.7 入口不引用 Composer/JWT 支持文件。FPM
 全程保持在线；缺少的支持文件先在 MU-plugin 同一文件系统的 root-only 隐藏
@@ -170,17 +263,32 @@ query-form App API 仍返回受保护的 401。它先在 Web 根目录外建立 
 执行下方普通发布器 dry-run/apply，不要把它当作日常升级命令重复使用。
 
 典型调用如下；SHA-256 是非敏感的发布校验值，不能替换成现场重新计算后
-未经核对的值：
+未经核对的值。备节点先用 `standby` dry-run/apply，上海节点再用
+`authority` dry-run/apply：
 
 ```bash
 sudo /usr/local/sbin/deploy-app-content-release \
   --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
   --manifest-sha256 <CI 记录的 release.sha256 哈希> \
+  --authority-role standby \
   --dry-run
 
 sudo /usr/local/sbin/deploy-app-content-release \
   --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
   --manifest-sha256 <同一个已核对哈希> \
+  --authority-role standby \
+  --apply
+
+sudo /usr/local/sbin/deploy-app-content-release \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --manifest-sha256 <同一个已核对哈希> \
+  --authority-role authority \
+  --dry-run
+
+sudo /usr/local/sbin/deploy-app-content-release \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --manifest-sha256 <同一个已核对哈希> \
+  --authority-role authority \
   --apply
 ```
 
@@ -203,17 +311,30 @@ Web 根目录、备份或服务状态。Composer 漏洞审计仍可能访问公�
 发布阶段短暂停止 `php8.3-fpm`，先安装 `vendor/` 和 Composer 元数据，最后
 安装插件入口；在 FPM 仍停止时，以 `www-data` 身份加载 JWT autoloader。
 在停止服务前，发布器会使用 `systemctl mask` 安装持久启动保护；完整发布单元
-的哈希和 autoloader 在离线状态通过后，才短暂 `unmask` 并启动 FPM。FPM 启动
-后会立即再次持久 mask；只有 Web 根目录、Nginx、直连 PHP 404 和本机 API 401
+的哈希和 autoloader 在离线状态通过后，发布器还会以 `www-data`、清空环境和
+固定 PHP 8.3 加载实际 `wp-load.php`，离线构造
+`GET /shuzijun/v1/app-content`，并严格断言 authority 为
+401/`fan_session_required`、standby 为
+503/`yishu_account_authority_unavailable`。这同时证明 marker 对 worker 可读及
+新插件的实际 REST 语义；自动回滚也在重启前重复同一离线探针。
+全部通过后才短暂 `unmask` 并启动 FPM。FPM 启动
+后会立即再次持久 mask；只有 Web 根目录、Nginx、直连 PHP 404 和本机 API
+权威角色验收
 全部在线验收通过，才最终解除启动保护。因此复制、哈希和在线验收期间发生
 SIGKILL、掉电或重启时，systemd 不会把半成品或正在验收的代码自动拉起。
 `unmask`、启动、再次 mask 是三个独立 systemd 操作；这个很短的交接窗口中，
-代码已经通过离线哈希和 autoloader 验证，但在线探针尚未完成。自动回滚使用
+代码已经通过离线哈希、autoloader 与 WordPress REST 角色验证，但在线探针尚未完成。自动回滚使用
 同一双阶段保护，失败隔离必须同时确认 FPM 已停止且 unit 仍为 persistent
 masked。部署器在任何 apply HTTP/备份写入前和每次 mask 前都会再次要求
 `php8.3-fpm` 原本为 exact enabled；它不会擅自改变 masked/disabled 的策略。
 `--apply` 在改动前后都使用 query-form REST 路由直连本机，这样新加坡节点的
-pretty-URL 代理不会把探针转到上海；探针要求本机返回 401 JSON 及插件的
+pretty-URL 代理不会把探针转到上海。改动前探针已与声明角色严格绑定，
+不再存在接受任意 401/503 的 legacy 例外；新代码上线后以及自动回滚后也严格
+要求 `--authority-role authority` 对应 401、`--authority-role standby` 对应
+503。如果备节点回滚到不含 fail-closed 保护的旧版，回滚验收会失败并保持
+PHP-FPM 停止且持久 mask，不会重新开放 query-form 绕过。探针继续校验 JSON
+错误码（401 必须为 `fan_session_required`，503 必须为
+`yishu_account_authority_unavailable`）、
 `X-Robots-Tag`/`Vary` 安全头。它还在改动前、改动后及自动回滚验收中分别
 请求插件入口和 `vendor/autoload.php`，两者都必须由 Nginx 精确返回 404；
 403 或 200 都视为发布失败。安装、哈希复核、Web 根目录校验、Nginx、FPM 或
@@ -233,29 +354,178 @@ queue on every timer run; the systemd path unit observed its own worker change,
 retrigged immediately, and eventually hit the start limit. The fixed worker
 changes the queue only when it is created or actually contains URLs.
 
-`apply-shuzijun-sync` is the reviewed backup-node receiver. After importing the
-primary database it explicitly flushes WordPress's persistent Redis object
-cache before restarting PHP-FPM. Without that step, the database is current but
-the App content API can indefinitely serve an older launch poster and
-`updatedAt` value from Redis. The script verifies the transfer checksum, creates
-a pre-sync database/config backup, validates Nginx and fails closed via
-`set -euo pipefail`.
+`sync-to-backup` and `apply-shuzijun-sync` form one pinned v3 protocol. The
+sender first proves its local marker is `authority`, attests the remote receiver
+against the exact SHA-256 compiled into the sender, and requires the exact
+`shuzijun-sync-receiver-v3-signed-uploads-only` protocol response before it
+issues a generation or creates an export. Install and attest the receiver first;
+an older receiver is not backward compatible and must never be invoked as a
+fallback.
 
-`sync-to-backup` is the matching primary-node sender. Both sides reject or
-exclude PHP files with appended suffixes, backup/editor residue, environment
-files, database exports and private-key formats including Apple `.p8` keys. The sender also removes stale
-excluded files from its dedicated staging directory, while the receiver runs
-the webroot verifier before and after copying files. The `wp-content` parent and
-all code/config entries remain `root:www-data` and non-writable throughout the
-copy; only the explicit `uploads` and `cache` runtime trees are returned to
-`www-data`. This prevents the PHP worker from renaming a root-owned plugin
-directory through a writable parent.
+The batch contains only a database gzip and `wp-content/uploads/`. A canonical
+JSON v2 manifest lists every allowed path, byte size, SHA-256 and a strictly
+increasing generation, and is signed with the
+existing root-only Ed25519 sync key under namespace and identity
+`shuzijun-sync`. The receiver verifies it against the root-owned
+`/etc/shuzijun/sync-signers`. The sender then streams a bounded manifest and
+signature followed by the declared file bytes through encrypted SSH directly
+to the root receiver; there is no remotely writable staging directory and no
+database plaintext owned by the transport account. Before authentication the
+receiver writes at most the bounded control records into a fresh root-only
+claim below `/var/lib/shuzijun-sync/incoming`; only after signature verification
+does it accept the size-bounded payload and verify every digest. It atomically
+advances root-only `/var/lib/shuzijun-sync/state/highest-accepted-generation`
+before any backup, media or database mutation, so the same or an older signed
+batch is rejected. A failed application consumes its generation; retry by
+issuing a newer batch, never by deleting or reducing either generation file.
+
+Any extra path, code/theme/plugin/config file, executable upload, symlink,
+hard-linked sender file, non-canonical manifest, oversize batch, digest mismatch,
+trailing byte or missing database is rejected. The sender's staging rsync
+independently excludes pure/mixed-case PHP and ends with an uploads-only include
+followed by a catch-all exclude; the receiver's rsync has fixed uploads-only
+source and destination roots, so its `--delete` cannot reach code or config.
+`verify-webroot-security` separately rejects PHP, PHTML, PHAR, script and
+per-directory config payloads already present in uploads, so
+whole-site sync cannot become a second code-release path; only
+`deploy-app-content-release` may replace executable code.
+
+The receiver acquires the shared site-directory lock and proves `standby`
+before protocol negotiation, before reading a batch and again immediately
+before restart. It requires both local query-form REST routes to return
+503/`yishu_account_authority_unavailable` before any root claim, backup or
+database/media write. After importing it flushes the persistent cache, reloads
+Nginx, restarts FPM and repeats both standby probes. A failed post-sync probe
+must both stop and persistently mask `php8.3-fpm`, then prove exact
+`masked`/`inactive`/`dead` state; failure to prove isolation is a critical manual
+incident rather than a swallowed cleanup error. Pre-sync database/config backups
+are root-only and fsynced; the App release unit and all other code remain
+`root:www-data` and non-writable.
+
+SSH is not a general standby login. The sender connects only as the dedicated,
+password-locked `shuzijun-sync-transport` account with pinned host-key checking.
+Its root-owned authorized key uses `restrict`, the reviewed sshd Match block
+forces `shuzijun-sync-ssh-gate`, and that gate accepts only the exact receiver
+`--attest`, `--protocol` and `--ingest` commands. The matching sudoers file grants
+only those three root commands. Remove any prior sync-key access for `ubuntu` and
+any broad `NOPASSWD: ALL`; otherwise the transport boundary is not installed.
+
+`shuzijun-sync.service` and `shuzijun-sync.timer` are installed only on the
+Shanghai primary. The timer runs once per day at 03:30 Asia/Shanghai with up
+to ten minutes of jitter; `Persistent=true` catches one missed run after a
+reboot without creating a high-frequency database/config backup stream. The
+oneshot service has a 45-minute deadline, uses low CPU/I/O priority and first
+requires MySQL, Nginx and PHP-FPM to be active. It must run as root because the
+sender reads the root-only pinned SSH key, invokes the root-owned verifier and
+exports WordPress through WP-CLI. Its systemd sandbox removes all capabilities,
+makes the system and primary Web root read-only, keeps `/root` read-only, gives
+it a private temporary directory, and permits writes only below `/run` and
+`/var/log` plus the root-only generation state below `/var/lib/shuzijun-sync` on
+the primary. The only remote write path remains the reviewed receiver reached
+through pinned SSH host-key verification.
+
+Every scheduled or manual sender invocation must take
+`/run/shuzijun-sync.lock`. Before a two-node release, stop the timer first and
+do not interrupt a receiver/sender that is already applying a database dump:
+
+```bash
+systemctl stop shuzijun-sync.timer
+if systemctl is-active --quiet shuzijun-sync.service; then
+  echo 'sync still active; wait for it to finish before deployment' >&2
+  exit 1
+fi
+```
+
+After both nodes pass their release manifests and smoke tests, install the
+current receiver on Singapore first. Then install the sender and versioned
+units on Shanghai, validate the units, perform one foreground locked sync, and
+only then enable the persistent timer:
+
+```bash
+# Singapore standby, first:
+install -d -o root -g root -m 0700 /var/lib/shuzijun-sync
+install -d -o root -g root -m 0700 \
+  /var/lib/shuzijun-sync/incoming \
+  /var/lib/shuzijun-sync/state
+install -o root -g root -m 0600 /dev/null \
+  /var/lib/shuzijun-sync/state/highest-accepted-generation
+printf '0\n' > /var/lib/shuzijun-sync/state/highest-accepted-generation
+# Each line is: shuzijun-sync <reviewed public key corresponding to the
+# primary's /root/.ssh/shuzijun_sync_ed25519>. Never place a private key here.
+install -o root -g root -m 0644 <reviewed-allowed-signers-file> \
+  /etc/shuzijun/sync-signers
+install -o root -g root -m 0755 Server/operations/apply-shuzijun-sync \
+  /usr/local/sbin/apply-shuzijun-sync
+install -o root -g root -m 0755 Server/operations/shuzijun-sync-ssh-gate \
+  /usr/local/sbin/shuzijun-sync-ssh-gate
+install -o root -g root -m 0440 \
+  Server/operations/shuzijun-sync-transport.sudoers \
+  /etc/sudoers.d/shuzijun-sync-transport
+visudo -cf /etc/sudoers.d/shuzijun-sync-transport
+useradd --system --home-dir /var/lib/shuzijun-sync-transport \
+  --shell /bin/sh shuzijun-sync-transport
+usermod --lock shuzijun-sync-transport
+install -d -o root -g root -m 0755 \
+  /var/lib/shuzijun-sync-transport \
+  /var/lib/shuzijun-sync-transport/.ssh
+# The reviewed public-key line must begin with `restrict ` and must be the only
+# line. Do not include a private key or a command supplied by the sender.
+install -o root -g root -m 0644 <restrict-prefixed-authorized-key> \
+  /var/lib/shuzijun-sync-transport/.ssh/authorized_keys
+install -o root -g root -m 0644 \
+  Server/operations/shuzijun-sync-transport.sshd \
+  /etc/ssh/sshd_config.d/60-shuzijun-sync-transport.conf
+sshd -t
+sshd -T -C user=shuzijun-sync-transport,host=localhost,addr=127.0.0.1 \
+  | grep -Fx 'forcecommand /usr/local/sbin/shuzijun-sync-ssh-gate'
+systemctl reload ssh
+sha256sum /usr/local/sbin/apply-shuzijun-sync
+sudo /usr/local/sbin/apply-shuzijun-sync --protocol
+
+# Compare the printed SHA-256 and protocol with REMOTE_RECEIVER_SHA256 and
+# SYNC_PROTOCOL in the reviewed sender source, then install Shanghai second:
+install -d -o root -g root -m 0700 /var/lib/shuzijun-sync
+install -o root -g root -m 0600 /dev/null \
+  /var/lib/shuzijun-sync/highest-issued-generation
+printf '0\n' > /var/lib/shuzijun-sync/highest-issued-generation
+install -o root -g root -m 0755 Server/operations/sync-to-backup \
+  /usr/local/sbin/sync-to-backup
+install -o root -g root -m 0644 Server/operations/shuzijun-sync.service \
+  /etc/systemd/system/shuzijun-sync.service
+install -o root -g root -m 0644 Server/operations/shuzijun-sync.timer \
+  /etc/systemd/system/shuzijun-sync.timer
+systemd-analyze verify /etc/systemd/system/shuzijun-sync.service \
+  /etc/systemd/system/shuzijun-sync.timer
+systemctl daemon-reload
+/usr/bin/flock -n /run/shuzijun-sync.lock \
+  /usr/local/sbin/sync-to-backup
+systemctl enable --now shuzijun-sync.timer
+systemctl is-enabled --quiet shuzijun-sync.timer
+systemctl is-active --quiet shuzijun-sync.timer
+```
+
+The two `0\n` initializations are one-time setup on fresh state only. The
+generation files are part of the security boundary: never reset, delete,
+roll back from a snapshot, or copy one node's file over the other. If a restore
+leaves the primary's issued value at or below Singapore's accepted value, keep
+the timer stopped and advance the primary state under change control to a value
+strictly above the accepted state before generating a new signed batch. Gaps are
+expected after failed exports or applies and must not be reused.
+
+Never install the timer on Singapore and never call `sync-to-backup` directly
+without `flock`. If the foreground sync or its post-sync standby smoke fails,
+leave both the sync timer and `shuzijun-failover.timer` stopped. A timer run
+that finds the lock busy fails visibly and does not start a second transfer;
+operators finish a release with the explicit foreground sync above, so a
+maintenance collision cannot postpone the release baseline until the next
+03:30 run.
 
 `verify-webroot-security` is the post-deployment guard for both production
 nodes. It fails when common backup/config/database/private-key residue exists
 under the document root, when any symbolic link or mixed-case PHP filename is
 present, when a PHP file has any suffix appended after `.php`, when an
-unexpected root-level PHP endpoint appears, when code ownership is writable,
+unexpected root-level PHP endpoint appears, when uploads contain executable or
+per-directory config payloads, when code ownership is writable,
 when the Nginx deny include is absent, when that include does not return 404 for
 every direct `/wp-content/...php` request, or when the resulting Nginx
 configuration is invalid. This ensures the MU-plugin's locked `vendor/` PHP is

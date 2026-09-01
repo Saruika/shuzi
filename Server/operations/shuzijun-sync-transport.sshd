@@ -1,0 +1,14 @@
+Match User shuzijun-sync-transport
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    AllowTcpForwarding no
+    PermitTunnel no
+    PermitUserRC no
+    MaxSessions 1
+    ForceCommand /usr/local/sbin/shuzijun-sync-ssh-gate
+
+Match all

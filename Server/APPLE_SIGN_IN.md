@@ -7,13 +7,14 @@ Build 34 使用 WordPress REST API 的状态型 Apple 登录流程。本文只�
 - 必须把 `shuzijun-app-content.php`、`composer.json`、`composer.lock` 和完整 `vendor/` 作为一个原子发布单元。`firebase/php-jwt` 必须严格锁定为 `7.1.0`，发布前执行 `composer audit --locked --no-dev`。
 - PHP 需为 8.3，并开启 OpenSSL 与 Sodium。
 - 在 WordPress 运行配置（不在仓库）定义 `YISHU_APPLE_TEAM_ID`、`YISHU_APPLE_KEY_ID`、`YISHU_APPLE_PRIVATE_KEY_PATH` 和 `YISHU_APPLE_DATA_KEY_PATH`。两个密钥路径都必须在 `ABSPATH` 之外，由 PHP worker 可读，权限不得宽于 `0400`/`0600`，且不得被同组或其他用户读取。`YISHU_APPLE_DATA_KEY_PATH` 指向一个仅含 32 字节高熵密钥的 43 位 base64url 文本文件（无 `=` 填充），用于派生版本化 subject HMAC 和 refresh-token 加密密钥。
+- 两个节点都必须有 root:root、模式精确 `0644` 的固定 `/etc/shuzijun/account-authority-role`，且 `/etc` 与 `/etc/shuzijun` 必须是正规 root:root 0755 目录。上海主节点内容精确为 `authority\n`，备用节点精确为 `standby\n`；缺失或任何额外字节均失败关闭。插件不得使用 Host、客户端头、主机名、PHP 常量或数据库 option 提升节点。备节点的 pretty URL 由 Nginx 代理上海，两种 query-form REST 入口在应用层返回 503。两节点必须安装同一已审核 SHA-256 的 root-only `/usr/local/sbin/verify-shuzijun-account-authority-role`，由它严格验证 marker 负载、父目录、所有权、权限与链接数。
 - Apple 数据密钥必须跨发布、主备节点和 WordPress salts 轮换保持稳定。不得与 `AUTH_KEY`/`SECURE_AUTH_KEY` 等 WordPress salts 绑定。需要轮换时必须先实施可读旧 key/写新 key 的版本化 key ring 和数据迁移；本版未实施 key ring，因此不可直接替换文件内容。
 - Apple Developer 中 App ID `cn.com.shuzijun.yishu` 需开启 Sign in with Apple；服务端通知 URL 指向 `POST /wp-json/shuzijun/v1/fan/apple-notifications`。
 - `YISHU_APPLE_TEST_MODE` 仅允许在 `WP_ENVIRONMENT_TYPE=local|development` 时启用，生产绝不定义该常量。
 
 ## 发布与拓扑
 
-1. CI 先执行 `php -l shuzijun-app-content.php`、`php tests/plugin-contract-test.php` 和 Composer 锁定依赖审计。两台生产节点还必须预装受信任的 Composer，并按 `operations/README.md` 预建 root-only staging/backup 边界、收紧站点代码所有权。生产使用 `operations/deploy-app-content-release`，先以不创建锁文件/备份、不调用本机业务 API 的 `--dry-run` 检查 Web 根目录外的固定发布单元和可信清单哈希；dry-run 的 Composer 漏洞审计仍会访问上游安全公告源。检查通过后再显式 `--apply`；apply 在 FPM 停止状态下以 `www-data` 身份验证实际安装后的 JWT autoload。不要使用整站数据库/媒体同步脚本代替代码发布器。
+1. CI 先执行 `php -l shuzijun-app-content.php`、`php tests/plugin-contract-test.php` 和 Composer 锁定依赖审计。两台生产节点还必须预装受信任的 Composer，并按 `operations/README.md` 预建 root-only staging/backup 边界、固定 marker 与收紧站点代码所有权。生产使用 `operations/deploy-app-content-release`，先以不创建锁文件/备份、不调用本机业务 API 的 `--dry-run` 检查 Web 根目录外的固定发布单元和可信清单哈希；dry-run 的 Composer 漏洞审计仍会访问上游安全公告源。备节点的 dry-run/apply 必须显式传 `--authority-role standby`，上海节点传 `--authority-role authority`；发布器会在 dry-run 成功前、apply 的任何业务探针前及首次备份/代码写入前，将固定 marker 与该参数强制比对。apply 在 FPM 停止状态下以 `www-data` 身份验证实际安装后的 JWT autoload，再加载实际 WordPress 并离线断言 REST 必须是主节点 401/备节点 503，通过后才启动 FPM。角色切换工具必须在 FPM 持久 masked、inactive/dead 且外部写入者排空后使用 `--confirm-writers-drained`；工具不会自动 unmask。发布器绝不修改 marker；初始化和灾备切换只使用 `operations/README.md` 的独立原子配置工具。不要使用整站数据库/媒体同步脚本代替代码发布器；同步协议只接受带严格单调 generation 的签名数据库与 data-only uploads，通过专用受限 SSH 账号直接流入 root-only claim，并在主/备节点分别通过 authority/standby marker 门禁；generation 状态不得回滚或复用。
 2. 主、备节点都要安装相同哈希的插件与 vendor，但只有上海主节点是账号写入权威节点。新加坡备节点的 Nginx 必须继续把整个 `/wp-json/shuzijun/v1/` 代理至主节点，不能本地生成 Apple challenge 或账号。
 3. 发布后验证 Composer autoload、Apple JWKS 网络访问、`GET_LOCK`/`RELEASE_LOCK`、WP-Cron 以及 challenge/撤销队列的单次调度。
 4. 执行 `tests/fan-api-smoke.sh`。它会验证 challenge 只保存 nonce/state/install 哈希、失败关闭和重放拒绝，不需要或打印真实 Apple 凭据。真实 Apple 登录与删号应再使用专用测试 Apple ID 从 TestFlight 完成手工验收。
@@ -29,4 +30,4 @@ Build 34 使用 WordPress REST API 的状态型 Apple 登录流程。本文只�
 
 ## 回滚
 
-回滚必须同时回滚插件、Composer 元数据和 `vendor/`，不可留下版本不匹配的 autoload。独立发布器会在失败时只恢复这个代码单元并恢复 FPM；它绝不回滚数据库、`wp-config.php`、uploads 或外部 Apple 密钥。回滚不能恢复已删除的用户、已消费 challenge 或已撤销会话。如旧版无法安全识别 Apple 账号元数据，应关闭 Apple 入口并保持现有账号读写失败关闭，而不是清除已绑定的数据。
+回滚必须同时回滚插件、Composer 元数据和 `vendor/`，不可留下版本不匹配的 autoload。独立发布器会在失败时只恢复这个代码单元并恢复 FPM；它绝不回滚数据库、角色 marker、uploads 或外部 Apple 密钥。回滚在 FPM 重启前必须重新验证 marker 和钉住的 verifier；不能恢复已删除的用户、已消费 challenge 或已撤销会话。如旧版无法安全识别 Apple 账号元数据，应关闭 Apple 入口并保持现有账号读写失败关闭，而不是清除已绑定的数据。

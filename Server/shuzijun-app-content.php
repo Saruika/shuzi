@@ -59,31 +59,39 @@ final class Shuzijun_App_Content_API {
     const FAN_APPLE_ISSUER = 'https://appleid.apple.com';
     const FAN_APPLE_CLIENT_ID = 'cn.com.shuzijun.yishu';
     const FAN_APPLE_JWKS_URL = 'https://appleid.apple.com/auth/keys';
+    const ACCOUNT_AUTHORITY_ROLE_PATH = '/etc/shuzijun/account-authority-role';
     const FAN_INVITATION_TTL = 86400;
     const FAN_MAX_INSTALLATIONS = 16;
     const FAN_MAX_SESSIONS = 8;
     private static $fan_session_context = null;
 
     public static function init() {
-        add_action('init', array(__CLASS__, 'ensure_roles'), 20);
         add_action('rest_api_init', array(__CLASS__, 'register_routes'));
-        add_action('save_post_portfolio', array(__CLASS__, 'portfolio_changed'), 20, 3);
         add_action('template_redirect', array(__CLASS__, 'block_public_portfolio_pages'), 1);
         add_action('pre_get_posts', array(__CLASS__, 'hide_public_portfolio_queries'));
         add_action('wp_head', array(__CLASS__, 'hide_public_portfolio_section'));
-        add_action('yishu_cleanup_fan_session', array(__CLASS__, 'cleanup_fan_session'), 10, 2);
-        add_action('yishu_cleanup_fan_invitation', array(__CLASS__, 'cleanup_fan_invitation'), 10, 4);
-        add_action('yishu_cleanup_fan_apple_challenge', array(__CLASS__, 'cleanup_fan_apple_challenge'), 10, 2);
-        add_action('yishu_cleanup_fan_apple_pending_account', array(__CLASS__, 'cleanup_fan_apple_pending_account'), 10, 2);
-        add_action('yishu_retry_fan_apple_revocation', array(__CLASS__, 'retry_fan_apple_revocation'), 10, 2);
-        add_action('yishu_cleanup_fan_apple_event', array(__CLASS__, 'cleanup_fan_apple_event'), 10, 2);
-        add_action('yishu_process_fan_apple_event', array(__CLASS__, 'process_fan_apple_event'), 10, 2);
-        add_action('yishu_cleanup_fan_apple_tombstone', array(__CLASS__, 'cleanup_fan_apple_tombstone'), 10, 2);
-        add_action('init', array(__CLASS__, 'ensure_fan_apple_revocation_schedule'), 40);
-        add_action('init', array(__CLASS__, 'ensure_fan_apple_event_schedule'), 41);
-        add_action('init', array(__CLASS__, 'ensure_fan_apple_tombstone_schedule'), 42);
-        add_action('delete_user', array(__CLASS__, 'prepare_fan_user_deletion'), 10, 1);
+        // Account state is single-writer. Only the node whose root-owned fixed
+        // role marker says `authority` may register asynchronous mutations. A
+        // copied database, site configuration, hostname or forwarding header can never
+        // promote a standby node.
+        if (self::account_authority_enabled()) {
+            add_action('init', array(__CLASS__, 'ensure_roles'), 20);
+            add_action('save_post_portfolio', array(__CLASS__, 'portfolio_changed'), 20, 3);
+            add_action('yishu_cleanup_fan_session', array(__CLASS__, 'cleanup_fan_session'), 10, 2);
+            add_action('yishu_cleanup_fan_invitation', array(__CLASS__, 'cleanup_fan_invitation'), 10, 4);
+            add_action('yishu_cleanup_fan_apple_challenge', array(__CLASS__, 'cleanup_fan_apple_challenge'), 10, 2);
+            add_action('yishu_cleanup_fan_apple_pending_account', array(__CLASS__, 'cleanup_fan_apple_pending_account'), 10, 2);
+            add_action('yishu_retry_fan_apple_revocation', array(__CLASS__, 'retry_fan_apple_revocation'), 10, 2);
+            add_action('yishu_cleanup_fan_apple_event', array(__CLASS__, 'cleanup_fan_apple_event'), 10, 2);
+            add_action('yishu_process_fan_apple_event', array(__CLASS__, 'process_fan_apple_event'), 10, 2);
+            add_action('yishu_cleanup_fan_apple_tombstone', array(__CLASS__, 'cleanup_fan_apple_tombstone'), 10, 2);
+            add_action('init', array(__CLASS__, 'ensure_fan_apple_revocation_schedule'), 40);
+            add_action('init', array(__CLASS__, 'ensure_fan_apple_event_schedule'), 41);
+            add_action('init', array(__CLASS__, 'ensure_fan_apple_tombstone_schedule'), 42);
+            add_action('delete_user', array(__CLASS__, 'prepare_fan_user_deletion'), 10, 1);
+        }
         add_filter('rest_post_dispatch', array(__CLASS__, 'secure_rest_response'), 10, 3);
+        add_filter('rest_pre_dispatch', array(__CLASS__, 'enforce_account_authority'), 0, 3);
         add_filter('rest_pre_dispatch', array(__CLASS__, 'block_public_catalog_routes'), 10, 3);
         add_filter('wp_sitemaps_post_types', array(__CLASS__, 'remove_portfolios_from_sitemaps'));
         add_filter('theme_mod_hero_cta', array(__CLASS__, 'public_hero_cta'));
@@ -125,6 +133,79 @@ final class Shuzijun_App_Content_API {
     public static function application_passwords_for_user($available, $user) {
         return $user instanceof WP_User
             && (user_can($user, self::CAPABILITY) || user_can($user, self::FAN_CAPABILITY));
+    }
+
+    public static function account_authority_enabled() {
+        $path = self::ACCOUNT_AUTHORITY_ROLE_PATH;
+        $test_override = false;
+        if (self::apple_test_mode_enabled()
+            && defined('YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH')
+            && is_string(YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH)
+            && strpos(YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH, sys_get_temp_dir() . DIRECTORY_SEPARATOR) === 0) {
+            $path = YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH;
+            $test_override = true;
+        }
+
+        if (!$test_override) {
+            foreach (array('/etc', '/etc/shuzijun') as $parent) {
+                $parent_stat = @lstat($parent);
+                if (!is_array($parent_stat)
+                    || ($parent_stat['mode'] & 0170000) !== 0040000
+                    || (int) ($parent_stat['uid'] ?? -1) !== 0
+                    || (int) ($parent_stat['gid'] ?? -1) !== 0
+                    || ($parent_stat['mode'] & 0777) !== 0755
+                    || is_link($parent)
+                    || realpath($parent) !== $parent) {
+                    return false;
+                }
+            }
+        }
+
+        clearstatcache(true, $path);
+        if (is_link($path) || realpath($path) !== $path) { return false; }
+        $before = @lstat($path);
+        if (!is_array($before)) { return false; }
+        $handle = @fopen($path, 'rb');
+        if (!is_resource($handle)) { return false; }
+        $opened = fstat($handle);
+        $payload = stream_get_contents($handle, 16);
+        $extra = fread($handle, 1);
+        fclose($handle);
+        if (!is_array($opened)
+            || ($opened['mode'] & 0170000) !== 0100000
+            || (int) ($opened['nlink'] ?? 0) !== 1
+            || (int) ($opened['dev'] ?? -1) !== (int) ($before['dev'] ?? -2)
+            || (int) ($opened['ino'] ?? -1) !== (int) ($before['ino'] ?? -2)
+            || ($opened['mode'] & 0777) !== 0644) {
+            return false;
+        }
+        if ($test_override) {
+            if ((int) ($opened['uid'] ?? -1) !== (int) getmyuid()
+                || (int) ($opened['gid'] ?? -1) !== (int) getmygid()) {
+                return false;
+            }
+        } elseif ((int) ($opened['uid'] ?? -1) !== 0
+            || (int) ($opened['gid'] ?? -1) !== 0) {
+            return false;
+        }
+        return $payload === "authority\n" && $extra === '';
+    }
+
+    public static function enforce_account_authority($result, $server, $request) {
+        if (!$request instanceof WP_REST_Request
+            || strpos((string) $request->get_route(), '/shuzijun/v1/') !== 0
+            || self::account_authority_enabled()) {
+            return $result;
+        }
+        // This gate runs after WordPress has normalized pretty and query-form
+        // REST requests to the same route, so both /?rest_route= and
+        // /index.php?rest_route= fail closed on a standby. Do not infer node
+        // authority from Host, REMOTE_ADDR or any client-controlled header.
+        return new WP_Error(
+            'yishu_account_authority_unavailable',
+            '账号服务暂时不可用，请稍后再试。',
+            array('status' => 503)
+        );
     }
 
     public static function block_fan_wordpress_login($user, $password = '') {

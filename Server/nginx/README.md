@@ -23,24 +23,34 @@ can execute a plugin or `vendor/` file first.
 
 After installing the snippet on each node, run the routing smoke test against
 the local TLS virtual host. It requires direct plugin variants to return 404
-while both query-form REST routes continue returning the expected unauthenticated
-401:
+and takes an explicit server-owned node role. The Shanghai authority must
+return the normal unauthenticated 401 for the pretty URL and both query-form
+routes. The Singapore standby must still return 401 through its pretty-URL
+proxy to Shanghai, but its two local query-form routes must return 503 with
+`yishu_account_authority_unavailable`:
 
 ```bash
 YISHU_SMOKE_RESOLVE=www.shuzijun.com.cn:443:127.0.0.1 \
-  Server/tests/nginx-sensitive-routing-smoke.sh https://www.shuzijun.com.cn www
+  Server/tests/nginx-sensitive-routing-smoke.sh \
+  https://www.shuzijun.com.cn www authority
+
+YISHU_SMOKE_RESOLVE=www.shuzijun.com.cn:443:127.0.0.1 \
+  Server/tests/nginx-sensitive-routing-smoke.sh \
+  https://www.shuzijun.com.cn www standby
 
 YISHU_SMOKE_RESOLVE=img.shuzijun.com.cn:443:127.0.0.1 \
-  Server/tests/nginx-sensitive-routing-smoke.sh https://img.shuzijun.com.cn img
+  Server/tests/nginx-sensitive-routing-smoke.sh \
+  https://img.shuzijun.com.cn img standby
 ```
 
-The smoke test accepts only the fixed `www` and `img` roles. Its HTTPS base
-host and explicit port must exactly match the mandatory curl
+The smoke test accepts only the fixed `www`/`img` origin roles and
+`authority`/`standby` node roles. Its HTTPS base host and explicit port must exactly match the mandatory curl
 `host:port:127.0.0.1` resolve value, so a local-origin check cannot silently
 escape to DNS or a different virtual host. The `www` run additionally parses
-both unauthenticated 401 responses: the JSON code must be
-`fan_session_required`, and the no-store, MIME-sniffing, framing, referrer,
-robots and `Vary` security headers must all remain intact.
+all three responses: authority 401 JSON must use `fan_session_required`,
+standby query-form 503 JSON must use `yishu_account_authority_unavailable`,
+and the no-store, MIME-sniffing, framing, referrer, robots and `Vary` security
+headers must all remain intact.
 
 `verify-nginx-server-block-contract.py` is the no-HTTP semantic preflight used
 by `verify-webroot-security`. Install both operation scripts together. The
@@ -78,6 +88,16 @@ peer is loopback (the backup apex route); CDN and direct-origin requests always
 overwrite that header with their immediate peer address so callers cannot
 forge network rate-limit identities. Remove it only as part of a deliberate
 disaster-recovery promotion after a final database sync.
+
+Nginx path matching cannot cover WordPress's `/?rest_route=` and
+`/index.php?rest_route=` aliases without also changing the local deployment
+probe path. The plugin therefore provides the second boundary: only a node
+whose root:root 0644 `/etc/shuzijun/account-authority-role` contains exactly
+`authority\n` serves `/shuzijun/v1/`. A node whose exact marker is `standby\n`,
+or whose marker cannot be safely read, returns 503 before permission callbacks
+or route handlers run and does not register asynchronous account-mutation
+hooks. Host, loopback source addresses, proxy headers, PHP constants and
+synchronized database values are never authority signals.
 
 `shuzijun-account-api-apex-route.conf` is included in the
 `shuzijun.com.cn` TLS server on both nodes. The App uses this direct, non-CDN

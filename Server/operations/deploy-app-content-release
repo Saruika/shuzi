@@ -21,12 +21,16 @@ readonly BACKUP_ROOT=/var/backups/shuzijun-app-content
 # coordinates apply and dry-run without creating or opening a lock file for
 # writing, so dry-run has no persistent filesystem mutation.
 readonly LOCK_PATH="$STAGING_ROOT"
+readonly AUTHORITY_LOCK_PATH="$SITE"
 readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
+readonly AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 readonly FPM_SERVICE=php8.3-fpm
 readonly HEALTH_HOST=www.shuzijun.com.cn
 # The query-form REST route deliberately misses the backup node's pretty-URL
 # proxy location and therefore exercises that node's local WordPress/plugin.
 readonly HEALTH_URL="https://$HEALTH_HOST/?rest_route=%2Fshuzijun%2Fv1%2Fapp-content"
+readonly HEALTH_INDEX_URL="https://$HEALTH_HOST/index.php?rest_route=%2Fshuzijun%2Fv1%2Fapp-content"
 readonly DIRECT_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/shuzijun-app-content.php"
 readonly DIRECT_VENDOR_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/vendor/autoload.php"
 readonly MANIFEST_NAME=release.sha256
@@ -36,6 +40,7 @@ readonly JWT_README_SHA256=8e2392c48204a21ad0d73068fb273b7ec1f79ccf13eab3fe6f256
 MODE=dry-run
 BUNDLE_INPUT=
 EXPECTED_MANIFEST_SHA256=
+AUTHORITY_ROLE=
 BUNDLE=
 MANIFEST=
 PHP_BIN=
@@ -49,12 +54,16 @@ FPM_BOOT_GUARD_ACTIVE=0
 MODE_SEEN=0
 BUNDLE_SEEN=0
 MANIFEST_SHA_SEEN=0
+AUTHORITY_ROLE_SEEN=0
 
 usage() {
     cat <<'EOF'
 Usage:
   deploy-app-content-release --bundle ABSOLUTE_PATH \
-      --manifest-sha256 SHA256 [--bundle-preflight|--dry-run|--apply]
+      --manifest-sha256 SHA256 --authority-role authority|standby \
+      [--dry-run|--apply]
+  deploy-app-content-release --bundle ABSOLUTE_PATH \
+      --manifest-sha256 SHA256 --bundle-preflight
 
 The default mode is --dry-run. --bundle-preflight performs only the immutable
 bundle, manifest, PHP, Composer and dependency checks; it does not inspect the
@@ -151,6 +160,57 @@ validate_fixed_paths() {
     [[ "$(stat -c '%u' /var/backups)" == 0 ]] || fail 'backup parent must be owned by root'
     reject_find_match 'backup parent is writable by a non-root identity' \
         /var/backups -maxdepth 0 -perm /022
+}
+
+validate_authority_verifier() {
+    local verifier_parent verifier_sha256 verifier_fd_path=/proc/self/fd/7
+    [[ "$AUTHORITY_VERIFY" == /usr/local/sbin/verify-shuzijun-account-authority-role \
+        && -f "$AUTHORITY_VERIFY" && -x "$AUTHORITY_VERIFY" \
+        && ! -L "$AUTHORITY_VERIFY" \
+        && "$(realpath -e -- "$AUTHORITY_VERIFY")" == "$AUTHORITY_VERIFY" \
+        && "$(stat -c '%u' "$AUTHORITY_VERIFY")" == 0 \
+        && "$(stat -c '%h' "$AUTHORITY_VERIFY")" == 1 ]] \
+        || { fail 'account-authority verifier is missing or unsafe'; return 1; }
+    for verifier_parent in /usr /usr/local /usr/local/sbin; do
+        [[ "$(realpath -e -- "$verifier_parent")" == "$verifier_parent" \
+            && -d "$verifier_parent" && ! -L "$verifier_parent" \
+            && "$(stat -c '%u' "$verifier_parent")" == 0 ]] \
+            || { fail 'account-authority verifier parent is unsafe'; return 1; }
+        reject_find_match 'account-authority verifier parent is writable by a non-root identity' \
+            "$verifier_parent" -maxdepth 0 -perm /022 || return 1
+    done
+    reject_find_match 'account-authority verifier is writable by a non-root identity' \
+        "$AUTHORITY_VERIFY" -maxdepth 0 -perm /022 || return 1
+    exec 7<"$AUTHORITY_VERIFY" \
+        || { fail 'account-authority verifier cannot be opened'; return 1; }
+    [[ -f "$verifier_fd_path" \
+        && "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" == '0:0:1:755' ]] \
+        || { fail 'opened account-authority verifier metadata is unsafe'; exec 7<&-; return 1; }
+    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }') \
+        || { exec 7<&-; return 1; }
+    [[ "$verifier_sha256" == "$AUTHORITY_VERIFY_SHA256" ]] \
+        || { fail 'account-authority verifier does not match the reviewed release'; exec 7<&-; return 1; }
+}
+
+validate_authority_lock_path() {
+    [[ "$AUTHORITY_LOCK_PATH" == /var/www/html/shuzijun.com.cn \
+        && -d "$AUTHORITY_LOCK_PATH" && ! -L "$AUTHORITY_LOCK_PATH" \
+        && "$(realpath -e -- "$AUTHORITY_LOCK_PATH")" == "$AUTHORITY_LOCK_PATH" \
+        && "$(stat -c '%u' "$AUTHORITY_LOCK_PATH")" == 0 ]] \
+        || { fail 'account-authority lock path is unsafe'; return 1; }
+    reject_find_match 'account-authority lock path is writable by a non-root identity' \
+        "$AUTHORITY_LOCK_PATH" -maxdepth 0 -perm /022 || return 1
+}
+
+verify_authority_role() {
+    local verifier_status=0
+    validate_authority_verifier || return 1
+    if ! env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/7 "$AUTHORITY_ROLE"; then
+        verifier_status=1
+    fi
+    exec 7<&-
+    return "$verifier_status"
 }
 
 validate_bundle_path() {
@@ -444,6 +504,49 @@ verify_installed_jwt_autoload() {
     ' "$TARGET_DIR"
 }
 
+probe_offline_wordpress_api() {
+    local expected_role=$1
+    [[ "$expected_role" == authority || "$expected_role" == standby ]] \
+        || { fail 'offline WordPress probe received an invalid authority role'; return 1; }
+    # FPM remains stopped and persistently guarded. Loading the actual
+    # WordPress tree as www-data proves both marker readability and the newly
+    # installed plugin's REST gate before any production worker can serve it.
+    timeout --signal=KILL 45s runuser -u www-data -- env -i \
+        PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
+        "$PHP_BIN" -d display_errors=0 -d log_errors=0 -r '
+        $site = $argv[1];
+        $role = $argv[2];
+        $_SERVER["REQUEST_METHOD"] = "GET";
+        $_SERVER["HTTP_HOST"] = "www.shuzijun.com.cn";
+        $_SERVER["SERVER_NAME"] = "www.shuzijun.com.cn";
+        $_SERVER["SERVER_PORT"] = "443";
+        $_SERVER["HTTPS"] = "on";
+        $_SERVER["REQUEST_URI"] = "/?rest_route=%2Fshuzijun%2Fv1%2Fapp-content";
+        define("REST_REQUEST", true);
+        define("WP_USE_THEMES", false);
+        require $site . "/wp-load.php";
+        $server = rest_get_server();
+        if (!did_action("rest_api_init")) {
+            do_action("rest_api_init", $server);
+        }
+        $request = new WP_REST_Request("GET", "/shuzijun/v1/app-content");
+        $response = rest_do_request($request);
+        if (is_wp_error($response)) {
+            $response = rest_convert_error_to_response($response);
+        }
+        if (!$response instanceof WP_REST_Response) { exit(11); }
+        $data = $response->get_data();
+        $expected = $role === "authority"
+            ? array(401, "fan_session_required")
+            : array(503, "yishu_account_authority_unavailable");
+        $actual = array(
+            (int) $response->get_status(),
+            is_array($data) ? (string) ($data["code"] ?? "") : "",
+        );
+        exit($actual === $expected ? 0 : 12);
+    ' "$SITE" "$expected_role"
+}
+
 validate_target_boundary() {
     if ! [[ "$TARGET_DIR" == /var/www/html/shuzijun.com.cn/wp-content/mu-plugins \
         && -d "$TARGET_DIR" && ! -L "$TARGET_DIR" \
@@ -535,29 +638,90 @@ probe_direct_php_blocked() {
 }
 
 probe_unauthorized_api() {
-    local attempt status headers
-    for attempt in 1 2 3 4 5 6 7 8 9 10; do
-        headers=
-        if headers=$(curl -q --silent --show-error --dump-header - --output /dev/null \
-            --request GET --proto '=https' --tlsv1.2 \
-            --connect-timeout 5 --max-time 15 --noproxy '*' \
-            --header 'Authorization:' --header 'X-Yishu-Install-ID:' \
-            --resolve "$HEALTH_HOST:443:127.0.0.1" "$HEALTH_URL"); then
-            status=$(printf '%s\n' "$headers" | awk \
-                'toupper($1) ~ /^HTTP\// { code=$2 } END { print code }')
-            if [[ "$status" == 401 ]] \
-                && printf '%s\n' "$headers" | grep -Eiq \
-                    '^content-type:[[:space:]]*application/json([;[:space:]]|$)' \
-                && printf '%s\n' "$headers" | grep -Eiq \
-                    '^x-robots-tag:[[:space:]]*noindex,[[:space:]]*nofollow[[:space:]]*$' \
-                && printf '%s\n' "$headers" | grep -Eiq \
-                    '^vary:.*authorization.*x-yishu-install-id'; then
-                return 0
+    local expected_role=$1
+    local attempt status headers status_allowed body_file body_matches=0
+    local url endpoint_matches endpoint_role probe_observed_role=
+    case "$expected_role" in
+        authority|standby) ;;
+        *) fail 'local App API probe received an invalid authority role'; return 1 ;;
+    esac
+    body_file=$(mktemp /tmp/shuzijun-app-api-probe.XXXXXX) \
+        || { fail 'cannot create local App API probe file'; return 1; }
+    for url in "$HEALTH_URL" "$HEALTH_INDEX_URL"; do
+        endpoint_matches=0
+        endpoint_role=
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            headers=
+            if headers=$(curl -q --silent --show-error --dump-header - --output "$body_file" \
+                --request GET --proto '=https' --tlsv1.2 \
+                --max-filesize 65536 \
+                --connect-timeout 5 --max-time 15 --noproxy '*' \
+                --header 'Authorization:' --header 'X-Yishu-Install-ID:' \
+                --resolve "$HEALTH_HOST:443:127.0.0.1" "$url"); then
+                status=$(printf '%s\n' "$headers" | awk \
+                    'toupper($1) ~ /^HTTP\// { code=$2 } END { print code }')
+                status_allowed=0
+                if [[ "$expected_role" == authority && "$status" == 401 ]] \
+                    || [[ "$expected_role" == standby && "$status" == 503 ]]; then
+                    status_allowed=1
+                fi
+                body_matches=0
+                if env -i PATH="$PATH" LC_ALL=C LANG=C \
+                    python3 -I - "$body_file" "$expected_role" "$status" <<'PY'
+import json
+import pathlib
+import sys
+
+try:
+    payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+role = sys.argv[2]
+status = sys.argv[3]
+allowed = {
+    "authority": {("401", "fan_session_required")},
+    "standby": {("503", "yishu_account_authority_unavailable")},
+}
+actual = (status, payload.get("code") if isinstance(payload, dict) else None)
+raise SystemExit(0 if actual in allowed[role] else 1)
+PY
+                then
+                    body_matches=1
+                fi
+                if [[ "$status_allowed" -eq 1 ]] \
+                    && [[ "$body_matches" -eq 1 ]] \
+                    && printf '%s\n' "$headers" | grep -Eiq \
+                        '^content-type:[[:space:]]*application/json([;[:space:]]|$)' \
+                    && printf '%s\n' "$headers" | grep -Eiq \
+                        '^x-robots-tag:[[:space:]]*noindex,[[:space:]]*nofollow[[:space:]]*$' \
+                    && printf '%s\n' "$headers" | grep -Eiq \
+                        '^vary:.*authorization.*x-yishu-install-id'; then
+                    if [[ "$status" == 401 ]]; then
+                        endpoint_role=authority
+                    else
+                        endpoint_role=standby
+                    fi
+                    endpoint_matches=1
+                    break
+                fi
             fi
+            sleep 1
+        done
+        if [[ "$endpoint_matches" -ne 1 ]]; then
+            rm -f -- "$body_file"
+            fail "local App API query-form probe did not satisfy the expected authority role: $expected_role"
+            return 1
         fi
-        sleep 1
+        if [[ -n "$probe_observed_role" && "$probe_observed_role" != "$endpoint_role" ]]; then
+            rm -f -- "$body_file"
+            fail 'local App API query-form endpoints disagree on the authority role'
+            return 1
+        fi
+        probe_observed_role=$endpoint_role
     done
-    fail 'local unauthenticated App API probe did not identify the protected local plugin route'
+    rm -f -- "$body_file"
+    return 0
 }
 
 verify_live_release_hashes() {
@@ -608,6 +772,11 @@ create_code_backup() {
     cp -a -- "$TARGET_DIR/composer.lock" "$BACKUP_DIR/"
     cp -a -- "$TARGET_DIR/vendor" "$BACKUP_DIR/"
     write_backup_manifest
+    # The persistent FPM boot guard can intentionally leave the node offline
+    # after power loss. Make the rollback unit durable before arming rollback
+    # or performing the first live-code mutation.
+    sync -f "$BACKUP_DIR"
+    sync -f "$BACKUP_ROOT"
     (
         cd "$BACKUP_DIR"
         sha256sum --strict --quiet --check "$BACKUP_MANIFEST"
@@ -772,6 +941,16 @@ restore_code_backup() {
         fi
     fi
 
+    # The restored plugin reads the fixed marker directly. Revalidate the
+    # exact marker and the pinned verifier while FPM remains stopped; rollback
+    # must never expose code under a stale or mismatched role contract.
+    if [[ "$restore_status" -eq 0 && "$FPM_WAS_ACTIVE" -eq 1 ]]; then
+        verify_authority_role >/dev/null 2>&1 || restore_status=1
+    fi
+    if [[ "$restore_status" -eq 0 && "$FPM_WAS_ACTIVE" -eq 1 ]]; then
+        probe_offline_wordpress_api "$AUTHORITY_ROLE" >/dev/null 2>&1 || restore_status=1
+    fi
+
     # Never restart PHP-FPM with a partial or unverified rollback.  Leaving it
     # stopped is the fail-closed state and prevents mismatched plugin/vendor
     # code from serving requests while an operator restores the known backup.
@@ -820,7 +999,7 @@ handle_failure() {
             && nginx -t >/dev/null 2>&1 \
             && systemctl is-active --quiet "$FPM_SERVICE" \
             && probe_direct_php_blocked \
-            && probe_unauthorized_api \
+            && probe_unauthorized_api "$AUTHORITY_ROLE" \
             && release_fpm_boot_guard; then
             printf 'app-content-release: previous code release restored; backup=%s\n' "$BACKUP_DIR" >&2
         else
@@ -861,6 +1040,14 @@ while [[ $# -gt 0 ]]; do
             MANIFEST_SHA_SEEN=1
             shift 2
             ;;
+        --authority-role)
+            [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+            [[ "$AUTHORITY_ROLE_SEEN" -eq 0 ]] \
+                || fail 'authority role option may be specified only once'
+            AUTHORITY_ROLE=$2
+            AUTHORITY_ROLE_SEEN=1
+            shift 2
+            ;;
         --dry-run)
             [[ "$MODE_SEEN" -eq 0 ]] || fail 'release mode may be specified only once'
             MODE=dry-run
@@ -893,11 +1080,28 @@ done
 [[ "$EUID" -eq 0 ]] || fail 'must run as root'
 [[ -n "$BUNDLE_INPUT" && -n "$EXPECTED_MANIFEST_SHA256" ]] \
     || { usage >&2; exit 2; }
+if [[ "$MODE" == bundle-preflight ]]; then
+    [[ "$AUTHORITY_ROLE_SEEN" -eq 0 ]] \
+        || fail '--authority-role is not accepted with --bundle-preflight'
+elif [[ "$AUTHORITY_ROLE" != authority && "$AUTHORITY_ROLE" != standby ]]; then
+    fail '--authority-role authority|standby is mandatory outside bundle preflight'
+fi
 
 for command_name in realpath stat find grep awk sha256sum flock nginx systemctl curl \
-    install cp rm sort date mkdir chmod chown sleep tail env timeout runuser; do
+    install cp rm sort date mkdir chmod chown sleep tail env timeout runuser mktemp \
+    python3 sync; do
     require_command "$command_name"
 done
+
+if [[ "$MODE" != bundle-preflight ]]; then
+    # This is the first production-state operation after argument/command
+    # validation.  Reject a role mismatch before Composer, HTTP, backup,
+    # service-policy or live-code work can have any persistent side effect.
+    validate_authority_lock_path
+    exec 8<"$AUTHORITY_LOCK_PATH"
+    flock -n 8 || fail 'account-authority configuration change is in progress'
+    verify_authority_role
+fi
 
 validate_staging_lock_path
 exec 9<"$LOCK_PATH"
@@ -918,9 +1122,13 @@ if [[ "$MODE" == bundle-preflight ]]; then
 fi
 
 verify_current_webroot
+# Re-check after the potentially long immutable bundle/Web-root preflight so a
+# dry-run cannot report success using an authority role that changed meanwhile.
+verify_authority_role
 
 if [[ "$MODE" == dry-run ]]; then
-    printf 'app-content-release: dry-run passed manifest=%s\n' "$EXPECTED_MANIFEST_SHA256"
+    printf 'app-content-release: dry-run passed manifest=%s authority-role=%s\n' \
+        "$EXPECTED_MANIFEST_SHA256" "$AUTHORITY_ROLE"
     exit 0
 fi
 
@@ -931,8 +1139,9 @@ systemctl is-active --quiet "$FPM_SERVICE" || fail 'PHP-FPM must be active befor
 require_fpm_enabled_policy
 FPM_WAS_ACTIVE=1
 probe_direct_php_blocked
-probe_unauthorized_api
+probe_unauthorized_api "$AUTHORITY_ROLE"
 # Close the last validation-to-use gap before any live or backup write.
+verify_authority_role
 validate_bundle_path
 validate_bundle_tree
 validate_manifest
@@ -945,6 +1154,10 @@ fi
 install_release_unit
 verify_live_release_hashes
 verify_installed_jwt_autoload
+# The newly installed plugin consumes the same fixed marker verified here.
+# Keep FPM stopped until that marker and the pinned verifier pass again.
+verify_authority_role
+probe_offline_wordpress_api "$AUTHORITY_ROLE"
 release_fpm_boot_guard
 systemctl start "$FPM_SERVICE"
 systemctl is-active --quiet "$FPM_SERVICE"
@@ -953,12 +1166,13 @@ systemctl is-active --quiet "$FPM_SERVICE"
 protect_fpm_from_incomplete_boot
 
 "$VERIFY" "$SITE"
+verify_authority_role
 nginx -t >/dev/null
 probe_direct_php_blocked
-probe_unauthorized_api
+probe_unauthorized_api "$AUTHORITY_ROLE"
 release_fpm_boot_guard
 
 ROLLBACK_READY=0
 trap - ERR INT TERM HUP
-printf 'app-content-release: applied manifest=%s backup=%s\n' \
-    "$EXPECTED_MANIFEST_SHA256" "$BACKUP_DIR"
+printf 'app-content-release: applied manifest=%s authority-role=%s backup=%s\n' \
+    "$EXPECTED_MANIFEST_SHA256" "$AUTHORITY_ROLE" "$BACKUP_DIR"

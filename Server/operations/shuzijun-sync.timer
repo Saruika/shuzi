@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Shuzijun standby synchronization once per day
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+RandomizedDelaySec=10min
+AccuracySec=1min
+Persistent=true
+Unit=shuzijun-sync.service
+
+[Install]
+WantedBy=timers.target

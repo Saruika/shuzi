@@ -312,7 +312,7 @@ struct AboutView: View {
         .accessibilityIdentifier("about-admin-entry")
         .padding(.horizontal, 20)
         .padding(.top, 2)
-        .padding(.bottom, localWeather.attributionLegalURL == nil ? 70 : 12)
+        .padding(.bottom, 12)
     }
 
     private var privacyAccess: some View {
@@ -349,37 +349,36 @@ struct AboutView: View {
         .padding(.bottom, 8)
     }
 
-    @ViewBuilder
     private var weatherAttribution: some View {
-        if let legalURL = localWeather.attributionLegalURL {
-            Link(destination: legalURL) {
-                HStack(spacing: 14) {
-                    AsyncImage(url: localWeather.attributionMarkURL) { phase in
-                        if case .success(let image) = phase {
-                            image.resizable().scaledToFit()
-                        } else {
-                            Text(localWeather.weatherProviderName)
-                                .font(.caption.weight(.semibold))
-                        }
+        Link(destination: localWeather.attributionLegalURL) {
+            HStack(spacing: 14) {
+                AsyncImage(url: localWeather.attributionMarkURL) { phase in
+                    if case .success(let image) = phase {
+                        image.resizable().scaledToFit()
+                    } else {
+                        Text(localWeather.weatherProviderName)
+                            .font(.caption.weight(.semibold))
                     }
-                    .frame(width: 108, height: 28, alignment: .leading)
-                    Spacer()
-                    Text("天气数据与许可")
-                        .font(.caption)
-                        .foregroundStyle(AppTheme.muted)
-                    Image(systemName: "arrow.up.right")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.4))
                 }
-                .foregroundStyle(AppTheme.warmWhite)
-                .padding(.horizontal, 15)
-                .frame(minHeight: 48)
-                .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
+                .frame(width: 108, height: 28, alignment: .leading)
+                Spacer()
+                Text("天气数据与许可")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.muted)
+                Image(systemName: "arrow.up.right")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.4))
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16)
-            .padding(.bottom, 70)
+            .foregroundStyle(AppTheme.warmWhite)
+            .padding(.horizontal, 15)
+            .frame(minHeight: 48)
+            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
         }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("about-weather-legal-link")
+        .accessibilityHint("打开 Apple Weather 数据来源与许可页")
+        .padding(.horizontal, 16)
+        .padding(.bottom, 70)
     }
 
     private func stat(_ value: String, _ label: String) -> some View {

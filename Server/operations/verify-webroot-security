@@ -86,6 +86,24 @@ if find "$site_root" -maxdepth 1 -type f -name '*.php' \
     exit 1
 fi
 
+# Uploads are worker-writable and therefore must be data-only. Nginx also
+# denies direct execution, but the filesystem contract independently rejects
+# executable/config payloads so a future routing regression cannot expose
+# attacker-controlled code. Match pure .php as well as every appended suffix.
+uploads_root="$site_root/wp-content/uploads"
+if [[ -d "$uploads_root" ]] && find "$uploads_root" -xdev -type f \
+    \( -iname '*.php*' -o -iname '*.phtml*' -o -iname '*.phar*' \
+    -o -iname '.htaccess' -o -iname '.user.ini' \
+    -o -iname '*.cgi' -o -iname '*.pl' -o -iname '*.py' \
+    -o -iname '*.rb' -o -iname '*.sh' -o -iname '*.bash' \
+    -o -iname '*.zsh' -o -iname '*.fish' -o -iname '*.exe' \
+    -o -iname '*.com' -o -iname '*.bat' -o -iname '*.cmd' \
+    -o -iname '*.ps1' -o -iname '*.jar' -o -iname '*.war' \) \
+    -print -quit | grep -q .; then
+    printf 'webroot-security: executable or config payload remains in uploads\n' >&2
+    exit 1
+fi
+
 if find "$site_root" -xdev -type l -print -quit | grep -q .; then
     printf 'webroot-security: symbolic link remains in document root\n' >&2
     exit 1

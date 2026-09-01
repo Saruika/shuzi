@@ -1,8 +1,10 @@
+import hashlib
 from pathlib import Path
 
 
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
+AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -27,6 +29,7 @@ def main() -> None:
     text = DEPLOYER.read_text(encoding="utf-8")
     lines = text.splitlines()
     readme = OPERATIONS_README.read_text(encoding="utf-8")
+    authority_verifier_sha256 = hashlib.sha256(AUTHORITY_VERIFIER.read_bytes()).hexdigest()
 
     assert lines[:3] == ["#!/bin/bash", "set -Eeuo pipefail", "umask 077"]
     assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin" in lines
@@ -38,18 +41,35 @@ def main() -> None:
         "readonly STAGING_ROOT=/var/lib/shuzijun-app-content/releases",
         "readonly BACKUP_ROOT=/var/backups/shuzijun-app-content",
         'readonly LOCK_PATH="$STAGING_ROOT"',
+        'readonly AUTHORITY_LOCK_PATH="$SITE"',
+        "readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role",
+        f"readonly AUTHORITY_VERIFY_SHA256={authority_verifier_sha256}",
     ):
         assert fixed_path in lines
     assert "LOCK_FILE=" not in text
     assert 'exec 9<"$LOCK_PATH"' in lines
     assert 'exec 9<>"$LOCK_PATH"' not in lines
+    assert any(line.strip() == 'exec 8<"$AUTHORITY_LOCK_PATH"' for line in lines)
+    assert not any(line.strip() == 'exec 8<>"$AUTHORITY_LOCK_PATH"' for line in lines)
 
     root_check = line_number(lines, '[[ "$EUID" -eq 0 ]]')
-    lock_validation = line_number(lines, "validate_staging_lock_path", root_check + 1)
+    authority_lock_validation = line_number(
+        lines, "validate_authority_lock_path", root_check + 1
+    )
+    authority_lock_open = line_number(
+        lines, 'exec 8<"$AUTHORITY_LOCK_PATH"', authority_lock_validation + 1
+    )
+    authority_lock_take = line_number(lines, "flock -n 8", authority_lock_open + 1)
+    early_authority_check = line_number(
+        lines, "verify_authority_role", authority_lock_take + 1
+    )
+    lock_validation = line_number(lines, "validate_staging_lock_path", early_authority_check + 1)
     lock_open = line_number(lines, 'exec 9<"$LOCK_PATH"', lock_validation + 1)
     lock_take = line_number(lines, "flock -n 9", lock_open + 1)
     fixed_validation = line_number(lines, "validate_fixed_paths", lock_take + 1)
-    assert root_check < lock_validation < lock_open < lock_take < fixed_validation
+    assert root_check < authority_lock_validation < authority_lock_open
+    assert authority_lock_open < authority_lock_take < early_authority_check
+    assert early_authority_check < lock_validation < lock_open < lock_take < fixed_validation
 
     find_guard = function_body(lines, "reject_find_match", "is_outside_site")
     assert "find \"$@\" -print0 -quit && printf '\\0'" in find_guard
@@ -130,11 +150,24 @@ def main() -> None:
     assert 'require $root . "/vendor/autoload.php"' not in preflight_body
 
     installed_autoload = function_body(
-        lines, "verify_installed_jwt_autoload", "validate_target_boundary"
+        lines, "verify_installed_jwt_autoload", "probe_offline_wordpress_api"
     )
     assert "runuser -u www-data -- env -i" in installed_autoload
     assert 'open_basedir=$TARGET_DIR' in installed_autoload
     assert 'require $root . "/vendor/autoload.php"' in installed_autoload
+
+    offline_probe = function_body(
+        lines, "probe_offline_wordpress_api", "validate_target_boundary"
+    )
+    for offline_guard in (
+        "runuser -u www-data -- env -i",
+        'require $site . "/wp-load.php"',
+        'new WP_REST_Request("GET", "/shuzijun/v1/app-content")',
+        "rest_do_request($request)",
+        'array(401, "fan_session_required")',
+        'array(503, "yishu_account_authority_unavailable")',
+    ):
+        assert offline_guard in offline_probe
 
     current_unit = function_body(
         lines, "validate_current_release_unit", "verify_current_webroot"
@@ -165,12 +198,21 @@ def main() -> None:
     for probe_guard in (
         "curl -q",
         "--resolve \"$HEALTH_HOST:443:127.0.0.1\"",
-        '[[ "$status" == 401 ]]',
+        '"$status" == 401',
+        '"$status" == 503',
+        "authority|standby)",
+        "fan_session_required",
+        "yishu_account_authority_unavailable",
+        "json.loads",
+        '--max-filesize 65536',
         "application/json",
         "x-robots-tag:",
         "vary:.*authorization.*x-yishu-install-id",
+        "endpoint_role=authority",
+        "endpoint_role=standby",
     ):
         assert probe_guard in probe_body
+    assert "safe" not in probe_body
     assert "/wp-json/shuzijun/v1/app-content" not in probe_body
 
     backup_body = function_body(lines, "create_code_backup", "remove_live_vendor")
@@ -184,6 +226,9 @@ def main() -> None:
         "vendor",
     ):
         assert f'$TARGET_DIR/{release_entry}' in backup_body
+    assert 'sync -f "$BACKUP_DIR"' in backup_body
+    assert 'sync -f "$BACKUP_ROOT"' in backup_body
+    assert backup_body.index('sync -f "$BACKUP_ROOT"') < backup_body.index("ROLLBACK_READY=1")
     assert "ROLLBACK_READY=1" in backup_body
 
     removal_body = function_body(lines, "remove_live_vendor", "remove_live_metadata")
@@ -224,6 +269,20 @@ def main() -> None:
     assert "sha256sum --strict --quiet --check" in rollback_body
     assert '[[ "$restore_status" -eq 0 && "$FPM_WAS_ACTIVE" -eq 1 ]]' in rollback_body
     assert 'systemctl start "$FPM_SERVICE"' in rollback_body
+    offline_rollback_role = line_number(
+        lines,
+        "verify_authority_role >/dev/null 2>&1",
+        lines.index("restore_code_backup() {") + 1,
+    )
+    offline_rollback_probe = line_number(
+        lines,
+        'probe_offline_wordpress_api "$AUTHORITY_ROLE"',
+        offline_rollback_role + 1,
+    )
+    rollback_unmask = line_number(
+        lines, "release_fpm_boot_guard", offline_rollback_probe + 1
+    )
+    assert offline_rollback_role < offline_rollback_probe < rollback_unmask
     assert rollback_body.count("protect_fpm_from_incomplete_boot") >= 2
     assert "Never restart PHP-FPM with a partial or unverified rollback" in rollback_body
     assert 'rm -rf -- "$TARGET_DIR"' not in rollback_body
@@ -245,28 +304,44 @@ def main() -> None:
     assert isolation_body.count("is_fpm_persistently_masked") >= 2
 
     dry_run = line_number(lines, 'if [[ "$MODE" == dry-run ]]')
+    first_authority_check = line_number(lines, "verify_authority_role", fixed_validation + 1)
+    assert fixed_validation < first_authority_check < dry_run
     enabled_policy = line_number(lines, "require_fpm_enabled_policy", dry_run + 1)
     first_direct_probe = line_number(lines, "probe_direct_php_blocked", enabled_policy + 1)
-    first_apply_probe = line_number(lines, "probe_unauthorized_api", first_direct_probe + 1)
-    backup = line_number(lines, "create_code_backup", first_apply_probe + 1)
+    first_apply_probe = line_number(
+        lines, 'probe_unauthorized_api "$AUTHORITY_ROLE"', first_direct_probe + 1
+    )
+    second_authority_check = line_number(
+        lines, "verify_authority_role", first_apply_probe + 1
+    )
+    backup = line_number(lines, "create_code_backup", second_authority_check + 1)
     boot_guard = line_number(lines, "protect_fpm_from_incomplete_boot", backup + 1)
     fpm_stop = line_number(lines, 'systemctl stop "$FPM_SERVICE"', boot_guard + 1)
     install = line_number(lines, "install_release_unit", fpm_stop + 1)
     live_hash = line_number(lines, "verify_live_release_hashes", install + 1)
     autoload = line_number(lines, "verify_installed_jwt_autoload", live_hash + 1)
-    guard_release = line_number(lines, "release_fpm_boot_guard", autoload + 1)
+    offline_role = line_number(lines, "verify_authority_role", autoload + 1)
+    offline_api = line_number(
+        lines, 'probe_offline_wordpress_api "$AUTHORITY_ROLE"', offline_role + 1
+    )
+    guard_release = line_number(lines, "release_fpm_boot_guard", offline_api + 1)
     fpm_start = line_number(lines, 'systemctl start "$FPM_SERVICE"', guard_release + 1)
     online_guard = line_number(lines, "protect_fpm_from_incomplete_boot", fpm_start + 1)
     post_verify = line_number(lines, '"$VERIFY" "$SITE"', online_guard + 1)
-    nginx_check = line_number(lines, "nginx -t", post_verify + 1)
+    final_authority_check = line_number(lines, "verify_authority_role", post_verify + 1)
+    nginx_check = line_number(lines, "nginx -t", final_authority_check + 1)
     final_direct_probe = line_number(lines, "probe_direct_php_blocked", nginx_check + 1)
-    final_probe = line_number(lines, "probe_unauthorized_api", final_direct_probe + 1)
+    final_probe = line_number(
+        lines, 'probe_unauthorized_api "$AUTHORITY_ROLE"', final_direct_probe + 1
+    )
     final_guard_release = line_number(lines, "release_fpm_boot_guard", final_probe + 1)
     rollback_disarm = line_number(lines, "ROLLBACK_READY=0", final_guard_release + 1)
-    assert dry_run < enabled_policy < first_direct_probe < first_apply_probe < backup
+    assert dry_run < enabled_policy < first_direct_probe < first_apply_probe
+    assert first_apply_probe < second_authority_check < backup
     assert backup < boot_guard < fpm_stop < install < live_hash
-    assert live_hash < autoload < guard_release < fpm_start < online_guard < post_verify
-    assert post_verify < nginx_check < final_direct_probe < final_probe
+    assert live_hash < autoload < offline_role < offline_api < guard_release
+    assert guard_release < fpm_start < online_guard < post_verify
+    assert post_verify < final_authority_check < nginx_check < final_direct_probe < final_probe
     assert final_probe < final_guard_release < rollback_disarm
 
     # No main-path call that can create backups, stop services, install code or
@@ -279,13 +354,38 @@ def main() -> None:
     assert "install_release_unit\n" not in main_pre_dry_run
     assert "probe_direct_php_blocked\n" not in main_pre_dry_run
     assert "probe_unauthorized_api\n" not in main_pre_dry_run
+    assert "mktemp" in text
+    assert "python3" in text
 
     for duplicate_guard in (
         "bundle option may be specified only once",
         "manifest SHA256 option may be specified only once",
+        "authority role option may be specified only once",
         "release mode may be specified only once",
     ):
         assert duplicate_guard in text
+
+    assert "--authority-role authority|standby" in text
+    assert "--authority-role is not accepted with --bundle-preflight" in text
+    assert "--authority-role authority|standby is mandatory outside bundle preflight" in text
+    assert 'probe_unauthorized_api "$AUTHORITY_ROLE"' in handle_body
+
+    authority_verifier = function_body(
+        lines, "validate_authority_verifier", "verify_authority_role"
+    )
+    for authority_guard in (
+        "/usr/local/sbin/verify-shuzijun-account-authority-role",
+        "realpath -e",
+        "stat -c '%u'",
+        "stat -c '%h'",
+        "writable by a non-root identity",
+        "AUTHORITY_VERIFY_SHA256",
+        "sha256sum",
+        "/proc/self/fd/7",
+    ):
+        assert authority_guard in authority_verifier
+    assert 'sha256sum "$verifier_fd_path"' in authority_verifier
+    assert '/usr/bin/python3 -I /proc/self/fd/7 "$AUTHORITY_ROLE"' in text
 
     for prohibited in (
         "wp db ",
@@ -306,6 +406,12 @@ def main() -> None:
         "缺少 Composer 时 dry-run 会按设计失败",
         "`root:www-data`",
         "不会发出可能",
+        "/etc/shuzijun/account-authority-role",
+        "--authority-role authority",
+        "--authority-role standby",
+        "wp-load.php",
+        "不再存在接受任意 401/503",
+        "--confirm-writers-drained",
     ):
         assert documented_prerequisite in readme
 

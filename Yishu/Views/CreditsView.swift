@@ -299,6 +299,9 @@ struct CreditsView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 3))
                         }
                         .buttonStyle(.plain)
+                        .accessibilityIdentifier("drama-link-\(drama.id)")
+                        .accessibilityLabel("观看\(drama.title)")
+                        .accessibilityHint("打开外部播放页面")
 
                         Text(drama.title)
                             .font(.subheadline.weight(.medium))

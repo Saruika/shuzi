@@ -1,0 +1,2 @@
+Cmnd_Alias SHUZIJUN_SYNC_RECEIVER = /usr/local/sbin/apply-shuzijun-sync --attest, /usr/local/sbin/apply-shuzijun-sync --protocol, /usr/local/sbin/apply-shuzijun-sync --ingest
+shuzijun-sync-transport ALL=(root:root) NOPASSWD: SHUZIJUN_SYNC_RECEIVER

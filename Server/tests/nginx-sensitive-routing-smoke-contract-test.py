@@ -34,9 +34,17 @@ while (( $# )); do
       ;;
   esac
 done
-if [[ "$url" == *rest_route* ]]; then
+if [[ "$url" == *rest_route* || "$url" == *'/wp-json/shuzijun/v1/'* ]]; then
+  status=401
+  reason=Unauthorized
+  code=fan_session_required
+  if [[ "$url" == *rest_route* && "${FAKE_CURL_NODE_ROLE:-authority}" == standby ]]; then
+    status=503
+    reason='Service Unavailable'
+    code=yishu_account_authority_unavailable
+  fi
   {
-    printf 'HTTP/1.1 401 Unauthorized\r\n'
+    printf 'HTTP/1.1 %s %s\r\n' "$status" "$reason"
     printf 'Content-Type: application/json; charset=UTF-8\r\n'
     printf 'X-Content-Type-Options: nosniff\r\n'
     printf 'X-Frame-Options: DENY\r\n'
@@ -52,9 +60,9 @@ if [[ "$url" == *rest_route* ]]; then
   if [[ "${FAKE_CURL_MODE:-valid}" == bad-json ]]; then
     printf '%s' '{"code":"wrong_error"}' >"$output"
   else
-    printf '%s' '{"code":"fan_session_required"}' >"$output"
+    printf '{"code":"%s"}' "$code" >"$output"
   fi
-  printf '401'
+  printf '%s' "$status"
 else
   : >"$headers"
   if [[ "$output" != /dev/null ]]; then : >"$output"; fi
@@ -67,18 +75,20 @@ def invoke(
     fake_bin: Path,
     base_url: str,
     role: str,
+    node_role: str,
     resolve: str | None,
     mode: str = "valid",
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
     env["FAKE_CURL_MODE"] = mode
+    env["FAKE_CURL_NODE_ROLE"] = node_role
     if resolve is None:
         env.pop("YISHU_SMOKE_RESOLVE", None)
     else:
         env["YISHU_SMOKE_RESOLVE"] = resolve
     return subprocess.run(
-        ["bash", str(SMOKE), base_url, role],
+        ["bash", str(SMOKE), base_url, role, node_role],
         capture_output=True,
         text=True,
         env=env,
@@ -97,47 +107,71 @@ def main() -> None:
             fake_bin,
             "https://www.shuzijun.com.cn",
             "www",
+            "authority",
             "www.shuzijun.com.cn:443:127.0.0.1",
         )
         assert www.returncode == 0, www.stderr
         assert "role=www" in www.stdout
+        assert "node-role=authority" in www.stdout
+
+        standby = invoke(
+            fake_bin,
+            "https://www.shuzijun.com.cn",
+            "www",
+            "standby",
+            "www.shuzijun.com.cn:443:127.0.0.1",
+        )
+        assert standby.returncode == 0, standby.stderr
+        assert "node-role=standby" in standby.stdout
 
         img = invoke(
             fake_bin,
             "https://img.shuzijun.com.cn:8443",
             "img",
+            "standby",
             "img.shuzijun.com.cn:8443:127.0.0.1",
         )
         assert img.returncode == 0, img.stderr
         assert "role=img" in img.stdout
 
-        for base_url, role, resolve, expected in (
+        for base_url, role, node_role, resolve, expected in (
             (
                 "https://www.shuzijun.com.cn",
                 "www",
+                "authority",
                 None,
                 "loopback resolve must exactly match",
             ),
             (
                 "https://www.shuzijun.com.cn",
                 "static",
+                "authority",
                 "www.shuzijun.com.cn:443:127.0.0.1",
                 "role must be www or img",
             ),
             (
                 "https://img.shuzijun.com.cn",
                 "www",
+                "standby",
                 "img.shuzijun.com.cn:443:127.0.0.1",
                 "base origin does not match role",
             ),
             (
                 "https://www.shuzijun.com.cn:8443",
                 "www",
+                "authority",
                 "www.shuzijun.com.cn:443:127.0.0.1",
                 "loopback resolve must exactly match",
             ),
+            (
+                "https://www.shuzijun.com.cn",
+                "www",
+                "primary",
+                "www.shuzijun.com.cn:443:127.0.0.1",
+                "node role must be authority or standby",
+            ),
         ):
-            rejected = invoke(fake_bin, base_url, role, resolve)
+            rejected = invoke(fake_bin, base_url, role, node_role, resolve)
             assert rejected.returncode == 2, rejected.stderr
             assert expected in rejected.stderr
 
@@ -145,21 +179,23 @@ def main() -> None:
             fake_bin,
             "https://www.shuzijun.com.cn",
             "www",
+            "authority",
             "www.shuzijun.com.cn:443:127.0.0.1",
             "bad-json",
         )
         assert bad_json.returncode != 0
-        assert "401 JSON error code is unexpected" in bad_json.stderr
+        assert "protected JSON error code is unexpected" in bad_json.stderr
 
         missing_header = invoke(
             fake_bin,
             "https://www.shuzijun.com.cn",
             "www",
+            "authority",
             "www.shuzijun.com.cn:443:127.0.0.1",
             "missing-header",
         )
         assert missing_header.returncode != 0
-        assert "401 Referrer-Policy header is missing or unsafe" in missing_header.stderr
+        assert "protected Referrer-Policy header is missing or unsafe" in missing_header.stderr
 
     print("nginx-sensitive-routing-smoke-contract-test: passed")
 

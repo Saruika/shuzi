@@ -1,15 +1,34 @@
 #!/bin/bash
 set -euo pipefail
 
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true
+
 SITE=/var/www/html/shuzijun.com.cn
 HOST=129.226.202.207
+TRANSPORT_USER=shuzijun-sync-transport
 KEY=/root/.ssh/shuzijun_sync_ed25519
 LOG=/var/log/wp-sync.log
 VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
+AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
+REMOTE_RECEIVER=/usr/local/sbin/apply-shuzijun-sync
+REMOTE_RECEIVER_SHA256=1fcf996003f4320b025a23d20363c1bfb0e3533e79596b7af7bae0dc20e8858a
+SYNC_PROTOCOL=shuzijun-sync-receiver-v3-signed-uploads-only
+GENERATION_ROOT=/var/lib/shuzijun-sync
+GENERATION_STATE="$GENERATION_ROOT/highest-issued-generation"
 
 RSYNC_FILTERS=(
     --exclude='cache/'
     --exclude='debug.log'
+    --exclude='/mu-plugins/shuzijun-app-content.php'
+    --exclude='/mu-plugins/composer.json'
+    --exclude='/mu-plugins/composer.lock'
+    --exclude='/mu-plugins/vendor/'
+    --exclude='*.[pP][hH][pP]*'
     --exclude='*.php?*'
     --exclude='*.php.*'
     --exclude='*.php_*'
@@ -44,12 +63,135 @@ RSYNC_FILTERS=(
     --exclude='*.tgz'
     --exclude='*.7z'
     --exclude='*.rar'
+    --include='/uploads/'
+    --include='/uploads/***'
+    --exclude='*'
 )
 
 test "$SITE" = /var/www/html/shuzijun.com.cn
 test "$HOST" = 129.226.202.207
 test -x "$VERIFY"
-test -f "$KEY"
+
+verify_authority_role() {
+    local expected_role=$1 verifier_fd_path=/proc/self/fd/7 verifier_sha256
+    local authority_verify_parent authority_verify_parent_mode verifier_status=0
+    test -f "$AUTHORITY_VERIFY" && test -x "$AUTHORITY_VERIFY" && test ! -L "$AUTHORITY_VERIFY"
+    test "$(realpath -e -- "$AUTHORITY_VERIFY")" = "$AUTHORITY_VERIFY"
+    for authority_verify_parent in /usr /usr/local /usr/local/sbin; do
+        test "$(realpath -e -- "$authority_verify_parent")" = "$authority_verify_parent"
+        test -d "$authority_verify_parent" && test ! -L "$authority_verify_parent"
+        test "$(stat -c '%u' "$authority_verify_parent")" = 0
+        authority_verify_parent_mode=$(stat -c '%a' "$authority_verify_parent")
+        (( (8#$authority_verify_parent_mode & 8#022) == 0 ))
+    done
+    exec 7<"$AUTHORITY_VERIFY"
+    test "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" = '0:0:1:755'
+    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }')
+    test "$verifier_sha256" = "$AUTHORITY_VERIFY_SHA256"
+    if ! env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I "$verifier_fd_path" "$expected_role"; then
+        verifier_status=1
+    fi
+    exec 7<&-
+    return "$verifier_status"
+}
+
+validate_generation_state_root() {
+    local parent
+    for parent in /var /var/lib; do
+        test "$(realpath -e -- "$parent")" = "$parent"
+        test -d "$parent" && test ! -L "$parent"
+        test "$(stat -c '%u:%g:%a' "$parent")" = '0:0:755'
+    done
+    test "$(realpath -e -- "$GENERATION_ROOT")" = "$GENERATION_ROOT"
+    test -d "$GENERATION_ROOT" && test ! -L "$GENERATION_ROOT"
+    test "$(stat -c '%u:%g:%a' "$GENERATION_ROOT")" = '0:0:700'
+}
+
+issue_generation() {
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I - "$GENERATION_ROOT" "$GENERATION_STATE" <<'PY'
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+state_path = Path(sys.argv[2])
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700):
+    raise SystemExit(1)
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(state_path, flags)
+try:
+    state_metadata = os.fstat(descriptor)
+    payload = os.read(descriptor, 32)
+    if os.read(descriptor, 1):
+        raise SystemExit(1)
+finally:
+    os.close(descriptor)
+if (not stat.S_ISREG(state_metadata.st_mode) or state_metadata.st_uid != 0
+        or state_metadata.st_gid != 0 or stat.S_IMODE(state_metadata.st_mode) != 0o600
+        or state_metadata.st_nlink != 1 or not re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", payload)):
+    raise SystemExit(1)
+generation = int(payload) + 1
+if generation >= 2**63:
+    raise SystemExit(1)
+
+temp_descriptor, temp_name = tempfile.mkstemp(prefix=".highest-issued.", dir=root)
+temp_path = Path(temp_name)
+try:
+    os.fchmod(temp_descriptor, 0o600)
+    encoded = f"{generation}\n".encode("ascii")
+    view = memoryview(encoded)
+    while view:
+        written = os.write(temp_descriptor, view)
+        if written <= 0:
+            raise SystemExit(1)
+        view = view[written:]
+    os.fsync(temp_descriptor)
+    os.close(temp_descriptor)
+    temp_descriptor = -1
+    os.replace(temp_path, state_path)
+    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if temp_descriptor >= 0:
+        os.close(temp_descriptor)
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        pass
+print(generation)
+PY
+}
+test -f "$KEY" && test ! -L "$KEY"
+test "$(realpath -e -- "$KEY")" = "$KEY"
+test "$(stat -c '%u:%h' "$KEY")" = '0:1'
+key_mode=$(stat -c '%a' "$KEY")
+(( (8#$key_mode & 8#077) == 0 ))
+
+# Prevent the sender from reading a release unit while the deployer is
+# replacing it, and prove this scheduler can run only on the authority node.
+exec 8<"$SITE"
+flock -n 8
+verify_authority_role authority
+
+SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$TRANSPORT_USER"@"$HOST")
+receiver_attestation=$("${SSH[@]}" \
+    "sudo $REMOTE_RECEIVER --attest")
+test "$receiver_attestation" = "$REMOTE_RECEIVER_SHA256  $REMOTE_RECEIVER"
+receiver_protocol=$("${SSH[@]}" "sudo $REMOTE_RECEIVER --protocol")
+test "$receiver_protocol" = "$SYNC_PROTOCOL"
+validate_generation_state_root
+GENERATION=$(issue_generation)
 
 TMP=$(mktemp -d)
 trap 'rm -rf -- "$TMP"' EXIT
@@ -61,16 +203,144 @@ printf '[%s] incremental sync started\n' "$(date '+%F %T')"
 cd "$SITE"
 wp db export "$TMP/shuzijun-sync.sql" --add-drop-table --allow-root >/dev/null
 gzip -9 "$TMP/shuzijun-sync.sql"
-cd "$TMP"
-sha256sum shuzijun-sync.sql.gz > shuzijun-sync.sha256
+install -d -m 700 "$TMP/wp-content"
+rsync -a --delete --delete-excluded "${RSYNC_FILTERS[@]}" \
+    "$SITE/wp-content/" "$TMP/wp-content/"
+env -i PATH="$PATH" LC_ALL=C LANG=C /usr/bin/python3 -I - \
+    "$TMP" "$GENERATION" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+from pathlib import Path
 
-SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 ubuntu@"$HOST")
-RSYNC_SSH="ssh -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15"
-"${SSH[@]}" 'install -d -m 700 /tmp/shuzijun-stage'
-rsync -az --delete --delete-excluded "${RSYNC_FILTERS[@]}" \
-    -e "$RSYNC_SSH" "$SITE/wp-content/" ubuntu@"$HOST":/tmp/shuzijun-stage/wp-content/
-rsync -az -e "$RSYNC_SSH" shuzijun-sync.sql.gz shuzijun-sync.sha256 \
-    ubuntu@"$HOST":/tmp/shuzijun-stage/
-"${SSH[@]}" sudo /usr/local/sbin/apply-shuzijun-sync
+root = Path(sys.argv[1]).resolve(strict=True)
+generation = int(sys.argv[2])
+if str(generation) != sys.argv[2] or generation < 1 or generation >= 2**63:
+    raise SystemExit(1)
+max_files = 100_000
+max_file_bytes = 8 * 1024 * 1024 * 1024
+max_batch_bytes = 64 * 1024 * 1024 * 1024
+files = []
+total_size = 0
+for directory, directory_names, file_names in os.walk(root, followlinks=False):
+    base = Path(directory)
+    for name in directory_names:
+        metadata = (base / name).lstat()
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise SystemExit(1)
+    for name in file_names:
+        path = base / name
+        relative = path.relative_to(root).as_posix()
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise SystemExit(1)
+        if relative != "shuzijun-sync.sql.gz" and not relative.startswith("wp-content/uploads/"):
+            raise SystemExit(1)
+        if relative.startswith("wp-content/uploads/"):
+            lower_name = path.name.lower()
+            forbidden_names = {".htaccess", ".user.ini"}
+            forbidden_suffixes = {
+                ".cgi", ".pl", ".py", ".rb", ".sh", ".bash", ".zsh", ".fish",
+                ".exe", ".com", ".bat", ".cmd", ".ps1", ".jar", ".war",
+            }
+            if (lower_name in forbidden_names or ".php" in lower_name
+                    or ".phtml" in lower_name or ".phar" in lower_name
+                    or any(lower_name.endswith(suffix) for suffix in forbidden_suffixes)):
+                raise SystemExit(1)
+        if metadata.st_size < 0 or metadata.st_size > max_file_bytes:
+            raise SystemExit(1)
+        total_size += metadata.st_size
+        if total_size > max_batch_bytes or len(files) >= max_files:
+            raise SystemExit(1)
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        files.append({"path": relative, "sha256": digest.hexdigest(), "size": metadata.st_size})
+files.sort(key=lambda item: item["path"])
+if not any(item["path"] == "shuzijun-sync.sql.gz" for item in files):
+    raise SystemExit(1)
+document = {"files": files, "generation": generation, "version": 2}
+payload = (json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode()
+manifest = root / "shuzijun-sync-manifest.json"
+descriptor = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(descriptor, "wb", closefd=True) as stream:
+    stream.write(payload)
+    stream.flush()
+    os.fsync(stream.fileno())
+PY
+ssh-keygen -Y sign -q -f "$KEY" -n shuzijun-sync \
+    "$TMP/shuzijun-sync-manifest.json"
 
-printf '[%s] incremental sync completed\n' "$(date '+%F %T')"
+env -i PATH="$PATH" LC_ALL=C LANG=C \
+    /usr/bin/python3 -I - "$TMP" <<'PY' \
+    | "${SSH[@]}" "sudo $REMOTE_RECEIVER --ingest"
+import hashlib
+import json
+import os
+import stat
+import struct
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve(strict=True)
+manifest_path = root / "shuzijun-sync-manifest.json"
+signature_path = root / "shuzijun-sync-manifest.json.sig"
+manifest = manifest_path.read_bytes()
+signature = signature_path.read_bytes()
+if not manifest or len(manifest) > 32 * 1024 * 1024 or not signature or len(signature) > 64 * 1024:
+    raise SystemExit(1)
+document = json.loads(manifest.decode("utf-8"))
+canonical = (json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode()
+if canonical != manifest or set(document) != {"files", "generation", "version"}:
+    raise SystemExit(1)
+
+def write_all(payload):
+    view = memoryview(payload)
+    while view:
+        written = os.write(1, view)
+        if written <= 0:
+            raise SystemExit(1)
+        view = view[written:]
+
+for control in (manifest, signature):
+    write_all(struct.pack(">Q", len(control)))
+    write_all(control)
+
+for item in document["files"]:
+    relative = item["path"]
+    expected_size = item["size"]
+    expected_digest = item["sha256"]
+    path = root / relative
+    resolved = path.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise SystemExit(1)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    digest = hashlib.sha256()
+    try:
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_size != expected_size):
+            raise SystemExit(1)
+        remaining = expected_size
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+            if not chunk:
+                raise SystemExit(1)
+            digest.update(chunk)
+            write_all(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    if digest.hexdigest() != expected_digest:
+        raise SystemExit(1)
+PY
+
+printf '[%s] incremental sync completed generation=%s\n' "$(date '+%F %T')" "$GENERATION"

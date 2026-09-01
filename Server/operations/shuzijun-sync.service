@@ -1,0 +1,47 @@
+[Unit]
+Description=Synchronize Shuzijun WordPress state to the standby node
+Wants=network-online.target
+After=network-online.target mysql.service nginx.service php8.3-fpm.service
+ConditionFileIsExecutable=/usr/local/sbin/sync-to-backup
+ConditionFileIsExecutable=/usr/local/sbin/verify-shuzijun-webroot-security
+ConditionPathExists=/root/.ssh/shuzijun_sync_ed25519
+ConditionPathExists=/var/lib/shuzijun-sync/highest-issued-generation
+RequiresMountsFor=/var/www/html/shuzijun.com.cn /var/lib/shuzijun-sync /var/log /run
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecCondition=/usr/bin/systemctl is-active --quiet mysql.service
+ExecCondition=/usr/bin/systemctl is-active --quiet nginx.service
+ExecCondition=/usr/bin/systemctl is-active --quiet php8.3-fpm.service
+ExecStart=/usr/bin/flock -n /run/shuzijun-sync.lock /usr/local/sbin/sync-to-backup
+TimeoutStartSec=45min
+TimeoutStopSec=2min
+KillMode=control-group
+Restart=no
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/shuzijun-sync /run /var/log
+ReadOnlyPaths=/var/www/html/shuzijun.com.cn
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native

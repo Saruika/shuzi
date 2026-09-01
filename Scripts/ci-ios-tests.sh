@@ -54,6 +54,11 @@ result_root="${CI_RESULT_DIR:-${RUNNER_TEMP:-/tmp}/yishu-results}"
 mkdir -p "$result_root"
 result_bundle="$result_root/Yishu-${device_family}-$(date +%s).xcresult"
 
+# The shared UI suite keeps XCTest's system accessibility audit on iPhone.
+# On iPad it runs the deterministic safe-area, 44pt, Dynamic Type, VoiceOver
+# and Apple UI-configuration layout contract instead, avoiding XCTest
+# framework error -56 without
+# skipping the accessibility gate or accepting an audit failure.
 xcodebuild \
   -project Yishu.xcodeproj \
   -scheme Yishu \

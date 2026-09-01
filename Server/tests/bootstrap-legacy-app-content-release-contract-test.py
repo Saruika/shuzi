@@ -1,3 +1,4 @@
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -5,6 +6,8 @@ import subprocess
 
 BOOTSTRAP = Path("Server/operations/bootstrap-legacy-app-content-release")
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
+AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
+OPERATIONS_README = Path("Server/operations/README.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -59,6 +62,8 @@ def main() -> None:
     lines = text.splitlines()
     deployer = DEPLOYER.read_text(encoding="utf-8")
     deployer_lines = deployer.splitlines()
+    authority_verifier_sha256 = hashlib.sha256(AUTHORITY_VERIFIER.read_bytes()).hexdigest()
+    operations_readme = OPERATIONS_README.read_text(encoding="utf-8")
 
     assert lines[:3] == ["#!/bin/bash", "set -Eeuo pipefail", "umask 077"]
     assert BOOTSTRAP.stat().st_mode & 0o111
@@ -72,8 +77,11 @@ def main() -> None:
         "readonly STAGING_ROOT=/var/lib/shuzijun-app-content/releases",
         "readonly BACKUP_ROOT=/var/backups/shuzijun-app-content",
         'readonly LOCK_PATH="$STAGING_ROOT"',
+        'readonly AUTHORITY_LOCK_PATH="$SITE"',
         "readonly DEPLOYER=/usr/local/sbin/deploy-app-content-release",
         "readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security",
+        "readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role",
+        f"readonly AUTHORITY_VERIFY_SHA256={authority_verifier_sha256}",
     ):
         assert fixed_path in lines
 
@@ -96,6 +104,16 @@ def main() -> None:
     assert deploy_preflight < bundle_preflight_exit < live_webroot_check
 
     root_check = line_number(lines, '[[ "$EUID" -eq 0 ]]')
+    authority_only = line_number(
+        lines,
+        '[[ "$AUTHORITY_ROLE" == authority ]]',
+        root_check,
+    )
+    authority_lock_open = line_number(
+        lines, 'exec 8<"$AUTHORITY_LOCK_PATH"', root_check
+    )
+    authority_lock_take = line_number(lines, "flock -n 8", authority_lock_open)
+    early_role_gate = line_number(lines, "verify_authority_role", authority_lock_take)
     delegated_preflight = line_number(
         lines,
         '--manifest-sha256 "$EXPECTED_MANIFEST_SHA256" --bundle-preflight',
@@ -104,8 +122,10 @@ def main() -> None:
     lock_open = line_number(lines, 'exec 9<"$LOCK_PATH"', delegated_preflight)
     lock_take = line_number(lines, "flock -n 9", lock_open)
     locked_validation = line_number(lines, "validate_locked_bundle", lock_take)
-    assert root_check < delegated_preflight < lock_open < lock_take < locked_validation
+    assert root_check < authority_only < authority_lock_open < authority_lock_take < early_role_gate
+    assert early_role_gate < delegated_preflight < lock_open < lock_take < locked_validation
     assert 'exec 9<>"$LOCK_PATH"' not in text
+    assert 'exec 8<>"$AUTHORITY_LOCK_PATH"' not in text
 
     locked_bundle = function_body(lines, "validate_locked_bundle", "resolve_php")
     for boundary in (
@@ -269,7 +289,8 @@ def main() -> None:
     active_precondition = line_number(
         lines, 'systemctl is-active --quiet "$FPM_SERVICE" || fail', first_api_probe
     )
-    backup = line_number(lines, "create_legacy_backup", active_precondition + 1)
+    apply_role_gate = line_number(lines, "verify_authority_role", active_precondition + 1)
+    backup = line_number(lines, "create_legacy_backup", apply_role_gate + 1)
     backup_verify = line_number(lines, "verify_legacy_backup", backup + 1)
     install_support = line_number(lines, "install_support_unit", backup_verify + 1)
     support_hash = line_number(lines, "verify_support_hashes", install_support + 1)
@@ -278,12 +299,13 @@ def main() -> None:
         lines, 'systemctl is-active --quiet "$FPM_SERVICE"', autoload + 1
     )
     post_verify = line_number(lines, '"$VERIFY" "$SITE"', active_postcondition + 1)
-    post_direct_probe = line_number(lines, "probe_direct_plugin_blocked", post_verify + 1)
+    post_role_gate = line_number(lines, "verify_authority_role", post_verify + 1)
+    post_direct_probe = line_number(lines, "probe_direct_plugin_blocked", post_role_gate + 1)
     post_api_probe = line_number(lines, "probe_unauthorized_api", post_direct_probe + 1)
     assert dry_run < first_direct_probe < first_api_probe < active_precondition
-    assert active_precondition < backup < backup_verify < install_support
+    assert active_precondition < apply_role_gate < backup < backup_verify < install_support
     assert install_support < support_hash < autoload < active_postcondition
-    assert active_postcondition < post_verify < post_direct_probe < post_api_probe
+    assert active_postcondition < post_verify < post_role_gate < post_direct_probe < post_api_probe
 
     main_pre_dry_run = "\n".join(lines[locked_validation:dry_run])
     early_resume_validation = line_number(
@@ -296,12 +318,14 @@ def main() -> None:
         lines, "clear_atomic_stage", apply_stage_cleanup_guard
     )
     baseline = line_number(lines, "verify_baseline_no_http", apply_stage_cleanup)
+    dry_role_gate = line_number(lines, "verify_authority_role", baseline + 1)
     assert (
         locked_validation
         < early_resume_validation
         < apply_stage_cleanup_guard
         < apply_stage_cleanup
         < baseline
+        < dry_role_gate
         < dry_run
     )
     for prohibited in (
@@ -344,6 +368,7 @@ def main() -> None:
         "bundle option may be specified only once",
         "manifest SHA256 option may be specified only once",
         "legacy PHP SHA256 option may be specified only once",
+        "authority role option may be specified only once",
         "bootstrap mode may be specified only once",
     ):
         assert duplicate_guard in text
@@ -376,9 +401,23 @@ def main() -> None:
         stderr=subprocess.PIPE,
     )
     assert "--legacy-php-sha256" in help_result.stdout
+    assert "--authority-role authority" in help_result.stdout
+    assert "standby legacy bootstrap is prohibited" in text
+    assert 'env -i PATH="$PATH" LC_ALL=C LANG=C' in text
+    assert 'verifier_sha256=$(sha256sum "$verifier_fd_path"' in text
+    assert '[[ "$verifier_sha256" == "$AUTHORITY_VERIFY_SHA256" ]]' in text
+    assert 'exec 7<"$AUTHORITY_VERIFY"' in text
+    assert '/usr/bin/python3 -I /proc/self/fd/7 "$AUTHORITY_ROLE"' in text
+    assert "stat -Lc '%u:%g:%h:%a'" in text
+    assert "exec 7<&-" in text
+    assert "for verifier_parent in /usr /usr/local /usr/local/sbin" in text
+    assert "account-authority verifier parent is writable" in text
     assert "default mode is --dry-run" in help_result.stdout
     assert "never replaces PHP or stops" in help_result.stdout
     assert "byte-exact subset" in help_result.stdout
+    assert "--authority-role <authority|standby>" not in operations_readme
+    assert "--authority-role <与本机实际配置一致的-authority或standby>" not in operations_readme
+    assert "只允许在 authority 节点使用" in operations_readme
 
     print("bootstrap-legacy-app-content-release-contract-test: passed")
 

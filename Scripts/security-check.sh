@@ -55,9 +55,11 @@ fi
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/entitlement-verifier/app.py").read_text(encoding="utf-8"))'
 python3 -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8")) for path in pathlib.Path("Server/operations").glob("*.py")]'
 python3 Server/tests/app-content-release-contract-test.py
+python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py
 python3 Server/tests/bootstrap-legacy-app-content-release-contract-test.py
 python3 Server/tests/sync-script-contract-test.py
+python3 Server/tests/sync-scheduler-contract-test.py
 python3 Server/tests/nginx-server-block-contract-test.py
 python3 Server/tests/install-build34-nginx-routing-contract-test.py
 python3 Server/tests/nginx-sensitive-routing-smoke-contract-test.py
@@ -66,6 +68,10 @@ bash -n Server/operations/bootstrap-legacy-app-content-release
 bash -n Server/operations/apply-shuzijun-sync
 bash -n Server/operations/sync-to-backup
 bash -n Server/operations/verify-webroot-security
+sh -n Server/operations/shuzijun-sync-ssh-gate
+if command -v visudo >/dev/null 2>&1; then
+  visudo -cf Server/operations/shuzijun-sync-transport.sudoers >/dev/null
+fi
 bash -n Server/tests/fan-api-smoke.sh
 bash -n Server/tests/nginx-sensitive-routing-smoke.sh
 
@@ -84,5 +90,25 @@ if grep -qF 'location ^~ /images/' Server/nginx/shuzijun-legacy-images-alias.con
   fail '旧图片映射不得绕过敏感文件正则规则'
 fi
 grep -qF 'shuzijun-legacy-images-alias.conf' Server/nginx/README.md
+grep -qF "const ACCOUNT_AUTHORITY_ROLE_PATH = '/etc/shuzijun/account-authority-role';" \
+  Server/shuzijun-app-content.php
+grep -qF '$payload === "authority\n"' Server/shuzijun-app-content.php
+grep -qF 'yishu_account_authority_unavailable' Server/shuzijun-app-content.php
+legacy_authority_constant='YISHU_ACCOUNT_''AUTHORITY'
+if grep -R -I -q -F "$legacy_authority_constant" Server Scripts; then
+  fail '检测到已废弃的 PHP authority 常量，必须只使用固定角色 marker'
+fi
+grep -qF -- '--authority-role authority' Server/operations/README.md
+grep -qF -- '--authority-role standby' Server/operations/README.md
+grep -qFx 'ExecStart=/usr/bin/flock -n /run/shuzijun-sync.lock /usr/local/sbin/sync-to-backup' \
+  Server/operations/shuzijun-sync.service
+grep -qFx 'Persistent=true' Server/operations/shuzijun-sync.timer
+grep -qFx '    ForceCommand /usr/local/sbin/shuzijun-sync-ssh-gate' \
+  Server/operations/shuzijun-sync-transport.sshd
+grep -qFx 'shuzijun-sync-transport ALL=(root:root) NOPASSWD: SHUZIJUN_SYNC_RECEIVER' \
+  Server/operations/shuzijun-sync-transport.sudoers
+if grep -qF 'NOPASSWD: ALL' Server/operations/shuzijun-sync-transport.sudoers; then
+  fail '同步传输账号不得拥有通配 sudo 权限'
+fi
 
 printf 'security-check: passed\n'

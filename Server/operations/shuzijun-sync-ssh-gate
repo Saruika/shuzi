@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME
+
+case "${SSH_ORIGINAL_COMMAND:-}" in
+    'sudo /usr/local/sbin/apply-shuzijun-sync --attest')
+        exec /usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --attest
+        ;;
+    'sudo /usr/local/sbin/apply-shuzijun-sync --protocol')
+        exec /usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --protocol
+        ;;
+    'sudo /usr/local/sbin/apply-shuzijun-sync --ingest')
+        exec /usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --ingest
+        ;;
+    *)
+        printf '%s\n' 'shuzijun-sync transport: command denied' >&2
+        exit 126
+        ;;
+esac

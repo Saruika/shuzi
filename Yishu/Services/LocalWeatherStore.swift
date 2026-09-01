@@ -20,8 +20,8 @@ final class LocalWeatherStore: NSObject {
     private(set) var symbolName = "location.fill"
     private(set) var phase: LocalWeatherPhase = .idle
     private(set) var attributionMarkURL: URL?
-    private(set) var attributionLegalURL: URL?
-    private(set) var weatherProviderName = "Apple Weather"
+    private(set) var attributionLegalURL = WeatherAttributionPresentation.officialLegalURL
+    private(set) var weatherProviderName = WeatherAttributionPresentation.defaultProviderName
 
     @ObservationIgnored private let locationManager = CLLocationManager()
     @ObservationIgnored private let weatherService = WeatherService.shared
@@ -33,6 +33,8 @@ final class LocalWeatherStore: NSObject {
     @ObservationIgnored private var lastLocation: CLLocation?
     @ObservationIgnored private var lastUpdated: Date?
     @ObservationIgnored private var activeRequestID = 0
+    @ObservationIgnored private var usesSimulatedWeather = false
+    @ObservationIgnored private var attributionDidResolve = false
 
     var needsSettings: Bool {
         phase == .denied
@@ -46,6 +48,21 @@ final class LocalWeatherStore: NSObject {
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains(
+            "-simulate-ready-weather-for-visual-testing"
+        ) || ProcessInfo.processInfo.environment[
+            "YISHU_SIMULATE_READY_WEATHER_FOR_VISUAL_TESTING"
+        ] == "1" {
+            usesSimulatedWeather = true
+            locationText = "杭州"
+            weatherText = "晴 24°"
+            symbolName = "sun.max.fill"
+            phase = .ready
+            attributionDidResolve = true
+        }
+#endif
     }
 
     deinit {
@@ -57,6 +74,7 @@ final class LocalWeatherStore: NSObject {
     }
 
     func activate() {
+        guard !usesSimulatedWeather else { return }
         guard CLLocationManager.locationServicesEnabled() else {
             showUnavailableLocation()
             return
@@ -77,6 +95,7 @@ final class LocalWeatherStore: NSObject {
     }
 
     func refreshIfAuthorized() {
+        guard !usesSimulatedWeather else { return }
         guard locationManager.authorizationStatus == .authorizedWhenInUse
                 || locationManager.authorizationStatus == .authorizedAlways else { return }
 
@@ -88,7 +107,15 @@ final class LocalWeatherStore: NSObject {
         requestLocation()
     }
 
+    func refreshAttributionIfNeeded() {
+        guard phase == .ready,
+              !attributionDidResolve,
+              attributionTask == nil else { return }
+        loadAttribution(for: activeRequestID)
+    }
+
     private func requestLocation(force: Bool = false) {
+        guard !usesSimulatedWeather else { return }
         guard force || (phase != .locating && phase != .loading) else { return }
         beginNewRequest()
         let requestID = activeRequestID
@@ -220,12 +247,23 @@ final class LocalWeatherStore: NSObject {
         attributionTask?.cancel()
         attributionTask = Task { [weak self] in
             guard let self else { return }
-            guard let attribution = try? await self.weatherService.attribution,
-                  !Task.isCancelled,
+            let attribution = try? await self.weatherService.attribution
+            guard !Task.isCancelled,
                   self.activeRequestID == requestID else { return }
-            self.weatherProviderName = attribution.serviceName
-            self.attributionMarkURL = attribution.combinedMarkDarkURL
-            self.attributionLegalURL = attribution.legalPageURL
+
+            // The official Apple attribution page is usable immediately and
+            // remains the stable destination if WeatherKit's optional
+            // attribution metadata is unavailable. This prevents the legal
+            // entry from getting stuck behind an indefinite loading state.
+            self.weatherProviderName = WeatherAttributionPresentation.providerName(
+                attribution?.serviceName
+            )
+            self.attributionMarkURL = attribution?.combinedMarkDarkURL
+            self.attributionLegalURL = WeatherAttributionPresentation.legalURL(
+                from: attribution?.legalPageURL
+            )
+            self.attributionDidResolve = true
+            self.attributionTask = nil
         }
     }
 
@@ -286,6 +324,10 @@ final class LocalWeatherStore: NSObject {
         locationWatchdogTask = nil
         weatherWatchdogTask = nil
         attributionTask = nil
+        attributionDidResolve = false
+        attributionMarkURL = nil
+        attributionLegalURL = WeatherAttributionPresentation.officialLegalURL
+        weatherProviderName = WeatherAttributionPresentation.defaultProviderName
     }
 
     private static func isUsable(_ location: CLLocation) -> Bool {
@@ -302,6 +344,31 @@ enum WeatherFailureCategory: Int {
     case locationTimedOut = 201
     case weatherTimedOut = 202
     case urlLoadingBase = 1_000
+}
+
+enum WeatherAttributionPresentation {
+    static let defaultProviderName = "Apple Weather"
+    static let officialLegalURL = URL(
+        string: "https://developer.apple.com/weatherkit/data-source-attribution/"
+    )!
+
+    static func providerName(_ candidate: String?) -> String {
+        let value = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? defaultProviderName : value
+    }
+
+    static func legalURL(from candidate: URL?) -> URL {
+        guard let candidate,
+              candidate.scheme?.lowercased() == "https",
+              candidate.user == nil,
+              candidate.password == nil,
+              candidate.port == nil || candidate.port == 443,
+              let host = candidate.host?.lowercased(),
+              host == "apple.com" || host.hasSuffix(".apple.com") else {
+            return officialLegalURL
+        }
+        return candidate
+    }
 }
 
 enum WeatherFailurePresentation {

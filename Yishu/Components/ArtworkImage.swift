@@ -637,7 +637,7 @@ struct CaptureProtectionCover: View {
                         Text("PROTECTED CONTENT · YI SHU")
                             .font(.caption2.weight(.semibold))
                             .tracking(2.1)
-                            .foregroundStyle(.white.opacity(0.28))
+                            .foregroundStyle(AppTheme.muted)
                             .padding(.top, 18)
                     }
                     .frame(maxWidth: .infinity)
