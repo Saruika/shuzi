@@ -7,6 +7,7 @@ import subprocess
 BOOTSTRAP = Path("Server/operations/bootstrap-legacy-app-content-release")
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
+WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
 OPERATIONS_README = Path("Server/operations/README.md")
 
 
@@ -63,6 +64,7 @@ def main() -> None:
     deployer = DEPLOYER.read_text(encoding="utf-8")
     deployer_lines = deployer.splitlines()
     authority_verifier_sha256 = hashlib.sha256(AUTHORITY_VERIFIER.read_bytes()).hexdigest()
+    webroot_verifier_sha256 = hashlib.sha256(WEBROOT_VERIFIER.read_bytes()).hexdigest()
     operations_readme = OPERATIONS_README.read_text(encoding="utf-8")
 
     assert lines[:3] == ["#!/bin/bash", "set -Eeuo pipefail", "umask 077"]
@@ -82,6 +84,8 @@ def main() -> None:
         "readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security",
         "readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role",
         f"readonly AUTHORITY_VERIFY_SHA256={authority_verifier_sha256}",
+        "readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security",
+        f"readonly VERIFY_SHA256={webroot_verifier_sha256}",
     ):
         assert fixed_path in lines
 
@@ -298,7 +302,7 @@ def main() -> None:
     active_postcondition = line_number(
         lines, 'systemctl is-active --quiet "$FPM_SERVICE"', autoload + 1
     )
-    post_verify = line_number(lines, '"$VERIFY" "$SITE"', active_postcondition + 1)
+    post_verify = line_number(lines, "run_webroot_verifier", active_postcondition + 1)
     post_role_gate = line_number(lines, "verify_authority_role", post_verify + 1)
     post_direct_probe = line_number(lines, "probe_direct_plugin_blocked", post_role_gate + 1)
     post_api_probe = line_number(lines, "probe_unauthorized_api", post_direct_probe + 1)
@@ -412,6 +416,11 @@ def main() -> None:
     assert "exec 7<&-" in text
     assert "for verifier_parent in /usr /usr/local /usr/local/sbin" in text
     assert "account-authority verifier parent is writable" in text
+    assert 'exec 6<"$VERIFY"' in text
+    assert 'sha256sum "$verifier_fd_path"' in text
+    assert '[[ "$verifier_sha256" == "$VERIFY_SHA256" ]]' in text
+    assert '/bin/bash /proc/self/fd/6 "$SITE"' in text
+    assert '"$VERIFY" "$SITE"' not in text
     assert "default mode is --dry-run" in help_result.stdout
     assert "never replaces PHP or stops" in help_result.stdout
     assert "byte-exact subset" in help_result.stdout

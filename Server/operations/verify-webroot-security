@@ -1,28 +1,92 @@
 #!/usr/bin/env bash
 set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV PYTHONPATH PYTHONHOME || true
 
 site_root=${1:-/var/www/html/shuzijun.com.cn}
 nginx_site=${2:-/etc/nginx/sites-available/shuzijun-ssl.conf}
 deny_snippet=${3:-/etc/nginx/snippets/shuzijun-sensitive-files-deny.conf}
 legacy_images_snippet=${4:-/etc/nginx/snippets/shuzijun-legacy-images-alias.conf}
 nginx_enabled_site=${5:-/etc/nginx/sites-enabled/shuzijun-ssl.conf}
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-nginx_contract_checker=${6:-$script_dir/verify-nginx-server-block-contract.py}
-nginx_config_owner=${7:-root:root}
-site_root_owner=${8:-root:www-data}
+nginx_config_owner=${6:-root:root}
+site_root_owner=${7:-root:www-data}
+readonly nginx_contract_checker=/usr/local/sbin/verify-nginx-server-block-contract.py
+readonly nginx_contract_checker_sha256=8915ce689de45b835dcc75c47aed40076177a587856cd9e9bbd462641aca9a96
+readonly nginx_contract_checker_fd=/proc/self/fd/9
+
+reject_checker_find_match() {
+    local failure_message=$1 entry found=0 scan_complete=0
+    shift
+    while IFS= read -r -d '' entry; do
+        if [[ -z "$entry" ]]; then scan_complete=1; else found=1; fi
+    done < <(find "$@" -print0 -quit && printf '\0')
+    [[ "$scan_complete" -eq 1 ]] \
+        || { printf 'webroot-security: checker filesystem scan failed\n' >&2; return 1; }
+    [[ "$found" -eq 0 ]] \
+        || { printf 'webroot-security: %s\n' "$failure_message" >&2; return 1; }
+}
+
+open_reviewed_nginx_checker() {
+    local parent checker_sha256
+    [[ "$nginx_contract_checker" == /usr/local/sbin/verify-nginx-server-block-contract.py \
+        && -f "$nginx_contract_checker" && -x "$nginx_contract_checker" \
+        && ! -L "$nginx_contract_checker" \
+        && "$(realpath -e -- "$nginx_contract_checker")" == "$nginx_contract_checker" \
+        && "$(stat -c '%u:%g:%h:%a' "$nginx_contract_checker")" == '0:0:1:755' ]] \
+        || { printf 'webroot-security: Nginx contract checker path or metadata is unsafe\n' >&2; return 1; }
+    for parent in /usr /usr/local /usr/local/sbin; do
+        [[ -d "$parent" && ! -L "$parent" \
+            && "$(realpath -e -- "$parent")" == "$parent" \
+            && "$(stat -c '%u:%g' "$parent")" == '0:0' ]] \
+            || { printf 'webroot-security: Nginx contract checker parent is unsafe\n' >&2; return 1; }
+        reject_checker_find_match \
+            'Nginx contract checker parent is writable by a non-root identity' \
+            "$parent" -maxdepth 0 -perm /022 || return 1
+    done
+    reject_checker_find_match \
+        'Nginx contract checker is writable by a non-root identity' \
+        "$nginx_contract_checker" -maxdepth 0 -perm /022 || return 1
+
+    # Hash and execute the already-opened inode.  Re-checking metadata through
+    # /proc/self/fd closes the path-validation-to-execution replacement gap.
+    exec 9<"$nginx_contract_checker" \
+        || { printf 'webroot-security: cannot open Nginx contract checker\n' >&2; return 1; }
+    [[ -f "$nginx_contract_checker_fd" \
+        && "$(stat -Lc '%u:%g:%h:%a' "$nginx_contract_checker_fd")" == '0:0:1:755' ]] \
+        || { exec 9<&-; printf 'webroot-security: opened Nginx checker metadata is unsafe\n' >&2; return 1; }
+    checker_sha256=$(sha256sum "$nginx_contract_checker_fd" | awk '{ print $1 }') \
+        || { exec 9<&-; return 1; }
+    [[ "$checker_sha256" == "$nginx_contract_checker_sha256" ]] \
+        || { exec 9<&-; printf 'webroot-security: Nginx checker review hash mismatch\n' >&2; return 1; }
+}
+
+run_reviewed_nginx_checker() {
+    local status=0
+    open_reviewed_nginx_checker || return 1
+    /usr/bin/python3 -I "$nginx_contract_checker_fd" "$@" || status=$?
+    exec 9<&-
+    return "$status"
+}
+
+# Establish the checker trust chain before relying on any caller-controlled
+# site/config path or parsing any Nginx content.
+open_reviewed_nginx_checker
+exec 9<&-
 
 test -d "$site_root"
 test -f "$nginx_site"
 test -f "$deny_snippet"
 test -f "$legacy_images_snippet"
 test -e "$nginx_enabled_site"
-test -f "$nginx_contract_checker"
 
 # Parse the active server blocks before relying on any textual snippet checks.
 # This is a local-filesystem contract check only: it deliberately performs no
 # HTTP requests, including when the release deployer invokes this verifier from
 # a dry-run.
-python3 "$nginx_contract_checker" \
+run_reviewed_nginx_checker \
     --site-root "$site_root" \
     --site-config "$nginx_site" \
     --enabled-entry "$nginx_enabled_site" \

@@ -5,6 +5,7 @@ from pathlib import Path
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
+WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -30,6 +31,7 @@ def main() -> None:
     lines = text.splitlines()
     readme = OPERATIONS_README.read_text(encoding="utf-8")
     authority_verifier_sha256 = hashlib.sha256(AUTHORITY_VERIFIER.read_bytes()).hexdigest()
+    webroot_verifier_sha256 = hashlib.sha256(WEBROOT_VERIFIER.read_bytes()).hexdigest()
 
     assert lines[:3] == ["#!/bin/bash", "set -Eeuo pipefail", "umask 077"]
     assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin" in lines
@@ -44,6 +46,8 @@ def main() -> None:
         'readonly AUTHORITY_LOCK_PATH="$SITE"',
         "readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role",
         f"readonly AUTHORITY_VERIFY_SHA256={authority_verifier_sha256}",
+        "readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security",
+        f"readonly VERIFY_SHA256={webroot_verifier_sha256}",
     ):
         assert fixed_path in lines
     assert "LOCK_FILE=" not in text
@@ -327,7 +331,7 @@ def main() -> None:
     guard_release = line_number(lines, "release_fpm_boot_guard", offline_api + 1)
     fpm_start = line_number(lines, 'systemctl start "$FPM_SERVICE"', guard_release + 1)
     online_guard = line_number(lines, "protect_fpm_from_incomplete_boot", fpm_start + 1)
-    post_verify = line_number(lines, '"$VERIFY" "$SITE"', online_guard + 1)
+    post_verify = line_number(lines, "run_webroot_verifier", online_guard + 1)
     final_authority_check = line_number(lines, "verify_authority_role", post_verify + 1)
     nginx_check = line_number(lines, "nginx -t", final_authority_check + 1)
     final_direct_probe = line_number(lines, "probe_direct_php_blocked", nginx_check + 1)
@@ -386,6 +390,27 @@ def main() -> None:
         assert authority_guard in authority_verifier
     assert 'sha256sum "$verifier_fd_path"' in authority_verifier
     assert '/usr/bin/python3 -I /proc/self/fd/7 "$AUTHORITY_ROLE"' in text
+
+    webroot_verifier = function_body(
+        lines, "validate_webroot_verifier", "run_webroot_verifier"
+    )
+    for webroot_guard in (
+        "/usr/local/sbin/verify-shuzijun-webroot-security",
+        "realpath -e",
+        "stat -c '%u:%g:%h:%a'",
+        "0:0:1:755",
+        "for verifier_parent in /usr /usr/local /usr/local/sbin",
+        "writable by a non-root identity",
+        'exec 6<"$VERIFY"',
+        "/proc/self/fd/6",
+        "stat -Lc '%u:%g:%h:%a'",
+        'sha256sum "$verifier_fd_path"',
+        "VERIFY_SHA256",
+    ):
+        assert webroot_guard in webroot_verifier
+    run_webroot = function_body(lines, "run_webroot_verifier", "validate_authority_lock_path")
+    assert '/bin/bash /proc/self/fd/6 "$SITE"' in run_webroot
+    assert '"$VERIFY" "$SITE"' not in text
 
     for prohibited in (
         "wp db ",

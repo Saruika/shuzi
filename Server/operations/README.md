@@ -262,6 +262,63 @@ query-form App API 仍返回受保护的 401。它先在 Web 根目录外建立 
 不会替换 1.5.7 PHP、删除已核验的支持子集或停止 FPM。Bootstrap 成功后立即
 执行下方普通发布器 dry-run/apply，不要把它当作日常升级命令重复使用。
 
+### Standby 历史单文件首次种子
+
+新加坡备用节点如果仍是经审核的 1.5.7 单文件状态，使用一次性
+`seed-standby-app-content-release`。它只接受固定 marker 精确为
+`standby\n`的节点，不接收可由调用者改写的角色参数。Dry-run 与
+apply 都要求操作者已停止同步、WP-CLI、Cron 及账号请求，传入
+`--confirm-writers-drained`，并且 `php8.3-fpm` 必须始终同时是持久
+`masked`、`inactive`、`dead`。该工具不会 unmask/start FPM。
+
+首先安装已审核版本的工具，并用 Git/CI 发布记录中的两个独立
+SHA-256 运行 dry-run：
+
+```bash
+sudo install -o root -g root -m 0755 \
+  Server/operations/seed-standby-app-content-release \
+  /usr/local/sbin/seed-standby-app-content-release
+
+sudo /usr/local/sbin/seed-standby-app-content-release \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --manifest-sha256 <CI 记录的 release.sha256 哈希> \
+  --legacy-php-sha256 <Git 审核的现网-1.5.7-哈希> \
+  --confirm-writers-drained \
+  --dry-run
+```
+
+Dry-run 会输出确定性 `plan-sha256`；该值同时绑定 standby 角色、
+固定目标、bundle/manifest、旧 PHP 哈希、发布器/角色验证器审核版本
+以及 FPM 隔离策略。记录并审核该哈希后，使用完全相同的参数，
+只增加 `--approved-plan-sha256`并改为 apply：
+
+```bash
+sudo /usr/local/sbin/seed-standby-app-content-release \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --manifest-sha256 <同一个已审核清单哈希> \
+  --legacy-php-sha256 <同一个已审核旧-PHP-哈希> \
+  --approved-plan-sha256 <dry-run 输出的-plan-sha256> \
+  --confirm-writers-drained \
+  --apply
+```
+
+工具先调用固定哈希的普通发布器 `--bundle-preflight`，复用发布
+manifest、PHP/Composer/JWT 依赖和漏洞审计；随后在共享站点锁和发布锁
+下重新校验全部字节。Apply 在 Web root 外建立 root-only 的 1.5.7
+审计/回滚备份，在 MU-plugin 同一文件系统的 root-only 隐藏目录先构建
+并校验完整发布单元，再以原子 rename 安装 `vendor/`、Composer
+元数据、插件入口和 `release.sha256`。安装后以 `www-data` 加载
+JWT autoloader 及真实 `wp-load.php`，对 `/index.php?...` 和 `/?...`
+两种 query-form 分别做离线 REST 请求，两者都必须返回
+503/`yishu_account_authority_unavailable`。
+
+任何失败都在 FPM 仍为 masked/inactive/dead 时删除未发布 staging，并用
+已核验备份原子恢复精确的 1.5.7 单文件状态；回滚无法完整验证时
+仍保持 FPM 隔离并要求人工恢复。该路径绝不得运行
+`bootstrap-legacy-app-content-release`，不复制 `wp-config.php`、数据库、上传目录
+或任何整站/代码同步内容。成功后仍由操作者先完成 marker、Nginx
+路由和单写者验收，再在独立操作中显式决定是否 unmask/start FPM。
+
 典型调用如下；SHA-256 是非敏感的发布校验值，不能替换成现场重新计算后
 未经核对的值。备节点先用 `standby` dry-run/apply，上海节点再用
 `authority` dry-run/apply：
@@ -531,9 +588,30 @@ every direct `/wp-content/...php` request, or when the resulting Nginx
 configuration is invalid. This ensures the MU-plugin's locked `vendor/` PHP is
 reachable only through WordPress `/index.php`. Recovery copies must use a
 root-only directory under `/var/backups` and must never be placed next to the
-live site. Install `verify-nginx-server-block-contract.py` beside the webroot
-verifier; its semantic active-config check is local-only and therefore remains
-safe to run during a release dry-run.
+live site. The semantic checker is not discovered relative to the wrapper or
+accepted from an argument. Install the reviewed files at their fixed paths:
+
+```bash
+sudo install -o root -g root -m 0755 \
+  Server/operations/verify-nginx-server-block-contract.py \
+  /usr/local/sbin/verify-nginx-server-block-contract.py
+sudo install -o root -g root -m 0755 \
+  Server/operations/verify-webroot-security \
+  /usr/local/sbin/verify-shuzijun-webroot-security
+```
+
+`verify-shuzijun-webroot-security` pins the reviewed checker SHA-256 and accepts
+only the canonical `/usr/local/sbin/verify-nginx-server-block-contract.py`
+regular file with exact root:root 0755 metadata and link count one. `/usr`,
+`/usr/local` and `/usr/local/sbin` must be canonical root-owned directories and
+must not be writable by a non-root identity. The wrapper opens the checker,
+revalidates metadata and the review hash through `/proc/self/fd`, then executes
+that same inode with `/usr/bin/python3 -I`; symlinks, writable copies, hash
+drift and path-replacement races fail before checker code runs. The release
+deployer, authority-only bootstrap and standby seed apply the same fixed-path,
+parent-chain, metadata, hash and open-FD execution contract to the wrapper
+itself. The semantic active-config check remains local-only and therefore safe
+to run during a release dry-run.
 
 The legacy `/images/...` public URLs must be provided by the constrained
 `shuzijun-legacy-images-alias.conf` include in both `www` and `img` TLS blocks,

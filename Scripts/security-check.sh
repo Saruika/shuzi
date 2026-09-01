@@ -58,6 +58,8 @@ python3 Server/tests/app-content-release-contract-test.py
 python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py
 python3 Server/tests/bootstrap-legacy-app-content-release-contract-test.py
+python3 Server/tests/standby-seed-contract-test.py
+python3 Server/tests/webroot-verifier-trust-contract-test.py
 python3 Server/tests/sync-script-contract-test.py
 python3 Server/tests/sync-scheduler-contract-test.py
 python3 Server/tests/nginx-server-block-contract-test.py
@@ -65,6 +67,7 @@ python3 Server/tests/install-build34-nginx-routing-contract-test.py
 python3 Server/tests/nginx-sensitive-routing-smoke-contract-test.py
 bash -n Server/operations/deploy-app-content-release
 bash -n Server/operations/bootstrap-legacy-app-content-release
+bash -n Server/operations/seed-standby-app-content-release
 bash -n Server/operations/apply-shuzijun-sync
 bash -n Server/operations/sync-to-backup
 bash -n Server/operations/verify-webroot-security

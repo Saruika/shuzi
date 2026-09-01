@@ -383,7 +383,7 @@ def assert_source_is_bound_to_state_machine() -> None:
         "release_fpm_boot_guard",
         'systemctl start "$FPM_SERVICE"',
         "protect_fpm_from_incomplete_boot",
-        '"$VERIFY" "$SITE"',
+        "run_webroot_verifier",
         "nginx -t",
         "probe_direct_php_blocked",
         "probe_unauthorized_api",

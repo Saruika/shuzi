@@ -23,6 +23,7 @@ readonly BACKUP_ROOT=/var/backups/shuzijun-app-content
 readonly LOCK_PATH="$STAGING_ROOT"
 readonly AUTHORITY_LOCK_PATH="$SITE"
 readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+readonly VERIFY_SHA256=ff1628c179513cc7406eb855ba84c77a8ff3af6ce32d0e60b66defba0f37ef1c
 readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
 readonly AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 readonly FPM_SERVICE=php8.3-fpm
@@ -190,6 +191,42 @@ validate_authority_verifier() {
         || { exec 7<&-; return 1; }
     [[ "$verifier_sha256" == "$AUTHORITY_VERIFY_SHA256" ]] \
         || { fail 'account-authority verifier does not match the reviewed release'; exec 7<&-; return 1; }
+}
+
+validate_webroot_verifier() {
+    local verifier_parent verifier_sha256 verifier_fd_path=/proc/self/fd/6
+    [[ "$VERIFY" == /usr/local/sbin/verify-shuzijun-webroot-security \
+        && -f "$VERIFY" && -x "$VERIFY" && ! -L "$VERIFY" \
+        && "$(realpath -e -- "$VERIFY")" == "$VERIFY" \
+        && "$(stat -c '%u:%g:%h:%a' "$VERIFY")" == '0:0:1:755' ]] \
+        || { fail 'webroot verifier is missing or unsafe'; return 1; }
+    for verifier_parent in /usr /usr/local /usr/local/sbin; do
+        [[ -d "$verifier_parent" && ! -L "$verifier_parent" \
+            && "$(realpath -e -- "$verifier_parent")" == "$verifier_parent" \
+            && "$(stat -c '%u:%g' "$verifier_parent")" == '0:0' ]] \
+            || { fail 'webroot verifier parent is unsafe'; return 1; }
+        reject_find_match 'webroot verifier parent is writable by a non-root identity' \
+            "$verifier_parent" -maxdepth 0 -perm /022 || return 1
+    done
+    reject_find_match 'webroot verifier is writable by a non-root identity' \
+        "$VERIFY" -maxdepth 0 -perm /022 || return 1
+    exec 6<"$VERIFY" || { fail 'webroot verifier cannot be opened'; return 1; }
+    [[ -f "$verifier_fd_path" \
+        && "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" == '0:0:1:755' ]] \
+        || { exec 6<&-; fail 'opened webroot verifier metadata is unsafe'; return 1; }
+    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }') \
+        || { exec 6<&-; return 1; }
+    [[ "$verifier_sha256" == "$VERIFY_SHA256" ]] \
+        || { exec 6<&-; fail 'webroot verifier does not match the reviewed release'; return 1; }
+}
+
+run_webroot_verifier() {
+    local verifier_status=0
+    validate_webroot_verifier || return 1
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /bin/bash /proc/self/fd/6 "$SITE" || verifier_status=$?
+    exec 6<&-
+    return "$verifier_status"
 }
 
 validate_authority_lock_path() {
@@ -603,8 +640,7 @@ validate_current_release_unit() {
 }
 
 verify_current_webroot() {
-    [[ -x "$VERIFY" ]] || fail 'webroot verifier is unavailable'
-    "$VERIFY" "$SITE"
+    run_webroot_verifier
     nginx -t >/dev/null
     systemctl is-active --quiet "$FPM_SERVICE"
     validate_current_release_unit
@@ -995,7 +1031,7 @@ handle_failure() {
     if [[ "$ROLLBACK_READY" -eq 1 ]]; then
         printf 'app-content-release: failure detected; restoring previous code release\n' >&2
         if restore_code_backup \
-            && "$VERIFY" "$SITE" >/dev/null 2>&1 \
+            && run_webroot_verifier >/dev/null 2>&1 \
             && nginx -t >/dev/null 2>&1 \
             && systemctl is-active --quiet "$FPM_SERVICE" \
             && probe_direct_php_blocked \
@@ -1165,7 +1201,7 @@ systemctl is-active --quiet "$FPM_SERVICE"
 # Masking an active unit does not stop it, so the local probes still execute.
 protect_fpm_from_incomplete_boot
 
-"$VERIFY" "$SITE"
+run_webroot_verifier
 verify_authority_role
 nginx -t >/dev/null
 probe_direct_php_blocked

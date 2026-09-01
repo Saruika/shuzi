@@ -103,6 +103,8 @@ xcodebuild -project Yishu.xcodeproj \
 - UI 回归采用 Apple 官方 UI configuration 机制，独立覆盖横竖屏、明暗外观、iPadOS 窗口化、Accessibility XXXL、安全区、44pt 与 VoiceOver，并保留 iPhone 系统辅助功能审计。
 - 账号与内容 API 改为服务器 root-only 固定角色标记控制的上海单写权威模型；备用节点对所有本地 pretty/query-form 绕过路径统一以明确 503 失败关闭，不能由 Host、转发头、数据库、`wp-config.php` 或回环地址提升权限。
 - 主备发布器新增强制 `authority` / `standby` 角色验收，严格核对 HTTP 状态、JSON 错误码、安全响应头和响应体上限；发布回滚保持相同失败关闭边界。
+- 新增仅供新加坡旧版单文件节点使用的事务化 standby 首次种子工具：只在角色固定为 `standby`、PHP-FPM 持久屏蔽且写入者排空时安装完整发布单元，失败会恢复经审核的 1.5.7 单文件状态并继续隔离流量。
+- Web 根目录巡检与 Nginx 语义检查器建立固定路径、root 所有权、精确权限、SHA-256 与打开后文件描述符执行的完整信任链，链接替换、可写副本或字节漂移都会在执行前失败。
 - 新增版本化、加固的每日主备同步 systemd service/timer，所有自动与人工同步共用 `/run/shuzijun-sync.lock`，并由安全合同测试验证安装顺序与恢复条件。
 
 ## v1.3.23

@@ -1,0 +1,607 @@
+#!/bin/bash
+set -Eeuo pipefail
+umask 077
+
+# One-time, offline migration for a standby node that still has only the
+# reviewed 1.5.7 MU-plugin entry point.  It deliberately does not share the
+# authority-only legacy bootstrap path: the complete fail-closed release is
+# staged and installed while PHP-FPM is persistently masked and stopped.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+IFS=$' \t\n'
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV http_proxy https_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY all_proxy \
+    NO_PROXY no_proxy COMPOSER_AUTH GITHUB_TOKEN GITLAB_TOKEN || true
+
+readonly SITE=/var/www/html/shuzijun.com.cn
+readonly TARGET_DIR="$SITE/wp-content/mu-plugins"
+readonly LIVE_PHP="$TARGET_DIR/shuzijun-app-content.php"
+readonly LIVE_MANIFEST="$TARGET_DIR/release.sha256"
+readonly STAGING_ROOT=/var/lib/shuzijun-app-content/releases
+readonly BACKUP_ROOT=/var/backups/shuzijun-app-content
+readonly LOCK_PATH="$STAGING_ROOT"
+readonly AUTHORITY_LOCK_PATH="$SITE"
+readonly DEPLOYER=/usr/local/sbin/deploy-app-content-release
+readonly DEPLOYER_SHA256=2a8c81faada1c4f474166f26a01c523c9fd70455dbbdcff898b784a3a6e79c30
+readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+readonly VERIFY_SHA256=ff1628c179513cc7406eb855ba84c77a8ff3af6ce32d0e60b66defba0f37ef1c
+readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
+readonly AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
+readonly FPM_SERVICE=php8.3-fpm
+readonly MANIFEST_NAME=release.sha256
+
+MODE=dry-run
+BUNDLE_INPUT=
+EXPECTED_MANIFEST_SHA256=
+EXPECTED_LEGACY_PHP_SHA256=
+APPROVED_PLAN_SHA256=
+BUNDLE=
+MANIFEST=
+PHP_BIN=
+PLAN_SHA256=
+TRANSACTION_DIR=
+BACKUP_DIR=
+BACKUP_MANIFEST=
+STAGE_DIR=
+BACKUP_READY=0
+CODE_MUTATED=0
+MODE_SEEN=0
+BUNDLE_SEEN=0
+MANIFEST_SHA_SEEN=0
+LEGACY_SHA_SEEN=0
+PLAN_SHA_SEEN=0
+WRITERS_DRAINED=0
+
+usage() {
+    cat <<'EOF'
+Usage:
+  seed-standby-app-content-release --bundle ABSOLUTE_PATH \
+      --manifest-sha256 SHA256 --legacy-php-sha256 SHA256 \
+      --confirm-writers-drained --dry-run
+
+  seed-standby-app-content-release --bundle ABSOLUTE_PATH \
+      --manifest-sha256 SHA256 --legacy-php-sha256 SHA256 \
+      --approved-plan-sha256 SHA256 --confirm-writers-drained --apply
+
+This standby-only migration accepts exactly the fixed root-owned `standby`
+role marker. PHP-FPM must already be persistently masked, inactive and dead in
+both modes. Dry-run prints a deterministic plan SHA-256; apply requires that
+reviewed hash and installs the complete manifested release while FPM remains
+masked. The legacy bootstrap is never called and no site configuration,
+database, uploads, wp-config.php or synchronized code is copied.
+EOF
+}
+
+fail() {
+    printf 'app-content-standby-seed: %s\n' "$1" >&2
+    return 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || fail "required command unavailable: $1"
+}
+
+reject_find_match() {
+    local failure_message=$1 entry found=0 scan_complete=0
+    shift
+    while IFS= read -r -d '' entry; do
+        if [[ -z "$entry" ]]; then scan_complete=1; else found=1; fi
+    done < <(find "$@" -print0 -quit && printf '\0')
+    [[ "$scan_complete" -eq 1 ]] || fail 'filesystem safety scan did not complete'
+    [[ "$found" -eq 0 ]] || fail "$failure_message"
+}
+
+validate_digest() {
+    [[ "$1" =~ ^[a-f0-9]{64}$ ]] \
+        || fail "$2 must be 64 lowercase hexadecimal characters"
+}
+
+validate_tool() {
+    local path=$1 label=$2 expected_sha=$3 parent actual
+    [[ -f "$path" && -x "$path" && ! -L "$path" \
+        && "$(realpath -e -- "$path")" == "$path" \
+        && "$(stat -c '%u:%h' "$path")" == '0:1' ]] \
+        || fail "$label is missing or unsafe"
+    reject_find_match "$label is writable by a non-root identity" \
+        "$path" -maxdepth 0 -perm /022
+    for parent in /usr /usr/local /usr/local/sbin; do
+        [[ -d "$parent" && ! -L "$parent" \
+            && "$(realpath -e -- "$parent")" == "$parent" \
+            && "$(stat -c '%u' "$parent")" == 0 ]] \
+            || fail "$label parent is unsafe"
+        reject_find_match "$label parent is writable by a non-root identity" \
+            "$parent" -maxdepth 0 -perm /022
+    done
+    actual=$(sha256sum -- "$path")
+    actual=${actual%% *}
+    [[ "$actual" == "$expected_sha" ]] || fail "$label does not match the reviewed release"
+}
+
+run_webroot_verifier() {
+    local verifier_sha256 verifier_status=0 verifier_fd_path=/proc/self/fd/6
+    validate_tool "$VERIFY" 'webroot verifier' "$VERIFY_SHA256" || return 1
+    exec 6<"$VERIFY" || { fail 'webroot verifier cannot be opened'; return 1; }
+    [[ -f "$verifier_fd_path" \
+        && "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" == '0:0:1:755' ]] \
+        || { exec 6<&-; fail 'opened webroot verifier metadata is unsafe'; return 1; }
+    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }') \
+        || { exec 6<&-; return 1; }
+    [[ "$verifier_sha256" == "$VERIFY_SHA256" ]] \
+        || { exec 6<&-; fail 'webroot verifier changed after opening'; return 1; }
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /bin/bash /proc/self/fd/6 "$SITE" || verifier_status=$?
+    exec 6<&-
+    return "$verifier_status"
+}
+
+validate_fixed_boundaries() {
+    local path
+    for path in "$SITE" "$TARGET_DIR" "$STAGING_ROOT" "$BACKUP_ROOT"; do
+        [[ -d "$path" && ! -L "$path" \
+            && "$(realpath -e -- "$path")" == "$path" \
+            && "$(stat -c '%u' "$path")" == 0 ]] \
+            || fail 'fixed seed boundary is unsafe'
+        reject_find_match 'fixed seed boundary is writable by a non-root identity' \
+            "$path" -maxdepth 0 -perm /022
+    done
+    [[ "$STAGING_ROOT" != "$SITE" && "$STAGING_ROOT" != "$SITE/"* \
+        && "$BACKUP_ROOT" != "$SITE" && "$BACKUP_ROOT" != "$SITE/"* ]] \
+        || fail 'staging and backup roots must be outside the webroot'
+    [[ -d /var/backups && ! -L /var/backups \
+        && "$(realpath -e -- /var/backups)" == /var/backups \
+        && "$(stat -c '%u' /var/backups)" == 0 ]] \
+        || fail 'backup parent is unsafe'
+    reject_find_match 'backup parent is writable by a non-root identity' \
+        /var/backups -maxdepth 0 -perm /022
+}
+
+verify_standby_role() {
+    local status=0
+    validate_tool "$AUTHORITY_VERIFY" 'account-authority verifier' \
+        "$AUTHORITY_VERIFY_SHA256"
+    exec 7<"$AUTHORITY_VERIFY"
+    [[ -f /proc/self/fd/7 \
+        && "$(stat -Lc '%u:%g:%h:%a' /proc/self/fd/7)" == '0:0:1:755' ]] \
+        || { exec 7<&-; fail 'opened authority verifier metadata is unsafe'; return 1; }
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/7 standby || status=1
+    exec 7<&-
+    [[ "$status" -eq 0 ]] || fail 'fixed account-authority role is not exact standby'
+}
+
+verify_fpm_isolated() {
+    local enabled active sub
+    enabled=$(systemctl is-enabled "$FPM_SERVICE" 2>/dev/null || true)
+    active=$(systemctl show "$FPM_SERVICE" --property=ActiveState --value 2>/dev/null || true)
+    sub=$(systemctl show "$FPM_SERVICE" --property=SubState --value 2>/dev/null || true)
+    [[ "$enabled" == masked && "$active" == inactive && "$sub" == dead ]] \
+        || fail 'PHP-FPM must remain persistently masked, inactive and dead'
+}
+
+resolve_php() {
+    local candidate candidate_parent binary_parent
+    for candidate in /usr/bin/php8.3 /usr/local/bin/php8.3 /usr/bin/php /usr/local/bin/php; do
+        [[ -x "$candidate" ]] && { PHP_BIN=$candidate; break; }
+    done
+    [[ -n "$PHP_BIN" ]] || fail 'PHP 8.3 is unavailable'
+    candidate_parent=${PHP_BIN%/*}
+    PHP_BIN=$(realpath -e -- "$PHP_BIN")
+    binary_parent=${PHP_BIN%/*}
+    [[ -f "$PHP_BIN" && ! -L "$PHP_BIN" && "$(stat -c '%u' "$PHP_BIN")" == 0 ]] \
+        || fail 'PHP runtime is unsafe'
+    for candidate in "$candidate_parent" "$binary_parent"; do
+        [[ "$(realpath -e -- "$candidate")" == "$candidate" \
+            && "$(stat -c '%u' "$candidate")" == 0 ]] || fail 'PHP directory is unsafe'
+        reject_find_match 'PHP directory is writable by a non-root identity' \
+            "$candidate" -maxdepth 0 -perm /022
+    done
+    reject_find_match 'PHP runtime is writable by a non-root identity' \
+        "$PHP_BIN" -maxdepth 0 -perm /022
+    "$PHP_BIN" -n -r 'exit(PHP_MAJOR_VERSION === 8 && PHP_MINOR_VERSION === 3 ? 0 : 1);' \
+        || fail 'PHP runtime must be version 8.3'
+}
+
+validate_bundle_locked() {
+    local actual line digest relative previous='' file entry count=0 complete=0 device
+    declare -A paths=()
+    [[ "$BUNDLE_INPUT" == /* && "$BUNDLE_INPUT" != *'//'* \
+        && "$BUNDLE_INPUT" != *'/./'* && "$BUNDLE_INPUT" != */. \
+        && "$BUNDLE_INPUT" != *'/../'* && "$BUNDLE_INPUT" != */.. ]] \
+        || fail 'bundle path is not canonical'
+    BUNDLE=$(realpath -e -- "$BUNDLE_INPUT")
+    [[ "$BUNDLE" == "$BUNDLE_INPUT" && "$BUNDLE" == "$STAGING_ROOT/"* \
+        && "${BUNDLE#$STAGING_ROOT/}" != */* \
+        && "${BUNDLE##*/}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ \
+        && -d "$BUNDLE" && ! -L "$BUNDLE" && "$(stat -c '%u' "$BUNDLE")" == 0 ]] \
+        || fail 'bundle boundary is unsafe'
+    MANIFEST="$BUNDLE/$MANIFEST_NAME"
+    [[ -f "$MANIFEST" && ! -L "$MANIFEST" ]] || fail 'release manifest is unsafe'
+    reject_find_match 'bundle is writable by a non-root identity' \
+        "$BUNDLE" \( ! -uid 0 -o -perm /022 \)
+    reject_find_match 'bundle contains a symbolic link' "$BUNDLE" -type l
+    reject_find_match 'bundle contains a non-regular entry' "$BUNDLE" ! -type d ! -type f
+    reject_find_match 'bundle contains a hard-linked file' "$BUNDLE" -type f -links +1
+    device=$(stat -c '%d' "$BUNDLE")
+    while IFS= read -r -d '' entry; do
+        [[ -z "$entry" ]] && { complete=1; continue; }
+        relative=${entry#"$BUNDLE/"}
+        [[ "$relative" =~ ^[A-Za-z0-9._/-]+$ && "$(stat -c '%d' "$entry")" == "$device" ]] \
+            || fail 'bundle contains an unsafe or cross-filesystem entry'
+        case "$relative" in
+            release.sha256|shuzijun-app-content.php|composer.json|composer.lock|vendor|vendor/*) ;;
+            *) fail 'bundle contains an entry outside the release unit' ;;
+        esac
+    done < <(find "$BUNDLE" -mindepth 1 -print0 && printf '\0')
+    [[ "$complete" -eq 1 ]] || fail 'bundle tree scan did not complete'
+    validate_digest "$EXPECTED_MANIFEST_SHA256" 'expected manifest SHA256'
+    actual=$(sha256sum -- "$MANIFEST"); actual=${actual%% *}
+    [[ "$actual" == "$EXPECTED_MANIFEST_SHA256" ]] \
+        || fail 'release manifest SHA256 changed after preflight'
+    LC_ALL=C tail -c 1 -- "$MANIFEST" | grep -qx '' \
+        || fail 'release manifest must end with one newline'
+    while IFS= read -r line; do
+        [[ "$line" =~ ^([a-f0-9]{64})\ \ ([A-Za-z0-9._/-]+)$ ]] \
+            || fail 'release manifest has an invalid record'
+        digest=${BASH_REMATCH[1]}; relative=${BASH_REMATCH[2]}
+        [[ "$relative" != /* && "$relative" != *'//'* && "$relative" != *'/../'* ]] \
+            || fail 'release manifest contains path traversal'
+        case "$relative" in
+            shuzijun-app-content.php|composer.json|composer.lock|vendor/*) ;;
+            *) fail 'release manifest entry is outside the release unit' ;;
+        esac
+        [[ -z "$previous" || "$relative" > "$previous" ]] \
+            || fail 'release manifest is not bytewise sorted and unique'
+        paths["$relative"]=$digest; previous=$relative
+    done < "$MANIFEST"
+    for relative in shuzijun-app-content.php composer.json composer.lock \
+        vendor/autoload.php vendor/composer/installed.php; do
+        [[ -n "${paths[$relative]+yes}" && -f "$BUNDLE/$relative" && ! -L "$BUNDLE/$relative" ]] \
+            || fail 'bundle or manifest omits a required release artifact'
+    done
+    complete=0
+    while IFS= read -r -d '' file; do
+        [[ -z "$file" ]] && { complete=1; continue; }
+        relative=${file#"$BUNDLE/"}; [[ "$relative" == release.sha256 ]] && continue
+        count=$((count + 1)); [[ -n "${paths[$relative]+yes}" ]] \
+            || fail 'release manifest does not allow every bundle file'
+    done < <(find "$BUNDLE" -type f -print0 && printf '\0')
+    [[ "$complete" -eq 1 && "$count" -eq "${#paths[@]}" ]] \
+        || fail 'release manifest contains a missing or extra file'
+    (cd "$BUNDLE" && sha256sum --strict --quiet --check "$MANIFEST") >/dev/null
+    grep -qxF ' * Version: 1.5.8' "$BUNDLE/shuzijun-app-content.php" \
+        || fail 'standby seed bundle is not plugin version 1.5.8'
+}
+
+validate_legacy_state() {
+    local actual worker_gid relative
+    worker_gid=$(id -g www-data) || fail 'www-data identity is unavailable'
+    [[ -f "$LIVE_PHP" && ! -L "$LIVE_PHP" \
+        && "$(realpath -e -- "$LIVE_PHP")" == "$LIVE_PHP" \
+        && "$(stat -c '%u:%g:%h' "$LIVE_PHP")" == "0:$worker_gid:1" \
+        && "$(stat -c '%d' "$LIVE_PHP")" == "$(stat -c '%d' "$TARGET_DIR")" ]] \
+        || fail 'legacy PHP boundary or ownership is unsafe'
+    reject_find_match 'legacy PHP is writable by a non-root identity' \
+        "$LIVE_PHP" -maxdepth 0 -perm /022
+    actual=$(sha256sum -- "$LIVE_PHP"); actual=${actual%% *}
+    [[ "$actual" == "$EXPECTED_LEGACY_PHP_SHA256" ]] \
+        || fail 'legacy PHP does not match the trusted audit hash'
+    grep -qxF ' * Version: 1.5.7' "$LIVE_PHP" || fail 'legacy PHP is not version 1.5.7'
+    "$PHP_BIN" -n -l "$LIVE_PHP" >/dev/null
+    for relative in composer.json composer.lock vendor release.sha256; do
+        [[ ! -e "$TARGET_DIR/$relative" && ! -L "$TARGET_DIR/$relative" ]] \
+            || fail 'legacy standby is not the expected single-file state'
+    done
+}
+
+compute_plan() {
+    local material
+    material=$(printf '%s\n' \
+        'shuzijun-standby-seed-plan-v1' \
+        'role=standby' \
+        "site=$SITE" \
+        "target=$TARGET_DIR" \
+        "bundle=$BUNDLE" \
+        "manifest=$EXPECTED_MANIFEST_SHA256" \
+        "legacy=$EXPECTED_LEGACY_PHP_SHA256" \
+        "deployer=$DEPLOYER_SHA256" \
+        "webroot-verifier=$VERIFY_SHA256" \
+        "authority-verifier=$AUTHORITY_VERIFY_SHA256" \
+        'fpm=php8.3-fpm:masked,inactive,dead' \
+        'artifacts=shuzijun-app-content.php,composer.json,composer.lock,vendor,release.sha256')
+    PLAN_SHA256=$(printf '%s\n' "$material" | sha256sum)
+    PLAN_SHA256=${PLAN_SHA256%% *}
+}
+
+clear_stage() {
+    [[ -n "$STAGE_DIR" ]] || return 0
+    if [[ -e "$STAGE_DIR" || -L "$STAGE_DIR" ]]; then
+        [[ "$STAGE_DIR" == "$TARGET_DIR/.shuzijun-standby-seed-$PLAN_SHA256" \
+            && -d "$STAGE_DIR" && ! -L "$STAGE_DIR" \
+            && "$(realpath -e -- "$STAGE_DIR")" == "$STAGE_DIR" \
+            && "$(stat -c '%d' "$STAGE_DIR")" == "$(stat -c '%d' "$TARGET_DIR")" ]] \
+            || return 1
+        reject_find_match 'transaction stage contains a symbolic link' "$STAGE_DIR" -type l \
+            || return 1
+        reject_find_match 'transaction stage contains a non-regular entry' \
+            "$STAGE_DIR" ! -type d ! -type f || return 1
+        rm -rf --one-file-system -- "$STAGE_DIR" || return 1
+        sync -f "$TARGET_DIR" || return 1
+    fi
+    [[ ! -e "$STAGE_DIR" && ! -L "$STAGE_DIR" ]]
+}
+
+validate_stage_tree() {
+    local worker_gid
+    worker_gid=$(id -g www-data) || return 1
+    [[ -d "$STAGE_DIR" && ! -L "$STAGE_DIR" \
+        && "$(realpath -e -- "$STAGE_DIR")" == "$STAGE_DIR" \
+        && "$(stat -c '%u:%g:%a' "$STAGE_DIR")" == "0:$worker_gid:2700" \
+        && "$(stat -c '%d' "$STAGE_DIR")" == "$(stat -c '%d' "$TARGET_DIR")" ]] \
+        || fail 'same-filesystem transaction stage is unsafe'
+    reject_find_match 'transaction stage contains a symbolic link' "$STAGE_DIR" -type l
+    reject_find_match 'transaction stage contains a non-regular entry' \
+        "$STAGE_DIR" ! -type d ! -type f
+    reject_find_match 'transaction stage contains a hard-linked file' \
+        "$STAGE_DIR" -type f -links +1
+    reject_find_match 'transaction stage has unsafe ownership or write access' \
+        "$STAGE_DIR" \( ! -uid 0 -o ! -gid "$worker_gid" -o -perm /022 \)
+    (cd "$STAGE_DIR" && sha256sum --strict --quiet --check release.sha256) >/dev/null
+    [[ "$(sha256sum "$STAGE_DIR/release.sha256" | awk '{print $1}')" \
+        == "$EXPECTED_MANIFEST_SHA256" ]] || fail 'staged manifest hash changed'
+}
+
+prepare_stage() {
+    STAGE_DIR="$TARGET_DIR/.shuzijun-standby-seed-$PLAN_SHA256"
+    [[ ! -e "$STAGE_DIR" && ! -L "$STAGE_DIR" ]] \
+        || fail 'standby seed stage already exists; inspect before retrying'
+    mkdir -m 0700 "$STAGE_DIR"
+    chown root:www-data "$STAGE_DIR"
+    chmod 2700 "$STAGE_DIR"
+    install -d -o root -g www-data -m 0755 "$STAGE_DIR/vendor"
+    cp -R -- "$BUNDLE/vendor/." "$STAGE_DIR/vendor/"
+    chown -R root:www-data "$STAGE_DIR/vendor"
+    find "$STAGE_DIR/vendor" -xdev -type d -exec chmod 0755 {} +
+    find "$STAGE_DIR/vendor" -xdev -type f -exec chmod 0644 {} +
+    for relative in shuzijun-app-content.php composer.json composer.lock release.sha256; do
+        install -o root -g www-data -m 0644 "$BUNDLE/$relative" "$STAGE_DIR/$relative"
+    done
+    validate_stage_tree
+    sync -f "$STAGE_DIR"
+    sync -f "$TARGET_DIR"
+}
+
+create_backup() {
+    local stamp actual
+    stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    BACKUP_DIR="$BACKUP_ROOT/standby-seed-${stamp}-${EXPECTED_LEGACY_PHP_SHA256:0:12}-$$"
+    mkdir -m 0700 "$BACKUP_DIR"
+    install -o root -g root -m 0600 "$LIVE_PHP" "$BACKUP_DIR/shuzijun-app-content.php"
+    BACKUP_MANIFEST="$BACKUP_DIR/legacy.sha256"
+    printf '%s  shuzijun-app-content.php\n' "$EXPECTED_LEGACY_PHP_SHA256" > "$BACKUP_MANIFEST"
+    chmod 0600 "$BACKUP_MANIFEST"
+    (cd "$BACKUP_DIR" && sha256sum --strict --quiet --check legacy.sha256) >/dev/null
+    sync -f "$BACKUP_DIR"; sync -f "$BACKUP_ROOT"
+    actual=$(sha256sum "$BACKUP_DIR/shuzijun-app-content.php"); actual=${actual%% *}
+    [[ "$actual" == "$EXPECTED_LEGACY_PHP_SHA256" ]] || fail 'legacy backup changed'
+    BACKUP_READY=1
+}
+
+remove_release_entries() {
+    local path
+    verify_fpm_isolated || return 1
+    for path in shuzijun-app-content.php composer.json composer.lock release.sha256; do
+        [[ ! -e "$TARGET_DIR/$path" && ! -L "$TARGET_DIR/$path" \
+            || -f "$TARGET_DIR/$path" && ! -L "$TARGET_DIR/$path" ]] || return 1
+    done
+    if [[ -e "$TARGET_DIR/vendor" || -L "$TARGET_DIR/vendor" ]]; then
+        [[ -d "$TARGET_DIR/vendor" && ! -L "$TARGET_DIR/vendor" \
+            && "$(realpath -e -- "$TARGET_DIR/vendor")" == "$TARGET_DIR/vendor" \
+            && "$(stat -c '%d' "$TARGET_DIR/vendor")" == "$(stat -c '%d' "$TARGET_DIR")" ]] \
+            || return 1
+        rm -rf --one-file-system -- "$TARGET_DIR/vendor"
+    fi
+    rm -f -- "$TARGET_DIR/shuzijun-app-content.php" "$TARGET_DIR/composer.json" \
+        "$TARGET_DIR/composer.lock" "$TARGET_DIR/release.sha256"
+}
+
+publish_release() {
+    local relative
+    verify_fpm_isolated
+    validate_stage_tree
+    CODE_MUTATED=1
+    remove_release_entries
+    # FPM is persistently isolated, so no request can observe the sequence.
+    # Dependencies and metadata precede the entry point; manifest is last.
+    for relative in vendor composer.lock composer.json shuzijun-app-content.php release.sha256; do
+        mv -T -- "$STAGE_DIR/$relative" "$TARGET_DIR/$relative"
+        sync -f "$TARGET_DIR"
+    done
+    rmdir "$STAGE_DIR"
+}
+
+validate_complete_release() {
+    local worker_gid relative
+    worker_gid=$(id -g www-data) || return 1
+    for relative in shuzijun-app-content.php composer.json composer.lock release.sha256; do
+        [[ -f "$TARGET_DIR/$relative" && ! -L "$TARGET_DIR/$relative" \
+            && "$(stat -c '%u:%g:%a:%h' "$TARGET_DIR/$relative")" == "0:$worker_gid:644:1" ]] \
+            || fail 'installed release metadata is unsafe'
+    done
+    [[ -d "$TARGET_DIR/vendor" && ! -L "$TARGET_DIR/vendor" ]] \
+        || fail 'installed vendor tree is unsafe'
+    reject_find_match 'installed vendor contains a symbolic link' "$TARGET_DIR/vendor" -type l
+    reject_find_match 'installed vendor contains a non-regular entry' \
+        "$TARGET_DIR/vendor" ! -type d ! -type f
+    reject_find_match 'installed vendor contains a hard-linked file' \
+        "$TARGET_DIR/vendor" -type f -links +1
+    reject_find_match 'installed vendor ownership or mode is unsafe' \
+        "$TARGET_DIR/vendor" \( ! -uid 0 -o ! -gid "$worker_gid" -o -perm /022 \)
+    [[ "$(sha256sum "$LIVE_MANIFEST" | awk '{print $1}')" == "$EXPECTED_MANIFEST_SHA256" ]] \
+        || fail 'installed release manifest differs from approved manifest'
+    (cd "$TARGET_DIR" && sha256sum --strict --quiet --check release.sha256) >/dev/null
+}
+
+verify_jwt_as_worker() {
+    timeout --signal=KILL 20s runuser -u www-data -- env -i \
+        PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
+        "$PHP_BIN" -n -d allow_url_fopen=0 -d "open_basedir=$TARGET_DIR" \
+        -d 'disable_functions=exec,passthru,shell_exec,system,proc_open,popen,putenv,mail,pcntl_exec,dl,link,symlink,rename,unlink,rmdir,mkdir,chmod,chown,chgrp,touch,copy,file_put_contents,fsockopen,pfsockopen,stream_socket_client' \
+        -r '$r=$argv[1]; require $r."/vendor/autoload.php"; exit(class_exists("Firebase\\JWT\\JWT") && class_exists("Firebase\\JWT\\JWK") ? 0 : 3);' \
+        "$TARGET_DIR"
+}
+
+probe_offline_query_forms() {
+    local uri
+    for uri in '/?rest_route=%2Fshuzijun%2Fv1%2Fapp-content' \
+        '/index.php?rest_route=%2Fshuzijun%2Fv1%2Fapp-content'; do
+        timeout --signal=KILL 45s runuser -u www-data -- env -i \
+            PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
+            "$PHP_BIN" -d display_errors=0 -d log_errors=0 -r '
+            $site=$argv[1]; $uri=$argv[2];
+            $_SERVER["REQUEST_METHOD"]="GET"; $_SERVER["HTTP_HOST"]="www.shuzijun.com.cn";
+            $_SERVER["SERVER_NAME"]="www.shuzijun.com.cn"; $_SERVER["SERVER_PORT"]="443";
+            $_SERVER["HTTPS"]="on"; $_SERVER["REQUEST_URI"]=$uri;
+            define("REST_REQUEST", true); define("WP_USE_THEMES", false);
+            require $site . "/wp-load.php";
+            $server=rest_get_server(); if (!did_action("rest_api_init")) { do_action("rest_api_init", $server); }
+            $request=new WP_REST_Request("GET", "/shuzijun/v1/app-content");
+            $response=rest_do_request($request); if (is_wp_error($response)) { $response=rest_convert_error_to_response($response); }
+            if (!$response instanceof WP_REST_Response) { exit(11); }
+            $data=$response->get_data();
+            $actual=array((int)$response->get_status(), is_array($data)?(string)($data["code"]??""):"");
+            exit($actual===array(503,"yishu_account_authority_unavailable") ? 0 : 12);
+        ' "$SITE" "$uri"
+    done
+}
+
+rollback() {
+    local status=0 restore="$TARGET_DIR/.shuzijun-standby-restore-$PLAN_SHA256"
+    [[ "$BACKUP_READY" -eq 1 && "$CODE_MUTATED" -eq 1 ]] || return 0
+    verify_fpm_isolated >/dev/null 2>&1 || return 1
+    (cd "$BACKUP_DIR" && sha256sum --strict --quiet --check legacy.sha256) >/dev/null 2>&1 \
+        || return 1
+    [[ ! -e "$restore" && ! -L "$restore" ]] || return 1
+    mkdir -m 0700 "$restore" || return 1
+    install -o root -g www-data -m 0644 "$BACKUP_DIR/shuzijun-app-content.php" \
+        "$restore/shuzijun-app-content.php" || status=1
+    if [[ "$status" -eq 0 ]]; then
+        remove_release_entries >/dev/null 2>&1 || status=1
+    fi
+    if [[ "$status" -eq 0 ]]; then
+        mv -T -- "$restore/shuzijun-app-content.php" "$LIVE_PHP" || status=1
+        rmdir "$restore" || status=1
+        sync -f "$TARGET_DIR" || status=1
+    fi
+    if [[ "$status" -eq 0 ]]; then
+        validate_legacy_state >/dev/null 2>&1 || status=1
+    fi
+    verify_fpm_isolated >/dev/null 2>&1 || status=1
+    return "$status"
+}
+
+handle_failure() {
+    local status=$1 rollback_status=0 stage_status=0
+    trap - ERR INT TERM HUP
+    set +e
+    [[ "$status" -ne 0 ]] || status=1
+    if [[ "$CODE_MUTATED" -eq 1 ]]; then
+        rollback || rollback_status=1
+    fi
+    clear_stage >/dev/null 2>&1 || stage_status=1
+    verify_fpm_isolated >/dev/null 2>&1 || rollback_status=1
+    if [[ "$rollback_status" -eq 0 && "$stage_status" -eq 0 ]]; then
+        printf 'app-content-standby-seed: failure; legacy release restored and PHP-FPM remains masked/inactive/dead' >&2
+    else
+        printf 'app-content-standby-seed: failure; PHP-FPM must remain isolated and manual recovery is required (rollback=%s stage=%s)' \
+            "$rollback_status" "$stage_status" >&2
+    fi
+    [[ "$BACKUP_READY" -eq 1 ]] && printf '; backup=%s' "$BACKUP_DIR" >&2
+    printf '\n' >&2
+    exit "$status"
+}
+
+trap 'handle_failure $?' ERR
+trap 'handle_failure 130' INT TERM HUP
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --bundle) [[ $# -ge 2 && "$BUNDLE_SEEN" -eq 0 ]] || fail 'invalid bundle option'; BUNDLE_INPUT=$2; BUNDLE_SEEN=1; shift 2 ;;
+        --manifest-sha256) [[ $# -ge 2 && "$MANIFEST_SHA_SEEN" -eq 0 ]] || fail 'invalid manifest option'; EXPECTED_MANIFEST_SHA256=$2; MANIFEST_SHA_SEEN=1; shift 2 ;;
+        --legacy-php-sha256) [[ $# -ge 2 && "$LEGACY_SHA_SEEN" -eq 0 ]] || fail 'invalid legacy option'; EXPECTED_LEGACY_PHP_SHA256=$2; LEGACY_SHA_SEEN=1; shift 2 ;;
+        --approved-plan-sha256) [[ $# -ge 2 && "$PLAN_SHA_SEEN" -eq 0 ]] || fail 'invalid plan option'; APPROVED_PLAN_SHA256=$2; PLAN_SHA_SEEN=1; shift 2 ;;
+        --confirm-writers-drained) [[ "$WRITERS_DRAINED" -eq 0 ]] || fail 'writers confirmation duplicated'; WRITERS_DRAINED=1; shift ;;
+        --dry-run) [[ "$MODE_SEEN" -eq 0 ]] || fail 'mode duplicated'; MODE=dry-run; MODE_SEEN=1; shift ;;
+        --apply) [[ "$MODE_SEEN" -eq 0 ]] || fail 'mode duplicated'; MODE=apply; MODE_SEEN=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) usage >&2; exit 2 ;;
+    esac
+done
+
+[[ "$EUID" -eq 0 ]] || fail 'must run as root'
+[[ -n "$BUNDLE_INPUT" && -n "$EXPECTED_MANIFEST_SHA256" \
+    && -n "$EXPECTED_LEGACY_PHP_SHA256" && "$WRITERS_DRAINED" -eq 1 ]] \
+    || { usage >&2; exit 2; }
+validate_digest "$EXPECTED_MANIFEST_SHA256" 'expected manifest SHA256'
+validate_digest "$EXPECTED_LEGACY_PHP_SHA256" 'expected legacy PHP SHA256'
+if [[ "$MODE" == apply ]]; then
+    validate_digest "$APPROVED_PLAN_SHA256" 'approved plan SHA256'
+else
+    [[ "$PLAN_SHA_SEEN" -eq 0 ]] || fail '--approved-plan-sha256 is apply-only'
+fi
+for command_name in realpath stat find grep awk sha256sum flock nginx systemctl \
+    install cp mv rm rmdir date mkdir chmod chown tail env timeout runuser id sync; do
+    require_command "$command_name"
+done
+
+validate_fixed_boundaries
+validate_tool "$DEPLOYER" 'release deployer' "$DEPLOYER_SHA256"
+validate_tool "$VERIFY" 'webroot verifier' "$VERIFY_SHA256"
+verify_fpm_isolated
+exec 8<"$AUTHORITY_LOCK_PATH"
+flock -n 8 || fail 'account-authority configuration change is in progress'
+verify_standby_role
+
+"$DEPLOYER" --bundle "$BUNDLE_INPUT" \
+    --manifest-sha256 "$EXPECTED_MANIFEST_SHA256" --bundle-preflight
+
+exec 9<"$LOCK_PATH"
+flock -n 9 || fail 'another App content release is in progress'
+validate_bundle_locked
+resolve_php
+validate_legacy_state
+run_webroot_verifier
+nginx -t >/dev/null
+verify_standby_role
+verify_fpm_isolated
+compute_plan
+
+if [[ "$MODE" == dry-run ]]; then
+    printf 'app-content-standby-seed: dry-run passed plan-sha256=%s manifest=%s legacy-php=%s role=standby fpm=masked,inactive,dead\n' \
+        "$PLAN_SHA256" "$EXPECTED_MANIFEST_SHA256" "$EXPECTED_LEGACY_PHP_SHA256"
+    exit 0
+fi
+
+[[ "$APPROVED_PLAN_SHA256" == "$PLAN_SHA256" ]] \
+    || fail 'approved plan SHA256 does not match the locked migration plan'
+validate_bundle_locked
+validate_legacy_state
+verify_standby_role
+verify_fpm_isolated
+create_backup
+prepare_stage
+publish_release
+validate_complete_release
+verify_jwt_as_worker
+verify_standby_role
+probe_offline_query_forms
+run_webroot_verifier
+nginx -t >/dev/null
+verify_fpm_isolated
+
+BACKUP_READY=0
+CODE_MUTATED=0
+trap - ERR INT TERM HUP
+printf 'app-content-standby-seed: applied plan-sha256=%s manifest=%s role=standby backup=%s fpm=masked,inactive,dead\n' \
+    "$PLAN_SHA256" "$EXPECTED_MANIFEST_SHA256" "$BACKUP_DIR"
