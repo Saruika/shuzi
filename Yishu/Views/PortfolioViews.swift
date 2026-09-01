@@ -118,7 +118,7 @@ struct PortfolioGridView: View {
         .safeAreaInset(edge: .top, spacing: 0) {
             PortfolioSearchBar(text: $searchText)
                 .padding(.horizontal, 20)
-                .padding(.top, 8)
+                .padding(.top, horizontalSizeClass == .regular ? -1 : 0)
                 .padding(.bottom, 10)
                 .background(AppTheme.ink)
         }
@@ -154,6 +154,7 @@ struct PortfolioGridView: View {
 private struct PortfolioSearchBar: View {
     @Binding var text: String
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @FocusState private var isFocused: Bool
 
     var body: some View {
@@ -193,7 +194,7 @@ private struct PortfolioSearchBar: View {
                 }
             }
             .padding(.horizontal, 15)
-            .frame(minHeight: 48)
+            .frame(minHeight: horizontalSizeClass == .regular ? 44 : 48)
             .background(AppTheme.elevatedInk, in: Capsule())
             .overlay {
                 Capsule()
@@ -238,28 +239,18 @@ private struct PortfolioGridCard: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text(editorialEyebrow)
                     .font(.caption2.weight(.semibold))
+                    .tracking(0.7)
                     .lineLimit(nil)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .layoutPriority(1)
-                    .foregroundStyle(AppTheme.ink)
+                    .foregroundStyle(AppTheme.gold)
                     .accessibilityLabel(portfolio.eyebrow)
                 Text(portfolio.title)
                     .font(.system(.title3, design: .serif))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
-                    .foregroundStyle(AppTheme.ink)
-            }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                AppTheme.warmWhite,
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(AppTheme.gold.opacity(0.35), lineWidth: 0.5)
+                    .foregroundStyle(.white)
             }
             .padding(14)
 

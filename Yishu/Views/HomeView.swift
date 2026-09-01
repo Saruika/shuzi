@@ -132,9 +132,9 @@ private struct HeroPager: View {
 
         Group {
             if usesCompactLayout {
-                compactHeroOverlay(availableWidth: proxy.size.width)
+                compactHeroOverlay
             } else {
-                regularHeroOverlay(availableWidth: proxy.size.width)
+                regularHeroOverlay
             }
         }
         .padding(.horizontal, 22)
@@ -142,9 +142,9 @@ private struct HeroPager: View {
         .padding(.bottom, usesCompactLayout ? 16 : 32)
     }
 
-    private func regularHeroOverlay(availableWidth: CGFloat) -> some View {
+    private var regularHeroOverlay: some View {
         VStack(alignment: .leading, spacing: 0) {
-            weatherRow(availableWidth: availableWidth)
+            weatherRow
 
             Spacer(minLength: 18)
 
@@ -161,9 +161,9 @@ private struct HeroPager: View {
         }
     }
 
-    private func compactHeroOverlay(availableWidth: CGFloat) -> some View {
+    private var compactHeroOverlay: some View {
         VStack(alignment: .leading, spacing: 0) {
-            weatherRow(availableWidth: availableWidth)
+            weatherRow
 
             Spacer(minLength: 8)
 
@@ -235,60 +235,80 @@ private struct HeroPager: View {
         .accessibilityIdentifier("home-open-portfolio")
     }
 
-    private func weatherRow(availableWidth: CGFloat) -> some View {
-        HStack {
+    private var weatherRow: some View {
+        HStack(spacing: 6) {
             Spacer(minLength: 0)
+            if localWeather.phase == .ready {
+                weatherAttributionControl
+            }
             weatherButton
-                .frame(
-                    maxWidth: min(max(availableWidth - 44, 148), 360),
-                    alignment: .trailing
-                )
         }
         .foregroundStyle(.white)
     }
 
+    private var weatherAttributionControl: some View {
+        Button {
+            isWeatherDetailsPresented = true
+            localWeather.refreshAttributionIfNeeded()
+        } label: {
+            HStack(spacing: 3) {
+                AsyncImage(url: localWeather.attributionMarkURL) { phase in
+                    if case .success(let image) = phase {
+                        image
+                            .resizable()
+                            .scaledToFit()
+                    } else {
+                        Text(localWeather.weatherProviderName)
+                            .font(.caption2.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                            .allowsTightening(true)
+                    }
+                }
+                .frame(width: 72, height: 18)
+
+                Image(systemName: "info.circle")
+                    .font(.caption2.weight(.semibold))
+            }
+            .frame(width: 82, height: 18)
+            .foregroundStyle(.white.opacity(0.88))
+            .shadow(color: .black.opacity(0.72), radius: 2, y: 1)
+            .frame(minWidth: 88, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .accessibilityLabel("Apple Weather 数据来源与许可")
+        .accessibilityHint("打开天气详情")
+        .accessibilityIdentifier("home-weather-attribution-control")
+    }
+
     private var weatherButton: some View {
         Button { openWeatherOrSettings() } label: {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 7) {
-                    weatherSummary(fixedHorizontally: true)
-                    if localWeather.phase == .ready {
-                        providerLabel
-                    }
+            weatherSummary
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 7)
+                .background(.black, in: Capsule())
+                .overlay {
+                    Capsule()
+                        .stroke(.white.opacity(0.30), lineWidth: 0.5)
                 }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    weatherSummary(fixedHorizontally: false)
-                    if localWeather.phase == .ready {
-                        providerLabel
-                    }
-                }
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.white)
-            .multilineTextAlignment(.leading)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
-            .background(.black, in: Capsule())
-            .overlay {
-                Capsule()
-                    .stroke(.white.opacity(0.30), lineWidth: 0.5)
-            }
-            .shadow(color: .black.opacity(0.20), radius: 6, y: 2)
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
-            // VoiceOver receives the complete button summary below. Hiding the
-            // visual fragments avoids exposing location and condition as two
-            // competing accessibility nodes while ViewThatFits changes layout.
-            .accessibilityHidden(true)
-            .animation(
-                reduceMotion ? nil : .easeInOut(duration: 0.22),
-                value: localWeather.locationText
-            )
-            .animation(
-                reduceMotion ? nil : .easeInOut(duration: 0.22),
-                value: localWeather.weatherText
-            )
+                .shadow(color: .black.opacity(0.20), radius: 6, y: 2)
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+                // VoiceOver receives the complete button summary below. Hiding
+                // the visual fragments avoids duplicate accessibility nodes.
+                .accessibilityHidden(true)
+                .animation(
+                    reduceMotion ? nil : .easeInOut(duration: 0.22),
+                    value: localWeather.locationText
+                )
+                .animation(
+                    reduceMotion ? nil : .easeInOut(duration: 0.22),
+                    value: localWeather.weatherText
+                )
         }
         .buttonStyle(.plain)
         // The hero is a compact photographic overlay. Keep it readable when
@@ -297,35 +317,24 @@ private struct HeroPager: View {
         // continue to expose the complete, uncapped weather information.
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .accessibilityIdentifier("home-weather")
-        .accessibilityLabel(
-            localWeather.phase == .ready
-                ? "\(localWeather.accessibilitySummary)，数据来源 Apple Weather"
-                : localWeather.accessibilitySummary
-        )
+        .accessibilityLabel(localWeather.accessibilitySummary)
         .accessibilityHint(weatherAccessibilityHint)
     }
 
-    private func weatherSummary(fixedHorizontally: Bool) -> some View {
+    private var weatherSummary: some View {
         HStack(spacing: 6) {
             weatherStatusIcon
                 .fixedSize()
             Text(
-                "\(WeatherPresentation.conciseLocationText(localWeather.locationText))"
-                    + " · \(localWeather.weatherText)"
+                WeatherPresentation.compactSummary(
+                    location: localWeather.locationText,
+                    weather: localWeather.weatherText
+                )
             )
-            .fixedSize(horizontal: fixedHorizontally, vertical: true)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
+            .allowsTightening(true)
         }
-    }
-
-    private var providerLabel: some View {
-        HStack(spacing: 4) {
-            Text("Apple Weather")
-                .font(.caption2.weight(.semibold))
-            Image(systemName: "info.circle.fill")
-                .font(.caption2.weight(.semibold))
-        }
-        .foregroundStyle(.white.opacity(0.82))
-        .fixedSize(horizontal: true, vertical: true)
     }
 
     private var pageIndicator: some View {

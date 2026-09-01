@@ -99,6 +99,7 @@ final class YishuUITests: XCTestCase {
         let dramaLink = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "drama-link-"))
             .firstMatch
+        scrollToElement(dramaLink, in: app)
         XCTAssertTrue(dramaLink.waitForExistence(timeout: 8), "影视页缺少可访问的短剧外链")
         XCTAssertTrue(
             dramaLink.label.hasPrefix("观看") && dramaLink.label.count > "观看".count,
@@ -163,6 +164,8 @@ final class YishuUITests: XCTestCase {
         assertMinimumTapTarget(progress, named: "Showreel 播放进度")
         assertMinimumTapTarget(playback, named: "Showreel 播放控制")
         assertMinimumTapTarget(mute, named: "Showreel 静音控制")
+        scrollToElement(playback, in: app)
+        scrollToElement(mute, in: app)
         XCTAssertTrue(playback.isHittable, "Showreel 播放控制不可点击")
         XCTAssertTrue(mute.isHittable, "Showreel 静音控制不可点击")
         playback.tap()
@@ -334,12 +337,26 @@ final class YishuUITests: XCTestCase {
 
         let weather = element("home-weather", in: app)
         assertMinimumTapTarget(weather, named: "首页天气详情")
-        XCTAssertTrue(
+        XCTAssertFalse(
             weather.label.contains("Apple Weather"),
-            "首页天气入口没有清晰标明 Apple Weather 数据来源：\(weather.label)"
+            "天气胶囊本身只应读出地点和当前天气：\(weather.label)"
+        )
+        let homeAttribution = element("home-weather-attribution-control", in: app)
+        XCTAssertTrue(
+            homeAttribution.waitForExistence(timeout: 5),
+            "首页天气数据仍需显示独立的 Apple Weather 署名入口"
+        )
+        assertMinimumTapTarget(homeAttribution, named: "Apple Weather 署名入口")
+        XCTAssertTrue(
+            homeAttribution.label.contains("Apple Weather"),
+            "独立署名入口应标明 Apple Weather 数据来源"
+        )
+        XCTAssertFalse(
+            weather.frame.intersects(homeAttribution.frame),
+            "Apple Weather 署名应位于天气胶囊之外"
         )
         attachScreenshot(named: "11-home-weather-source", app: app)
-        weather.tap()
+        homeAttribution.tap()
 
         assertExists("home-weather-attribution-heading", in: app)
         let provider = element("home-weather-provider", in: app)
@@ -593,10 +610,19 @@ final class YishuUITests: XCTestCase {
 
     private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication) {
         var attempts = 0
-        while !element.isHittable, attempts < 8 {
+        while (!element.isHittable || !elementCenterIsVisible(element, in: app)), attempts < 8 {
             app.swipeUp()
             attempts += 1
         }
+    }
+
+    private func elementCenterIsVisible(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        let window = app.windows.firstMatch
+        guard window.exists, element.exists else { return false }
+
+        let frame = element.frame
+        guard !frame.isEmpty, !frame.isInfinite, !frame.isNull else { return false }
+        return window.frame.contains(CGPoint(x: frame.midX, y: frame.midY))
     }
 
     private func attachScreenshot(named name: String, app: XCUIApplication) {
@@ -652,6 +678,11 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         XCTAssertLessThanOrEqual(heading.frame.maxX, scene.maxX + 1, "关于页标题超出窗口")
         XCTAssertGreaterThanOrEqual(portrait.frame.minX, scene.minX - 1, "关于页人物图超出窗口")
         XCTAssertLessThanOrEqual(portrait.frame.maxX, scene.maxX + 1, "关于页人物图超出窗口")
+        XCTAssertLessThanOrEqual(
+            portrait.frame.maxY,
+            scene.maxY + 1,
+            "关于页人物图没有完整收进当前窗口"
+        )
         let statusBar = app.statusBars.firstMatch
         if statusBar.exists {
             XCTAssertGreaterThanOrEqual(
@@ -667,21 +698,52 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         attachScreenshot(named: "adaptive-about", app: app)
     }
 
+    func testPortfolioSearchMatchesTheCurrentSceneConfiguration() {
+        let app = launchApp(arguments: ["-open-portfolio-for-visual-testing"])
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的应用窗口")
+
+        let searchField = element("portfolio-search-field", in: app)
+        XCTAssertTrue(searchField.waitForExistence(timeout: 8), "当前 UI 配置下作品搜索框没有出现")
+
+        let scene = window.frame
+        XCTAssertLessThan(
+            searchField.frame.minY,
+            scene.height * 0.13,
+            "当前 UI 配置下作品搜索框距离顶部过远"
+        )
+        let statusBar = app.statusBars.firstMatch
+        if statusBar.exists {
+            XCTAssertGreaterThanOrEqual(
+                searchField.frame.minY,
+                statusBar.frame.maxY - 1,
+                "当前 UI 配置下作品搜索框侵入状态栏安全区域"
+            )
+        }
+        attachScreenshot(named: "adaptive-portfolio-search", app: app)
+    }
+
     func testAccessibilityXXXLKeepsHomeControlsComfortableInEveryConfiguration() {
         let app = launchApp(arguments: [
             "-UIPreferredContentSizeCategoryName",
             "UICTContentSizeCategoryAccessibilityXXXL",
+            "-simulate-ready-weather-for-visual-testing",
         ])
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的应用窗口")
 
         let weather = element("home-weather", in: app)
+        let weatherAttribution = element("home-weather-attribution-control", in: app)
         let portfolioAction = element("home-open-portfolio", in: app)
         assertMinimumTapTarget(weather, named: "当前 UI 配置的首页天气")
+        assertMinimumTapTarget(weatherAttribution, named: "当前 UI 配置的天气署名")
         assertMinimumTapTarget(portfolioAction, named: "当前 UI 配置的查看作品")
         XCTAssertTrue(weather.isHittable, "辅助功能大字号下天气入口不可点击")
+        XCTAssertTrue(weatherAttribution.isHittable, "辅助功能大字号下天气署名不可点击")
         XCTAssertTrue(portfolioAction.isHittable, "辅助功能大字号下查看作品不可点击")
         XCTAssertTrue(window.frame.contains(weather.frame), "辅助功能大字号下天气入口超出窗口")
+        XCTAssertTrue(window.frame.contains(weatherAttribution.frame), "辅助功能大字号下天气署名超出窗口")
+        XCTAssertFalse(weather.frame.intersects(weatherAttribution.frame), "辅助功能大字号下天气与署名发生重叠")
         XCTAssertTrue(window.frame.contains(portfolioAction.frame), "辅助功能大字号下查看作品超出窗口")
         attachScreenshot(named: "adaptive-home-accessibility-xxxl", app: app)
     }

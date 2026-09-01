@@ -11,35 +11,41 @@ struct AboutView: View {
     @State private var presentsAdminAccess = false
 
     var body: some View {
-        ZStack {
-            AppTheme.ink.ignoresSafeArea()
-            ScrollView {
-                Group {
-                    if usesTwoColumnLayout {
-                        HStack(alignment: .top, spacing: 24) {
-                            portrait
-                                .frame(maxWidth: .infinity)
-                            profileDetails
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 48)
-                        }
-                        .frame(maxWidth: 1_164)
-                        .padding(.horizontal, 24)
-                    } else {
-                        VStack(spacing: 0) {
-                            portrait
-                                .frame(maxWidth: 720)
-                                .frame(maxWidth: .infinity)
-                            profileDetails
-                                .frame(maxWidth: 720)
-                                .frame(maxWidth: .infinity)
+        GeometryReader { scene in
+            ZStack {
+                AppTheme.ink.ignoresSafeArea()
+                ScrollView {
+                    Group {
+                        if usesTwoColumnLayout {
+                            HStack(alignment: .top, spacing: 24) {
+                                portrait
+                                    .frame(
+                                        maxWidth: .infinity,
+                                        maxHeight: twoColumnPortraitHeight(in: scene),
+                                        alignment: .top
+                                    )
+                                profileDetails
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 48)
+                            }
+                            .frame(maxWidth: 1_164)
+                            .padding(.horizontal, 24)
+                        } else {
+                            VStack(spacing: 0) {
+                                portrait
+                                    .frame(maxWidth: 720)
+                                    .frame(maxWidth: .infinity)
+                                profileDetails
+                                    .frame(maxWidth: 720)
+                                    .frame(maxWidth: .infinity)
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .top)
                 }
-                .frame(maxWidth: .infinity, alignment: .top)
+                .scrollIndicators(.hidden)
+                .floatingTabBarScrollClearance()
             }
-            .scrollIndicators(.hidden)
-            .floatingTabBarScrollClearance()
         }
         .toolbar(.hidden, for: .navigationBar)
         .fullScreenCover(isPresented: $presentsAdminAccess) {
@@ -57,6 +63,15 @@ struct AboutView: View {
     private var usesTwoColumnLayout: Bool {
         !dynamicTypeSize.isAccessibilitySize
             && (horizontalSizeClass == .regular || verticalSizeClass == .compact)
+    }
+
+    private func twoColumnPortraitHeight(in scene: GeometryProxy) -> CGFloat {
+        max(
+            0,
+            scene.size.height
+                - scene.safeAreaInsets.top
+                - scene.safeAreaInsets.bottom
+        )
     }
 
     private var profileDetails: some View {
@@ -94,15 +109,11 @@ struct AboutView: View {
                 Text("易姝")
                     .font(.system(.largeTitle, design: .serif))
                 Text("短剧演员 / 模特 / 视频创作者")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.black)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.9), radius: 2, y: 1)
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 2)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 6)
-                    .background(
-                        AppTheme.warmWhite,
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    )
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .padding(22)
         }

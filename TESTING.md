@@ -69,9 +69,9 @@ Server/tests/fan-api-smoke.sh
 
 GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服务器密钥；外部 Action 固定到完整 commit SHA。失败时保留七天 `.xcresult` 供排查。
 
-## Build 34 发布前验收
+## Build 35 发布前验收
 
-1. 确认构建设置为 `1.3.23 (34)`、Bundle ID `cn.com.shuzijun.yishu`，且 App ID 与本次签名描述文件同时包含 Sign in with Apple 和 WeatherKit；能力变更后必须重新生成签名描述文件。
+1. 确认构建设置为 `1.3.23 (35)`、Bundle ID `cn.com.shuzijun.yishu`，且 App ID 与本次签名描述文件同时包含 Sign in with Apple 和 WeatherKit；能力变更后必须重新生成签名描述文件。
 2. 服务端运行锁定依赖的 `composer install --no-dev --classmap-authoritative`；Apple `.p8` 位于 Web 根目录外，只通过 `YISHU_APPLE_TEAM_ID`、`YISHU_APPLE_KEY_ID`、`YISHU_APPLE_PRIVATE_KEY_PATH` 引用。测试日志和仓库不得出现私钥、client secret、identity token、authorization code、nonce、state 或 Apple subject。
 3. 确认服务器可通过 HTTPS 访问 `appleid.apple.com/auth/keys`、`/auth/token` 和 `/auth/revoke`，WP-Cron 或等价计划任务能执行撤销重试；反向代理继续转发 `Authorization` 与安装记录头。
 4. 在真实 TestFlight 安装执行：新 Apple 账号 → 必填抖音 ID → 待审批 → 管理员批准 → 主内容；同一 Apple ID 重复登录；取消授权、网络失败与重新前台；其他设备会话撤销；onboarding 和已批准状态分别永久删号。

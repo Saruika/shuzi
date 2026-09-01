@@ -49,6 +49,17 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(WeatherPresentation.conciseLocationText("  "), "当前位置")
     }
 
+    func testCompactWeatherSummaryOnlyContainsLocationAndCurrentWeather() {
+        XCTAssertEqual(
+            WeatherPresentation.compactSummary(location: "杭州市", weather: "晴 24°"),
+            "杭州 · 晴 24°"
+        )
+        XCTAssertFalse(
+            WeatherPresentation.compactSummary(location: "杭州市", weather: "晴 24°")
+                .localizedCaseInsensitiveContains("Apple Weather")
+        )
+    }
+
     func testWeatherAttributionAlwaysHasAnOfficialLegalFallback() {
         XCTAssertEqual(
             WeatherAttributionPresentation.officialLegalURL.absoluteString,

@@ -408,6 +408,10 @@ enum WeatherFailurePresentation {
 }
 
 enum WeatherPresentation {
+    static func compactSummary(location: String, weather: String) -> String {
+        "\(conciseLocationText(location)) · \(weather)"
+    }
+
     static func conciseLocationText(_ location: String) -> String {
         let trimmed = location.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "当前位置" }
