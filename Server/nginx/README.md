@@ -63,18 +63,32 @@ sensitive/legacy snippet includes must be direct children, occur exactly once,
 and precede every `location` (with the sensitive include first). It also rejects
 protected `^~` prefixes, inline legacy `/images` locations, a remaining
 document-root `images` entry, writable configuration/snippets, and unsafe root
-ownership. This preflight reads only local files, so release dry-runs never send
-HTTP requests.
+ownership. Application regex locations must match the fixed host-specific
+allowlist and body profile: static/media handlers use only fail-closed
+`try_files $uri =404` for content resolution, together with their fixed
+cache/security-header directives and without a location root/alias/upstream
+override, while the www PHP profile binds the reviewed Unix FPM socket and
+FastCGI execution chain.
+The host-specific PHP and dotfile denies (plus the www upload/file PHP deny) are
+mandatory and unique. Because Nginx selects regex locations in declaration
+order, the dotfile deny must precede generic PHP/static/media regexes and the
+upload/file PHP deny must precede generic PHP. The installer migrates only these
+exact reviewed blocks into that order, moving each complete block byte-for-byte;
+the candidate SHA covers the move, rollback restores the original ordering, and
+the independent checker enforces the same ordering contract. This preflight
+reads only local files, so release dry-runs never send HTTP requests.
 
 `shuzijun-legacy-images-alias.conf` replaces the historical document-root
 `images -> wp-content/uploads/hero-images` symbolic link. Include it immediately
 after the sensitive-file deny snippet and before generic PHP/static locations in
 the `www` and `img` TLS server blocks, then remove the symbolic link. The alias
-accepts only one flat, conservative image filename and returns 404 for nested or
-unknown paths; exact PHP payloads under `/images/` are denied independently by
-the sensitive-file snippet. This preserves existing `/images/...` URLs without
-letting a writable upload directory participate in PHP routing or exposing
-arbitrary file types.
+accepts only one flat, conservative image filename. Its following ordered
+`location ~* ^/images/` fallback returns 404 for nested or unknown paths before
+later application regex locations can match; a normal prefix fallback would be
+overridable. Exact PHP payloads under `/images/` are denied independently by the
+earlier sensitive-file snippet. This preserves existing `/images/...` URLs
+without letting a writable upload directory participate in PHP routing or
+exposing arbitrary file types.
 
 `shuzijun-account-api-backup-proxy.conf` is only for the Singapore backup
 node's `www.shuzijun.com.cn` TLS server. Tencent CDN may retry a 401/403 from

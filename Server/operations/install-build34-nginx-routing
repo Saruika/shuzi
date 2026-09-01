@@ -65,6 +65,7 @@ FASTCGI_ALLOWED_PARAMS = frozenset(
         "DOCUMENT_URI",
         "GATEWAY_INTERFACE",
         "HTTPS",
+        "HTTP_AUTHORIZATION",
         "HTTP_PROXY",
         "PATH_INFO",
         "QUERY_STRING",
@@ -782,57 +783,201 @@ def reject_nested_locations(document: Sequence[Directive], label: str) -> None:
     walk(document, False)
 
 
-COMMON_PHP_LOCATION_REGEXES = frozenset(
+ALLOWED_REGEX_PROFILES: dict[str, dict[tuple[str, str], str]] = {
+    # Keep this byte-for-byte equivalent to the independent production
+    # verifier's allowlist.  The installer validates both the exact header and
+    # the matching body profile before it writes any candidate configuration.
+    WWW_HOST: {
+        ("~*", r"/(?:uploads|files)/.*\.php$"): "deny-404",
+        ("~", r"\.php$"): "www-php",
+        ("~*", r"\.m3u8$"): "root-try-files",
+        ("~*", r"\.(?:ts|mp4|m4v|webm)$"): "root-try-files",
+        (
+            "~*",
+            r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+        ): "root-try-files",
+        ("~", r"/\."): "deny-all",
+        ("~", r"^/health/[0-9]{1,5}$"): "health-204",
+    },
+    IMG_HOST: {
+        (
+            "~*",
+            r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+        ): "root-try-files",
+        ("~", r"\.php$"): "deny-404",
+        ("~", r"/\."): "deny-all",
+        ("~", r"^/health/[0-9]{1,5}$"): "health-204",
+    },
+}
+
+WWW_M3U8_BODY_SIGNATURE = (
+    ("expires", ("off",), True),
     (
-        r"\.php$",
-        r"[^/]\.php(/|$)",
-        r"[^/]\.php(?:/|$)",
-        r"^(.+\.php)(/.+)$",
-        r"^(.+\.php)(/.*)$",
-    )
+        "add_header",
+        ("Cache-Control", "public, max-age=300, stale-while-revalidate=30", "always"),
+        True,
+    ),
+    ("add_header", ("Access-Control-Allow-Origin", "*", "always"), True),
+    ("add_header", ("Timing-Allow-Origin", "*", "always"), True),
+    ("try_files", ("$uri", "=404"), True),
+)
+WWW_MEDIA_BODY_SIGNATURE = (
+    ("expires", ("off",), True),
+    (
+        "add_header",
+        ("Cache-Control", "public, max-age=2592000, immutable", "always"),
+        True,
+    ),
+    ("add_header", ("Access-Control-Allow-Origin", "*", "always"), True),
+    ("add_header", ("Timing-Allow-Origin", "*", "always"), True),
+    ("try_files", ("$uri", "=404"), True),
+)
+WWW_STATIC_BODY_SIGNATURE = (
+    ("expires", ("30d",), True),
+    (
+        "add_header",
+        ("Cache-Control", "public, max-age=2592000, immutable"),
+        True,
+    ),
+    ("try_files", ("$uri", "=404"), True),
+)
+IMG_STATIC_BODY_SIGNATURE = (
+    ("expires", ("365d",), True),
+    (
+        "add_header",
+        ("Cache-Control", "public, max-age=31536000, immutable"),
+        True,
+    ),
+    ("add_header", ("Timing-Allow-Origin", "*", "always"), True),
+    (
+        "add_header",
+        ("Cross-Origin-Resource-Policy", "cross-origin", "always"),
+        True,
+    ),
+    ("access_log", ("off",), True),
+    ("try_files", ("$uri", "=404"), True),
+)
+ROOT_TRY_FILES_BODY_SIGNATURES = {
+    (WWW_HOST, "~*", r"\.m3u8$"): WWW_M3U8_BODY_SIGNATURE,
+    (WWW_HOST, "~*", r"\.(?:ts|mp4|m4v|webm)$"): WWW_MEDIA_BODY_SIGNATURE,
+    (
+        WWW_HOST,
+        "~*",
+        r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+    ): WWW_STATIC_BODY_SIGNATURE,
+    (
+        IMG_HOST,
+        "~*",
+        r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+    ): IMG_STATIC_BODY_SIGNATURE,
+}
+
+REGEX_ORDER_CONTRACT = {
+    WWW_HOST: (
+        (("~*", r"/(?:uploads|files)/.*\.php$"), ("~", r"\.php$")),
+        (("~", r"/\."), ("~", r"\.php$")),
+        (("~", r"/\."), ("~*", r"\.m3u8$")),
+        (("~", r"/\."), ("~*", r"\.(?:ts|mp4|m4v|webm)$")),
+        (
+            ("~", r"/\."),
+            (
+                "~*",
+                r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+            ),
+        ),
+    ),
+    IMG_HOST: (
+        (("~", r"/\."), ("~", r"\.php$")),
+        (
+            ("~", r"/\."),
+            (
+                "~*",
+                r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+            ),
+        ),
+    ),
+}
+REQUIRED_SECURITY_REGEX_PROFILES = {
+    WWW_HOST: frozenset(
+        {
+            ("~*", r"/(?:uploads|files)/.*\.php$"),
+            ("~", r"\.php$"),
+            ("~", r"/\."),
+        }
+    ),
+    IMG_HOST: frozenset(
+        {
+            ("~", r"\.php$"),
+            ("~", r"/\."),
+        }
+    ),
+}
+
+WWW_PHP_REGEX_BODY_SIGNATURE = (
+    ("fastcgi_split_path_info", (r"^(.+?\.php)(/.*)$",), True),
+    ("try_files", ("$fastcgi_script_name", "=404"), True),
+    ("set", ("$path_info", "$fastcgi_path_info"), True),
+    ("fastcgi_param", ("PATH_INFO", "$path_info"), True),
+    ("fastcgi_index", ("index.php",), True),
+    (
+        "fastcgi_param",
+        ("SCRIPT_FILENAME", "$document_root$fastcgi_script_name"),
+        True,
+    ),
+    ("fastcgi_param", ("QUERY_STRING", "$query_string"), True),
+    ("fastcgi_param", ("REQUEST_METHOD", "$request_method"), True),
+    ("fastcgi_param", ("CONTENT_TYPE", "$content_type"), True),
+    ("fastcgi_param", ("CONTENT_LENGTH", "$content_length"), True),
+    ("fastcgi_param", ("SCRIPT_NAME", "$fastcgi_script_name"), True),
+    ("fastcgi_param", ("REQUEST_URI", "$request_uri"), True),
+    ("fastcgi_param", ("DOCUMENT_URI", "$document_uri"), True),
+    ("fastcgi_param", ("DOCUMENT_ROOT", "$document_root"), True),
+    ("fastcgi_param", ("SERVER_PROTOCOL", "$server_protocol"), True),
+    ("fastcgi_param", ("REQUEST_SCHEME", "$scheme"), True),
+    ("fastcgi_param", ("HTTPS", "$https", "if_not_empty"), True),
+    ("fastcgi_param", ("GATEWAY_INTERFACE", "CGI/1.1"), True),
+    ("fastcgi_param", ("SERVER_SOFTWARE", "nginx/$nginx_version"), True),
+    ("fastcgi_param", ("REMOTE_ADDR", "$remote_addr"), True),
+    ("fastcgi_param", ("REMOTE_PORT", "$remote_port"), True),
+    ("fastcgi_param", ("REMOTE_USER", "$remote_user"), True),
+    ("fastcgi_param", ("SERVER_ADDR", "$server_addr"), True),
+    ("fastcgi_param", ("SERVER_PORT", "$server_port"), True),
+    ("fastcgi_param", ("SERVER_NAME", "$server_name"), True),
+    ("fastcgi_param", ("REDIRECT_STATUS", "200"), True),
+    ("fastcgi_pass", ("unix:/var/run/php/php8.3-fpm.sock",), True),
+    ("fastcgi_hide_header", ("X-Powered-By",), True),
+    ("fastcgi_param", ("HTTP_AUTHORIZATION", "$http_authorization"), True),
+    ("fastcgi_cache", ("SJWORDPRESS",), True),
+    ("fastcgi_cache_key", ("$scheme$host$request_uri",), True),
+    ("fastcgi_cache_methods", ("GET", "HEAD"), True),
+    ("fastcgi_cache_valid", ("200", "30s"), True),
+    ("fastcgi_cache_bypass", ("$sj_skip_cache",), True),
+    (
+        "fastcgi_no_cache",
+        ("$sj_skip_cache", "$upstream_http_set_cookie"),
+        True,
+    ),
+    ("fastcgi_cache_lock", ("on",), True),
+    ("fastcgi_cache_lock_timeout", ("5s",), True),
+    ("fastcgi_cache_background_update", ("on",), True),
+    (
+        "fastcgi_cache_use_stale",
+        ("updating", "error", "timeout", "invalid_header", "http_500", "http_503"),
+        True,
+    ),
 )
 
-
-def anchored_regex_first_segment(pattern: str) -> str | None:
-    """Return a proven literal first URI segment, otherwise fail closed."""
-
-    normalized = pattern.replace(r"\/", "/")
-    if not normalized.startswith("^/"):
-        return None
-    segment: list[str] = []
-    index = 2
-    while index < len(normalized):
-        char = normalized[index]
-        if char == "/" or char == "$":
-            return "".join(segment) if segment else None
-        if char == "\\":
-            if index + 1 >= len(normalized):
-                return None
-            escaped = normalized[index + 1]
-            # PCRE gives alphanumeric escapes semantics (\x69, octal,
-            # backreferences, character classes, ...).  Only escaped literal
-            # punctuation is safe to fold into a proven path segment.
-            if escaped not in "._~-":
-                return None
-            segment.append(escaped)
-            index += 2
-            continue
-        if char.isalnum() or char in "._~-":
-            segment.append(char)
-            index += 1
-            continue
-        return None
-    return "".join(segment) if segment else None
-
-
-def application_regex_is_proven_safe_for_images(pattern: str) -> bool:
-    normalized = pattern.replace(r"\/", "/")
-    if normalized in COMMON_PHP_LOCATION_REGEXES:
-        # The reviewed sensitive snippet is textually before all application
-        # locations and independently denies PHP below /images and wp-content.
-        return True
-    segment = anchored_regex_first_segment(normalized)
-    return segment is not None and segment.casefold() != "images"
+UPSTREAM_OR_ALIAS_DIRECTIVES = frozenset(
+    {
+        "alias",
+        "root",
+        "proxy_pass",
+        "fastcgi_pass",
+        "uwsgi_pass",
+        "scgi_pass",
+        "grpc_pass",
+    }
+)
 
 
 def compile_location_regex(modifier: str, pattern: str, label: str) -> re.Pattern[str]:
@@ -936,7 +1081,7 @@ EXPECTED_LEGACY_SIGNATURE = (
     ),
     (
         "location",
-        ("/images/",),
+        ("~*", r"^/images/"),
         (
             ("access_log", ("off",), None),
             ("log_not_found", ("off",), None),
@@ -1006,26 +1151,31 @@ def validate_legacy_snippet(content: bytes) -> None:
         raise InstallError(f"{label} must contain exactly three top-level locations")
 
     exact = [node for node in document if node.args == ("=", "/images")]
-    fallback = [node for node in document if node.args == ("/images/",)]
+    fallback = [node for node in document if node.args == ("~*", r"^/images/")]
     regexes = [
         node
         for node in document
         if len(node.args) == 2 and node.args[0] in ("~", "~*")
     ]
-    if len(exact) != 1 or len(fallback) != 1 or len(regexes) != 1:
+    if len(exact) != 1 or len(fallback) != 1 or len(regexes) != 2:
         raise InstallError(f"{label} route topology is not the reviewed flat-image API")
     if not direct_return(exact[0], ("308", "/images/")):
         raise InstallError(f"{label} exact route must redirect to /images/")
     if not direct_return(fallback[0], ("404",)):
         raise InstallError(f"{label} fallback route must return 404")
 
-    image_route = regexes[0]
     expected_image_regex = (
         r"^/images/([A-Za-z0-9][A-Za-z0-9._-]*\."
         r"(?:jpg|jpeg|png|gif|webp|avif|ico|svg))$"
     )
-    if image_route.args != ("~*", expected_image_regex):
+    image_routes = [
+        node for node in regexes if node.args == ("~*", expected_image_regex)
+    ]
+    if len(image_routes) != 1:
         raise InstallError(f"{label} regex is not the reviewed flat-image allowlist")
+    image_route = image_routes[0]
+    if list(document).index(image_route) >= list(document).index(fallback[0]):
+        raise InstallError(f"{label} fallback must follow the flat-image allowlist")
     pattern = compile_location_regex(image_route.args[0], image_route.args[1], label)
     accepted = ("/images/portrait.jpg", "/images/ICON.SVG")
     rejected = (
@@ -1230,11 +1380,9 @@ def validate_location_security(
             )
         if is_images_location(modifier, path):
             raise InstallError(f"{label} contains an inline /images location")
-        if modifier in ("~", "~*") and not application_regex_is_proven_safe_for_images(
-            path
-        ):
-            raise InstallError(
-                f"{label} has a regex location that may bypass legacy /images routing"
+        if modifier in ("~", "~*"):
+            validate_allowed_regex_location(
+                WWW_HOST, item, modifier, path, label=label
             )
 
 
@@ -1435,11 +1583,21 @@ def validate_candidate_server(
     sensitive: Directive,
     legacy: Directive,
     hostname: str,
+    *,
+    includes_expanded: bool = False,
 ) -> None:
     reject_nested_locations((node,), hostname)
     roots = direct(node, "root")
-    if len(roots) != 1 or roots[0].args != (SITE_ROOT,):
-        raise InstallError(f"{hostname} must have exactly one fixed root {SITE_ROOT}")
+    all_roots = [
+        item
+        for item in [node, *descendants(node)]
+        if item.name.lower() == "root"
+    ]
+    if len(roots) != 1 or len(all_roots) != 1 or roots[0].args != (SITE_ROOT,):
+        raise InstallError(
+            f"{hostname} must have exactly one direct fixed root {SITE_ROOT} "
+            "and no nested override"
+        )
     children = list(node.children or ())
     sensitive_index = children.index(sensitive)
     legacy_index = children.index(legacy)
@@ -1450,6 +1608,7 @@ def validate_candidate_server(
     ]
     if locations and legacy_index >= min(locations):
         raise InstallError(f"{hostname} security includes must precede every location")
+    validate_application_regex_order(node, hostname)
     redirect_controls = {
         "error_page",
         "if",
@@ -1497,19 +1656,56 @@ def validate_candidate_server(
             raise InstallError(
                 f"{hostname} contains an inline /images location after transformation"
             )
-        if modifier in ("~", "~*") and not application_regex_is_proven_safe_for_images(
-            path
-        ):
+        if modifier in ("~", "~*"):
+            validate_allowed_regex_location(
+                hostname,
+                item,
+                modifier,
+                path,
+                php_includes_expanded=includes_expanded,
+            )
+
+
+def validate_application_regex_order(node: Directive, hostname: str) -> None:
+    indexes: dict[tuple[str, str], list[int]] = {}
+    for index, item in enumerate(node.children or ()):
+        parsed = location_path(item)
+        if parsed is None or parsed[0] not in ("~", "~*"):
+            continue
+        indexes.setdefault(parsed, []).append(index)
+
+    for key in ALLOWED_REGEX_PROFILES[hostname]:
+        if len(indexes.get(key, ())) > 1:
             raise InstallError(
-                f"{hostname} has a regex location that may bypass legacy /images routing"
+                f"{hostname} repeats a reviewed application regex location"
+            )
+    missing = [
+        key
+        for key in REQUIRED_SECURITY_REGEX_PROFILES[hostname]
+        if len(indexes.get(key, ())) != 1
+    ]
+    if missing:
+        raise InstallError(
+            f"{hostname} is missing a required application security regex location"
+        )
+    for earlier, later in REGEX_ORDER_CONTRACT[hostname]:
+        earlier_indexes = indexes.get(earlier, ())
+        later_indexes = indexes.get(later, ())
+        if earlier_indexes and later_indexes and earlier_indexes[0] >= later_indexes[0]:
+            raise InstallError(
+                f"{hostname} application security regex order is unsafe"
             )
 
 
 def validate_fastcgi_handler(location: Directive, hostname: str) -> None:
     children = tuple(location.children or ())
     passes = [item for item in children if item.name.lower() == "fastcgi_pass"]
-    if len(passes) != 1 or passes[0].children is not None or len(passes[0].args) != 1:
-        raise InstallError(f"{hostname} PHP handler must have exactly one fastcgi_pass")
+    if (
+        len(passes) != 1
+        or passes[0].children is not None
+        or passes[0].args != ("unix:/var/run/php/php8.3-fpm.sock",)
+    ):
+        raise InstallError(f"{hostname} PHP handler must use the reviewed FPM socket")
     markers = [
         Path(item.args[0])
         for item in children
@@ -1521,7 +1717,18 @@ def validate_fastcgi_handler(location: Directive, hostname: str) -> None:
         )
     allowed = {
         EXPANDED_INCLUDE_MARKER,
+        "fastcgi_cache",
+        "fastcgi_cache_background_update",
+        "fastcgi_cache_bypass",
+        "fastcgi_cache_key",
+        "fastcgi_cache_lock",
+        "fastcgi_cache_lock_timeout",
+        "fastcgi_cache_methods",
+        "fastcgi_cache_use_stale",
+        "fastcgi_cache_valid",
+        "fastcgi_hide_header",
         "fastcgi_index",
+        "fastcgi_no_cache",
         "fastcgi_param",
         "fastcgi_pass",
         "fastcgi_split_path_info",
@@ -1564,6 +1771,71 @@ def validate_fastcgi_handler(location: Directive, hostname: str) -> None:
         "=404",
     ):
         raise InstallError(f"{hostname} PHP handler try_files is not reviewed")
+
+
+def validate_allowed_regex_location(
+    hostname: str,
+    location: Directive,
+    modifier: str,
+    pattern: str,
+    *,
+    label: str | None = None,
+    php_includes_expanded: bool = True,
+) -> None:
+    """Validate the exact regex header and body profile approved in production."""
+
+    context = label or hostname
+    profile = ALLOWED_REGEX_PROFILES[hostname].get((modifier, pattern))
+    if profile is None:
+        raise InstallError(
+            f"{context} contains a regex location outside the reviewed allowlist"
+        )
+
+    def body_signature(*, omit_expansion_markers: bool = False):
+        return tuple(
+            (item.name.lower(), item.args, item.children is None)
+            for item in (location.children or ())
+            if not (
+                omit_expansion_markers
+                and item.name.lower() == EXPANDED_INCLUDE_MARKER
+            )
+        )
+
+    if profile == "root-try-files":
+        observed = body_signature()
+        expected = ROOT_TRY_FILES_BODY_SIGNATURES[(hostname, modifier, pattern)]
+        observed_try_files = [
+            args for name, args, leaf in observed if name == "try_files" and leaf
+        ]
+        if observed_try_files and observed_try_files != [("$uri", "=404")]:
+            raise InstallError(f"{context} reviewed static regex must fail closed")
+        if observed != expected:
+            raise InstallError(f"{context} reviewed static regex handler drifted")
+        return
+
+    if profile == "www-php":
+        # The first rewrite pass intentionally preserves raw include
+        # directives.  The mandatory expanded-include pass below validates the
+        # exact Debian FastCGI chain and body before any write can occur.
+        if not php_includes_expanded:
+            return
+        validate_fastcgi_handler(location, hostname)
+        if body_signature(omit_expansion_markers=True) != WWW_PHP_REGEX_BODY_SIGNATURE:
+            raise InstallError(f"{context} reviewed PHP regex body drifted")
+        return
+
+    if profile in ("deny-404", "health-204"):
+        expected_code = "404" if profile == "deny-404" else "204"
+        if body_signature() != (("return", (expected_code,), True),):
+            raise InstallError(f"{context} reviewed return-only regex handler drifted")
+        return
+
+    if profile == "deny-all":
+        if body_signature() != (("deny", ("all",), True),):
+            raise InstallError(f"{context} reviewed dotfile regex handler drifted")
+        return
+
+    raise InstallError(f"{context} has an unknown regex review profile")
 
 
 def validate_expanded_include_context(node: Directive, hostname: str) -> None:
@@ -1626,7 +1898,11 @@ def validate_candidate_with_includes(
         sensitive_include = require_direct_include(expanded, SENSITIVE_INCLUDE, hostname)
         legacy_include = require_direct_include(expanded, LEGACY_INCLUDE, hostname)
         validate_candidate_server(
-            expanded, sensitive_include, legacy_include, hostname
+            expanded,
+            sensitive_include,
+            legacy_include,
+            hostname,
+            includes_expanded=True,
         )
         validate_expanded_include_context(expanded, hostname)
     return expansion.states
@@ -1642,11 +1918,91 @@ def require_security_order(node: Directive, sensitive: Directive, hostname: str)
         raise InstallError(f"{hostname} sensitive include must precede every location")
 
 
+def directive_full_line_span(text: str, node: Directive, source: str) -> tuple[int, int]:
+    start = text.rfind("\n", 0, node.start) + 1
+    if text[start : node.start].strip():
+        raise InstallError(f"{source}: regex location must begin on its own line")
+    newline = text.find("\n", node.end)
+    line_end = len(text) if newline == -1 else newline
+    trailer = text[node.end : line_end].strip()
+    if trailer and not trailer.startswith("#"):
+        raise InstallError(f"{source}: regex location has an unsafe line trailer")
+    return start, (len(text) if newline == -1 else newline + 1)
+
+
+def rewrite_application_regex_order(
+    content: bytes, source: str
+) -> tuple[bytes, bool]:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise InstallError(f"{source} is not valid UTF-8") from error
+    changed = False
+
+    for _ in range(16):
+        document = parse(text, source)
+        move: tuple[Directive, Directive] | None = None
+        for hostname in (WWW_HOST, IMG_HOST):
+            node = unique_tls_server(document, hostname)
+            matches: dict[tuple[str, str], list[tuple[int, Directive]]] = {}
+            for index, item in enumerate(node.children or ()):
+                parsed = location_path(item)
+                if parsed is None or parsed[0] not in ("~", "~*"):
+                    continue
+                matches.setdefault(parsed, []).append((index, item))
+            for key in ALLOWED_REGEX_PROFILES[hostname]:
+                if len(matches.get(key, ())) > 1:
+                    raise InstallError(
+                        f"{hostname} repeats a reviewed application regex location"
+                    )
+            for earlier, later in REGEX_ORDER_CONTRACT[hostname]:
+                earlier_matches = matches.get(earlier, ())
+                later_matches = matches.get(later, ())
+                if (
+                    earlier_matches
+                    and later_matches
+                    and earlier_matches[0][0] >= later_matches[0][0]
+                ):
+                    move = (earlier_matches[0][1], later_matches[0][1])
+                    break
+            if move is not None:
+                break
+        if move is None:
+            return text.encode("utf-8"), changed
+
+        moving, target = move
+        moving_start, moving_end = directive_full_line_span(text, moving, source)
+        target_start, _ = directive_full_line_span(text, target, source)
+        if moving_start <= target_start:
+            raise InstallError(f"{source}: internal regex ordering rewrite is invalid")
+        rendered = text[moving_start:moving_end]
+        text = (
+            text[:target_start]
+            + rendered
+            + text[target_start:moving_start]
+            + text[moving_end:]
+        )
+        changed = True
+
+    raise InstallError(f"{source}: application regex ordering did not converge")
+
+
 def rewrite_active_config(
     content: bytes,
     expected_old_location_sha256: str | None,
     source: str = "active config",
 ) -> RewriteResult:
+    ordered_content, order_changed = rewrite_application_regex_order(content, source)
+    if order_changed:
+        verified = rewrite_active_config(
+            ordered_content, expected_old_location_sha256, source
+        )
+        return RewriteResult(
+            verified.content,
+            "rewrite-required",
+            verified.old_location_sha256,
+        )
+
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError as error:

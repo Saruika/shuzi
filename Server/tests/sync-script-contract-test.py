@@ -344,9 +344,9 @@ def main() -> None:
     assert wp_content_php_rule in verifier_text
     assert "wp-content/(?:uploads|cache)" not in sensitive_deny_text
     assert "^/images/.*\\.php" in sensitive_deny_text
-    assert "location ~* ^/images/" in legacy_images_text
+    assert legacy_images_text.count("location ~* ^/images/") == 2
     assert "wp-content/uploads/hero-images/$1" in legacy_images_text
-    assert "location /images/" in legacy_images_text
+    assert "location /images/" not in legacy_images_text
     assert "location ^~ /images/" not in legacy_images_text
     for required_probe in (
         "/wp-content/mu-plugins/shuzijun-app-content.php",

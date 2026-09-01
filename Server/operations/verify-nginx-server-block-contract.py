@@ -346,7 +346,7 @@ EXPECTED_LEGACY_SIGNATURE = (
     ),
     (
         "location",
-        ("/images/",),
+        ("~*", r"^/images/"),
         (
             ("access_log", ("off",), None),
             ("log_not_found", ("off",), None),
@@ -805,9 +805,167 @@ ALLOWED_REGEX_PROFILES: dict[str, dict[tuple[str, str], str]] = {
     },
 }
 
+WWW_M3U8_BODY_SIGNATURE = (
+    ("expires", ("off",), True),
+    (
+        "add_header",
+        ("Cache-Control", "public, max-age=300, stale-while-revalidate=30", "always"),
+        True,
+    ),
+    ("add_header", ("Access-Control-Allow-Origin", "*", "always"), True),
+    ("add_header", ("Timing-Allow-Origin", "*", "always"), True),
+    ("try_files", ("$uri", "=404"), True),
+)
+WWW_MEDIA_BODY_SIGNATURE = (
+    ("expires", ("off",), True),
+    (
+        "add_header",
+        ("Cache-Control", "public, max-age=2592000, immutable", "always"),
+        True,
+    ),
+    ("add_header", ("Access-Control-Allow-Origin", "*", "always"), True),
+    ("add_header", ("Timing-Allow-Origin", "*", "always"), True),
+    ("try_files", ("$uri", "=404"), True),
+)
+WWW_STATIC_BODY_SIGNATURE = (
+    ("expires", ("30d",), True),
+    (
+        "add_header",
+        ("Cache-Control", "public, max-age=2592000, immutable"),
+        True,
+    ),
+    ("try_files", ("$uri", "=404"), True),
+)
+IMG_STATIC_BODY_SIGNATURE = (
+    ("expires", ("365d",), True),
+    (
+        "add_header",
+        ("Cache-Control", "public, max-age=31536000, immutable"),
+        True,
+    ),
+    ("add_header", ("Timing-Allow-Origin", "*", "always"), True),
+    (
+        "add_header",
+        ("Cross-Origin-Resource-Policy", "cross-origin", "always"),
+        True,
+    ),
+    ("access_log", ("off",), True),
+    ("try_files", ("$uri", "=404"), True),
+)
+ROOT_TRY_FILES_BODY_SIGNATURES = {
+    (WWW_HOST, "~*", r"\.m3u8$"): WWW_M3U8_BODY_SIGNATURE,
+    (WWW_HOST, "~*", r"\.(?:ts|mp4|m4v|webm)$"): WWW_MEDIA_BODY_SIGNATURE,
+    (
+        WWW_HOST,
+        "~*",
+        r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+    ): WWW_STATIC_BODY_SIGNATURE,
+    (
+        IMG_HOST,
+        "~*",
+        r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+    ): IMG_STATIC_BODY_SIGNATURE,
+}
+
+REGEX_ORDER_CONTRACT = {
+    WWW_HOST: (
+        (("~*", r"/(?:uploads|files)/.*\.php$"), ("~", r"\.php$")),
+        (("~", r"/\."), ("~", r"\.php$")),
+        (("~", r"/\."), ("~*", r"\.m3u8$")),
+        (("~", r"/\."), ("~*", r"\.(?:ts|mp4|m4v|webm)$")),
+        (
+            ("~", r"/\."),
+            (
+                "~*",
+                r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+            ),
+        ),
+    ),
+    IMG_HOST: (
+        (("~", r"/\."), ("~", r"\.php$")),
+        (
+            ("~", r"/\."),
+            (
+                "~*",
+                r"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$",
+            ),
+        ),
+    ),
+}
+REQUIRED_SECURITY_REGEX_PROFILES = {
+    WWW_HOST: frozenset(
+        {
+            ("~*", r"/(?:uploads|files)/.*\.php$"),
+            ("~", r"\.php$"),
+            ("~", r"/\."),
+        }
+    ),
+    IMG_HOST: frozenset(
+        {
+            ("~", r"\.php$"),
+            ("~", r"/\."),
+        }
+    ),
+}
+
+WWW_PHP_REGEX_BODY_SIGNATURE = (
+    ("fastcgi_split_path_info", (r"^(.+?\.php)(/.*)$",), True),
+    ("try_files", ("$fastcgi_script_name", "=404"), True),
+    ("set", ("$path_info", "$fastcgi_path_info"), True),
+    ("fastcgi_param", ("PATH_INFO", "$path_info"), True),
+    ("fastcgi_index", ("index.php",), True),
+    (
+        "fastcgi_param",
+        ("SCRIPT_FILENAME", "$document_root$fastcgi_script_name"),
+        True,
+    ),
+    ("fastcgi_param", ("QUERY_STRING", "$query_string"), True),
+    ("fastcgi_param", ("REQUEST_METHOD", "$request_method"), True),
+    ("fastcgi_param", ("CONTENT_TYPE", "$content_type"), True),
+    ("fastcgi_param", ("CONTENT_LENGTH", "$content_length"), True),
+    ("fastcgi_param", ("SCRIPT_NAME", "$fastcgi_script_name"), True),
+    ("fastcgi_param", ("REQUEST_URI", "$request_uri"), True),
+    ("fastcgi_param", ("DOCUMENT_URI", "$document_uri"), True),
+    ("fastcgi_param", ("DOCUMENT_ROOT", "$document_root"), True),
+    ("fastcgi_param", ("SERVER_PROTOCOL", "$server_protocol"), True),
+    ("fastcgi_param", ("REQUEST_SCHEME", "$scheme"), True),
+    ("fastcgi_param", ("HTTPS", "$https", "if_not_empty"), True),
+    ("fastcgi_param", ("GATEWAY_INTERFACE", "CGI/1.1"), True),
+    ("fastcgi_param", ("SERVER_SOFTWARE", "nginx/$nginx_version"), True),
+    ("fastcgi_param", ("REMOTE_ADDR", "$remote_addr"), True),
+    ("fastcgi_param", ("REMOTE_PORT", "$remote_port"), True),
+    ("fastcgi_param", ("REMOTE_USER", "$remote_user"), True),
+    ("fastcgi_param", ("SERVER_ADDR", "$server_addr"), True),
+    ("fastcgi_param", ("SERVER_PORT", "$server_port"), True),
+    ("fastcgi_param", ("SERVER_NAME", "$server_name"), True),
+    ("fastcgi_param", ("REDIRECT_STATUS", "200"), True),
+    ("fastcgi_pass", ("unix:/var/run/php/php8.3-fpm.sock",), True),
+    ("fastcgi_hide_header", ("X-Powered-By",), True),
+    ("fastcgi_param", ("HTTP_AUTHORIZATION", "$http_authorization"), True),
+    ("fastcgi_cache", ("SJWORDPRESS",), True),
+    ("fastcgi_cache_key", ("$scheme$host$request_uri",), True),
+    ("fastcgi_cache_methods", ("GET", "HEAD"), True),
+    ("fastcgi_cache_valid", ("200", "30s"), True),
+    ("fastcgi_cache_bypass", ("$sj_skip_cache",), True),
+    (
+        "fastcgi_no_cache",
+        ("$sj_skip_cache", "$upstream_http_set_cookie"),
+        True,
+    ),
+    ("fastcgi_cache_lock", ("on",), True),
+    ("fastcgi_cache_lock_timeout", ("5s",), True),
+    ("fastcgi_cache_background_update", ("on",), True),
+    (
+        "fastcgi_cache_use_stale",
+        ("updating", "error", "timeout", "invalid_header", "http_500", "http_503"),
+        True,
+    ),
+)
+
 
 UPSTREAM_OR_ALIAS_DIRECTIVES = {
     "alias",
+    "root",
     "proxy_pass",
     "fastcgi_pass",
     "uwsgi_pass",
@@ -929,74 +1087,73 @@ def validate_allowed_regex_location(
             f"{hostname} contains a regex location outside the reviewed allowlist"
         )
 
-    body = list(location.children or ())
-    body_ids = {id(item) for item in body}
-    body_and_nested = nested_items(location)
-    expanded_body = [item for item in body_and_nested if item is not location]
-    forbidden_handlers = [
-        item
-        for item in expanded_body
-        if item.name.lower() in UPSTREAM_OR_ALIAS_DIRECTIVES
-    ]
-    returns = [item for item in expanded_body if item.name.lower() == "return"]
-    try_files = [item for item in expanded_body if item.name.lower() == "try_files"]
-    denies = [item for item in expanded_body if item.name.lower() == "deny"]
-    access_overrides = [
-        item
-        for item in expanded_body
-        if item.name.lower() in ("allow", "satisfy")
-    ]
-    conditional_blocks = [
-        item
-        for item in expanded_body
-        if item.children is not None and item.name.lower() in ("if", "limit_except")
-    ]
+    body_signature = tuple(
+        (item.name.lower(), item.args, item.children is None)
+        for item in (location.children or ())
+    )
 
     if profile == "root-try-files":
-        if (
-            forbidden_handlers
-            or returns
-            or conditional_blocks
-            or len(try_files) != 1
-            or id(try_files[0]) not in body_ids
-        ):
-            raise ContractError(f"{hostname} reviewed static regex handler drifted")
-        if try_files[0].args != ("$uri", "=404"):
+        expected = ROOT_TRY_FILES_BODY_SIGNATURES[(hostname, modifier, pattern)]
+        observed_try_files = [
+            args for name, args, leaf in body_signature if name == "try_files" and leaf
+        ]
+        if observed_try_files and observed_try_files != [("$uri", "=404")]:
             raise ContractError(f"{hostname} reviewed static regex must fail closed")
+        if body_signature != expected:
+            raise ContractError(f"{hostname} reviewed static regex handler drifted")
         return
 
     if profile == "www-php":
         validate_php_handler_contract(hostname, location)
+        if body_signature != WWW_PHP_REGEX_BODY_SIGNATURE:
+            raise ContractError(f"{hostname} reviewed PHP regex body drifted")
         return
 
     if profile in ("deny-404", "health-204"):
         expected_code = "404" if profile == "deny-404" else "204"
-        if (
-            forbidden_handlers
-            or try_files
-            or conditional_blocks
-            or len(returns) != 1
-            or id(returns[0]) not in body_ids
-            or returns[0].args != (expected_code,)
-        ):
+        if body_signature != (("return", (expected_code,), True),):
             raise ContractError(f"{hostname} reviewed return-only regex handler drifted")
         return
 
     if profile == "deny-all":
-        if (
-            forbidden_handlers
-            or try_files
-            or returns
-            or access_overrides
-            or conditional_blocks
-            or len(denies) != 1
-            or id(denies[0]) not in body_ids
-            or denies[0].args != ("all",)
-        ):
+        if body_signature != (("deny", ("all",), True),):
             raise ContractError(f"{hostname} reviewed dotfile regex handler drifted")
         return
 
     raise ContractError(f"{hostname} has an unknown regex review profile")
+
+
+def validate_application_regex_order(
+    effective_node: EffectiveDirective, hostname: str
+) -> None:
+    indexes: dict[tuple[str, str], list[int]] = {}
+    for index, item in enumerate(effective_node.children or ()):
+        parsed = location_path(item)
+        if parsed is None or parsed[0] not in ("~", "~*"):
+            continue
+        indexes.setdefault(parsed, []).append(index)
+
+    for key in ALLOWED_REGEX_PROFILES[hostname]:
+        if len(indexes.get(key, ())) > 1:
+            raise ContractError(
+                f"{hostname} repeats a reviewed application regex location"
+            )
+    missing = [
+        key
+        for key in REQUIRED_SECURITY_REGEX_PROFILES[hostname]
+        if len(indexes.get(key, ())) != 1
+    ]
+    if missing:
+        raise ContractError(
+            f"{hostname} is missing a required application security regex location"
+        )
+    for earlier, later in REGEX_ORDER_CONTRACT[hostname]:
+        earlier_indexes = indexes.get(earlier, ())
+        later_indexes = indexes.get(later, ())
+        if earlier_indexes and later_indexes and earlier_indexes[0] >= later_indexes[0]:
+            raise ContractError(
+                f"{hostname} application security regex order is unsafe"
+            )
 
 
 def validate_server_block(
@@ -1063,6 +1220,7 @@ def validate_server_block(
     ]
     if location_indexes and max(include_indexes.values()) >= min(location_indexes):
         raise ContractError(f"{hostname} security includes must precede every location")
+    validate_application_regex_order(effective_node, hostname)
 
     forbidden_redirectors = [
         item

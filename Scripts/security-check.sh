@@ -88,7 +88,12 @@ grep -qF 'return 404;' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF 'shuzijun-sensitive-files-deny.conf' Server/nginx/README.md
 grep -qF 'location ~* ^/images/' Server/nginx/shuzijun-legacy-images-alias.conf
 grep -qF 'wp-content/uploads/hero-images/$1;' Server/nginx/shuzijun-legacy-images-alias.conf
-grep -qF 'location /images/' Server/nginx/shuzijun-legacy-images-alias.conf
+if [[ "$(grep -cF 'location ~* ^/images/' Server/nginx/shuzijun-legacy-images-alias.conf)" -ne 2 ]]; then
+  fail '旧图片映射必须包含有序的图片白名单与兜底正则'
+fi
+if grep -qF 'location /images/' Server/nginx/shuzijun-legacy-images-alias.conf; then
+  fail '旧图片兜底不得使用可被后续正则覆盖的普通前缀'
+fi
 if grep -qF 'location ^~ /images/' Server/nginx/shuzijun-legacy-images-alias.conf; then
   fail '旧图片映射不得绕过敏感文件正则规则'
 fi

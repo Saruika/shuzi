@@ -23,6 +23,16 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[LOADER.name] = MODULE
 LOADER.exec_module(MODULE)
 
+VERIFIER_PATH = ROOT / "operations" / "verify-nginx-server-block-contract.py"
+VERIFIER_LOADER = importlib.machinery.SourceFileLoader(
+    "build34_nginx_verifier", str(VERIFIER_PATH)
+)
+VERIFIER_SPEC = importlib.util.spec_from_loader(VERIFIER_LOADER.name, VERIFIER_LOADER)
+assert VERIFIER_SPEC is not None
+VERIFIER_MODULE = importlib.util.module_from_spec(VERIFIER_SPEC)
+sys.modules[VERIFIER_LOADER.name] = VERIFIER_MODULE
+VERIFIER_LOADER.exec_module(VERIFIER_MODULE)
+
 
 ACTIVE = Path("/etc/nginx/sites-enabled/shuzijun-ssl.conf")
 AVAILABLE = Path("/etc/nginx/sites-available/shuzijun-ssl.conf")
@@ -53,12 +63,25 @@ REVIEWED_FASTCGI_PHP_INCLUDE = (
     b"include fastcgi.conf;\n"
 )
 REVIEWED_FASTCGI_BASE_INCLUDE = (
+    b"fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n"
     b"fastcgi_param QUERY_STRING $query_string;\n"
     b"fastcgi_param REQUEST_METHOD $request_method;\n"
-    b"fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n"
-    b"fastcgi_param DOCUMENT_ROOT $document_root;\n"
+    b"fastcgi_param CONTENT_TYPE $content_type;\n"
+    b"fastcgi_param CONTENT_LENGTH $content_length;\n"
     b"fastcgi_param SCRIPT_NAME $fastcgi_script_name;\n"
     b"fastcgi_param REQUEST_URI $request_uri;\n"
+    b"fastcgi_param DOCUMENT_URI $document_uri;\n"
+    b"fastcgi_param DOCUMENT_ROOT $document_root;\n"
+    b"fastcgi_param SERVER_PROTOCOL $server_protocol;\n"
+    b"fastcgi_param REQUEST_SCHEME $scheme;\n"
+    b"fastcgi_param HTTPS $https if_not_empty;\n"
+    b"fastcgi_param GATEWAY_INTERFACE CGI/1.1;\n"
+    b"fastcgi_param SERVER_SOFTWARE nginx/$nginx_version;\n"
+    b"fastcgi_param REMOTE_ADDR $remote_addr;\n"
+    b"fastcgi_param REMOTE_PORT $remote_port;\n"
+    b"fastcgi_param REMOTE_USER $remote_user;\n"
+    b"fastcgi_param SERVER_ADDR $server_addr;\n"
+    b"fastcgi_param SERVER_PORT $server_port;\n"
     b"fastcgi_param SERVER_NAME $server_name;\n"
     b"fastcgi_param REDIRECT_STATUS 200;\n"
 )
@@ -238,6 +261,24 @@ def active_config(node_marker: str = "primary-shanghai") -> bytes:
         "    }\n"
         "    location = /favicon.ico { return 204; }\n"
         "    location = /robots.txt { return 204; }\n"
+        "    location ~* /(?:uploads|files)/.*\\.php$ { return 404; }\n"
+        "    location ~ /\\. { deny all; }\n"
+        "    location ~ \\.php$ {\n"
+        "        include snippets/fastcgi-php.conf;\n"
+        "        fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;\n"
+        "        fastcgi_hide_header X-Powered-By;\n"
+        "        fastcgi_param HTTP_AUTHORIZATION $http_authorization;\n"
+        "        fastcgi_cache SJWORDPRESS;\n"
+        "        fastcgi_cache_key $scheme$host$request_uri;\n"
+        "        fastcgi_cache_methods GET HEAD;\n"
+        "        fastcgi_cache_valid 200 30s;\n"
+        "        fastcgi_cache_bypass $sj_skip_cache;\n"
+        "        fastcgi_no_cache $sj_skip_cache $upstream_http_set_cookie;\n"
+        "        fastcgi_cache_lock on;\n"
+        "        fastcgi_cache_lock_timeout 5s;\n"
+        "        fastcgi_cache_background_update on;\n"
+        "        fastcgi_cache_use_stale updating error timeout invalid_header http_500 http_503;\n"
+        "    }\n"
         "    location ~ \"^/health/[0-9]{1,5}$\" { return 204; }\n"
         "}\n"
         "server {\n"
@@ -250,6 +291,8 @@ def active_config(node_marker: str = "primary-shanghai") -> bytes:
         "        expires 365d;\n"
         "        add_header X-Origin-Node preserved-node-specific;\n"
         "    }\n"
+        "    location ~ /\\. { deny all; }\n"
+        "    location ~ \\.php$ { return 404; }\n"
         "    location / { try_files $uri =404; }\n"
         "}\n"
         "server {\n"
@@ -258,6 +301,66 @@ def active_config(node_marker: str = "primary-shanghai") -> bytes:
         "    include /etc/nginx/snippets/node-specific-apex-route.conf;\n"
         "}\n"
     ).encode()
+
+
+PRODUCTION_STATIC_PATTERN = (
+    rb"\.(?:jpg|jpeg|png|gif|webp|avif|ico|css|js|svg|woff|woff2)$"
+)
+
+
+def production_regex_active_config() -> bytes:
+    """Add exact production profiles in the unsafe legacy order to be migrated."""
+
+    config = active_config().replace(
+        b"    location ~ /\\. { deny all; }\n",
+        b"",
+        1,
+    )
+    www_profiles = (
+        b"    location ~* \\.m3u8$ {\n"
+        b"        expires off;\n"
+        b'        add_header Cache-Control "public, max-age=300, stale-while-revalidate=30" always;\n'
+        b'        add_header Access-Control-Allow-Origin "*" always;\n'
+        b'        add_header Timing-Allow-Origin "*" always;\n'
+        b"        try_files $uri =404;\n"
+        b"    }\n"
+        b"    location ~* \\.(?:ts|mp4|m4v|webm)$ {\n"
+        b"        expires off;\n"
+        b'        add_header Cache-Control "public, max-age=2592000, immutable" always;\n'
+        b'        add_header Access-Control-Allow-Origin "*" always;\n'
+        b'        add_header Timing-Allow-Origin "*" always;\n'
+        b"        try_files $uri =404;\n"
+        b"    }\n"
+        b"    location ~* " + PRODUCTION_STATIC_PATTERN + b" {\n"
+        b"        expires 30d;\n"
+        b'        add_header Cache-Control "public, max-age=2592000, immutable";\n'
+        b"        try_files $uri =404;\n"
+        b"    }\n"
+        b"    location ~ /\\. { deny all; }\n"
+    )
+    config = config.replace(
+        b'    location ~ "^/health/[0-9]{1,5}$" { return 204; }\n',
+        www_profiles
+        + b'    location ~ "^/health/[0-9]{1,5}$" { return 204; }\n',
+        1,
+    )
+    return config.replace(
+        b"    location ~ /\\. { deny all; }\n"
+        b"    location ~ \\.php$ { return 404; }\n"
+        b"    location / { try_files $uri =404; }\n",
+        b"    location ~* " + PRODUCTION_STATIC_PATTERN + b" {\n"
+        b"        expires 365d;\n"
+        b'        add_header Cache-Control "public, max-age=31536000, immutable";\n'
+        b'        add_header Timing-Allow-Origin "*" always;\n'
+        b'        add_header Cross-Origin-Resource-Policy "cross-origin" always;\n'
+        b"        access_log off;\n"
+        b"        try_files $uri =404;\n"
+        b"    }\n"
+        b"    location ~ /\\. { deny all; }\n"
+        b"    location ~ \\.php$ { return 404; }\n"
+        b"    location / { try_files $uri =404; }\n",
+        1,
+    )
 
 
 def php_include_active_config() -> bytes:
@@ -270,16 +373,7 @@ def php_include_active_config() -> bytes:
         ),
         1,
     )
-    return config.replace(
-        b'    location ~ "^/health/[0-9]{1,5}$" { return 204; }\n',
-        (
-            b'    location ~ "\\.php$" {\n'
-            b"        include snippets/fastcgi-php.conf;\n"
-            b"        fastcgi_pass unix:/run/php/php8.3-fpm.sock;\n"
-            b"    }\n"
-        ),
-        1,
-    )
+    return config
 
 
 def add_reviewed_include_entries(entries: dict[Path, object]) -> None:
@@ -365,6 +459,7 @@ def initial_entries(
     }
     if account_snippet is not None:
         entries[ACCOUNT_API_TARGET] = file_state(account_snippet)
+    add_reviewed_include_entries(entries)
     return entries
 
 
@@ -1275,7 +1370,7 @@ def assert_drift_and_unsafe_inputs_rejected() -> None:
         arguments["expected_active_sha256"] = MODULE.sha256(changed)
         arguments["expected_old_location_sha256"] = old_location_hash(changed)
 
-    assert_rejected(wrong_root, "must have exactly one fixed root")
+    assert_rejected(wrong_root, "must have exactly one direct fixed root")
 
     def protected_prefix_location(filesystem, arguments) -> None:
         changed = filesystem.entries[ACTIVE].data.replace(
@@ -1441,6 +1536,199 @@ def assert_nginx_tokenizer_semantics() -> None:
         raise AssertionError("unquoted regex quantifier was parsed ambiguously")
 
 
+def assert_production_regex_profiles() -> None:
+    assert MODULE.ALLOWED_REGEX_PROFILES == VERIFIER_MODULE.ALLOWED_REGEX_PROFILES
+    assert (
+        MODULE.UPSTREAM_OR_ALIAS_DIRECTIVES
+        == VERIFIER_MODULE.UPSTREAM_OR_ALIAS_DIRECTIVES
+    )
+    assert (
+        MODULE.ROOT_TRY_FILES_BODY_SIGNATURES
+        == VERIFIER_MODULE.ROOT_TRY_FILES_BODY_SIGNATURES
+    )
+    assert (
+        MODULE.WWW_PHP_REGEX_BODY_SIGNATURE
+        == VERIFIER_MODULE.WWW_PHP_REGEX_BODY_SIGNATURE
+    )
+    assert MODULE.REGEX_ORDER_CONTRACT == VERIFIER_MODULE.REGEX_ORDER_CONTRACT
+    assert (
+        MODULE.REQUIRED_SECURITY_REGEX_PROFILES
+        == VERIFIER_MODULE.REQUIRED_SECURITY_REGEX_PROFILES
+    )
+
+    config = production_regex_active_config()
+    unsafe_document = MODULE.parse(config.decode(), "unsafe production fixture")
+    for hostname in (MODULE.WWW_HOST, MODULE.IMG_HOST):
+        node = MODULE.unique_tls_server(unsafe_document, hostname)
+        try:
+            MODULE.validate_application_regex_order(node, hostname)
+        except MODULE.InstallError as error:
+            assert "application security regex order is unsafe" in str(error), error
+        else:
+            raise AssertionError(f"unsafe production regex order accepted: {hostname}")
+    entries = initial_entries(config)
+    filesystem = FakeFilesystem(entries)
+    result = make_installer(filesystem, FakeRunner()).install(
+        **install_arguments(entries, apply=False)
+    )
+    assert result.state == "rewrite-required"
+    parsed = MODULE.parse(result.content.decode(), "ordered production candidate")
+    for hostname in (MODULE.WWW_HOST, MODULE.IMG_HOST):
+        node = MODULE.unique_tls_server(parsed, hostname)
+        MODULE.validate_application_regex_order(node, hostname)
+    assert not filesystem.operations and not filesystem.backups
+
+    upload_line = (
+        b"    location ~* /(?:uploads|files)/.*\\.php$ { return 404; }\n"
+    )
+    unsafe_upload_config = active_config().replace(upload_line, b"", 1).replace(
+        b'    location ~ "^/health/[0-9]{1,5}$" { return 204; }\n',
+        upload_line
+        + b'    location ~ "^/health/[0-9]{1,5}$" { return 204; }\n',
+        1,
+    )
+    upload_entries = initial_entries(unsafe_upload_config)
+    upload_result = make_installer(
+        FakeFilesystem(upload_entries), FakeRunner()
+    ).install(**install_arguments(upload_entries, apply=False))
+    upload_document = MODULE.parse(
+        upload_result.content.decode(), "ordered upload deny candidate"
+    )
+    MODULE.validate_application_regex_order(
+        MODULE.unique_tls_server(upload_document, MODULE.WWW_HOST), MODULE.WWW_HOST
+    )
+
+    def assert_profile_rejected(mutator, expected: str) -> None:
+        case_entries = initial_entries(config)
+        arguments = install_arguments(case_entries, apply=True)
+        changed = mutator(case_entries[ACTIVE].data)
+        assert changed != case_entries[ACTIVE].data
+        case_entries[ACTIVE] = file_state(changed)
+        arguments["expected_active_sha256"] = MODULE.sha256(changed)
+        arguments["expected_old_location_sha256"] = old_location_hash(changed)
+        case_filesystem = FakeFilesystem(case_entries)
+        try:
+            make_installer(case_filesystem, FakeRunner()).install(**arguments)
+        except MODULE.InstallError as error:
+            assert expected in str(error), error
+        else:
+            raise AssertionError(f"production regex drift accepted: {expected}")
+        assert not case_filesystem.backups
+
+    static_location = (
+        b"location ~* " + PRODUCTION_STATIC_PATTERN + b" {\n"
+        b"        expires 30d;\n"
+        b'        add_header Cache-Control "public, max-age=2592000, immutable";\n'
+        b"        try_files $uri =404;\n"
+        b"    }"
+    )
+    assert_profile_rejected(
+        lambda content: content.replace(
+            static_location,
+            b"location ~* "
+            + PRODUCTION_STATIC_PATTERN
+            + b" { alias /tmp/unreviewed-assets/; }",
+            1,
+        ),
+        "reviewed static regex handler drifted",
+    )
+    assert_profile_rejected(
+        lambda content: content.replace(
+            static_location,
+            b"location ~* "
+            + PRODUCTION_STATIC_PATTERN
+            + b" { root /tmp/unreviewed-assets; try_files $uri =404; }",
+            1,
+        ),
+        "no nested override",
+    )
+    assert_profile_rejected(
+        lambda content: content.replace(
+            static_location,
+            b"location ~* "
+            + PRODUCTION_STATIC_PATTERN
+            + b" { try_files $uri /index.php?$args; }",
+            1,
+        ),
+        "reviewed static regex must fail closed",
+    )
+    assert_profile_rejected(
+        lambda content: content.replace(
+            PRODUCTION_STATIC_PATTERN, rb"\.(?:jpg|jpeg|php)$", 1
+        ),
+        "regex location outside the reviewed allowlist",
+    )
+    assert_profile_rejected(
+        lambda content: content.replace(
+            b"location ~* /(?:uploads|files)/.*\\.php$ { return 404; }",
+            b"location ~* /(?:uploads|files)/.*\\.php$ "
+            b"{ proxy_pass http://unreviewed; }",
+            1,
+        ),
+        "reviewed return-only regex handler drifted",
+    )
+    assert_profile_rejected(
+        lambda content: content.replace(
+            b"location ~ /\\. { deny all; }",
+            b"location ~ /\\. { allow all; deny all; }",
+            1,
+        ),
+        "reviewed dotfile regex handler drifted",
+    )
+
+    for injected in (
+        b"satisfy any; allow all;",
+        b"dav_methods PUT DELETE;",
+        b"mirror /capture;",
+        b"post_action /capture;",
+        b"auth_request /permit-all;",
+        b"unknown_effect { return 204; }",
+    ):
+        assert_profile_rejected(
+            lambda content, directive=injected: content.replace(
+                static_location,
+                b"location ~* " + PRODUCTION_STATIC_PATTERN + b" { "
+                + directive
+                + b" try_files $uri =404; }",
+                1,
+            ),
+            "reviewed static regex handler drifted",
+        )
+
+    for required_line in (
+        b"    location ~* /(?:uploads|files)/.*\\.php$ { return 404; }\n",
+        b"    location ~ \\.php$ { return 404; }\n",
+    ):
+        assert_profile_rejected(
+            lambda content, line=required_line: content.replace(line, b"", 1),
+            "missing a required application security regex location",
+        )
+
+    assert_profile_rejected(
+        lambda content: content.replace(
+            b"    location ~ \\.php$ {\n",
+            b"    location ~ \\.phpx$ {\n",
+            1,
+        ),
+        "missing a required application security regex location",
+    )
+    dotfile_deny = b"    location ~ /\\. { deny all; }\n"
+    assert_profile_rejected(
+        lambda content: content.replace(dotfile_deny, b"", 1),
+        "missing a required application security regex location",
+    )
+
+    def remove_last_dotfile_deny(content: bytes) -> bytes:
+        index = content.rfind(dotfile_deny)
+        assert index >= 0
+        return content[:index] + content[index + len(dotfile_deny) :]
+
+    assert_profile_rejected(
+        remove_last_dotfile_deny,
+        "missing a required application security regex location",
+    )
+
+
 def assert_candidate_semantic_bypass_gates() -> None:
     health = b'location ~ "^/health/[0-9]{1,5}$"'
 
@@ -1466,7 +1754,7 @@ def assert_candidate_semantic_bypass_gates() -> None:
     ):
         reject_location(
             b'location ~* "' + pattern + b'"',
-            "regex location that may bypass legacy /images routing",
+            "regex location outside the reviewed allowlist",
         )
     reject_location(b"location @deny_bypass", "named location")
 
@@ -1644,6 +1932,28 @@ def assert_recursive_include_contract() -> None:
         ),
         "must be root-owned",
     )
+
+    def replace_fpm_socket(fs, args, replacement: bytes) -> None:
+        changed = fs.entries[ACTIVE].data.replace(
+            b"fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;",
+            b"fastcgi_pass " + replacement + b";",
+            1,
+        )
+        assert changed != fs.entries[ACTIVE].data
+        fs.entries[ACTIVE] = file_state(changed)
+        args["expected_active_sha256"] = MODULE.sha256(changed)
+        args["expected_old_location_sha256"] = old_location_hash(changed)
+
+    for unreviewed_fpm_target in (
+        b"127.0.0.1:9000",
+        b"unix:/tmp/unreviewed-php-fpm.sock",
+    ):
+        reject_include(
+            lambda fs, args, target=unreviewed_fpm_target: replace_fpm_socket(
+                fs, args, target
+            ),
+            "PHP handler must use the reviewed FPM socket",
+        )
 
     def unknown_server_include(fs, args) -> None:
         unknown = Path("/etc/nginx/snippets/unreviewed.conf")
@@ -1938,6 +2248,7 @@ def main() -> None:
     assert_drift_and_unsafe_inputs_rejected()
     assert_sensitive_exact_location_mirror()
     assert_nginx_tokenizer_semantics()
+    assert_production_regex_profiles()
     assert_candidate_semantic_bypass_gates()
     assert_fixed_snippet_semantic_gates()
     assert_recursive_include_contract()

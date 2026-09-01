@@ -61,11 +61,11 @@ class Fixture:
             encoding="utf-8",
         )
         self.fastcgi_conf.write_text(
+            "fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n"
             "fastcgi_param QUERY_STRING $query_string;\n"
             "fastcgi_param REQUEST_METHOD $request_method;\n"
             "fastcgi_param CONTENT_TYPE $content_type;\n"
             "fastcgi_param CONTENT_LENGTH $content_length;\n"
-            "fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;\n"
             "fastcgi_param SCRIPT_NAME $fastcgi_script_name;\n"
             "fastcgi_param REQUEST_URI $request_uri;\n"
             "fastcgi_param DOCUMENT_URI $document_uri;\n"
@@ -88,12 +88,7 @@ class Fixture:
         self.enabled_entry.symlink_to(self.site_config)
 
     def valid_config(self) -> str:
-        www_php = (
-            "  location ~ \\.php$ {\n"
-            "    include snippets/fastcgi-php.conf;\n"
-            "    fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;\n"
-            "  }\n"
-        )
+        www_php = self.generic_php_block()
         return (
             "# Real deployments have a port-80 redirect block for each host.\n"
             "server {\n"
@@ -126,11 +121,27 @@ class Fixture:
             "  location /wp-json/shuzijun/v1/ { proxy_pass http://account-api; }\n"
             "  location / { try_files $uri $uri/ /index.php?$args; }\n"
             "  location ~* /(?:uploads|files)/.*\\.php$ { return 404; }\n"
-            + www_php
-            + "  location ~* \\.m3u8$ { try_files $uri =404; }\n"
-            "  location ~* \\.(?:ts|mp4|m4v|webm)$ { try_files $uri =404; }\n"
-            f"  location ~* {self.STATIC_PATTERN} {{ try_files $uri =404; }}\n"
             "  location ~ /\\. { deny all; }\n"
+            + www_php
+            + "  location ~* \\.m3u8$ {\n"
+            "    expires off;\n"
+            '    add_header Cache-Control "public, max-age=300, stale-while-revalidate=30" always;\n'
+            '    add_header Access-Control-Allow-Origin "*" always;\n'
+            '    add_header Timing-Allow-Origin "*" always;\n'
+            "    try_files $uri =404;\n"
+            "  }\n"
+            "  location ~* \\.(?:ts|mp4|m4v|webm)$ {\n"
+            "    expires off;\n"
+            '    add_header Cache-Control "public, max-age=2592000, immutable" always;\n'
+            '    add_header Access-Control-Allow-Origin "*" always;\n'
+            '    add_header Timing-Allow-Origin "*" always;\n'
+            "    try_files $uri =404;\n"
+            "  }\n"
+            f"  location ~* {self.STATIC_PATTERN} {{\n"
+            "    expires 30d;\n"
+            '    add_header Cache-Control "public, max-age=2592000, immutable";\n'
+            "    try_files $uri =404;\n"
+            "  }\n"
             + self.HEALTH
             + "}\n"
             "server {\n"
@@ -140,10 +151,17 @@ class Fixture:
             f"  include {self.security};\n"
             f"  include {self.sensitive};\n"
             f"  include {self.legacy};\n"
-            f"  location ~* {self.STATIC_PATTERN} {{ try_files $uri =404; }}\n"
-            "  location / { try_files $uri =404; }\n"
-            "  location ~ \\.php$ { return 404; }\n"
             "  location ~ /\\. { deny all; }\n"
+            "  location ~ \\.php$ { return 404; }\n"
+            f"  location ~* {self.STATIC_PATTERN} {{\n"
+            "    expires 365d;\n"
+            '    add_header Cache-Control "public, max-age=31536000, immutable";\n'
+            '    add_header Timing-Allow-Origin "*" always;\n'
+            '    add_header Cross-Origin-Resource-Policy "cross-origin" always;\n'
+            "    access_log off;\n"
+            "    try_files $uri =404;\n"
+            "  }\n"
+            "  location / { try_files $uri =404; }\n"
             + self.HEALTH
             + "}\n"
         )
@@ -185,6 +203,27 @@ class Fixture:
             "  location ~ \\.php$ {\n"
             "    include snippets/fastcgi-php.conf;\n"
             "    fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;\n"
+            "    fastcgi_hide_header X-Powered-By;\n"
+            "    fastcgi_param HTTP_AUTHORIZATION $http_authorization;\n"
+            "    fastcgi_cache SJWORDPRESS;\n"
+            "    fastcgi_cache_key $scheme$host$request_uri;\n"
+            "    fastcgi_cache_methods GET HEAD;\n"
+            "    fastcgi_cache_valid 200 30s;\n"
+            "    fastcgi_cache_bypass $sj_skip_cache;\n"
+            "    fastcgi_no_cache $sj_skip_cache $upstream_http_set_cookie;\n"
+            "    fastcgi_cache_lock on;\n"
+            "    fastcgi_cache_lock_timeout 5s;\n"
+            "    fastcgi_cache_background_update on;\n"
+            "    fastcgi_cache_use_stale updating error timeout invalid_header http_500 http_503;\n"
+            "  }\n"
+        )
+
+    def www_static_block(self) -> str:
+        return (
+            f"  location ~* {self.STATIC_PATTERN} {{\n"
+            "    expires 30d;\n"
+            '    add_header Cache-Control "public, max-age=2592000, immutable";\n'
+            "    try_files $uri =404;\n"
             "  }\n"
         )
 
@@ -454,10 +493,104 @@ def main() -> None:
     )
     run_case(
         lambda fixture: fixture.replace(
-            f"  location ~* {fixture.STATIC_PATTERN} {{ try_files $uri =404; }}",
+            fixture.www_static_block(),
             f"  location ~* {fixture.STATIC_PATTERN} {{ alias /tmp/assets/; }}",
         ),
         "reviewed static regex handler drifted",
+    )
+    run_case(
+        lambda fixture: fixture.replace(
+            fixture.www_static_block(),
+            f"  location ~* {fixture.STATIC_PATTERN} "
+            "{ root /tmp/unreviewed-assets; try_files $uri =404; }",
+        ),
+        "no nested override",
+    )
+    for injected in (
+        "satisfy any; allow all;",
+        "dav_methods PUT DELETE;",
+        "mirror /capture;",
+        "post_action /capture;",
+        "auth_request /permit-all;",
+        "unknown_effect { return 204; }",
+    ):
+        run_case(
+            lambda fixture, directive=injected: fixture.replace(
+                fixture.www_static_block(),
+                f"  location ~* {fixture.STATIC_PATTERN} "
+                f"{{ {directive} try_files $uri =404; }}\n",
+            ),
+            "reviewed static regex handler drifted",
+        )
+
+    def unsafe_dotfile_order(fixture: Fixture) -> None:
+        dot = "  location ~ /\\. { deny all; }\n"
+        content = fixture.site_config.read_text(encoding="utf-8")
+        assert content.count(dot) == 2
+        content = content.replace(dot, "", 1)
+        content = content.replace(
+            fixture.www_static_block(), fixture.www_static_block() + dot, 1
+        )
+        fixture.site_config.write_text(content, encoding="utf-8")
+
+    run_case(
+        unsafe_dotfile_order,
+        "application security regex order is unsafe",
+    )
+
+    def unsafe_upload_deny_order(fixture: Fixture) -> None:
+        upload = "  location ~* /(?:uploads|files)/.*\\.php$ { return 404; }\n"
+        content = fixture.site_config.read_text(encoding="utf-8")
+        assert content.count(upload) == 1
+        content = content.replace(upload, "", 1)
+        content = content.replace(
+            fixture.generic_php_block(), fixture.generic_php_block() + upload, 1
+        )
+        fixture.site_config.write_text(content, encoding="utf-8")
+
+    run_case(
+        unsafe_upload_deny_order,
+        "application security regex order is unsafe",
+    )
+
+    run_case(
+        lambda fixture: fixture.replace(
+            "  location ~* /(?:uploads|files)/.*\\.php$ { return 404; }\n",
+            "",
+        ),
+        "missing a required application security regex location",
+    )
+    run_case(
+        lambda fixture: fixture.replace(
+            "  location ~ \\.php$ { return 404; }\n",
+            "",
+        ),
+        "missing a required application security regex location",
+    )
+    run_case(
+        lambda fixture: fixture.replace(
+            "  location ~ \\.php$ {\n",
+            "  location ~ \\.phpx$ {\n",
+        ),
+        "missing a required application security regex location",
+    )
+    run_case(
+        lambda fixture: fixture.replace("  location ~ /\\. { deny all; }\n", ""),
+        "missing a required application security regex location",
+    )
+
+    def missing_img_dotfile_deny(fixture: Fixture) -> None:
+        marker = "  location ~ /\\. { deny all; }\n"
+        content = fixture.site_config.read_text(encoding="utf-8")
+        index = content.rfind(marker)
+        assert index >= 0
+        fixture.site_config.write_text(
+            content[:index] + content[index + len(marker) :], encoding="utf-8"
+        )
+
+    run_case(
+        missing_img_dotfile_deny,
+        "missing a required application security regex location",
     )
     run_case(
         lambda fixture: fixture.replace(
@@ -631,6 +764,18 @@ def main() -> None:
         run_case(
             lambda fixture, value=directive: php_parameter_override(fixture, value),
             "reviewed PHP execution target parameters drifted",
+        )
+
+    for unreviewed_fpm_target in (
+        "127.0.0.1:9000",
+        "unix:/tmp/unreviewed-php-fpm.sock",
+    ):
+        run_case(
+            lambda fixture, target=unreviewed_fpm_target: fixture.replace(
+                "    fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;",
+                f"    fastcgi_pass {target};",
+            ),
+            "reviewed PHP handler drifted",
         )
 
     def recursive_php_override(fixture: Fixture) -> None:

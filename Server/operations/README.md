@@ -29,7 +29,18 @@ canonical TLS server block。www/img 中的普通 include 会在 root:root 0644�
 无硬链接且可信父目录的门禁下递归展开；只允许现网的七项 security header
 snippet 与 `fastcgi-php.conf -> fastcgi.conf` 执行链。嵌套 location、可能匹配
 `/images` 的未知 regex、named location、rewrite/error_page/internal redirect、
-重复或改写 `SCRIPT_FILENAME` 等 FastCGI 执行参数都会拒绝。sensitive、legacy
+重复或改写 `SCRIPT_FILENAME` 等 FastCGI 执行参数都会拒绝。应用 regex 只接受
+与独立 Web-root verifier 相同的 www/img 精确 allowlist；每一项还必须符合绑定的
+`$uri =404` 静态/媒体、return-only、`deny all` 或严格 PHP body profile，不能仅靠
+看似安全的路径表达式通过。静态/媒体 profile 内的 location-scoped `root`、
+`alias` 与 upstream handler 全部拒绝；www PHP profile 还固定绑定
+`unix:/var/run/php/php8.3-fpm.sock`，TCP 或其它 socket 不能通过。两个主机的
+PHP 与 dotfile deny（以及 www 的 uploads/files PHP deny）是必需且唯一的。
+Nginx regex 按声明顺序首个命中：因此 dotfile deny 必须位于通用 PHP、
+静态和媒体 regex 之前，uploads/files PHP deny 必须位于通用 PHP 之前。
+安装器只会将这些精确已审核 block 的完整字节原样移动到安全顺序；
+dry-run 的 candidate SHA 包含该顺序变化，事务失败回滚会恢复原顺序。候选配置
+随后由独立 verifier 按同一必需集与顺序契约复核。sensitive、legacy
 与 account 固定 snippet 也不是不透明输入：前两者必须与版本化 AST 完全一致，
 account block 则接受节点体差异但执行同一重定向与 location 安全门禁。
 
@@ -233,14 +244,14 @@ mask FPM，由已审核的完整发布镜像重建为 fail-closed 版本；不�
 
 ```bash
 sudo /usr/local/sbin/bootstrap-legacy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
   --manifest-sha256 <CI 记录的 release.sha256 哈希> \
   --legacy-php-sha256 <Git 中已核对的 1.5.7 PHP 哈希> \
   --authority-role authority \
   --dry-run
 
 sudo /usr/local/sbin/bootstrap-legacy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
   --manifest-sha256 <同一个已核对哈希> \
   --legacy-php-sha256 <同一个已核对的 1.5.7 PHP 哈希> \
   --authority-role authority \
@@ -280,7 +291,7 @@ sudo install -o root -g root -m 0755 \
   /usr/local/sbin/seed-standby-app-content-release
 
 sudo /usr/local/sbin/seed-standby-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
   --manifest-sha256 <CI 记录的 release.sha256 哈希> \
   --legacy-php-sha256 <Git 审核的现网-1.5.7-哈希> \
   --confirm-writers-drained \
@@ -294,7 +305,7 @@ Dry-run 会输出确定性 `plan-sha256`；该值同时绑定 standby 角色、
 
 ```bash
 sudo /usr/local/sbin/seed-standby-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
   --manifest-sha256 <同一个已审核清单哈希> \
   --legacy-php-sha256 <同一个已审核旧-PHP-哈希> \
   --approved-plan-sha256 <dry-run 输出的-plan-sha256> \
@@ -325,25 +336,25 @@ JWT autoloader 及真实 `wp-load.php`，对 `/index.php?...` 和 `/?...`
 
 ```bash
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
   --manifest-sha256 <CI 记录的 release.sha256 哈希> \
   --authority-role standby \
   --dry-run
 
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
   --manifest-sha256 <同一个已核对哈希> \
   --authority-role standby \
   --apply
 
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
   --manifest-sha256 <同一个已核对哈希> \
   --authority-role authority \
   --dry-run
 
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
   --manifest-sha256 <同一个已核对哈希> \
   --authority-role authority \
   --apply
@@ -618,8 +629,11 @@ The legacy `/images/...` public URLs must be provided by the constrained
 not by a document-root symbolic link. Install the sensitive-file snippet first,
 validate and reload Nginx, then install the alias include, validate it against a
 known image and a denied `.php` probe, and only then remove the old `images`
-symlink. The Web-root verifier requires two alias includes and rejects any
-remaining symlink, so a partial migration fails closed.
+symlink. Inside the legacy snippet the flat-image allowlist regex is immediately
+followed by an ordered `^/images/` regex that returns 404. A normal prefix
+fallback is not sufficient because later application regex locations can outrank
+it. The Web-root verifier requires two alias includes and rejects any remaining
+symlink, so a partial migration fails closed.
 
 For ordinary website and media continuity, both `www.shuzijun.com.cn` and
 `img.shuzijun.com.cn` keep Shanghai as the primary CDN origin and Singapore as

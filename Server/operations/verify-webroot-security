@@ -14,7 +14,7 @@ nginx_enabled_site=${5:-/etc/nginx/sites-enabled/shuzijun-ssl.conf}
 nginx_config_owner=${6:-root:root}
 site_root_owner=${7:-root:www-data}
 readonly nginx_contract_checker=/usr/local/sbin/verify-nginx-server-block-contract.py
-readonly nginx_contract_checker_sha256=8915ce689de45b835dcc75c47aed40076177a587856cd9e9bbd462641aca9a96
+readonly nginx_contract_checker_sha256=9b6819ccbae6b2826277e827f6a33f6fd3b961170cc17c169f05888dffd5d12c
 readonly nginx_contract_checker_fd=/proc/self/fd/9
 
 reject_checker_find_match() {
@@ -250,7 +250,11 @@ fi
 # and img TLS server blocks and reject a partially migrated configuration.
 grep -qF 'location ~* ^/images/' "$legacy_images_snippet"
 grep -qF 'wp-content/uploads/hero-images/$1;' "$legacy_images_snippet"
-grep -qF 'location /images/' "$legacy_images_snippet"
+test "$(grep -cF 'location ~* ^/images/' "$legacy_images_snippet")" -eq 2
+if grep -qF 'location /images/' "$legacy_images_snippet"; then
+    printf 'webroot-security: legacy fallback is an overridable prefix location\n' >&2
+    exit 1
+fi
 grep -qF 'return 404;' "$legacy_images_snippet"
 if grep -qF 'location ^~ /images/' "$legacy_images_snippet"; then
     printf 'webroot-security: legacy image alias bypasses regex deny rules\n' >&2
