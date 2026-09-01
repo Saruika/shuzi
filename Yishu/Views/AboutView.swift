@@ -20,6 +20,7 @@ struct AboutView: View {
     @State private var scrollViewportHeight: CGFloat = 0
 
     private let portraitCaptionInset: CGFloat = 22
+    private let singleColumnCaptionSafetyMargin: CGFloat = 12
 
     var body: some View {
         GeometryReader { scene in
@@ -103,12 +104,13 @@ struct AboutView: View {
     }
 
     private func singleColumnCaptionBottomPadding(in scene: GeometryProxy) -> CGFloat {
-        guard scrollViewportHeight > 0 else { return portraitCaptionInset }
+        let minimumPadding = portraitCaptionInset + singleColumnCaptionSafetyMargin
+        guard scrollViewportHeight > 0 else { return minimumPadding }
 
         let portraitWidth = min(max(scene.size.width, 0), 720)
         let portraitHeight = portraitWidth * 16 / 9
         let overflow = max(0, portraitHeight - scrollViewportHeight)
-        return portraitCaptionInset + overflow
+        return minimumPadding + overflow
     }
 
     @ViewBuilder

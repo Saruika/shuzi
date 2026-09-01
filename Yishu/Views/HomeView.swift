@@ -1,6 +1,49 @@
 import SwiftUI
 import UIKit
 
+enum HomeHeroPresentation: String, Equatable {
+    case fill
+    case fit
+}
+
+enum HomeHeroRenderPolicy {
+    static func presentation(
+        for viewport: CGSize,
+        idiom: UIUserInterfaceIdiom
+    ) -> HomeHeroPresentation {
+        idiom == .pad && viewport.width > viewport.height ? .fit : .fill
+    }
+
+    static func shouldLoadRemoteImage(
+        at index: Int,
+        selection: Int,
+        count: Int
+    ) -> Bool {
+        guard count > 0,
+              (0..<count).contains(index),
+              (0..<count).contains(selection) else { return false }
+        let directDistance = abs(index - selection)
+        let circularDistance = min(directDistance, count - directDistance)
+        return circularDistance <= 1
+    }
+
+    static func prefetchIndices(selection: Int, count: Int) -> [Int] {
+        guard count > 0, (0..<count).contains(selection) else { return [] }
+        return Array(Set([
+            (selection - 1 + count) % count,
+            selection,
+            (selection + 1) % count,
+        ])).sorted()
+    }
+
+    static func shouldAnimateTransition(from current: Int, to next: Int, count: Int) -> Bool {
+        guard count > 1,
+              (0..<count).contains(current),
+              (0..<count).contains(next) else { return false }
+        return abs(current - next) == 1
+    }
+}
+
 struct HomeView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
     @Environment(LocalWeatherStore.self) private var localWeather
@@ -35,7 +78,8 @@ private struct HeroPager: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
-    @State private var selection = 0
+    @Environment(\.displayScale) private var displayScale
+    @State private var selection = HeroPager.visualTestInitialSelection
     @State private var isVisible = false
 
     private var slides: [URL] {
@@ -43,26 +87,44 @@ private struct HeroPager: View {
     }
 
     private var shouldAutoAdvance: Bool {
-        isVisible
+        return isVisible
             && scenePhase == .active
             && !reduceMotion
             && !voiceOverEnabled
+            && !disablesAutoAdvanceForVisualTesting
             && slides.count > 1
     }
 
     var body: some View {
         GeometryReader { proxy in
+            let presentation = HomeHeroRenderPolicy.presentation(
+                for: proxy.size,
+                idiom: UIDevice.current.userInterfaceIdiom
+            )
+            let exposesVisualTestState = exposesHeroStateForVisualTesting
+
             ZStack(alignment: .bottom) {
                 TabView(selection: $selection) {
                     ForEach(slides.indices, id: \.self) { index in
                         HeroSlideImage(
                             url: slides[index],
                             fallbackName: ContentCatalog.heroAssetName(at: index),
-                            loadsRemoteImage: abs(index - selection) <= 1
+                            loadsRemoteImage: !holdsRemoteImagesForVisualTesting
+                                && HomeHeroRenderPolicy.shouldLoadRemoteImage(
+                                    at: index,
+                                    selection: selection,
+                                    count: slides.count
+                                ),
+                            presentation: presentation,
+                            visualTestIdentifier: exposesVisualTestState
+                                && presentation == .fit
+                                && index == selection
+                                ? "home-hero-actual-fitted-image"
+                                : nil
                         )
                             .frame(width: proxy.size.width, height: proxy.size.height)
                             .clipped()
-                            .accessibilityHidden(true)
+                            .accessibilityHidden(!exposesVisualTestState || index != selection)
                             .tag(index)
                     }
                 }
@@ -82,7 +144,10 @@ private struct HeroPager: View {
                     gradient: Gradient(stops: [
                         .init(color: .clear, location: 0),
                         .init(color: .clear, location: 0.55),
-                        .init(color: AppTheme.ink.opacity(0.95), location: 1)
+                        .init(
+                            color: AppTheme.ink.opacity(presentation == .fit ? 0.68 : 0.95),
+                            location: 1
+                        )
                     ]),
                     startPoint: .top,
                     endPoint: .bottom
@@ -90,6 +155,23 @@ private struct HeroPager: View {
                 .allowsHitTesting(false)
 
                 heroOverlay(in: proxy)
+
+                homeHeroVisualTestControls(
+                    presentation: presentation
+                )
+            }
+            .task(id: prefetchRequestID(for: proxy.size)) {
+                guard !holdsRemoteImagesForVisualTesting else { return }
+                await ArtworkImagePrefetcher.prefetch(
+                    urls: prefetchURLs,
+                    maxPixelSize: min(
+                        1_800,
+                        max(
+                            320,
+                            Int(ceil(max(proxy.size.width, proxy.size.height) * displayScale))
+                        )
+                    )
+                )
             }
         }
         .onAppear {
@@ -102,9 +184,10 @@ private struct HeroPager: View {
                 while !Task.isCancelled {
                     try await Task.sleep(for: .seconds(5))
                     guard shouldAutoAdvance else { return }
-                    withAnimation(.easeInOut(duration: 0.65)) {
-                        selection = (selection + 1) % slides.count
-                    }
+                    setSelection(
+                        (selection + 1) % slides.count,
+                        animationDuration: 0.65
+                    )
                 }
             } catch { }
         }
@@ -307,6 +390,7 @@ private struct HeroPager: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("首页照片")
         .accessibilityValue("第 \(selection + 1) 张，共 \(slides.count) 张")
+        .accessibilityIdentifier("home-hero-page-indicator")
         .accessibilityHint(slides.count > 1 ? "上下轻扫切换照片" : "")
         .accessibilityAdjustableAction { direction in
             guard slides.count > 1 else { return }
@@ -324,9 +408,102 @@ private struct HeroPager: View {
     private func changeSelection(by offset: Int) {
         guard !slides.isEmpty else { return }
         let nextSelection = (selection + offset + slides.count) % slides.count
-        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.22)) {
+        setSelection(nextSelection, animationDuration: 0.22)
+    }
+
+    private func setSelection(_ nextSelection: Int, animationDuration: Double) {
+        let shouldAnimate = !reduceMotion
+            && HomeHeroRenderPolicy.shouldAnimateTransition(
+                from: selection,
+                to: nextSelection,
+                count: slides.count
+            )
+        if shouldAnimate {
+            withAnimation(.easeInOut(duration: animationDuration)) {
+                selection = nextSelection
+            }
+        } else {
             selection = nextSelection
         }
+    }
+
+    private var prefetchURLs: [URL] {
+        HomeHeroRenderPolicy.prefetchIndices(
+            selection: selection,
+            count: slides.count
+        ).map { slides[$0] }
+    }
+
+    private func prefetchRequestID(for size: CGSize) -> String {
+        let urls = prefetchURLs.map(\.absoluteString).joined(separator: "|")
+        return "\(selection)#\(Int(size.width.rounded()))x\(Int(size.height.rounded()))#\(urls)"
+    }
+
+    private var holdsRemoteImagesForVisualTesting: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains(
+            "-hold-home-remote-images-for-visual-testing"
+        )
+#else
+        false
+#endif
+    }
+
+    private var disablesAutoAdvanceForVisualTesting: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains(
+            "-disable-home-auto-advance-for-visual-testing"
+        )
+#else
+        false
+#endif
+    }
+
+    private var exposesHeroStateForVisualTesting: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains(
+            "-expose-home-hero-state-for-visual-testing"
+        )
+#else
+        false
+#endif
+    }
+
+    private static var visualTestInitialSelection: Int {
+#if DEBUG
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let flag = arguments.firstIndex(
+            of: "-home-hero-selection-for-visual-testing"
+        ),
+            arguments.indices.contains(flag + 1),
+            let value = Int(arguments[flag + 1]) else { return 0 }
+        return min(
+            max(0, value),
+            max(0, ContentCatalog.heroImages.count - 1)
+        )
+#else
+        0
+#endif
+    }
+
+    @ViewBuilder
+    private func homeHeroVisualTestControls(
+        presentation: HomeHeroPresentation
+    ) -> some View {
+#if DEBUG
+        if exposesHeroStateForVisualTesting {
+            Color.clear
+                .frame(width: 1, height: 1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    presentation == .fit ? "完整显示" : "铺满显示"
+                )
+                .accessibilityValue("第 \(selection + 1) 张，共 \(slides.count) 张")
+                .accessibilityIdentifier("home-hero-visual-state-\(selection)")
+                .id("home-hero-visual-state-\(selection)")
+                .allowsHitTesting(false)
+        }
+#endif
     }
 
     private func openWeatherOrSettings() {
@@ -363,63 +540,181 @@ private struct HeroSlideImage: View {
     let url: URL
     let fallbackName: String?
     let loadsRemoteImage: Bool
+    let presentation: HomeHeroPresentation
+    let visualTestIdentifier: String?
 
     var body: some View {
         GeometryReader { proxy in
-            if loadsRemoteImage {
-                DownsampledAsyncImage(
-                    url: url,
-                    targetSize: proxy.size,
-                    maximumPixelSize: 1_800
-                ) { phase in
-                    switch phase {
-                    case .empty:
-                        fallback
-                            .overlay(alignment: .center) {
-                                if fallbackName == nil {
-                                    ProgressView().tint(AppTheme.gold)
-                                }
-                            }
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .transition(.opacity)
-                    case .failure:
-                        fallback
-                    @unknown default:
-                        fallback
-                    }
-                }
+            if presentation == .fit {
+                fittedComposition(in: proxy.size)
             } else {
-                ZStack {
-                    AppTheme.elevatedInk
-                    LinearGradient(
-                        colors: [.white.opacity(0.035), .clear, AppTheme.gold.opacity(0.05)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                }
+                filledComposition(in: proxy.size)
             }
         }
         .clipped()
     }
 
     @ViewBuilder
-    private var fallback: some View {
-        if let fallbackName {
-            Image(fallbackName)
-                .resizable()
-                .scaledToFill()
-        } else {
-            ZStack {
-                AppTheme.elevatedInk
-                LinearGradient(
-                    colors: [.white.opacity(0.035), .clear, AppTheme.gold.opacity(0.05)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
+    private func fittedComposition(in size: CGSize) -> some View {
+        ZStack {
+            fittedBackground(in: size)
+
+            if let fallbackName {
+                fittedForeground(
+                    Image(fallbackName),
+                    in: size,
+                    sourceSize: UIImage(named: fallbackName)?.size,
+                    accessibilityIdentifier: visualTestIdentifier
                 )
             }
+
+            remoteImage(in: size, usesFittedPresentation: true)
+        }
+        .frame(width: size.width, height: size.height)
+    }
+
+    @ViewBuilder
+    private func filledComposition(in size: CGSize) -> some View {
+        ZStack {
+            if let fallbackName {
+                filledArtwork(Image(fallbackName), in: size)
+            } else {
+                placeholder
+                    .overlay { ProgressView().tint(AppTheme.gold) }
+            }
+
+            remoteImage(in: size, usesFittedPresentation: false)
+        }
+    }
+
+    @ViewBuilder
+    private func remoteImage(
+        in size: CGSize,
+        usesFittedPresentation: Bool
+    ) -> some View {
+        if loadsRemoteImage {
+            DownsampledAsyncImage(
+                url: url,
+                targetSize: size,
+                maximumPixelSize: 1_800
+            ) { phase in
+                switch phase {
+                case .success(let image):
+                    if usesFittedPresentation {
+                        ZStack {
+                            fittedBackground(image, in: size)
+                            fittedForeground(
+                                image,
+                                in: size,
+                                sourceSize: nil,
+                                accessibilityIdentifier: nil
+                            )
+                        }
+                            .transition(.opacity)
+                    } else {
+                        filledArtwork(image, in: size)
+                            .transition(.opacity)
+                    }
+                case .empty, .failure:
+                    Color.clear
+                @unknown default:
+                    Color.clear
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func fittedBackground(in size: CGSize) -> some View {
+        if let fallbackName {
+            fittedBackground(Image(fallbackName), in: size)
+        } else {
+            placeholder
+        }
+    }
+
+    private func fittedBackground(_ image: Image, in size: CGSize) -> some View {
+        image
+            .resizable()
+            .scaledToFill()
+            .frame(width: size.width, height: size.height)
+            .scaleEffect(1.06)
+            .blur(radius: 24, opaque: true)
+            .saturation(0.82)
+            .brightness(-0.10)
+            .overlay { Color.black.opacity(0.18) }
+    }
+
+    private func filledArtwork(_ image: Image, in size: CGSize) -> some View {
+        image
+            .resizable()
+            .scaledToFill()
+            .frame(width: size.width, height: size.height)
+    }
+
+    @ViewBuilder
+    private func fittedForeground(
+        _ image: Image,
+        in size: CGSize,
+        sourceSize: CGSize?,
+        accessibilityIdentifier: String?
+    ) -> some View {
+        if let accessibilityIdentifier {
+            fittedArtwork(image, in: size, sourceSize: sourceSize)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("完整首页照片")
+                .accessibilityIdentifier(accessibilityIdentifier)
+        } else {
+            fittedArtwork(image, in: size, sourceSize: sourceSize)
+        }
+    }
+
+    @ViewBuilder
+    private func fittedArtwork(
+        _ image: Image,
+        in size: CGSize,
+        sourceSize: CGSize?
+    ) -> some View {
+        if let sourceSize,
+           sourceSize.width > 0,
+           sourceSize.height > 0 {
+            let fittedSize = fittedForegroundSize(
+                sourceSize: sourceSize,
+                in: size
+            )
+            image
+                .resizable()
+                .scaledToFit()
+                .frame(width: fittedSize.width, height: fittedSize.height)
+                .shadow(color: .black.opacity(0.28), radius: 16)
+        } else {
+            image
+                .resizable()
+                .scaledToFit()
+                .frame(width: size.width, height: size.height)
+                .shadow(color: .black.opacity(0.28), radius: 16)
+        }
+    }
+
+    private func fittedForegroundSize(sourceSize: CGSize, in viewport: CGSize) -> CGSize {
+        let scale = min(
+            viewport.width / sourceSize.width,
+            viewport.height / sourceSize.height
+        )
+        return CGSize(
+            width: sourceSize.width * scale,
+            height: sourceSize.height * scale
+        )
+    }
+
+    private var placeholder: some View {
+        ZStack {
+            AppTheme.elevatedInk
+            LinearGradient(
+                colors: [.white.opacity(0.035), .clear, AppTheme.gold.opacity(0.05)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
         }
     }
 }

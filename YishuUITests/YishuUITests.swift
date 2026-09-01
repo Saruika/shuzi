@@ -166,9 +166,9 @@ final class YishuUITests: XCTestCase {
             "辅助功能字号下职业说明超出人物图"
         )
         XCTAssertLessThanOrEqual(
-            roleSummary.frame.maxY + 2,
+            roleSummary.frame.maxY + 12,
             visibleBottom.frame.minY,
-            "辅助功能字号下职业说明被底部可见区域裁切"
+            "辅助功能字号下职业说明没有留足底部安全余量"
         )
         try app.performAccessibilityAudit(for: [.textClipped])
         attachScreenshot(named: "05-about-accessibility-xxxl", app: app)
@@ -186,9 +186,9 @@ final class YishuUITests: XCTestCase {
         XCTAssertTrue(visibleBottom.waitForExistence(timeout: 8), "缺少关于页可见区域边界")
         XCTAssertTrue(window.frame.contains(roleSummary.frame), "关于页职业说明超出窗口")
         XCTAssertLessThanOrEqual(
-            roleSummary.frame.maxY + 2,
+            roleSummary.frame.maxY + 12,
             visibleBottom.frame.minY,
-            "关于页职业说明被底部可见区域裁切"
+            "关于页职业说明没有留足底部安全余量"
         )
         let tabBar = app.tabBars.firstMatch
         if tabBar.exists {
@@ -863,9 +863,9 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             "关于页职业说明超出人物图"
         )
         XCTAssertLessThanOrEqual(
-            roleSummary.frame.maxY + 2,
+            roleSummary.frame.maxY + 12,
             visibleBottom.frame.minY,
-            "关于页职业说明超出当前窗口的实际可见区域"
+            "关于页职业说明没有留足当前窗口的底部安全余量"
         )
         XCTAssertLessThanOrEqual(
             portrait.frame.maxY,
@@ -1006,6 +1006,73 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         )
     }
 
+    func testHomeHeroKeepsTheFullIPadCompositionAndNeverTurnsBlank() {
+        let heroArguments = [
+            "-hold-home-remote-images-for-visual-testing",
+            "-expose-home-hero-state-for-visual-testing",
+        ]
+        let staticHeroArguments = heroArguments + [
+            "-disable-home-auto-advance-for-visual-testing",
+        ]
+        var app = launchApp(arguments: staticHeroArguments + [
+            "-home-hero-selection-for-visual-testing", "0",
+        ])
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的 iPad 窗口")
+
+        let state = element("home-hero-visual-state-0", in: app)
+        let pageIndicator = element("home-hero-page-indicator", in: app)
+        XCTAssertTrue(state.waitForExistence(timeout: 8), "缺少首页图片显示状态")
+        XCTAssertTrue(pageIndicator.waitForExistence(timeout: 8), "缺少首页轮播页码")
+
+        let expectsFullComposition = UIDevice.current.userInterfaceIdiom == .pad
+            && window.frame.width > window.frame.height
+        XCTAssertEqual(
+            state.label,
+            expectsFullComposition ? "完整显示" : "铺满显示",
+            "首页没有按当前 iPad 窗口方向选择正确构图"
+        )
+        XCTAssertEqual(pageIndicator.value as? String, "第 1 张，共 5 张")
+        if expectsFullComposition {
+            let fittedImage = element("home-hero-actual-fitted-image", in: app)
+            XCTAssertTrue(fittedImage.waitForExistence(timeout: 5), "缺少 iPad 横屏完整图片范围")
+            let visibleImageFrame = window.frame.intersection(fittedImage.frame)
+            XCTAssertGreaterThanOrEqual(
+                visibleImageFrame.width / fittedImage.frame.width,
+                0.98,
+                "完整图片左右超出首页可视范围：window=\(window.frame)，image=\(fittedImage.frame)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                visibleImageFrame.height / fittedImage.frame.height,
+                0.95,
+                "完整图片上下超出首页可视范围：window=\(window.frame)，image=\(fittedImage.frame)"
+            )
+            XCTAssertEqual(
+                fittedImage.frame.width / fittedImage.frame.height,
+                959.0 / 1_440.0,
+                accuracy: 0.02,
+                "iPad 横屏首页仍在裁切竖版照片"
+            )
+        }
+        assertHomeHeroIsVisiblyRendered(in: app, page: 1)
+
+        for page in [2, 3, 4, 5, 1] {
+            app.terminate()
+            app = launchApp(arguments: staticHeroArguments + [
+                "-home-hero-selection-for-visual-testing", "\(page - 1)",
+            ])
+            let pageState = element("home-hero-visual-state-\(page - 1)", in: app)
+            XCTAssertTrue(
+                pageState.waitForExistence(timeout: 8),
+                "首页轮播没有显示第 \(page) 张的可验证状态"
+            )
+            XCTAssertEqual(pageState.value as? String, "第 \(page) 张，共 5 张")
+            assertHomeHeroIsVisiblyRendered(in: app, page: page)
+        }
+
+        attachScreenshot(named: "adaptive-home-hero-continuity", app: app)
+    }
+
     func testAccessibilityXXXLKeepsHomeControlsComfortableInEveryConfiguration() {
         let app = launchApp(arguments: [
             "-UIPreferredContentSizeCategoryName",
@@ -1049,6 +1116,73 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
 
     private func element(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    private func assertHomeHeroIsVisiblyRendered(
+        in app: XCUIApplication,
+        page: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard let source = app.screenshot().image.cgImage else {
+            XCTFail("无法读取第 \(page) 张首页截图", file: file, line: line)
+            return
+        }
+        let cropRect = CGRect(
+            x: CGFloat(source.width) * 0.34,
+            y: CGFloat(source.height) * 0.18,
+            width: CGFloat(source.width) * 0.32,
+            height: CGFloat(source.height) * 0.48
+        ).integral
+        guard let crop = source.cropping(to: cropRect) else {
+            XCTFail("无法裁取第 \(page) 张首页图片区", file: file, line: line)
+            return
+        }
+
+        let sampleSide = 24
+        var pixels = [UInt8](repeating: 0, count: sampleSide * sampleSide * 4)
+        guard let context = CGContext(
+            data: &pixels,
+            width: sampleSide,
+            height: sampleSide,
+            bitsPerComponent: 8,
+            bytesPerRow: sampleSide * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            XCTFail("无法分析第 \(page) 张首页图片", file: file, line: line)
+            return
+        }
+        context.interpolationQuality = .low
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: sampleSide, height: sampleSide))
+
+        var luminanceTotal = 0.0
+        var visiblyLitSamples = 0
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            let red = Double(pixels[offset]) / 255
+            let green = Double(pixels[offset + 1]) / 255
+            let blue = Double(pixels[offset + 2]) / 255
+            let luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+            luminanceTotal += luminance
+            if luminance > 0.16 { visiblyLitSamples += 1 }
+        }
+        let sampleCount = sampleSide * sampleSide
+        let meanLuminance = luminanceTotal / Double(sampleCount)
+        let visiblyLitRatio = Double(visiblyLitSamples) / Double(sampleCount)
+        XCTAssertGreaterThan(
+            meanLuminance,
+            0.10,
+            "第 \(page) 张首页轮播变成黑屏",
+            file: file,
+            line: line
+        )
+        XCTAssertGreaterThan(
+            visiblyLitRatio,
+            0.12,
+            "第 \(page) 张首页没有持续显示照片内容",
+            file: file,
+            line: line
+        )
     }
 
     private func assertMinimumTapTarget(

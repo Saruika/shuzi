@@ -157,6 +157,76 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(ContentCatalog.heroAssetName(at: ContentCatalog.heroImages.count))
     }
 
+    func testHomeHeroShowsTheFullPhotoOnlyForLandscapeIPadWindows() {
+        XCTAssertEqual(
+            HomeHeroRenderPolicy.presentation(
+                for: CGSize(width: 1_366, height: 1_024),
+                idiom: .pad
+            ),
+            .fit
+        )
+        XCTAssertEqual(
+            HomeHeroRenderPolicy.presentation(
+                for: CGSize(width: 1_024, height: 1_366),
+                idiom: .pad
+            ),
+            .fill
+        )
+        XCTAssertEqual(
+            HomeHeroRenderPolicy.presentation(
+                for: CGSize(width: 932, height: 430),
+                idiom: .phone
+            ),
+            .fill
+        )
+        XCTAssertEqual(
+            HomeHeroRenderPolicy.presentation(
+                for: CGSize(width: 430, height: 932),
+                idiom: .phone
+            ),
+            .fill
+        )
+    }
+
+    func testHomeHeroTreatsTheFirstAndLastSlidesAsCircularNeighbours() {
+        XCTAssertEqual(
+            HomeHeroRenderPolicy.prefetchIndices(selection: 0, count: 5),
+            [0, 1, 4]
+        )
+        XCTAssertTrue(
+            HomeHeroRenderPolicy.shouldLoadRemoteImage(
+                at: 4,
+                selection: 0,
+                count: 5
+            )
+        )
+        XCTAssertTrue(
+            HomeHeroRenderPolicy.shouldLoadRemoteImage(
+                at: 0,
+                selection: 4,
+                count: 5
+            )
+        )
+        XCTAssertFalse(
+            HomeHeroRenderPolicy.shouldLoadRemoteImage(
+                at: 3,
+                selection: 0,
+                count: 5
+            )
+        )
+        XCTAssertFalse(
+            HomeHeroRenderPolicy.shouldAnimateTransition(from: 4, to: 0, count: 5),
+            "末张回到首张时不能让非循环 TabView 跨页动画"
+        )
+        XCTAssertFalse(
+            HomeHeroRenderPolicy.shouldAnimateTransition(from: 0, to: 4, count: 5),
+            "首张回到末张时不能让非循环 TabView 跨页动画"
+        )
+        XCTAssertTrue(
+            HomeHeroRenderPolicy.shouldAnimateTransition(from: 3, to: 4, count: 5)
+        )
+    }
+
     func testBundledLaunchPosterDoesNotReuseAHomeHero() {
         let homeHeroes = Set(ContentCatalog.heroImages)
 

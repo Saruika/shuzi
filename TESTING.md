@@ -69,6 +69,14 @@ Server/tests/fan-api-smoke.sh
 
 GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服务器密钥；外部 Action 固定到完整 commit SHA。失败时保留七天 `.xcresult` 供排查。
 
+## Build 40 发布前验收
+
+1. 确认构建设置为 `1.3.28 (40)`、Bundle ID `cn.com.shuzijun.yishu`，且 Sign in with Apple 和 WeatherKit 签名能力保持完整。
+2. 在 iPhone 17 Pro Max 普通字号与 Accessibility XXXL 下打开关于页，确认“短剧演员 / 模特 / 视频创作者”全文位于人物图内，并与浮动底部导航至少保留 12pt 安全余量。
+3. 在 iPad 横屏检查全部五张首页图片：人物照片应完整显示，侧边使用同一张图的模糊背景；竖屏 iPad 和 iPhone 仍保持原有铺满构图。
+4. 从第五张等待轮播回到第一张，确认首尾切换不使用非循环跨页动画，画面没有黑屏；替换为不同比例的管理员图片后，前景与模糊背景必须来自同一张新图。
+5. 执行 68 项 iOS 单元测试、iPad 四组横竖屏/明暗首页与关于页配置、Pro Max 普通字号与 Accessibility XXXL 专项回归，以及 `Scripts/security-check.sh`；任一项失败都不得发布。
+
 ## Build 39 发布前验收
 
 1. 确认构建设置为 `1.3.27 (39)`、Bundle ID `cn.com.shuzijun.yishu`，且 Sign in with Apple 和 WeatherKit 签名能力保持完整。
