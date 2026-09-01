@@ -1962,7 +1962,8 @@ private struct FanAdminUserRow: View {
                      : "@\(user.douyinID) · \(user.identityCode)")
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)
-                    .lineLimit(1)
+                    .lineLimit(nil)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
             Image(systemName: "chevron.right")

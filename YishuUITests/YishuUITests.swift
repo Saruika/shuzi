@@ -125,6 +125,47 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "05-about", app: app)
     }
 
+    func testAboutRoleSummaryIsCompleteInLandscapeAndLargeText() throws {
+        XCUIDevice.shared.orientation = .landscapeRight
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+
+        let app = launchApp(arguments: [
+            "-open-about-for-visual-testing",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryXXXL",
+        ])
+        let portrait = element("about-portrait", in: app)
+        let roleSummary = element("about-role-summary", in: app)
+        XCTAssertTrue(portrait.waitForExistence(timeout: 8), "横屏关于页人物图没有出现")
+        XCTAssertTrue(roleSummary.waitForExistence(timeout: 8), "横屏关于页职业说明没有出现")
+        XCTAssertEqual(roleSummary.label, "短剧演员 / 模特 / 视频创作者")
+        XCTAssertTrue(
+            portrait.frame.insetBy(dx: -1, dy: -1).contains(roleSummary.frame),
+            "横屏关于页职业说明超出人物图"
+        )
+        try app.performAccessibilityAudit(for: [.textClipped])
+        attachScreenshot(named: "05-about-landscape-xxxl", app: app)
+    }
+
+    func testAboutRoleSummaryIsCompleteAtAccessibilityXXXL() throws {
+        let app = launchApp(arguments: [
+            "-open-about-for-visual-testing",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityXXXL",
+        ])
+        let portrait = element("about-portrait", in: app)
+        let roleSummary = element("about-role-summary", in: app)
+        XCTAssertTrue(portrait.waitForExistence(timeout: 8), "辅助功能字号下关于页人物图没有出现")
+        XCTAssertTrue(roleSummary.waitForExistence(timeout: 8), "辅助功能字号下职业说明没有出现")
+        XCTAssertEqual(roleSummary.label, "短剧演员 / 模特 / 视频创作者")
+        XCTAssertTrue(
+            portrait.frame.insetBy(dx: -1, dy: -1).contains(roleSummary.frame),
+            "辅助功能字号下职业说明超出人物图"
+        )
+        try app.performAccessibilityAudit(for: [.textClipped])
+        attachScreenshot(named: "05-about-accessibility-xxxl", app: app)
+    }
+
     func testPortfolioCanOpenAnAlbumAndFullScreenViewer() {
         let app = launchApp(arguments: ["-open-portfolio-for-visual-testing"])
         assertExists("portfolio-heading", in: app)
@@ -670,8 +711,11 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
 
         let heading = element("about-heading", in: app)
         let portrait = element("about-portrait", in: app)
+        let roleSummary = element("about-role-summary", in: app)
         XCTAssertTrue(heading.waitForExistence(timeout: 8), "当前 UI 配置下关于页标题没有出现")
         XCTAssertTrue(portrait.waitForExistence(timeout: 8), "当前 UI 配置下关于页人物图没有出现")
+        XCTAssertTrue(roleSummary.waitForExistence(timeout: 8), "当前 UI 配置下职业说明没有出现")
+        XCTAssertEqual(roleSummary.label, "短剧演员 / 模特 / 视频创作者")
 
         let scene = window.frame
         let expectsTwoColumns = scene.width >= 700 || scene.width > scene.height
@@ -697,6 +741,10 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         XCTAssertLessThanOrEqual(heading.frame.maxX, scene.maxX + 1, "关于页标题超出窗口")
         XCTAssertGreaterThanOrEqual(portrait.frame.minX, scene.minX - 1, "关于页人物图超出窗口")
         XCTAssertLessThanOrEqual(portrait.frame.maxX, scene.maxX + 1, "关于页人物图超出窗口")
+        XCTAssertTrue(
+            portrait.frame.insetBy(dx: -1, dy: -1).contains(roleSummary.frame),
+            "关于页职业说明超出人物图"
+        )
         XCTAssertLessThanOrEqual(
             portrait.frame.maxY,
             scene.maxY + 1,

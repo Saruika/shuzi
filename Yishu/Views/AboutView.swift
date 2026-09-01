@@ -112,8 +112,9 @@ struct AboutView: View {
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.9), radius: 2, y: 1)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 3 : 2)
+                    .lineLimit(nil)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("about-role-summary")
             }
             .padding(22)
         }
@@ -366,13 +367,16 @@ struct AboutView: View {
                 HStack(spacing: 14) {
                     AsyncImage(url: localWeather.attributionMarkURL) { phase in
                         if case .success(let image) = phase {
-                            image.resizable().scaledToFit()
+                            image
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 108, height: 28, alignment: .leading)
                         } else {
                             Text(localWeather.weatherProviderName)
                                 .font(.caption.weight(.semibold))
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    .frame(width: 108, height: 28, alignment: .leading)
                     Spacer()
                     Image(systemName: "arrow.up.right")
                         .font(.caption2)
