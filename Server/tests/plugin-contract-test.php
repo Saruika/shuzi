@@ -362,10 +362,10 @@ expect_true(
         && strpos($authority_method_source, 'self::ACCOUNT_AUTHORITY_ROLE_PATH') !== false
         && strpos($authority_method_source, '$payload === "authority\\n"') !== false
         && strpos($authority_method_source, 'wp-config.php') === false
-        && strpos($authority_method_source, "(int) ($opened['uid'] ?? -1) !== 0") !== false
-        && strpos($authority_method_source, "(int) ($opened['gid'] ?? -1) !== 0") !== false
-        && strpos($authority_method_source, "($opened['mode'] & 0777) !== 0644") !== false
-        && strpos($authority_method_source, "(int) ($opened['nlink'] ?? 0) !== 1") !== false
+        && strpos($authority_method_source, '(int) ($opened[\'uid\'] ?? -1) !== 0') !== false
+        && strpos($authority_method_source, '(int) ($opened[\'gid\'] ?? -1) !== 0') !== false
+        && strpos($authority_method_source, '($opened[\'mode\'] & 0777) !== 0644') !== false
+        && strpos($authority_method_source, '(int) ($opened[\'nlink\'] ?? 0) !== 1') !== false
         && strpos($authority_method_source, '$request->get_header') === false
         && strpos($authority_method_source, '$_SERVER[') === false,
     '权威判定只能依赖服务器所有的固定精确角色标记'
