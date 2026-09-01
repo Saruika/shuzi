@@ -162,6 +162,31 @@ final class PortfolioStore: ObservableObject {
         Self.removeCacheInBackground()
     }
 
+#if DEBUG
+    /// Gives layout tests a deterministic multi-page album without changing
+    /// release content or reaching the live publishing service.
+    func configureMultiImageGalleryForVisualTestingIfNeeded() {
+        guard ProcessInfo.processInfo.arguments.contains(
+            "-use-multi-image-gallery-for-visual-testing"
+        ), let firstPortfolio = portfolios.first else { return }
+
+        let visualTestImages = Portfolio.fallback.compactMap(\.images.first)
+        guard visualTestImages.count >= 3 else { return }
+
+        portfolios[0] = Portfolio(
+            id: firstPortfolio.id,
+            title: firstPortfolio.title,
+            subtitle: firstPortfolio.subtitle,
+            eyebrow: firstPortfolio.eyebrow,
+            slug: firstPortfolio.slug,
+            websiteURL: firstPortfolio.websiteURL,
+            coverURL: visualTestImages[0].url,
+            images: visualTestImages,
+            totalImageCount: visualTestImages.count
+        )
+    }
+#endif
+
     private static func removeCacheInBackground() {
         Task.detached(priority: .utility) {
             guard let url = Self.cacheFileURL(createDirectory: false) else { return }

@@ -387,7 +387,11 @@ struct PortfolioDetailView: View {
                 owner: .fullScreenPresentation,
                 onExit: { selectedImage = nil }
             ) {
-                GalleryViewer(portfolio: currentPortfolio, initialImage: image)
+                GalleryViewer(
+                    portfolio: currentPortfolio,
+                    initialImage: image,
+                    onClose: { selectedImage = nil }
+                )
                     .environmentObject(store)
                     .environmentObject(favorites)
             }
@@ -506,13 +510,19 @@ private struct PortfolioEmptyArtwork: View {
 
 struct GalleryViewer: View {
     let portfolio: Portfolio
+    let onClose: () -> Void
     @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var favorites: FavoritesStore
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.displayScale) private var displayScale
     @State private var selection: Int
 
-    init(portfolio: Portfolio, initialImage: PortfolioImage) {
+    init(
+        portfolio: Portfolio,
+        initialImage: PortfolioImage,
+        onClose: @escaping () -> Void
+    ) {
         self.portfolio = portfolio
+        self.onClose = onClose
         _selection = State(initialValue: initialImage.id)
     }
 
@@ -529,61 +539,152 @@ struct GalleryViewer: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        GeometryReader { viewport in
+            ZStack {
+                Color.black.ignoresSafeArea()
 
-            TabView(selection: $selection) {
-                ForEach(accessibleImages) { image in
-                    ZoomableArtwork(image: image)
-                        .tag(image.id)
-                }
-            }
-            .tabViewStyle(.page(indexDisplayMode: .never))
+                VStack(spacing: 0) {
+                    galleryToolbar
+                        .padding(.horizontal, 18)
+                        .padding(.top, 12)
+                        .padding(.bottom, 8)
 
-            VStack {
-                HStack {
-                    Button { dismiss() } label: {
-                        Image(systemName: "xmark")
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial, in: Circle())
+                    TabView(selection: $selection) {
+                        ForEach(accessibleImages) { image in
+                            ZoomableArtwork(image: image)
+                                .tag(image.id)
+                        }
                     }
-                    Spacer()
-                    Text("\(selectedIndex) / \(accessibleImages.count)")
-                        .font(.system(.caption, design: .monospaced).weight(.medium))
-                        .foregroundStyle(.white.opacity(0.7))
-                        .accessibilityLabel("第 \(selectedIndex) 张，共 \(accessibleImages.count) 张")
-                    Spacer()
-                    Button {
-                        if let selected { favorites.toggle(selected) }
-                    } label: {
-                        Image(systemName: selected.map(favorites.contains) == true ? "heart.fill" : "heart")
-                            .frame(width: 44, height: 44)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    .tint(selected.map(favorites.contains) == true ? AppTheme.gold : .white)
-                    .accessibilityLabel(selected.map(favorites.contains) == true ? "取消收藏" : "收藏照片")
+                    .tabViewStyle(.page(indexDisplayMode: .never))
+                    .padding(.horizontal, galleryHorizontalInset(in: viewport.size))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .layoutPriority(1)
+
+                    galleryCaption
+                        .padding(.horizontal, 18)
+                        .padding(.top, 8)
+                        .padding(.bottom, 16)
                 }
-                Spacer()
-                VStack(spacing: 6) {
-                    Text(portfolio.title)
-                        .font(.system(.title3, design: .serif))
-                        .accessibilityAddTraits(.isHeader)
-                    Text("双指缩放 · 左右翻页")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.5))
-                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .foregroundStyle(.white)
-            .padding(18)
+            .task(id: prefetchRequestID(for: viewport.size)) {
+                await ArtworkImagePrefetcher.prefetch(
+                    urls: prefetchURLs,
+                    maxPixelSize: min(
+                        2_200,
+                        max(
+                            320,
+                            Int(ceil(max(viewport.size.width, viewport.size.height) * displayScale))
+                        )
+                    )
+                )
+            }
         }
         .statusBarHidden()
-        .accessibilityIdentifier("gallery-viewer")
         .protectedFromScreenCapture()
         .onChange(of: accessibleImages.map(\.id)) { _, imageIDs in
             if !imageIDs.contains(selection), let firstID = imageIDs.first {
                 selection = firstID
             }
         }
+    }
+
+    private var galleryToolbar: some View {
+        HStack {
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .accessibilityLabel("关闭图片")
+            .accessibilityIdentifier("gallery-close")
+
+            Spacer()
+
+            Text("\(selectedIndex) / \(accessibleImages.count)")
+                .font(.system(.caption, design: .monospaced).weight(.medium))
+                .foregroundStyle(.white.opacity(0.7))
+                .accessibilityLabel("第 \(selectedIndex) 张，共 \(accessibleImages.count) 张")
+                .accessibilityIdentifier("gallery-counter")
+
+            Spacer()
+
+            Button {
+                if let selected { favorites.toggle(selected) }
+            } label: {
+                Image(systemName: selected.map(favorites.contains) == true ? "heart.fill" : "heart")
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .tint(selected.map(favorites.contains) == true ? AppTheme.gold : .white)
+            .accessibilityLabel(selected.map(favorites.contains) == true ? "取消收藏" : "收藏照片")
+        }
+    }
+
+    private var galleryCaption: some View {
+        VStack(spacing: 6) {
+            Text(portfolio.title)
+                .font(.system(.title3, design: .serif))
+                .accessibilityAddTraits(.isHeader)
+            Text("双指缩放 · 左右翻页")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.5))
+        }
+        .accessibilityIdentifier("gallery-caption")
+    }
+
+    private func galleryHorizontalInset(in size: CGSize) -> CGFloat {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return 0 }
+        return size.width > size.height ? 36 : 24
+    }
+
+    private var prefetchURLs: [URL] {
+        guard let index = accessibleImages.firstIndex(where: { $0.id == selection }) else {
+            return []
+        }
+        let lowerBound = max(accessibleImages.startIndex, index - 1)
+        let upperBound = min(accessibleImages.index(before: accessibleImages.endIndex), index + 1)
+        return accessibleImages[lowerBound...upperBound].flatMap { image in
+            [image.url, image.fullSizeURL]
+        }
+    }
+
+    private func prefetchRequestID(for size: CGSize) -> String {
+        "\(selection)#\(Int(size.width.rounded()))x\(Int(size.height.rounded()))"
+    }
+}
+
+private struct ProgressiveGalleryArtwork: View {
+    let image: PortfolioImage
+    let targetSize: CGSize
+
+    var body: some View {
+        ZStack {
+            ArtworkImage(url: image.url, contentMode: .fit)
+
+            if image.fullSizeURL != image.url {
+                DownsampledAsyncImage(
+                    url: image.fullSizeURL,
+                    targetSize: targetSize
+                ) { phase in
+                    switch phase {
+                    case .success(let fullResolutionImage):
+                        fullResolutionImage
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: targetSize.width, height: targetSize.height)
+                            .transition(.opacity)
+                    case .empty, .failure:
+                        Color.clear
+                    @unknown default:
+                        Color.clear
+                    }
+                }
+            }
+        }
+        .frame(width: targetSize.width, height: targetSize.height)
+        .clipped()
     }
 }
 
@@ -597,7 +698,7 @@ private struct ZoomableArtwork: View {
 
     var body: some View {
         GeometryReader { proxy in
-            ArtworkImage(url: image.fullSizeURL, contentMode: .fit)
+            ProgressiveGalleryArtwork(image: image, targetSize: proxy.size)
                 .scaleEffect(scale)
                 .offset(offset)
                 .simultaneousGesture(magnifyGesture(in: proxy.size))
@@ -643,6 +744,13 @@ private struct ZoomableArtwork: View {
                     updateTransform {
                         resetTransform()
                     }
+                }
+                .accessibilityIdentifier("gallery-image-\(image.id)")
+                .onChange(of: proxy.size) { _, _ in
+                    // A rotated or resized iPad window must immediately return
+                    // to the uncropped 1x composition. Animating from the old
+                    // viewport briefly preserves an invalid crop.
+                    resetTransform()
                 }
         }
     }

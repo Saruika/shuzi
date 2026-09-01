@@ -82,7 +82,11 @@ struct FavoritesView: View {
                 owner: .fullScreenPresentation,
                 onExit: { selectedEntry = nil }
             ) {
-                GalleryViewer(portfolio: entry.portfolio, initialImage: entry.image)
+                GalleryViewer(
+                    portfolio: entry.portfolio,
+                    initialImage: entry.image,
+                    onClose: { selectedEntry = nil }
+                )
                     .environmentObject(store)
                     .environmentObject(favorites)
             }

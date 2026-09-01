@@ -357,6 +357,9 @@ struct RootView: View {
         enforceCurrentFanPermissionScope()
         await portfolioStore.restoreCachedContent(allowVideo: canViewVideo)
         enforceCurrentFanPermissionScope()
+#if DEBUG
+        portfolioStore.configureMultiImageGalleryForVisualTestingIfNeeded()
+#endif
         prepareLaunchPosterIfNeeded(allowBundledFallback: true)
         hasPreparedAuthorizedContent = true
         recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)

@@ -150,20 +150,55 @@ final class YishuUITests: XCTestCase {
     func testAboutRoleSummaryIsCompleteAtAccessibilityXXXL() throws {
         let app = launchApp(arguments: [
             "-open-about-for-visual-testing",
+            "-expose-about-visible-bottom-for-visual-testing",
             "-UIPreferredContentSizeCategoryName",
             "UICTContentSizeCategoryAccessibilityXXXL",
         ])
         let portrait = element("about-portrait", in: app)
         let roleSummary = element("about-role-summary", in: app)
+        let visibleBottom = element("about-visible-bottom", in: app)
         XCTAssertTrue(portrait.waitForExistence(timeout: 8), "辅助功能字号下关于页人物图没有出现")
         XCTAssertTrue(roleSummary.waitForExistence(timeout: 8), "辅助功能字号下职业说明没有出现")
+        XCTAssertTrue(visibleBottom.waitForExistence(timeout: 8), "缺少关于页可见区域边界")
         XCTAssertEqual(roleSummary.label, "短剧演员 / 模特 / 视频创作者")
         XCTAssertTrue(
             portrait.frame.insetBy(dx: -1, dy: -1).contains(roleSummary.frame),
             "辅助功能字号下职业说明超出人物图"
         )
+        XCTAssertLessThanOrEqual(
+            roleSummary.frame.maxY + 2,
+            visibleBottom.frame.minY,
+            "辅助功能字号下职业说明被底部可见区域裁切"
+        )
         try app.performAccessibilityAudit(for: [.textClipped])
         attachScreenshot(named: "05-about-accessibility-xxxl", app: app)
+    }
+
+    func testAboutRoleSummaryStaysAboveTheVisibleBottomOnPhone() {
+        let app = launchApp(arguments: [
+            "-open-about-for-visual-testing",
+            "-expose-about-visible-bottom-for-visual-testing",
+        ])
+        let window = app.windows.firstMatch
+        let roleSummary = element("about-role-summary", in: app)
+        let visibleBottom = element("about-visible-bottom", in: app)
+        XCTAssertTrue(roleSummary.waitForExistence(timeout: 8), "关于页职业说明没有出现")
+        XCTAssertTrue(visibleBottom.waitForExistence(timeout: 8), "缺少关于页可见区域边界")
+        XCTAssertTrue(window.frame.contains(roleSummary.frame), "关于页职业说明超出窗口")
+        XCTAssertLessThanOrEqual(
+            roleSummary.frame.maxY + 2,
+            visibleBottom.frame.minY,
+            "关于页职业说明被底部可见区域裁切"
+        )
+        let tabBar = app.tabBars.firstMatch
+        if tabBar.exists {
+            XCTAssertLessThan(
+                roleSummary.frame.maxY,
+                tabBar.frame.minY,
+                "关于页职业说明被底部导航遮挡"
+            )
+        }
+        attachScreenshot(named: "05-about-visible-bottom", app: app)
     }
 
     func testPortfolioCanOpenAnAlbumAndFullScreenViewer() {
@@ -188,9 +223,24 @@ final class YishuUITests: XCTestCase {
         XCTAssertTrue(firstImage.waitForExistence(timeout: 8), "相册封面无法打开")
         firstImage.tap()
 
-        assertExists("gallery-viewer", in: app, timeout: 8)
+        assertExists("gallery-close", in: app, timeout: 8)
         XCTAssertTrue(app.buttons["收藏照片"].exists || app.buttons["取消收藏"].exists)
         attachScreenshot(named: "07-gallery-viewer", app: app)
+
+        let close = element("gallery-close", in: app)
+        assertMinimumTapTarget(close, named: "图片查看器关闭")
+        XCTAssertTrue(close.isHittable, "图片查看器关闭按钮不可点击")
+        close.tap()
+        let viewerDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: close
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [viewerDismissed], timeout: 3),
+            .completed,
+            "点击关闭后图片查看器仍停留在屏幕上"
+        )
+        XCTAssertTrue(detail.exists, "关闭图片后没有返回当前相册")
     }
 
     func testCustomShowreelControlsRemainUsable() {
@@ -364,6 +414,7 @@ final class YishuUITests: XCTestCase {
             "-reset-fan-session-for-visual-testing",
             "-bypass-access-gate-for-visual-testing",
             "-open-portfolio-for-visual-testing",
+            "-use-multi-image-gallery-for-visual-testing",
         ]
         app.launch()
 
@@ -380,8 +431,69 @@ final class YishuUITests: XCTestCase {
         XCTAssertTrue(firstImage.waitForExistence(timeout: 8))
         firstImage.tap()
 
-        assertExists("gallery-viewer", in: app, timeout: 8)
+        assertExists("gallery-close", in: app, timeout: 8)
         XCTAssertTrue(app.buttons["收藏照片"].exists || app.buttons["取消收藏"].exists)
+
+        let window = app.windows.firstMatch
+        let firstGalleryImage = element("gallery-image-18", in: app)
+        let caption = element("gallery-caption", in: app)
+        let counter = element("gallery-counter", in: app)
+        let close = element("gallery-close", in: app)
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "受保护图片查看器缺少关闭按钮")
+        XCTAssertTrue(firstGalleryImage.waitForExistence(timeout: 5), "受保护图片查看器没有显示照片")
+        XCTAssertTrue(close.isHittable, "受保护图片查看器关闭按钮不可点击")
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        let landscapeWindow = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                window.exists && window.frame.width > window.frame.height
+            },
+            object: window
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [landscapeWindow], timeout: 5),
+            .completed,
+            "受保护图片查看器没有响应 iPad 横屏尺寸"
+        )
+        XCTAssertTrue(window.frame.contains(firstGalleryImage.frame), "横屏后受保护照片超出窗口")
+        if window.frame.width >= 700 {
+            XCTAssertGreaterThanOrEqual(
+                firstGalleryImage.frame.minY,
+                close.frame.maxY - 1,
+                "iPad 横屏时照片上边缘被工具栏遮挡"
+            )
+            XCTAssertLessThanOrEqual(
+                firstGalleryImage.frame.maxY,
+                caption.frame.minY + 1,
+                "iPad 横屏时照片下边缘被说明遮挡"
+            )
+        }
+
+        XCTAssertEqual(counter.label, "第 1 张，共 3 张")
+        firstGalleryImage.swipeLeft()
+        let protectedPageChanged = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "第 2 张，共 3 张"),
+            object: counter
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [protectedPageChanged], timeout: 5),
+            .completed,
+            "受保护图片查看器横屏切图失败"
+        )
+        let secondGalleryImage = element("gallery-image-33", in: app)
+        XCTAssertTrue(secondGalleryImage.waitForExistence(timeout: 5), "横屏切图后照片没有出现")
+        XCTAssertTrue(window.frame.contains(secondGalleryImage.frame), "横屏切图后照片超出窗口")
+
+        close.tap()
+        let viewerDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: close
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [viewerDismissed], timeout: 3),
+            .completed,
+            "受保护图片查看器无法关闭"
+        )
     }
 
     func testAccessibilityTextSizeKeepsPrimaryActionsComfortable() {
@@ -705,16 +817,21 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
     }
 
     func testAboutLayoutMatchesTheCurrentSceneConfiguration() {
-        let app = launchApp(arguments: ["-open-about-for-visual-testing"])
+        let app = launchApp(arguments: [
+            "-open-about-for-visual-testing",
+            "-expose-about-visible-bottom-for-visual-testing",
+        ])
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的应用窗口")
 
         let heading = element("about-heading", in: app)
         let portrait = element("about-portrait", in: app)
         let roleSummary = element("about-role-summary", in: app)
+        let visibleBottom = element("about-visible-bottom", in: app)
         XCTAssertTrue(heading.waitForExistence(timeout: 8), "当前 UI 配置下关于页标题没有出现")
         XCTAssertTrue(portrait.waitForExistence(timeout: 8), "当前 UI 配置下关于页人物图没有出现")
         XCTAssertTrue(roleSummary.waitForExistence(timeout: 8), "当前 UI 配置下职业说明没有出现")
+        XCTAssertTrue(visibleBottom.waitForExistence(timeout: 8), "当前 UI 配置下缺少可见区域边界")
         XCTAssertEqual(roleSummary.label, "短剧演员 / 模特 / 视频创作者")
 
         let scene = window.frame
@@ -744,6 +861,11 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         XCTAssertTrue(
             portrait.frame.insetBy(dx: -1, dy: -1).contains(roleSummary.frame),
             "关于页职业说明超出人物图"
+        )
+        XCTAssertLessThanOrEqual(
+            roleSummary.frame.maxY + 2,
+            visibleBottom.frame.minY,
+            "关于页职业说明超出当前窗口的实际可见区域"
         )
         XCTAssertLessThanOrEqual(
             portrait.frame.maxY,
@@ -788,6 +910,100 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             )
         }
         attachScreenshot(named: "adaptive-portfolio-search", app: app)
+    }
+
+    func testGalleryViewerMatchesTheCurrentSceneConfiguration() {
+        let app = launchApp(arguments: [
+            "-open-portfolio-for-visual-testing",
+            "-use-multi-image-gallery-for-visual-testing",
+        ])
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的应用窗口")
+
+        let card = app.buttons
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-"))
+            .firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 12), "作品网格中没有可打开的相册")
+        card.tap()
+
+        let firstImage = app.buttons
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-"))
+            .firstMatch
+        XCTAssertTrue(firstImage.waitForExistence(timeout: 8), "相册封面无法打开")
+        let imageIdentifier = firstImage.identifier.replacingOccurrences(
+            of: "portfolio-open-image-",
+            with: "gallery-image-"
+        )
+        firstImage.tap()
+
+        let image = element(imageIdentifier, in: app)
+        let caption = element("gallery-caption", in: app)
+        let close = element("gallery-close", in: app)
+        XCTAssertTrue(close.waitForExistence(timeout: 8), "图片查看器没有出现")
+        XCTAssertTrue(image.waitForExistence(timeout: 8), "图片查看器没有显示当前照片")
+        XCTAssertTrue(caption.waitForExistence(timeout: 5), "图片查看器缺少底部说明")
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "图片查看器缺少关闭按钮")
+        assertMinimumTapTarget(close, named: "图片查看器关闭")
+        XCTAssertTrue(window.frame.contains(image.frame), "当前照片超出窗口")
+
+        if window.frame.width >= 700 {
+            XCTAssertGreaterThanOrEqual(
+                image.frame.minY,
+                close.frame.maxY - 1,
+                "iPad 照片上边缘被顶部控件遮挡"
+            )
+            XCTAssertLessThanOrEqual(
+                image.frame.maxY,
+                caption.frame.minY + 1,
+                "iPad 照片下边缘被底部说明遮挡"
+            )
+        }
+
+        let counter = element("gallery-counter", in: app)
+        XCTAssertTrue(counter.waitForExistence(timeout: 3), "图片查看器缺少页码")
+        XCTAssertEqual(counter.label, "第 1 张，共 3 张", "多图回归数据没有生效")
+        let initialCounter = counter.label
+        image.swipeLeft()
+        let pageChanged = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label != %@", initialCounter),
+            object: counter
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [pageChanged], timeout: 5),
+            .completed,
+            "iPad 左右翻页没有切换到下一张照片"
+        )
+        XCTAssertTrue(close.exists, "切换照片时查看器丢失")
+        XCTAssertTrue(caption.exists, "切换照片时查看器内容中断")
+        XCTAssertEqual(counter.label, "第 2 张，共 3 张")
+
+        let secondImage = element("gallery-image-33", in: app)
+        XCTAssertTrue(secondImage.waitForExistence(timeout: 5), "切换后的第二张照片没有显示")
+        XCTAssertTrue(window.frame.contains(secondImage.frame), "切换后的照片超出窗口")
+        if window.frame.width >= 700 {
+            XCTAssertGreaterThanOrEqual(
+                secondImage.frame.minY,
+                close.frame.maxY - 1,
+                "iPad 切图后照片上边缘被顶部控件遮挡"
+            )
+            XCTAssertLessThanOrEqual(
+                secondImage.frame.maxY,
+                caption.frame.minY + 1,
+                "iPad 切图后照片下边缘被底部说明遮挡"
+            )
+        }
+
+        attachScreenshot(named: "adaptive-gallery-viewer", app: app)
+        close.tap()
+        let viewerDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: close
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [viewerDismissed], timeout: 3),
+            .completed,
+            "当前 UI 配置下图片查看器无法关闭"
+        )
     }
 
     func testAccessibilityXXXLKeepsHomeControlsComfortableInEveryConfiguration() {

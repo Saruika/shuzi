@@ -72,6 +72,12 @@ private actor ArtworkImagePipeline {
         cache.totalCostLimit = 48 * 1024 * 1024
         return cache
     }()
+    private let previewCache: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 16
+        cache.totalCostLimit = 24 * 1024 * 1024
+        return cache
+    }()
     private var inFlight: [String: Task<UIImage, Error>] = [:]
     private let session = SecureURLSessionFactory.make(
         requestTimeout: 8,
@@ -166,6 +172,11 @@ private actor ArtworkImagePipeline {
             let image = try await task.value
             let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
             cache.setObject(image, forKey: key as NSString, cost: cost)
+            previewCache.setObject(
+                image,
+                forKey: url.absoluteString as NSString,
+                cost: cost
+            )
             inFlight[key] = nil
             return image
         } catch {
@@ -175,6 +186,10 @@ private actor ArtworkImagePipeline {
             )
             throw error
         }
+    }
+
+    func cachedPreview(for url: URL) -> UIImage? {
+        previewCache.object(forKey: url.absoluteString as NSString)
     }
 
     private static func hasSafePixelDimensions(_ source: CGImageSource) -> Bool {
@@ -189,6 +204,22 @@ private actor ArtworkImagePipeline {
     }
 }
 
+enum ArtworkImagePrefetcher {
+    static func prefetch(urls: [URL], maxPixelSize: Int) async {
+        let uniqueURLs = Array(Set(urls))
+        await withTaskGroup(of: Void.self) { group in
+            for url in uniqueURLs {
+                group.addTask {
+                    _ = try? await ArtworkImagePipeline.shared.image(
+                        for: url,
+                        maxPixelSize: maxPixelSize
+                    )
+                }
+            }
+        }
+    }
+}
+
 struct DownsampledAsyncImage<Content: View>: View {
     let url: URL?
     let targetSize: CGSize
@@ -198,6 +229,7 @@ struct DownsampledAsyncImage<Content: View>: View {
     @Environment(\.displayScale) private var displayScale
     @Environment(\.scenePhase) private var scenePhase
     @State private var image: UIImage?
+    @State private var loadedURL: URL?
     @State private var error: Error?
     @State private var retryGeneration = 0
 
@@ -253,9 +285,17 @@ struct DownsampledAsyncImage<Content: View>: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: requestID) {
-            image = nil
+            if loadedURL != url {
+                image = nil
+                loadedURL = nil
+            }
             error = nil
             guard let url, maxPixelSize > 0 else { return }
+            if let cachedPreview = await ArtworkImagePipeline.shared.cachedPreview(for: url) {
+                guard !Task.isCancelled else { return }
+                image = cachedPreview
+                loadedURL = url
+            }
             do {
                 let loaded = try await ArtworkImagePipeline.shared.image(
                     for: url,
@@ -263,6 +303,7 @@ struct DownsampledAsyncImage<Content: View>: View {
                 )
                 guard !Task.isCancelled else { return }
                 image = loaded
+                loadedURL = url
             } catch is CancellationError {
                 return
             } catch {

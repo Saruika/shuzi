@@ -1,5 +1,13 @@
 import SwiftUI
 
+private struct AboutScrollViewportHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct AboutView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @Environment(LocalWeatherStore.self) private var localWeather
@@ -9,6 +17,9 @@ struct AboutView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var presentsAdminAccess = false
+    @State private var scrollViewportHeight: CGFloat = 0
+
+    private let portraitCaptionInset: CGFloat = 22
 
     var body: some View {
         GeometryReader { scene in
@@ -18,7 +29,7 @@ struct AboutView: View {
                     Group {
                         if usesTwoColumnLayout {
                             HStack(alignment: .top, spacing: 24) {
-                                portrait
+                                portrait(captionBottomPadding: portraitCaptionInset)
                                     .frame(
                                         maxWidth: .infinity,
                                         maxHeight: twoColumnPortraitHeight(in: scene),
@@ -32,7 +43,9 @@ struct AboutView: View {
                             .padding(.horizontal, 24)
                         } else {
                             VStack(spacing: 0) {
-                                portrait
+                                portrait(
+                                    captionBottomPadding: singleColumnCaptionBottomPadding(in: scene)
+                                )
                                     .frame(maxWidth: 720)
                                     .frame(maxWidth: .infinity)
                                 profileDetails
@@ -44,7 +57,22 @@ struct AboutView: View {
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
                 .scrollIndicators(.hidden)
+                .background {
+                    GeometryReader { viewport in
+                        Color.clear.preference(
+                            key: AboutScrollViewportHeightKey.self,
+                            value: viewport.size.height
+                        )
+                    }
+                }
+                .overlay(alignment: .bottom) {
+                    visibleBottomTestProbe
+                }
                 .floatingTabBarScrollClearance()
+                .onPreferenceChange(AboutScrollViewportHeightKey.self) { height in
+                    guard height.isFinite, height > 0 else { return }
+                    scrollViewportHeight = height
+                }
             }
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -74,6 +102,32 @@ struct AboutView: View {
         )
     }
 
+    private func singleColumnCaptionBottomPadding(in scene: GeometryProxy) -> CGFloat {
+        guard scrollViewportHeight > 0 else { return portraitCaptionInset }
+
+        let portraitWidth = min(max(scene.size.width, 0), 720)
+        let portraitHeight = portraitWidth * 16 / 9
+        let overflow = max(0, portraitHeight - scrollViewportHeight)
+        return portraitCaptionInset + overflow
+    }
+
+    @ViewBuilder
+    private var visibleBottomTestProbe: some View {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains(
+            "-expose-about-visible-bottom-for-visual-testing"
+        ) {
+            Color.clear
+                .frame(maxWidth: .infinity)
+                .frame(height: 1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("关于页可见区域下边界")
+                .accessibilityIdentifier("about-visible-bottom")
+                .allowsHitTesting(false)
+        }
+#endif
+    }
+
     private var profileDetails: some View {
         VStack(spacing: 0) {
             biography
@@ -87,7 +141,7 @@ struct AboutView: View {
         }
     }
 
-    private var portrait: some View {
+    private func portrait(captionBottomPadding: CGFloat) -> some View {
         ZStack(alignment: .bottomLeading) {
             if let portraitURL = portfolioStore.aboutPortraitURL {
                 ArtworkImage(url: portraitURL, contentMode: .fit)
@@ -116,7 +170,9 @@ struct AboutView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("about-role-summary")
             }
-            .padding(22)
+            .padding(.horizontal, portraitCaptionInset)
+            .padding(.top, portraitCaptionInset)
+            .padding(.bottom, captionBottomPadding)
         }
         .aspectRatio(9 / 16, contentMode: .fit)
     }
