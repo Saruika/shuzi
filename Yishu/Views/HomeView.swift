@@ -37,7 +37,6 @@ private struct HeroPager: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var selection = 0
     @State private var isVisible = false
-    @State private var isWeatherDetailsPresented = false
 
     private var slides: [URL] {
         imageURLs.isEmpty ? ContentCatalog.heroImages : imageURLs
@@ -114,9 +113,6 @@ private struct HeroPager: View {
             let selectedURL = oldSlides.indices.contains(selection) ? oldSlides[selection] : nil
             selection = selectedURL.flatMap(newSlides.firstIndex(of:))
                 ?? min(selection, max(0, newSlides.count - 1))
-        }
-        .sheet(isPresented: $isWeatherDetailsPresented) {
-            WeatherAttributionSheet(localWeather: localWeather)
         }
     }
 
@@ -239,48 +235,8 @@ private struct HeroPager: View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
             weatherButton
-            if localWeather.phase == .ready {
-                weatherAttributionControl
-            }
         }
         .foregroundStyle(.white)
-    }
-
-    private var weatherAttributionControl: some View {
-        Button {
-            localWeather.refreshAttributionIfNeeded()
-            openURL(localWeather.attributionLegalURL)
-        } label: {
-            HStack(spacing: 4) {
-                AsyncImage(url: localWeather.attributionSquareMarkURL) { phase in
-                    if case .success(let image) = phase {
-                        image
-                            .resizable()
-                            .scaledToFit()
-                    } else {
-                        Image(systemName: "info.circle.fill")
-                            .font(.caption.weight(.semibold))
-                    }
-                }
-                .frame(width: 18, height: 18)
-                .accessibilityHidden(true)
-
-                Text("来源")
-                    .font(.caption2.weight(.medium))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
-            }
-            .foregroundStyle(.white.opacity(0.88))
-            .shadow(color: .black.opacity(0.72), radius: 2, y: 1)
-            .frame(minWidth: 52, minHeight: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
-        .accessibilityLabel("Apple Weather 数据来源与许可")
-        .accessibilityValue("来源")
-        .accessibilityHint("打开 Apple Weather 数据来源与许可页")
-        .accessibilityIdentifier("home-weather-attribution-control")
     }
 
     private var weatherButton: some View {
@@ -313,8 +269,8 @@ private struct HeroPager: View {
         .buttonStyle(.plain)
         // The hero is a compact photographic overlay. Keep it readable when
         // the system uses accessibility sizes without allowing this one
-        // capsule to obscure the portrait; the details sheet and VoiceOver
-        // continue to expose the complete, uncapped weather information.
+        // capsule to obscure the portrait; VoiceOver continues to expose the
+        // complete, uncapped weather summary.
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .accessibilityIdentifier("home-weather")
         .accessibilityLabel(localWeather.accessibilitySummary)
@@ -375,8 +331,7 @@ private struct HeroPager: View {
 
     private func openWeatherOrSettings() {
         if localWeather.phase == .ready {
-            isWeatherDetailsPresented = true
-            localWeather.refreshAttributionIfNeeded()
+            localWeather.activate()
         } else if localWeather.needsSettings,
            let settingsURL = URL(string: UIApplication.openSettingsURLString) {
             openURL(settingsURL)
@@ -387,7 +342,7 @@ private struct HeroPager: View {
 
     private var weatherAccessibilityHint: String {
         if localWeather.phase == .ready {
-            return "打开天气详情、Apple Weather 数据来源与许可"
+            return "刷新当前位置与天气"
         }
         return localWeather.needsSettings ? "打开系统设置" : "更新位置与天气"
     }
@@ -400,91 +355,6 @@ private struct HeroPager: View {
                 .tint(.white)
         } else {
             Image(systemName: localWeather.symbolName)
-        }
-    }
-}
-
-private struct WeatherAttributionSheet: View {
-    let localWeather: LocalWeatherStore
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Text("当地天气")
-                            .font(.title2.weight(.semibold))
-                            .accessibilityIdentifier("home-weather-attribution-heading")
-                            .accessibilityAddTraits(.isHeader)
-                        Text(
-                            "\(WeatherPresentation.conciseLocationText(localWeather.locationText))"
-                                + " · \(localWeather.weatherText)"
-                        )
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                    }
-
-                    VStack(alignment: .leading, spacing: 12) {
-                        AsyncImage(url: localWeather.attributionMarkURL) { phase in
-                            if case .success(let image) = phase {
-                                image
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 132, height: 34, alignment: .leading)
-                            } else {
-                                Text(localWeather.weatherProviderName)
-                                    .font(.headline.weight(.semibold))
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("Apple Weather")
-                        .accessibilityIdentifier("home-weather-provider")
-
-                        Text("天气数据由 Apple Weather 提供。可查看数据来源、版权与许可信息。")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Link(destination: localWeather.attributionLegalURL) {
-                            HStack(spacing: 10) {
-                                Text("Apple Weather 数据来源与许可")
-                                Spacer(minLength: 12)
-                                Image(systemName: "arrow.up.right")
-                            }
-                            .font(.body.weight(.semibold))
-                            .padding(.horizontal, 16)
-                            .frame(maxWidth: .infinity, minHeight: 50)
-                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("home-weather-legal-link")
-                        .accessibilityHint("打开 Apple Weather 数据来源与许可页")
-                    }
-                    .padding(18)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
-                }
-                .padding(20)
-                .frame(maxWidth: 620, alignment: .leading)
-                .frame(maxWidth: .infinity)
-            }
-            .navigationTitle("天气详情")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { dismiss() }
-                        .frame(minWidth: 44, minHeight: 44)
-                        .accessibilityIdentifier("home-weather-details-close")
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-        .presentationCompactAdaptation(.sheet)
-        .task {
-            localWeather.refreshAttributionIfNeeded()
         }
     }
 }

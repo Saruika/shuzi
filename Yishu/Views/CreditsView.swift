@@ -44,9 +44,13 @@ struct CreditsView: View {
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .onAppear {
 #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-play-showreel-for-visual-testing"),
-               inlinePlayer == nil {
+            let arguments = ProcessInfo.processInfo.arguments
+            if arguments.contains("-play-showreel-for-visual-testing"), inlinePlayer == nil {
                 playInline()
+                if arguments.contains("-simulate-ended-showreel-for-visual-testing"),
+                   let showreel = store.showreel {
+                    simulateInlinePlaybackEnded(showreel)
+                }
             }
 #endif
         }
@@ -104,6 +108,7 @@ struct CreditsView: View {
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel("影片画面，\(showreel.title)，\(showreel.summary)")
                             .accessibilityValue(inlinePlaybackStateLabel)
+                            .accessibilityIdentifier("showreel-video-surface")
 
                         if isInlineBuffering {
                             VStack(spacing: 9) {
@@ -120,20 +125,6 @@ struct CreditsView: View {
                             .accessibilityElement(children: .combine)
                             .accessibilityLabel("视频正在缓冲，播放控制仍可使用")
                             .accessibilityAddTraits(.updatesFrequently)
-                        } else if isInlineEnded {
-                            VStack(spacing: 8) {
-                                Image(systemName: "arrow.counterclockwise.circle.fill")
-                                    .font(.title)
-                                Text("播放结束")
-                                    .font(.headline)
-                            }
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 20)
-                            .padding(.vertical, 14)
-                            .background(.black.opacity(0.68), in: RoundedRectangle(cornerRadius: 14))
-                            .allowsHitTesting(false)
-                            .accessibilityElement(children: .combine)
-                            .accessibilityLabel("视频播放结束，可使用下方按钮重新播放")
                         }
                     }
                     .aspectRatio(1.5, contentMode: .fit)
@@ -400,6 +391,26 @@ struct CreditsView: View {
         playbackWaitStartedAt = nil
         VideoAudioSession.deactivate()
     }
+
+#if DEBUG
+    private func simulateInlinePlaybackEnded(_ showreel: ShowreelContent) {
+        let simulatedDuration = displayDurationInSeconds(showreel.durationLabel) ?? 1
+        inlineDuration = simulatedDuration
+        inlineCurrentTime = simulatedDuration
+        inlinePlayer?.seek(
+            to: CMTime(seconds: simulatedDuration, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        finishInlinePlayback()
+    }
+
+    private func displayDurationInSeconds(_ label: String) -> Double? {
+        let components = label.split(separator: ":").compactMap { Double($0) }
+        guard components.count == 2 || components.count == 3 else { return nil }
+        return components.reduce(0) { $0 * 60 + $1 }
+    }
+#endif
 
     private func updateInlineSeekPosition(_ proposedPosition: Double) {
         let maximum = max(inlineDuration, 1)

@@ -69,11 +69,13 @@ Server/tests/fan-api-smoke.sh
 
 GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服务器密钥；外部 Action 固定到完整 commit SHA。失败时保留七天 `.xcresult` 供排查。
 
-## Build 36 发布前验收
+## Build 37 发布前验收
 
-1. 确认构建设置为 `1.3.24 (36)`、Bundle ID `cn.com.shuzijun.yishu`，且 App ID 与本次签名描述文件同时包含 Sign in with Apple 和 WeatherKit；能力变更后必须重新生成签名描述文件。
+1. 确认构建设置为 `1.3.25 (37)`、Bundle ID `cn.com.shuzijun.yishu`，且 App ID 与本次签名描述文件同时包含 Sign in with Apple 和 WeatherKit；能力变更后必须重新生成签名描述文件。
 2. 服务端运行锁定依赖的 `composer install --no-dev --classmap-authoritative`；Apple `.p8` 位于 Web 根目录外，只通过 `YISHU_APPLE_TEAM_ID`、`YISHU_APPLE_KEY_ID`、`YISHU_APPLE_PRIVATE_KEY_PATH` 引用。测试日志和仓库不得出现私钥、client secret、identity token、authorization code、nonce、state 或 Apple subject。
 3. 确认服务器可通过 HTTPS 访问 `appleid.apple.com/auth/keys`、`/auth/token` 和 `/auth/revoke`，WP-Cron 或等价计划任务能执行撤销重试；反向代理继续转发 `Authorization` 与安装记录头。
 4. 在真实 TestFlight 安装执行：新 Apple 账号 → 必填抖音 ID → 待审批 → 管理员批准 → 主内容；同一 Apple ID 重复登录；取消授权、网络失败与重新前台；其他设备会话撤销；onboarding 和已批准状态分别永久删号。
 5. 删除后确认 App 本机收藏/最近浏览分区消失、原 bearer 不可使用、Apple 账号可按产品规则重新申请；App Store 隐私标签与 App 内政策须包含昵称、用户 ID、设备级随机标识和粗略位置，不声明未请求的 Apple 邮箱。
 6. 在 iPhone、iPad 横竖屏和辅助功能字体下检查作品页：搜索框紧贴状态栏下方的系统安全区域，且聚焦、输入、清除、取消、空结果、下拉刷新和详情返回均正常。同时开启 VoiceOver、减少动态效果和减少透明度，确认保护遮罩不会让底层内容被聚焦。
+7. 开启天气后确认首页仅显示地点、天气和温度，不出现 Apple Weather 标记或“来源”入口；“关于”页应完整显示 Apple Weather 商标、数据来源说明和可点击许可链接。
+8. 将 Showreel 播放至结束，确认画面停留在最后一帧且没有中央“播放结束”卡片；底部播放键应切换为重播，并在点击后恢复播放，暂停、静音和进度控制保持可用。

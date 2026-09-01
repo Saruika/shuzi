@@ -173,6 +173,41 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "04-custom-showreel-controls", app: app)
     }
 
+    func testShowreelCompletionKeepsThePictureClean() {
+        let app = launchApp(arguments: [
+            "-open-credits-for-visual-testing",
+            "-play-showreel-for-visual-testing",
+            "-simulate-ended-showreel-for-visual-testing",
+        ])
+
+        let surface = element("showreel-video-surface", in: app)
+        let playback = element("showreel-playback-control", in: app)
+        XCTAssertTrue(surface.waitForExistence(timeout: 8), "视频结束后画面区域消失")
+        scrollToElement(playback, in: app)
+        assertMinimumTapTarget(playback, named: "视频结束后的重播控制")
+        XCTAssertEqual(playback.label, "重新播放视频")
+        XCTAssertEqual(surface.value as? String, "播放结束")
+        let obsoleteEndOverlay = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label == %@",
+                "视频播放结束，可使用下方按钮重新播放"
+            )
+        )
+        XCTAssertEqual(obsoleteEndOverlay.count, 0, "视频结束后不应覆盖中央提示")
+        XCTAssertTrue(
+            (element("showreel-progress", in: app).value as? String)?.contains("总时长") == true,
+            "结束状态应保留完整时长"
+        )
+        attachScreenshot(named: "04-showreel-ended-clean", app: app)
+
+        playback.tap()
+        expectation(
+            for: NSPredicate(format: "label == %@", "暂停视频"),
+            evaluatedWith: playback
+        )
+        waitForExpectations(timeout: 3)
+    }
+
     func testPortfolioSearchStaysNearTheSafeAreaAndCanClearAndCancel() {
         let app = launchApp(arguments: ["-open-portfolio-for-visual-testing"])
         assertExists("portfolio-heading", in: app)
@@ -327,7 +362,7 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "11-accessibility-xxxl", app: app)
     }
 
-    func testHomeWeatherExposesAppleWeatherAttributionAndLegalLink() {
+    func testWeatherAttributionAppearsOnlyOnAboutPage() {
         let app = launchApp(
             arguments: [
                 "-simulate-ready-weather-for-visual-testing",
@@ -336,52 +371,30 @@ final class YishuUITests: XCTestCase {
         )
 
         let weather = element("home-weather", in: app)
-        assertMinimumTapTarget(weather, named: "首页天气详情")
+        assertMinimumTapTarget(weather, named: "首页天气")
         XCTAssertFalse(
             weather.label.contains("Apple Weather"),
             "天气胶囊本身只应读出地点和当前天气：\(weather.label)"
         )
         let homeAttribution = element("home-weather-attribution-control", in: app)
-        XCTAssertTrue(
-            homeAttribution.waitForExistence(timeout: 5),
-            "首页天气数据仍需显示独立的 Apple Weather 署名入口"
-        )
-        assertMinimumTapTarget(homeAttribution, named: "Apple Weather 署名入口")
-        XCTAssertTrue(
-            homeAttribution.label.contains("Apple Weather"),
-            "独立署名入口应标明 Apple Weather 数据来源"
-        )
-        XCTAssertEqual(homeAttribution.value as? String, "来源")
-        XCTAssertFalse(
-            weather.frame.intersects(homeAttribution.frame),
-            "Apple Weather 署名应位于天气胶囊之外"
-        )
-        XCTAssertGreaterThanOrEqual(
-            homeAttribution.frame.minX,
-            weather.frame.maxX,
-            "天气来源入口不应再显示在天气胶囊左侧"
-        )
-        attachScreenshot(named: "11-home-weather-source", app: app)
-        weather.tap()
+        XCTAssertFalse(homeAttribution.exists, "首页不应再显示 Apple Weather 来源入口")
+        XCTAssertFalse(element("home-weather-provider", in: app).exists)
+        XCTAssertFalse(element("home-weather-legal-link", in: app).exists)
+        attachScreenshot(named: "11-home-weather-without-source", app: app)
 
-        assertExists("home-weather-attribution-heading", in: app)
-        let provider = element("home-weather-provider", in: app)
-        XCTAssertTrue(provider.waitForExistence(timeout: 5), "天气详情缺少 Apple Weather 标识")
-        XCTAssertEqual(provider.label, "Apple Weather")
-
-        let legalLink = element("home-weather-legal-link", in: app)
+        openTab("关于", in: app)
+        // SwiftUI exposes this styled Link as XCUIElementTypeOther on iOS 26,
+        // even when it carries the `.isLink` accessibility trait. Locate it
+        // by its stable identifier and separately gate its label and action.
+        let legalLink = element("about-weather-legal-link", in: app)
         scrollToElement(legalLink, in: app)
-        assertMinimumTapTarget(legalLink, named: "Apple Weather 数据与许可")
-        XCTAssertTrue(legalLink.isHittable, "Apple Weather 数据与许可链接不可点击")
+        assertMinimumTapTarget(legalLink, named: "关于页 Apple Weather 数据与许可")
+        XCTAssertTrue(legalLink.isHittable, "关于页 Apple Weather 数据与许可链接不可点击")
         XCTAssertTrue(
             legalLink.label.contains("Apple Weather"),
-            "法律来源入口没有标明 Apple Weather：\(legalLink.label)"
+            "关于页没有标明 Apple Weather：\(legalLink.label)"
         )
-
-        let close = element("home-weather-details-close", in: app)
-        XCTAssertTrue(close.waitForExistence(timeout: 5), "天气详情缺少系统完成按钮")
-        XCTAssertTrue(close.isHittable, "天气详情的系统完成按钮不可点击")
-        attachScreenshot(named: "11-home-weather-attribution", app: app)
+        attachScreenshot(named: "11-about-weather-attribution", app: app)
     }
 
     func testPrimaryPagesMeetFocusedAccessibilityGate() throws {
@@ -742,14 +755,11 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         let weatherAttribution = element("home-weather-attribution-control", in: app)
         let portfolioAction = element("home-open-portfolio", in: app)
         assertMinimumTapTarget(weather, named: "当前 UI 配置的首页天气")
-        assertMinimumTapTarget(weatherAttribution, named: "当前 UI 配置的天气署名")
         assertMinimumTapTarget(portfolioAction, named: "当前 UI 配置的查看作品")
         XCTAssertTrue(weather.isHittable, "辅助功能大字号下天气入口不可点击")
-        XCTAssertTrue(weatherAttribution.isHittable, "辅助功能大字号下天气署名不可点击")
+        XCTAssertFalse(weatherAttribution.exists, "辅助功能大字号下首页不应出现天气署名入口")
         XCTAssertTrue(portfolioAction.isHittable, "辅助功能大字号下查看作品不可点击")
         XCTAssertTrue(window.frame.contains(weather.frame), "辅助功能大字号下天气入口超出窗口")
-        XCTAssertTrue(window.frame.contains(weatherAttribution.frame), "辅助功能大字号下天气署名超出窗口")
-        XCTAssertFalse(weather.frame.intersects(weatherAttribution.frame), "辅助功能大字号下天气与署名发生重叠")
         XCTAssertTrue(window.frame.contains(portfolioAction.frame), "辅助功能大字号下查看作品超出窗口")
         attachScreenshot(named: "adaptive-home-accessibility-xxxl", app: app)
     }

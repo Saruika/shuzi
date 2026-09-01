@@ -362,30 +362,37 @@ struct AboutView: View {
 
     private var weatherAttribution: some View {
         Link(destination: localWeather.attributionLegalURL) {
-            HStack(spacing: 14) {
-                AsyncImage(url: localWeather.attributionMarkURL) { phase in
-                    if case .success(let image) = phase {
-                        image.resizable().scaledToFit()
-                    } else {
-                        Text(localWeather.weatherProviderName)
-                            .font(.caption.weight(.semibold))
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 14) {
+                    AsyncImage(url: localWeather.attributionMarkURL) { phase in
+                        if case .success(let image) = phase {
+                            image.resizable().scaledToFit()
+                        } else {
+                            Text(localWeather.weatherProviderName)
+                                .font(.caption.weight(.semibold))
+                        }
                     }
+                    .frame(width: 108, height: 28, alignment: .leading)
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.4))
                 }
-                .frame(width: 108, height: 28, alignment: .leading)
-                Spacer()
-                Text("天气数据与许可")
+
+                Text("天气数据由 Apple Weather 提供")
+                    .font(.footnote.weight(.medium))
+                Text("查看数据来源、版权与许可信息")
                     .font(.caption)
                     .foregroundStyle(AppTheme.muted)
-                Image(systemName: "arrow.up.right")
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.4))
             }
             .foregroundStyle(AppTheme.warmWhite)
-            .padding(.horizontal, 15)
-            .frame(minHeight: 48)
+            .padding(15)
+            .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("Apple Weather 天气数据来源与许可")
+        .accessibilityAddTraits(.isLink)
         .accessibilityIdentifier("about-weather-legal-link")
         .accessibilityHint("打开 Apple Weather 数据来源与许可页")
         .padding(.horizontal, 16)

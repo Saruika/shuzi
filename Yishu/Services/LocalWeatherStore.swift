@@ -20,7 +20,6 @@ final class LocalWeatherStore: NSObject {
     private(set) var symbolName = "location.fill"
     private(set) var phase: LocalWeatherPhase = .idle
     private(set) var attributionMarkURL: URL?
-    private(set) var attributionSquareMarkURL: URL?
     private(set) var attributionLegalURL = WeatherAttributionPresentation.officialLegalURL
     private(set) var weatherProviderName = WeatherAttributionPresentation.defaultProviderName
 
@@ -106,13 +105,6 @@ final class LocalWeatherStore: NSObject {
             return
         }
         requestLocation()
-    }
-
-    func refreshAttributionIfNeeded() {
-        guard phase == .ready,
-              !attributionDidResolve,
-              attributionTask == nil else { return }
-        loadAttribution(for: activeRequestID)
     }
 
     private func requestLocation(force: Bool = false) {
@@ -260,7 +252,6 @@ final class LocalWeatherStore: NSObject {
                 attribution?.serviceName
             )
             self.attributionMarkURL = attribution?.combinedMarkDarkURL
-            self.attributionSquareMarkURL = attribution?.squareMarkURL
             self.attributionLegalURL = WeatherAttributionPresentation.legalURL(
                 from: attribution?.legalPageURL
             )
@@ -328,7 +319,6 @@ final class LocalWeatherStore: NSObject {
         attributionTask = nil
         attributionDidResolve = false
         attributionMarkURL = nil
-        attributionSquareMarkURL = nil
         attributionLegalURL = WeatherAttributionPresentation.officialLegalURL
         weatherProviderName = WeatherAttributionPresentation.defaultProviderName
     }
