@@ -140,10 +140,18 @@ final class Shuzijun_App_Content_API {
         $test_override = false;
         if (self::apple_test_mode_enabled()
             && defined('YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH')
-            && is_string(YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH)
-            && strpos(YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH, sys_get_temp_dir() . DIRECTORY_SEPARATOR) === 0) {
-            $path = YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH;
-            $test_override = true;
+            && is_string(YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH)) {
+            // macOS may expose the temporary directory through `/var` while
+            // realpath resolves it through `/private/var`. Resolve both sides
+            // before enforcing the test-only containment boundary.
+            $test_path = realpath(YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH);
+            $test_root = realpath(sys_get_temp_dir());
+            if (is_string($test_path)
+                && is_string($test_root)
+                && strpos($test_path, rtrim($test_root, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR) === 0) {
+                $path = $test_path;
+                $test_override = true;
+            }
         }
 
         if (!$test_override) {
