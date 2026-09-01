@@ -351,12 +351,18 @@ final class YishuUITests: XCTestCase {
             homeAttribution.label.contains("Apple Weather"),
             "独立署名入口应标明 Apple Weather 数据来源"
         )
+        XCTAssertEqual(homeAttribution.value as? String, "来源")
         XCTAssertFalse(
             weather.frame.intersects(homeAttribution.frame),
             "Apple Weather 署名应位于天气胶囊之外"
         )
+        XCTAssertGreaterThanOrEqual(
+            homeAttribution.frame.minX,
+            weather.frame.maxX,
+            "天气来源入口不应再显示在天气胶囊左侧"
+        )
         attachScreenshot(named: "11-home-weather-source", app: app)
-        homeAttribution.tap()
+        weather.tap()
 
         assertExists("home-weather-attribution-heading", in: app)
         let provider = element("home-weather-provider", in: app)

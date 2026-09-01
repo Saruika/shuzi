@@ -238,48 +238,48 @@ private struct HeroPager: View {
     private var weatherRow: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
+            weatherButton
             if localWeather.phase == .ready {
                 weatherAttributionControl
             }
-            weatherButton
         }
         .foregroundStyle(.white)
     }
 
     private var weatherAttributionControl: some View {
         Button {
-            isWeatherDetailsPresented = true
             localWeather.refreshAttributionIfNeeded()
+            openURL(localWeather.attributionLegalURL)
         } label: {
-            HStack(spacing: 3) {
-                AsyncImage(url: localWeather.attributionMarkURL) { phase in
+            HStack(spacing: 4) {
+                AsyncImage(url: localWeather.attributionSquareMarkURL) { phase in
                     if case .success(let image) = phase {
                         image
                             .resizable()
                             .scaledToFit()
                     } else {
-                        Text(localWeather.weatherProviderName)
-                            .font(.caption2.weight(.semibold))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.72)
-                            .allowsTightening(true)
+                        Image(systemName: "info.circle.fill")
+                            .font(.caption.weight(.semibold))
                     }
                 }
-                .frame(width: 72, height: 18)
+                .frame(width: 18, height: 18)
+                .accessibilityHidden(true)
 
-                Image(systemName: "info.circle")
-                    .font(.caption2.weight(.semibold))
+                Text("来源")
+                    .font(.caption2.weight(.medium))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
-            .frame(width: 82, height: 18)
             .foregroundStyle(.white.opacity(0.88))
             .shadow(color: .black.opacity(0.72), radius: 2, y: 1)
-            .frame(minWidth: 88, minHeight: 44)
+            .frame(minWidth: 52, minHeight: 44)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .accessibilityLabel("Apple Weather 数据来源与许可")
-        .accessibilityHint("打开天气详情")
+        .accessibilityValue("来源")
+        .accessibilityHint("打开 Apple Weather 数据来源与许可页")
         .accessibilityIdentifier("home-weather-attribution-control")
     }
 
