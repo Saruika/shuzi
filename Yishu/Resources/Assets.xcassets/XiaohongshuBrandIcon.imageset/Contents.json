@@ -1,15 +1,17 @@
 {
   "images" : [
     {
-      "filename" : "about-portrait-qipao-blue.jpg",
+      "filename" : "xiaohongshu-icon.png",
       "idiom" : "universal",
       "scale" : "1x"
     },
     {
+      "filename" : "xiaohongshu-icon@2x.png",
       "idiom" : "universal",
       "scale" : "2x"
     },
     {
+      "filename" : "xiaohongshu-icon@3x.png",
       "idiom" : "universal",
       "scale" : "3x"
     }

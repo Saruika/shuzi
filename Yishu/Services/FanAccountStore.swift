@@ -39,6 +39,13 @@ enum FanAccountSource: String {
     case apple
 }
 
+enum FanAccountConsentPolicy {
+    /// Every new acknowledgement is tied to the currently published policy.
+    /// The server alone owns the compatibility allowlist for already stored
+    /// acknowledgements so an old App cannot opt itself into legacy consent.
+    static let currentVersion = "2026-09-02-approval-v3"
+}
+
 struct FanProfile: Codable, Equatable {
     let userID: String
     let identityCode: String
@@ -239,6 +246,16 @@ enum FanAccountValidation {
         return candidate
     }
 
+    /// Douyin is an optional identity hint. An entirely blank value is valid;
+    /// when a user chooses to provide one it must still satisfy the same
+    /// normalization contract as existing accounts.
+    static func normalizedOptionalDouyinID(_ value: String) -> String? {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return ""
+        }
+        return normalizedDouyinID(value)
+    }
+
     static func isValidDisplayName(_ value: String) -> Bool {
         let clean = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return (1...30).contains(clean.count)
@@ -340,7 +357,7 @@ enum FanAccountValidation {
     static func isValidProfile(_ profile: FanProfile, now: Date = Date()) -> Bool {
         UUID(uuidString: profile.userID) != nil
             && normalizedIdentityCode(profile.identityCode) == profile.identityCode
-            && normalizedDouyinID(profile.douyinID) == profile.douyinID
+            && normalizedOptionalDouyinID(profile.douyinID) == profile.douyinID
             && FanAccountSource(rawValue: profile.accountSource) != nil
             && !profile.requiresAppleRegistration
             && FanAccountStatus(rawValue: profile.status) != nil
@@ -363,7 +380,7 @@ enum FanAccountValidation {
                 && !user.requiresPasswordChange
                 && user.passwordRecoveryExpiresAt == nil
         }
-        return normalizedDouyinID(user.douyinID) == user.douyinID
+        return normalizedOptionalDouyinID(user.douyinID) == user.douyinID
             && hasConsistentSecuritySetupState(
                 douyinID: user.douyinID,
                 requiresAccountSetup: user.requiresAccountSetup,
@@ -383,7 +400,7 @@ enum FanAccountValidation {
     ) throws -> FanRequiredSetupInput {
         let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isValidDisplayName(cleanName) else { throw FanAccountError.invalidDisplayName }
-        guard let cleanDouyinID = normalizedDouyinID(douyinID),
+        guard let cleanDouyinID = normalizedOptionalDouyinID(douyinID),
               !isInvitationPlaceholderDouyinID(cleanDouyinID) else {
             throw FanAccountError.invalidDouyinID
         }
@@ -411,7 +428,7 @@ enum FanAccountValidation {
     ) throws -> FanAppleRegistrationInput {
         let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isValidDisplayName(cleanName) else { throw FanAccountError.invalidDisplayName }
-        guard let cleanDouyinID = normalizedDouyinID(douyinID),
+        guard let cleanDouyinID = normalizedOptionalDouyinID(douyinID),
               !isInvitationPlaceholderDouyinID(cleanDouyinID) else {
             throw FanAccountError.invalidDouyinID
         }
@@ -452,7 +469,7 @@ enum FanAccountError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidDisplayName: "请填写 1–30 个字符的昵称。"
-        case .invalidDouyinID: "请填写 2–50 位的抖音 ID，不要填链接。"
+        case .invalidDouyinID: "抖音 ID 为选填；如填写，请使用 2–50 位 ID，不要填链接。"
         case .consentRequired: "请先阅读并确认账号资料的使用说明。"
         case .weakPassword: "密码至少 10 位，并包含文字或字母、数字、符号中的至少两类。"
         case .passwordMismatch: "两次输入的密码不一致。"
@@ -465,7 +482,7 @@ enum FanAccountError: LocalizedError {
         case .passwordRecoveryRequired: "请使用临时恢复凭据设置一个新密码。"
         case .passwordRecoveryExpired: "密码恢复凭据已过期，请联系管理员重新生成。"
         case .currentSessionCannotBeRevoked: "当前设备请使用退出登录。"
-        case .appleRegistrationRequired: "请先填写昵称和抖音 ID，完成账号申请。"
+        case .appleRegistrationRequired: "请先填写昵称并完成账号申请。"
         case .appleCredentialRevoked: "Apple 登录授权已撤销，请重新登录。"
         case .appleCredentialTransferred: "Apple 登录关系已转移，请重新通过 Apple 登录确认账号。"
         case .appleCredentialUnavailable: "无法确认当前 Apple 登录凭据，请重新通过 Apple 登录。"
@@ -704,7 +721,8 @@ final class FanAccountStore: ObservableObject {
             errorMessage = FanAccountError.invalidDisplayName.errorDescription
             return
         }
-        guard let cleanDouyinID = FanAccountValidation.normalizedDouyinID(douyinID) else {
+        guard let cleanDouyinID = FanAccountValidation.normalizedOptionalDouyinID(douyinID),
+              !FanAccountValidation.isInvitationPlaceholderDouyinID(cleanDouyinID) else {
             errorMessage = FanAccountError.invalidDouyinID.errorDescription
             return
         }
@@ -733,7 +751,7 @@ final class FanAccountStore: ObservableObject {
                     douyinID: cleanDouyinID,
                     password: password,
                     installID: installID.uuidString.lowercased(),
-                    consentVersion: "2026-08-31-approval-v2"
+                    consentVersion: FanAccountConsentPolicy.currentVersion
                 )
             )
             let response: FanAuthResponse = try await perform(
@@ -936,7 +954,7 @@ final class FanAccountStore: ObservableObject {
                 displayName: input.displayName,
                 douyinID: input.douyinID,
                 installID: installID.uuidString.lowercased(),
-                consentVersion: "2026-08-31-approval-v2"
+                consentVersion: FanAccountConsentPolicy.currentVersion
             ))
             let response: FanAuthResponse = try await perform(
                 path: "shuzijun/v1/fan/complete-apple-registration",
@@ -1103,7 +1121,7 @@ final class FanAccountStore: ObservableObject {
                     currentPassword: input.currentPassword,
                     newPassword: input.newPassword,
                     installID: installID.uuidString.lowercased(),
-                    consentVersion: "2026-08-31-approval-v2"
+                    consentVersion: FanAccountConsentPolicy.currentVersion
                 )
             )
             let response: FanAuthResponse = try await perform(

@@ -14,6 +14,21 @@ private enum VisualTestingDestination {
     case collaboration
 }
 
+struct ColdLaunchPosterSelectionState: Equatable {
+    private(set) var snapshot: LaunchPosterContent?
+    private(set) var hasSelected = false
+
+    mutating func record(_ poster: LaunchPosterContent?) {
+        snapshot = poster
+        hasSelected = true
+    }
+
+    mutating func reset() {
+        snapshot = nil
+        hasSelected = false
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
     @EnvironmentObject private var favorites: FavoritesStore
@@ -25,6 +40,7 @@ struct RootView: View {
     @State private var selectedTab: AppTab
     @State private var portfolioPath: [Portfolio] = []
     @State private var launchPosterSnapshot: LaunchPosterContent?
+    @State private var coldLaunchPosterSelection = ColdLaunchPosterSelectionState()
     @State private var hasPreparedLaunchPoster = false
     @State private var isLaunchPosterVisible = false
     @State private var hasResolvedAccess = false
@@ -92,8 +108,14 @@ struct RootView: View {
         .onChange(of: portfolioStore.portfolios) { _, portfolios in
             recentlyViewed.retainAvailablePortfolios(in: portfolios)
         }
-        .onChange(of: fanAccount.profile?.userID, initial: true) { _, userID in
+        .onChange(of: fanAccount.profile?.userID, initial: true) { oldUserID, userID in
+            if oldUserID != userID {
+                resetProtectedPresentation()
+            }
             switchLocalLibrary(to: userID)
+            if userID != nil, fanAccount.isApproved || shouldBypassAccessGate {
+                Task { await prepareAuthorizedContentIfNeeded() }
+            }
         }
         .onChange(of: fanAccount.removedAccountUserID, initial: true) { _, userID in
             guard let userID else { return }
@@ -154,11 +176,9 @@ struct RootView: View {
             enforceCurrentFanPermissionScope()
             Task { await refreshApprovedContent() }
         }
-        .onChange(of: portfolioStore.launchPosters) { _, _ in
-            refreshVisibleLaunchPosterSnapshot()
-        }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else {
+                Task { await ArtworkImagePrefetcher.purgeMemory() }
                 adminSession.lock()
                 fanAccount.pauseAppleCredentialRetry()
                 return
@@ -184,6 +204,9 @@ struct RootView: View {
         ) { _ in
             fanAccount.handleAppleCredentialRevoked()
             resetProtectedPresentation()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
+            Task { await ArtworkImagePrefetcher.purgeMemory() }
         }
     }
 
@@ -310,25 +333,22 @@ struct RootView: View {
         return skipsPosterForTesting || visualPortfolioTitle != nil || selectedTab != .home
     }
 
-    private func prepareLaunchPosterIfNeeded(allowBundledFallback: Bool) {
+    private func prepareLaunchPosterIfNeeded() {
         guard !hasPreparedLaunchPoster else { return }
-        if shouldSkipLaunchPoster || !allowBundledFallback {
+        if shouldSkipLaunchPoster {
             launchPosterSnapshot = nil
             isLaunchPosterVisible = false
             hasPreparedLaunchPoster = true
             return
         }
-        launchPosterSnapshot = portfolioStore.activeLaunchPoster
+        if !coldLaunchPosterSelection.hasSelected {
+            coldLaunchPosterSelection.record(
+                portfolioStore.selectLaunchPosterForColdLaunch()
+            )
+        }
+        launchPosterSnapshot = coldLaunchPosterSelection.snapshot
         isLaunchPosterVisible = launchPosterSnapshot != nil
         hasPreparedLaunchPoster = true
-    }
-
-    private func refreshVisibleLaunchPosterSnapshot() {
-        guard hasPreparedLaunchPoster, isLaunchPosterVisible else { return }
-        let latest = portfolioStore.activeLaunchPoster
-        guard latest != launchPosterSnapshot else { return }
-        launchPosterSnapshot = latest
-        isLaunchPosterVisible = latest != nil
     }
 
     private func restoreAccess() async {
@@ -360,7 +380,7 @@ struct RootView: View {
 #if DEBUG
         portfolioStore.configureMultiImageGalleryForVisualTestingIfNeeded()
 #endif
-        prepareLaunchPosterIfNeeded(allowBundledFallback: true)
+        prepareLaunchPosterIfNeeded()
         hasPreparedAuthorizedContent = true
         recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
         if let visualPortfolioTitle,
@@ -422,6 +442,7 @@ struct RootView: View {
     }
 
     private func resetProtectedPresentation() {
+        Task { await ArtworkImagePrefetcher.purgeMemory() }
         invalidateApprovedContentRefresh()
         portfolioStore.discardProtectedContent()
         portfolioStore.enforcePermissionScope(
@@ -432,6 +453,7 @@ struct RootView: View {
         hasPreparedLaunchPoster = false
         isLaunchPosterVisible = false
         launchPosterSnapshot = nil
+        coldLaunchPosterSelection.reset()
         portfolioPath = []
     }
 

@@ -72,7 +72,9 @@ struct AppContentManifest: Codable {
 /// manifest from creating unbounded SwiftUI collections or pathological text.
 enum ContentManifestPolicy {
     static let currentSchemaVersion = 1
-    static let currentCacheSchemaVersion = 3
+    // Version 4 removes all on-device portrait fallbacks and invalidates older
+    // launch-poster metadata so an app upgrade cannot resurrect a retired image.
+    static let currentCacheSchemaVersion = 4
 
     private static let maximumHeroCount = 5
     private static let maximumLaunchPosterCount = 12
@@ -225,20 +227,37 @@ enum ContentCatalog {
         URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-05-nas-1939-20260829.jpg")!,
     ]
     static let aboutPortraitURL: URL? = nil
-    private static let heroAssetNames = ["HeroOne", "HeroTwo", "HeroThree", "HeroFour", "HeroFive"]
+    private static let launchPosterBaseURL =
+        "https://www.shuzijun.com.cn/wp-content/uploads/2026/09"
 
-    static func heroAssetName(at index: Int) -> String? {
-        heroAssetNames.indices.contains(index) ? heroAssetNames[index] : nil
-    }
-    private static let launchPosterFallbackURL = URL(
-        string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-launch-qipao-ivory-20260830.jpg"
-    )!
     static let launchPosters = [
         LaunchPosterContent(
-            id: "evergreen",
+            id: "hanfu-lantern-01",
             isEnabled: true,
-            imageURL: launchPosterFallbackURL,
-            eyebrow: "YI SHU",
+            imageURL: URL(string: "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-01-mobile-20260902b.jpg")!,
+            eyebrow: "东方美学",
+            title: "易姝",
+            subtitle: "镜头之内，自有叙事。",
+            startsAt: Date(timeIntervalSince1970: 0),
+            endsAt: Date(timeIntervalSince1970: 4_102_444_800),
+            displaySeconds: 2.5
+        ),
+        LaunchPosterContent(
+            id: "hanfu-lantern-02",
+            isEnabled: true,
+            imageURL: URL(string: "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-02-mobile-20260902b.jpg")!,
+            eyebrow: "东方美学",
+            title: "易姝",
+            subtitle: "镜头之内，自有叙事。",
+            startsAt: Date(timeIntervalSince1970: 0),
+            endsAt: Date(timeIntervalSince1970: 4_102_444_800),
+            displaySeconds: 2.5
+        ),
+        LaunchPosterContent(
+            id: "hanfu-lantern-03",
+            isEnabled: true,
+            imageURL: URL(string: "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-03-mobile-20260902b.jpg")!,
+            eyebrow: "东方美学",
             title: "易姝",
             subtitle: "镜头之内，自有叙事。",
             startsAt: Date(timeIntervalSince1970: 0),

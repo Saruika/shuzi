@@ -58,6 +58,14 @@ enum AdminContentEditingPolicy {
     }
 }
 
+/// Administrator previews are inspection surfaces, not the final editorial
+/// crop. Keep the whole source asset visible here so an administrator can
+/// verify orientation and framing before publishing. Public presentation views
+/// intentionally keep their own independent fill/fit decisions.
+enum AdminMediaPreviewPolicy {
+    static let contentMode: ContentMode = .fit
+}
+
 /// Resolves an editable collection element by its stable identity on every
 /// access. SwiftUI may keep a control alive for one render pass after its row
 /// is removed or the server replaces the collection; an index-derived binding
@@ -450,7 +458,7 @@ struct AdminView: View {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 148), spacing: 8)], spacing: 8) {
                     ForEach(Array(portfolio.images.enumerated()), id: \.element.id) { index, image in
                         ZStack {
-                            ArtworkImage(url: image.url)
+                            AdminMediaPreview(url: image.url)
                                 .frame(height: 126)
                                 .frame(maxWidth: .infinity)
                                 .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -597,7 +605,7 @@ struct AdminView: View {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 148), spacing: 8)], spacing: 8) {
                 ForEach(Array(heroImageURLs.enumerated()), id: \.offset) { index, url in
                     ZStack {
-                        ArtworkImage(url: url)
+                        AdminMediaPreview(url: url)
                             .frame(height: 132)
                             .frame(maxWidth: .infinity)
                             .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -668,15 +676,7 @@ struct AdminView: View {
 
     private var aboutPortraitEditor: some View {
         AdminSection(title: "关于页人物图", subtitle: "替换后会同步到所有用户设备") {
-            Group {
-                if let aboutPortraitURL {
-                    ArtworkImage(url: aboutPortraitURL)
-                } else {
-                    Image("AboutPortrait")
-                        .resizable()
-                        .scaledToFill()
-                }
-            }
+            AdminMediaPreview(url: aboutPortraitURL)
             .frame(height: 300)
             .frame(maxWidth: .infinity)
             .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -687,14 +687,14 @@ struct AdminView: View {
             }
             .disabled(isPublishing)
 
-            Text("建议使用 9:16 竖版人像。未发布新图时继续使用 App 内置照片。")
+            Text("建议使用 9:16 竖版人像。照片仅从受信任的云端地址按需加载，不存入 App 本地。")
                 .font(.caption2)
                 .foregroundStyle(AppTheme.muted)
         }
     }
 
     private var launchPosterEditor: some View {
-        AdminSection(title: "开屏海报", subtitle: "按日期自动投放；最近开始的有效海报优先展示") {
+        AdminSection(title: "开屏海报", subtitle: "按日期自动投放；有效海报按稳定顺序轮换并避免连续重复") {
             PhotosPicker(selection: $selectedLaunchPoster, matching: .images) {
                 Label("上传一张开屏海报", systemImage: "rectangle.portrait.badge.plus")
                     .adminPrimaryButton()
@@ -705,7 +705,7 @@ struct AdminView: View {
                 launchPosterCard(poster)
             }
 
-            Text("上方预览采用与真实开屏一致的裁切和文案位置。建议使用 9:16 竖版照片，最后点击底部“保存并发布全部修改”。")
+            Text("上方会完整显示源图和文案安全区；真实开屏会根据设备方向自适应。建议使用 9:16 竖版照片，最后点击底部“保存并发布全部修改”。")
                 .font(.caption2)
                 .foregroundStyle(AppTheme.muted)
         }
@@ -769,7 +769,7 @@ struct AdminView: View {
 
     private var showreelEditor: some View {
         AdminSection(title: "Showreel", subtitle: "更换视频、海报和展示文案") {
-            ArtworkImage(url: showreelDraft.posterURL)
+            AdminMediaPreview(url: showreelDraft.posterURL)
                 .frame(height: 190)
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -822,7 +822,7 @@ struct AdminView: View {
         return VStack(alignment: .leading, spacing: 10) {
             if let url = URL(string: drama.wrappedValue.imageURL),
                ContentSecurityPolicy.isTrustedMediaURL(url) {
-                ArtworkImage(url: url)
+                AdminMediaPreview(url: url)
                     .frame(height: 180)
                     .frame(maxWidth: .infinity)
                     .clipShape(RoundedRectangle(cornerRadius: 5))
@@ -1303,17 +1303,46 @@ private struct LaunchPosterAdminPreview: View {
     let poster: LaunchPosterContent
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            ArtworkImage(url: poster.imageURL)
-            LinearGradient(
-                colors: [.black.opacity(0.12), .clear, AppTheme.ink.opacity(0.92)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            LaunchPosterTextBlock(poster: poster, compact: true)
-            .padding(18)
+        ZStack {
+            AppTheme.elevatedInk
+
+            ZStack(alignment: .bottomLeading) {
+                AdminMediaPreview(url: poster.imageURL)
+                LinearGradient(
+                    colors: [.black.opacity(0.12), .clear, AppTheme.ink.opacity(0.92)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                LaunchPosterTextBlock(poster: poster, compact: true)
+                    .padding(18)
+            }
+            .aspectRatio(9 / 16, contentMode: .fit)
         }
-        .aspectRatio(9 / 16, contentMode: .fill)
+    }
+}
+
+/// A neutral, aspect-preserving surface used exclusively by administrator
+/// editing screens. Centralizing this prevents fixed-height grids from silently
+/// falling back to `ArtworkImage`'s presentation-oriented `.fill` default.
+private struct AdminMediaPreview: View {
+    let url: URL?
+
+    var body: some View {
+        ZStack {
+            AppTheme.elevatedInk
+
+            if let url {
+                ArtworkImage(
+                    url: url,
+                    contentMode: AdminMediaPreviewPolicy.contentMode
+                )
+            } else {
+                Image(systemName: "photo")
+                    .font(.title2)
+                    .foregroundStyle(AppTheme.muted)
+            }
+        }
+        .clipped()
     }
 }
 

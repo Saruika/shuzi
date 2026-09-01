@@ -8,6 +8,11 @@ private struct AboutScrollViewportHeightKey: PreferenceKey {
     }
 }
 
+private enum AboutContactIcon {
+    case system(String)
+    case brandAsset(String)
+}
+
 struct AboutView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @Environment(LocalWeatherStore.self) private var localWeather
@@ -150,10 +155,13 @@ struct AboutView: View {
                     .accessibilityLabel("易姝形象照")
                     .accessibilityIdentifier("about-portrait")
             } else {
-                Image("AboutPortrait")
-                    .resizable()
-                    .scaledToFit()
-                    .accessibilityLabel("易姝形象照")
+                ZStack {
+                    AppTheme.elevatedInk
+                    Image(systemName: "person.crop.rectangle")
+                        .font(.largeTitle.weight(.light))
+                        .foregroundStyle(AppTheme.gold.opacity(0.72))
+                }
+                    .accessibilityLabel("易姝形象照正在安全加载")
                     .accessibilityIdentifier("about-portrait")
             }
             LinearGradient(colors: [.clear, AppTheme.ink], startPoint: .center, endPoint: .bottom)
@@ -161,7 +169,11 @@ struct AboutView: View {
                 Text("YI SHU")
                     .font(.caption2.weight(.semibold))
                     .tracking(4)
-                    .foregroundStyle(AppTheme.gold)
+                    .foregroundStyle(AppTheme.warmWhite)
+                    .shadow(color: .black.opacity(0.95), radius: 2, y: 1)
+                    // Decorative transliteration; the following Chinese name
+                    // carries the same semantic content for VoiceOver.
+                    .accessibilityHidden(true)
                 Text("易姝")
                     .font(.system(.largeTitle, design: .serif))
                 Text("短剧演员 / 模特 / 视频创作者")
@@ -282,10 +294,33 @@ struct AboutView: View {
 
     private var links: some View {
         VStack(spacing: 10) {
-            contactLink("工作联系", detail: "369476120@qq.com", icon: "envelope", url: ContentCatalog.emailURL)
-            contactLink("小红书", detail: "一只梳子君", icon: "sparkles", url: ContentCatalog.xiaohongshuURL)
-            contactLink("抖音", detail: "一只梳子君", icon: "play.circle", url: ContentCatalog.douyinURL)
-            contactLink("红果短剧", detail: "易姝", icon: "film.stack", url: ContentCatalog.hongguoURL)
+            contactLink(
+                "工作联系",
+                detail: "369476120@qq.com",
+                icon: .system("envelope"),
+                url: ContentCatalog.emailURL
+            )
+            contactLink(
+                "小红书",
+                detail: "一只梳子君",
+                icon: .brandAsset("XiaohongshuBrandIcon"),
+                url: ContentCatalog.xiaohongshuURL
+            )
+            .accessibilityIdentifier("about-xiaohongshu-link")
+            contactLink(
+                "抖音",
+                detail: "一只梳子君",
+                icon: .brandAsset("DouyinBrandIcon"),
+                url: ContentCatalog.douyinURL
+            )
+            .accessibilityIdentifier("about-douyin-link")
+            contactLink(
+                "红果短剧",
+                detail: "易姝",
+                icon: .brandAsset("HongguoBrandIcon"),
+                url: ContentCatalog.hongguoURL
+            )
+            .accessibilityIdentifier("about-hongguo-link")
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
@@ -474,12 +509,15 @@ struct AboutView: View {
         .padding(.vertical, dynamicTypeSize.isAccessibilitySize ? 12 : 0)
     }
 
-    private func contactLink(_ title: String, detail: String, icon: String, url: URL) -> some View {
+    private func contactLink(
+        _ title: String,
+        detail: String,
+        icon: AboutContactIcon,
+        url: URL
+    ) -> some View {
         Link(destination: url) {
             HStack(spacing: 14) {
-                Image(systemName: icon)
-                    .font(.body)
-                    .foregroundStyle(AppTheme.gold)
+                contactIcon(icon)
                     .frame(width: 36, height: 36)
                     .background(.white.opacity(0.055), in: Circle())
                 VStack(alignment: .leading, spacing: 3) {
@@ -500,5 +538,23 @@ struct AboutView: View {
             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func contactIcon(_ icon: AboutContactIcon) -> some View {
+        switch icon {
+        case let .system(name):
+            Image(systemName: name)
+                .font(.body)
+                .foregroundStyle(AppTheme.gold)
+        case let .brandAsset(name):
+            Image(name)
+                .resizable()
+                .renderingMode(.original)
+                .scaledToFit()
+                .frame(width: 24, height: 24)
+                .clipShape(RoundedRectangle(cornerRadius: 5.5, style: .continuous))
+                .accessibilityHidden(true)
+        }
     }
 }

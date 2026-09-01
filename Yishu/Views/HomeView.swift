@@ -14,6 +14,21 @@ enum HomeHeroRenderPolicy {
         idiom == .pad && viewport.width > viewport.height ? .fit : .fill
     }
 
+    static func fittedSize(sourceSize: CGSize, in viewport: CGSize) -> CGSize {
+        guard sourceSize.width > 0,
+              sourceSize.height > 0,
+              viewport.width > 0,
+              viewport.height > 0 else { return .zero }
+        let scale = min(
+            viewport.width / sourceSize.width,
+            viewport.height / sourceSize.height
+        )
+        return CGSize(
+            width: sourceSize.width * scale,
+            height: sourceSize.height * scale
+        )
+    }
+
     static func shouldLoadRemoteImage(
         at index: Int,
         selection: Int,
@@ -83,7 +98,13 @@ private struct HeroPager: View {
     @State private var isVisible = false
 
     private var slides: [URL] {
-        imageURLs.isEmpty ? ContentCatalog.heroImages : imageURLs
+        // Keep the adaptive-layout fixture independent from a stale manifest
+        // left in the simulator by an earlier UI test. This branch is only
+        // reachable from the DEBUG-only visual-test launch argument.
+        if holdsRemoteImagesForVisualTesting {
+            return ContentCatalog.heroImages
+        }
+        return imageURLs.isEmpty ? ContentCatalog.heroImages : imageURLs
     }
 
     private var shouldAutoAdvance: Bool {
@@ -106,21 +127,24 @@ private struct HeroPager: View {
             ZStack(alignment: .bottom) {
                 TabView(selection: $selection) {
                     ForEach(slides.indices, id: \.self) { index in
+                        let loadsRemoteImage = !holdsRemoteImagesForVisualTesting
+                            && HomeHeroRenderPolicy.shouldLoadRemoteImage(
+                                at: index,
+                                selection: selection,
+                                count: slides.count
+                            )
+                        let visualTestIdentifier = exposesVisualTestState
+                            && presentation == .fit
+                            && index == selection
+                            ? "home-hero-actual-fitted-image"
+                            : nil
+
                         HeroSlideImage(
                             url: slides[index],
-                            fallbackName: ContentCatalog.heroAssetName(at: index),
-                            loadsRemoteImage: !holdsRemoteImagesForVisualTesting
-                                && HomeHeroRenderPolicy.shouldLoadRemoteImage(
-                                    at: index,
-                                    selection: selection,
-                                    count: slides.count
-                                ),
+                            loadsRemoteImage: loadsRemoteImage,
+                            usesVisualTestArtwork: holdsRemoteImagesForVisualTesting,
                             presentation: presentation,
-                            visualTestIdentifier: exposesVisualTestState
-                                && presentation == .fit
-                                && index == selection
-                                ? "home-hero-actual-fitted-image"
-                                : nil
+                            visualTestIdentifier: visualTestIdentifier
                         )
                             .frame(width: proxy.size.width, height: proxy.size.height)
                             .clipped()
@@ -538,14 +562,16 @@ private struct HeroPager: View {
 
 private struct HeroSlideImage: View {
     let url: URL
-    let fallbackName: String?
     let loadsRemoteImage: Bool
+    let usesVisualTestArtwork: Bool
     let presentation: HomeHeroPresentation
     let visualTestIdentifier: String?
 
     var body: some View {
         GeometryReader { proxy in
-            if presentation == .fit {
+            if usesVisualTestArtwork {
+                visualTestComposition(in: proxy.size)
+            } else if presentation == .fit {
                 fittedComposition(in: proxy.size)
             } else {
                 filledComposition(in: proxy.size)
@@ -555,20 +581,67 @@ private struct HeroSlideImage: View {
     }
 
     @ViewBuilder
+    private func visualTestComposition(in size: CGSize) -> some View {
+#if DEBUG
+        let sourceSize = CGSize(width: 959, height: 1_440)
+        if presentation == .fit {
+            let fittedSize = HomeHeroRenderPolicy.fittedSize(
+                sourceSize: sourceSize,
+                in: size
+            )
+            ZStack {
+                visualTestArtwork
+                    .frame(width: size.width, height: size.height)
+                    .blur(radius: 24, opaque: true)
+                    .overlay { Color.black.opacity(0.12) }
+
+                visualTestArtwork
+                    .frame(width: fittedSize.width, height: fittedSize.height)
+
+                HomeHeroLayoutProbe(
+                    identifier: visualTestIdentifier ?? "",
+                    sourceSize: sourceSize
+                )
+                .frame(width: size.width, height: size.height)
+            }
+            .frame(width: size.width, height: size.height)
+        } else {
+            visualTestArtwork
+                .frame(width: size.width, height: size.height)
+        }
+#else
+        placeholder
+#endif
+    }
+
+    private var visualTestArtwork: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.72, green: 0.79, blue: 0.70),
+                Color(red: 0.88, green: 0.82, blue: 0.64),
+                Color(red: 0.30, green: 0.40, blue: 0.34),
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    @ViewBuilder
     private func fittedComposition(in size: CGSize) -> some View {
         ZStack {
             fittedBackground(in: size)
 
-            if let fallbackName {
-                fittedForeground(
-                    Image(fallbackName),
-                    in: size,
-                    sourceSize: UIImage(named: fallbackName)?.size,
-                    accessibilityIdentifier: visualTestIdentifier
-                )
-            }
-
             remoteImage(in: size, usesFittedPresentation: true)
+
+#if DEBUG
+            if !loadsRemoteImage, let visualTestIdentifier {
+                Color.clear
+                    .frame(width: size.width, height: size.height)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("完整首页照片布局范围")
+                    .accessibilityIdentifier(visualTestIdentifier)
+            }
+#endif
         }
         .frame(width: size.width, height: size.height)
     }
@@ -576,12 +649,8 @@ private struct HeroSlideImage: View {
     @ViewBuilder
     private func filledComposition(in size: CGSize) -> some View {
         ZStack {
-            if let fallbackName {
-                filledArtwork(Image(fallbackName), in: size)
-            } else {
-                placeholder
-                    .overlay { ProgressView().tint(AppTheme.gold) }
-            }
+            placeholder
+                .overlay { ProgressView().tint(AppTheme.gold) }
 
             remoteImage(in: size, usesFittedPresentation: false)
         }
@@ -626,11 +695,7 @@ private struct HeroSlideImage: View {
 
     @ViewBuilder
     private func fittedBackground(in size: CGSize) -> some View {
-        if let fallbackName {
-            fittedBackground(Image(fallbackName), in: size)
-        } else {
-            placeholder
-        }
+        placeholder
     }
 
     private func fittedBackground(_ image: Image, in size: CGSize) -> some View {
@@ -678,7 +743,7 @@ private struct HeroSlideImage: View {
         if let sourceSize,
            sourceSize.width > 0,
            sourceSize.height > 0 {
-            let fittedSize = fittedForegroundSize(
+            let fittedSize = HomeHeroRenderPolicy.fittedSize(
                 sourceSize: sourceSize,
                 in: size
             )
@@ -696,17 +761,6 @@ private struct HeroSlideImage: View {
         }
     }
 
-    private func fittedForegroundSize(sourceSize: CGSize, in viewport: CGSize) -> CGSize {
-        let scale = min(
-            viewport.width / sourceSize.width,
-            viewport.height / sourceSize.height
-        )
-        return CGSize(
-            width: sourceSize.width * scale,
-            height: sourceSize.height * scale
-        )
-    }
-
     private var placeholder: some View {
         ZStack {
             AppTheme.elevatedInk
@@ -718,3 +772,57 @@ private struct HeroSlideImage: View {
         }
     }
 }
+
+#if DEBUG
+private struct HomeHeroLayoutProbe: UIViewRepresentable {
+    let identifier: String
+    let sourceSize: CGSize
+
+    func makeUIView(context: Context) -> HomeHeroLayoutProbeView {
+        let view = HomeHeroLayoutProbeView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ view: HomeHeroLayoutProbeView, context: Context) {
+        view.configure(identifier: identifier, sourceSize: sourceSize)
+    }
+}
+
+private final class HomeHeroLayoutProbeView: UIView {
+    private lazy var probeElement = UIAccessibilityElement(accessibilityContainer: self)
+    private var sourceSize: CGSize = .zero
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isAccessibilityElement = false
+        probeElement.accessibilityLabel = "完整首页照片布局范围"
+        accessibilityElements = [probeElement]
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func configure(identifier: String, sourceSize: CGSize) {
+        probeElement.accessibilityIdentifier = identifier
+        self.sourceSize = sourceSize
+        setNeedsLayout()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let fittedSize = HomeHeroRenderPolicy.fittedSize(
+            sourceSize: sourceSize,
+            in: bounds.size
+        )
+        probeElement.accessibilityFrameInContainerSpace = CGRect(
+            x: (bounds.width - fittedSize.width) / 2,
+            y: (bounds.height - fittedSize.height) / 2,
+            width: fittedSize.width,
+            height: fittedSize.height
+        )
+    }
+}
+#endif

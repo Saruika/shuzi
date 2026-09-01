@@ -172,7 +172,7 @@ struct FanAccountView: View {
             .disabled(deleteCurrentPassword.isEmpty)
             Button("取消", role: .cancel) { deleteCurrentPassword = "" }
         } message: {
-            Text("请重新输入当前密码。身份码、抖音 ID、权限和服务器账号记录都会被删除，且无法恢复。")
+            Text("请重新输入当前密码。身份码、已填写的抖音 ID、权限和服务器账号记录都会被删除，且无法恢复。")
         }
         .alert("通过 Apple 重新验证并删除账号？", isPresented: $showAppleDeleteConfirmation) {
             Button("继续 Apple 验证", role: .destructive) {
@@ -183,7 +183,7 @@ struct FanAccountView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("验证通过后，身份码、抖音 ID、权限和服务器账号记录都会被永久删除。")
+            Text("验证通过后，身份码、已填写的抖音 ID、权限和服务器账号记录都会被永久删除。")
         }
         .fullScreenCover(isPresented: $presentsAdminAccess) {
             SecureCaptureSurface(
@@ -245,7 +245,7 @@ struct FanAccountView: View {
                 .disabled(account.isWorking || appleSignIn.isWorking)
                 .opacity(account.isWorking || appleSignIn.isWorking ? 0.55 : 1)
 
-                Text("首次通过 Apple 验证后，仍需填写昵称和抖音 ID，并等待管理员审批。")
+                Text("首次通过 Apple 验证后，仍需填写昵称并提交申请；抖音 ID 选填。")
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)
                     .multilineTextAlignment(.center)
@@ -339,13 +339,13 @@ struct FanAccountView: View {
                     .textContentType(.nickname)
                     .accessibilityLabel("昵称")
                     .accessibilityIdentifier("fan-apple-display-name")
-                TextField("抖音 ID（必填，不要填链接）", text: $appleRegistrationDraft.douyinID)
+                TextField("抖音 ID（选填，不要填链接）", text: $appleRegistrationDraft.douyinID)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .accessibilityLabel("抖音 ID，必填，请不要填写链接")
+                    .accessibilityLabel("抖音 ID，选填，请不要填写链接")
                     .accessibilityIdentifier("fan-apple-douyin-id")
 
-                Text("抖音 ID 只用于管理员核验身份和分配权限，不会在粉丝之间公开。")
+                Text("抖音 ID 为选填；如自愿填写，只用于管理员核验，不会影响注册、审批或内容权限，也不会向其他粉丝公开。")
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)
 
@@ -361,7 +361,7 @@ struct FanAccountView: View {
                 .accessibilityIdentifier("fan-apple-privacy-policy")
 
                 Toggle(isOn: $appleRegistrationDraft.acceptedDataUse) {
-                    Text("我已阅读隐私政策：昵称、抖音 ID、随机身份码和安装记录用于账号识别、安全登录与权限分配。")
+                    Text("我已阅读隐私政策：昵称、随机身份码和安装记录用于账号识别、安全登录与权限分配；如填写抖音 ID，仅用于管理员核验。")
                         .font(.caption)
                         .lineSpacing(4)
                 }
@@ -425,10 +425,10 @@ struct FanAccountView: View {
             TextField("昵称", text: $displayName)
                 .textContentType(.nickname)
                 .accessibilityLabel("昵称")
-            TextField("抖音 ID（必填，不要填链接）", text: $douyinID)
+            TextField("抖音 ID（选填，不要填链接）", text: $douyinID)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .accessibilityLabel("抖音 ID，必填，请不要填写链接")
+                .accessibilityLabel("抖音 ID，选填，请不要填写链接")
                 .accessibilityIdentifier("fan-register-douyin-id")
             SecureField("设置密码（至少 10 位）", text: $registrationPassword)
                 .textContentType(.newPassword)
@@ -437,7 +437,7 @@ struct FanAccountView: View {
                 .textContentType(.newPassword)
                 .accessibilityLabel("确认密码")
 
-            Text("抖音 ID 只用于管理员核验身份和分配权限，不会在粉丝之间公开。")
+            Text("抖音 ID 为选填；如自愿填写，仅用于管理员核验，不会影响注册、审批或内容权限。")
                 .font(.caption2)
                 .foregroundStyle(AppTheme.muted)
 
@@ -453,7 +453,7 @@ struct FanAccountView: View {
             .accessibilityIdentifier("fan-register-privacy-policy")
 
             Toggle(isOn: $acceptedDataUse) {
-                Text("我已阅读隐私政策：昵称、抖音 ID、随机身份码和安装记录用于账号识别、安全登录与权限分配，不用于广告跟踪。")
+                Text("我已阅读隐私政策：昵称、随机身份码和安装记录用于账号识别、安全登录与权限分配；如填写抖音 ID，仅用于管理员核验。上述资料不用于广告跟踪。")
                     .font(.caption)
                     .lineSpacing(4)
             }
@@ -559,7 +559,11 @@ struct FanAccountView: View {
                 VStack(spacing: 0) {
                     identityRow("粉丝身份码", value: profile.identityCode, copyable: true)
                     Divider().overlay(.white.opacity(0.08))
-                    identityRow("抖音 ID", value: profile.douyinID, copyable: false)
+                    identityRow(
+                        "抖音 ID",
+                        value: profile.douyinID.isEmpty ? "未填写（选填）" : profile.douyinID,
+                        copyable: false
+                    )
                     Divider().overlay(.white.opacity(0.08))
                     identityRow("本机安装码", value: profile.installationCode, copyable: true)
                     Divider().overlay(.white.opacity(0.08))
@@ -641,7 +645,7 @@ struct FanAccountView: View {
                  ? "管理员只会看到这次生成的临时凭据一次，无法读取你设置的新密码。完成后临时密码和旧会话会立即失效。"
                  : (profile.requiresPasswordChange
                     ? "恢复凭据只会向管理员显示一次。完成后临时密码和所有旧会话都会失效。"
-                    : "请妥善保存身份码。管理员只能看到昵称、抖音 ID、身份码、审批状态和权限，无法查看你的密码。"))
+                    : "请妥善保存身份码。管理员只能看到昵称、身份码、审批状态、权限以及你自愿填写的抖音 ID，无法查看你的密码。"))
                 .font(.caption2)
                 .lineSpacing(4)
                 .foregroundStyle(AppTheme.muted)
@@ -698,10 +702,10 @@ struct FanAccountView: View {
             TextField("本人昵称", text: $invitedDisplayName)
                 .textContentType(.nickname)
                 .accessibilityLabel("本人昵称")
-            TextField("本人抖音 ID（必填，不要填链接）", text: $invitedDouyinID)
+            TextField("本人抖音 ID（选填，不要填链接）", text: $invitedDouyinID)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .accessibilityLabel("本人抖音 ID，必填，请不要填写链接")
+                .accessibilityLabel("本人抖音 ID，选填，请不要填写链接")
                 .accessibilityIdentifier("fan-setup-douyin-id")
             SecureField("重新输入管理员给你的临时密码", text: $currentTemporaryPassword)
                 .textContentType(.password)
@@ -725,7 +729,7 @@ struct FanAccountView: View {
             .accessibilityIdentifier("fan-setup-privacy-policy")
 
             Toggle(isOn: $acceptedInvitationDataUse) {
-                Text("我本人已阅读隐私政策，同意昵称、抖音 ID、随机身份码和安装记录用于账号识别、安全登录与权限分配。")
+                Text("我本人已阅读隐私政策，同意昵称、随机身份码和安装记录用于账号识别、安全登录与权限分配；如填写抖音 ID，仅用于管理员核验。")
                     .font(.caption)
                     .lineSpacing(4)
             }
@@ -1365,7 +1369,7 @@ struct FanAccessAdminView: View {
                 .font(.headline)
                 .foregroundStyle(AppTheme.gold)
 
-            Text("临时凭据仅显示这一次，有效期 24 小时。对方首次登录后必须本人填写抖音 ID、确认隐私政策并设置新密码；在此之前无法访问任何作品内容。")
+            Text("临时凭据仅显示这一次，有效期 24 小时。对方首次登录后必须本人填写昵称、确认隐私政策并设置新密码；抖音 ID 选填。在完成设置前无法访问任何作品内容。")
                 .font(.caption)
                 .lineSpacing(4)
                 .foregroundStyle(AppTheme.muted)
@@ -1616,9 +1620,10 @@ private struct FanAccessDetailView: View {
                             .font(.system(.largeTitle, design: .serif))
                             .accessibilityAddTraits(.isHeader)
                         Text(user.requiresAppleRegistration
-                             ? "等待绑定抖音 ID"
+                             ? "等待完成账号申请"
                              : user.requiresAccountSetup
-                             ? "抖音 ID 待本人填写" : "@\(user.douyinID)")
+                             ? "待本人完成首次设置"
+                             : (user.douyinID.isEmpty ? "抖音 ID 未填写（选填）" : "@\(user.douyinID)"))
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(AppTheme.gold)
                         Text(user.identityCode)
@@ -1645,7 +1650,7 @@ private struct FanAccessDetailView: View {
                         if user.requiresIdentityCompletion {
                             Label(
                                 user.requiresAppleRegistration
-                                    ? "对方已通过 Apple 验证，但尚未填写抖音 ID 并提交申请；现在不能批准或开放内容。"
+                                    ? "对方已通过 Apple 验证，但尚未完成账号申请；现在不能批准或开放内容。"
                                     : "对方尚未完成首次设置。即使账号为待审批状态，也不能提前批准或访问内容。",
                                 systemImage: user.requiresAppleRegistration
                                     ? "apple.logo" : "key.horizontal.fill"
@@ -1956,10 +1961,12 @@ private struct FanAdminUserRow: View {
                         .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
                 }
                 Text(user.requiresAppleRegistration
-                     ? "等待绑定抖音 ID · \(user.identityCode)"
+                     ? "等待完成账号申请 · \(user.identityCode)"
                      : user.requiresAccountSetup
                      ? "待本人完成首次设置 · \(user.identityCode)"
-                     : "@\(user.douyinID) · \(user.identityCode)")
+                     : (user.douyinID.isEmpty
+                        ? "抖音 ID 未填写（选填） · \(user.identityCode)"
+                        : "@\(user.douyinID) · \(user.identityCode)"))
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)
                     .lineLimit(nil)

@@ -41,6 +41,15 @@ if git grep -q 'http://' -- ':(glob)Yishu/**/*.swift'; then
   fail 'iOS 生产源码中不允许明文 HTTP 地址'
 fi
 
+# App Review gate: do not recreate screenshot blocking by borrowing UIKit's
+# secure-text rendering hierarchy or by naming private UIKit classes. Apple
+# exposes capture-state notifications, but no public still-image screenshot
+# prevention API for third-party apps.
+if git grep -q -E 'isSecureTextEntry|_UIText|SecureCanvasResolver|SecureHostingContainerView' -- \
+  ':(glob)Yishu/**/*.swift'; then
+  fail '检测到非公开截图画布实现，违反 App Store 公开 API 门禁'
+fi
+
 if command -v php >/dev/null 2>&1; then
   php -l Server/shuzijun-app-content.php >/dev/null
   php Server/tests/plugin-contract-test.php

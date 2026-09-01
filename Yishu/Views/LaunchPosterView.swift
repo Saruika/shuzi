@@ -8,6 +8,7 @@ struct LaunchPosterView: View {
     @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var artworkIsVisible = false
     @State private var remoteImageIsVisible = false
     @State private var artworkScale: CGFloat = 1.035
     @State private var copyIsVisible = false
@@ -47,38 +48,33 @@ struct LaunchPosterView: View {
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
-                    }
+                }
 
-                DownsampledAsyncImage(
-                    url: poster.imageURL,
-                    targetSize: proxy.size,
-                    maximumPixelSize: 1_800
-                ) { phase in
-                    if case .success(let image) = phase {
-                        launchArtwork(image, in: proxy.size)
-                            .scaleEffect(artworkScale)
-                            .opacity(remoteImageIsVisible ? 1 : 0)
-                            .onAppear {
-                                if reduceMotion {
-                                    remoteImageIsVisible = true
-                                    artworkScale = 1
-                                    copyIsVisible = true
-                                } else {
-                                    withAnimation(.easeOut(duration: 0.45)) {
+                ZStack {
+                    launchPlaceholder(in: proxy.size)
+                        .onAppear(perform: revealCopyIfNeeded)
+
+                    DownsampledAsyncImage(
+                        url: poster.imageURL,
+                        targetSize: proxy.size,
+                        maximumPixelSize: 2_880,
+                        showsRetryButton: false
+                    ) { phase in
+                        if case .success(let image) = phase {
+                            launchArtwork(image, in: proxy.size)
+                                .scaleEffect(artworkScale)
+                                .opacity(remoteImageIsVisible ? 1 : 0)
+                                .onAppear {
+                                    revealArtworkIfNeeded()
+                                    if reduceMotion {
                                         remoteImageIsVisible = true
-                                    }
-                                    withAnimation(.linear(duration: min(max(poster.displaySeconds, 1.5), 5) + 0.6)) {
-                                        artworkScale = 1
-                                    }
-                                    withAnimation(.easeOut(duration: 0.55).delay(0.12)) {
-                                        copyIsVisible = true
+                                    } else {
+                                        withAnimation(.easeOut(duration: 0.45)) {
+                                            remoteImageIsVisible = true
+                                        }
                                     }
                                 }
-                            }
-                    } else if case .empty = phase {
-                        ProgressView()
-                            .tint(AppTheme.gold)
-                            .frame(width: proxy.size.width, height: proxy.size.height)
+                        }
                     }
                 }
 
@@ -140,19 +136,23 @@ struct LaunchPosterView: View {
                 .accessibilityHint("立即进入首页")
                 .accessibilityIdentifier("launch-poster-skip")
             }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("launch-poster-canvas")
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
         .background(AppTheme.ink.ignoresSafeArea())
         .task(
             id: LaunchPosterDismissTaskID(
                 imageURL: poster.imageURL,
-                imageIsVisible: remoteImageIsVisible,
+                imageIsVisible: artworkIsVisible,
                 pausesAutomaticDismissal: pausesAutomaticDismissal
             )
         ) {
             guard !pausesAutomaticDismissal else { return }
             do {
-                let duration = remoteImageIsVisible
+                let duration = artworkIsVisible
                     ? min(max(poster.displaySeconds, 1.5), 5)
                     : 10
                 try await Task.sleep(for: .seconds(duration))
@@ -161,6 +161,59 @@ struct LaunchPosterView: View {
                 dismiss()
             } catch { }
         }
+    }
+
+    private func revealArtworkIfNeeded() {
+        guard !artworkIsVisible else { return }
+        if reduceMotion {
+            artworkIsVisible = true
+            artworkScale = 1
+            copyIsVisible = true
+        } else {
+            withAnimation(.easeOut(duration: 0.45)) {
+                artworkIsVisible = true
+            }
+            withAnimation(.linear(duration: min(max(poster.displaySeconds, 1.5), 5) + 0.6)) {
+                artworkScale = 1
+            }
+            withAnimation(.easeOut(duration: 0.55).delay(0.12)) {
+                copyIsVisible = true
+            }
+        }
+    }
+
+    private func revealCopyIfNeeded() {
+        guard !copyIsVisible else { return }
+        if reduceMotion {
+            copyIsVisible = true
+        } else {
+            withAnimation(.easeOut(duration: 0.55).delay(0.12)) {
+                copyIsVisible = true
+            }
+        }
+    }
+
+    private func launchPlaceholder(in size: CGSize) -> some View {
+        ZStack {
+            AppTheme.ink
+            RadialGradient(
+                colors: [AppTheme.gold.opacity(0.16), .clear],
+                center: .topTrailing,
+                startRadius: 0,
+                endRadius: max(size.width, size.height) * 0.78
+            )
+            LinearGradient(
+                colors: [.white.opacity(0.035), .clear, AppTheme.gold.opacity(0.06)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            ProgressView()
+                .controlSize(.small)
+                .tint(AppTheme.gold)
+                .accessibilityLabel("正在安全加载开屏图片")
+                .accessibilityIdentifier("launch-poster-loading")
+        }
+        .frame(width: size.width, height: size.height)
     }
 
     private func statusBarScrim(topInset: CGFloat, canvasHeight: CGFloat) -> some View {

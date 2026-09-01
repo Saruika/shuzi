@@ -83,6 +83,43 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "00-launch-poster-accessibility", app: app)
     }
 
+    func testLaunchPosterCanvasCoversTheWindowAcrossOrientations() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-disable-screen-protection-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityXXXL",
+        ]
+        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launch()
+
+        let window = app.windows.firstMatch
+        let canvas = element("launch-poster-canvas", in: app)
+        XCTAssertTrue(window.waitForExistence(timeout: 12), "开屏缺少应用窗口")
+        XCTAssertTrue(canvas.waitForExistence(timeout: 12), "开屏缺少可验证的全屏画布")
+        assertLaunchPosterCanvas(canvas, covers: window, orientation: "竖屏")
+        attachScreenshot(named: "00-launch-poster-full-window-portrait", app: app)
+
+        XCUIDevice.shared.orientation = .landscapeLeft
+        // XCUIElement's KVC predicate may retain the initial frame snapshot
+        // across rotation. Re-query both elements after UIKit settles.
+        Thread.sleep(forTimeInterval: 3)
+        let landscapeWindow = app.windows.firstMatch
+        let landscapeCanvas = element("launch-poster-canvas", in: app)
+        XCTAssertGreaterThan(
+            landscapeWindow.frame.width,
+            landscapeWindow.frame.height,
+            "开屏窗口未进入横屏"
+        )
+        XCTAssertTrue(landscapeCanvas.waitForExistence(timeout: 3), "旋转后开屏画布丢失")
+        assertLaunchPosterCanvas(landscapeCanvas, covers: landscapeWindow, orientation: "横屏")
+        attachScreenshot(named: "00-launch-poster-full-window-landscape", app: app)
+
+        XCUIDevice.shared.orientation = .portrait
+    }
+
     func testPrimaryTabsExposeTheirCoreContent() {
         let app = launchApp()
 
@@ -398,6 +435,31 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "10-admin-login", app: app)
     }
 
+    func testAboutSocialLinksKeepCompleteAccessiblePlatformAndAccountNames() {
+        let app = launchApp(arguments: ["-open-about-for-visual-testing"])
+        let expectedLinks = [
+            ("about-xiaohongshu-link", "小红书", "一只梳子君"),
+            ("about-douyin-link", "抖音", "一只梳子君"),
+            ("about-hongguo-link", "红果短剧", "易姝"),
+        ]
+
+        for (identifier, platform, account) in expectedLinks {
+            let link = element(identifier, in: app)
+            scrollToElement(link, in: app)
+            XCTAssertTrue(link.isHittable, "\(platform) 外链不可点击")
+            assertMinimumTapTarget(link, named: "\(platform) 外链")
+            XCTAssertTrue(link.label.contains(platform), "\(platform) 外链缺少平台名")
+            XCTAssertTrue(link.label.contains(account), "\(platform) 外链缺少账号名")
+            XCTAssertEqual(
+                link.label.components(separatedBy: platform).count - 1,
+                1,
+                "\(platform) 装饰图标不应被 VoiceOver 重复朗读"
+            )
+        }
+
+        attachScreenshot(named: "10-about-social-brand-icons", app: app)
+    }
+
     func testEmptyLibraryCanReturnToPortfolio() {
         let app = launchApp(arguments: ["-open-favorites-for-visual-testing"])
         assertExists("favorites-heading", in: app)
@@ -626,6 +688,31 @@ final class YishuUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(element.frame.height, 43.5, "\(name)高度不足 44pt", file: file, line: line)
     }
 
+    private func assertLaunchPosterCanvas(
+        _ canvas: XCUIElement,
+        covers window: XCUIElement,
+        orientation: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let windowFrame = window.frame
+        let visibleFrame = windowFrame.intersection(canvas.frame)
+        XCTAssertGreaterThanOrEqual(
+            visibleFrame.width / max(windowFrame.width, 1),
+            0.995,
+            "\(orientation)开屏未覆盖窗口全宽：window=\(windowFrame), canvas=\(canvas.frame)",
+            file: file,
+            line: line
+        )
+        XCTAssertGreaterThanOrEqual(
+            visibleFrame.height / max(windowFrame.height, 1),
+            0.995,
+            "\(orientation)开屏未覆盖窗口全高：window=\(windowFrame), canvas=\(canvas.frame)",
+            file: file,
+            line: line
+        )
+    }
+
     private func auditPrimaryPageAccessibilityBaseline(
         pageNamed pageName: String,
         in app: XCUIApplication
@@ -798,6 +885,9 @@ final class YishuUITests: XCTestCase {
     }
 
     private func attachScreenshot(named name: String, app: XCUIApplication) {
+        guard ProcessInfo.processInfo.environment["YISHU_UI_TEST_ATTACH_SCREENSHOTS"] == "1" else {
+            return
+        }
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name
         attachment.lifetime = .keepAlways
@@ -1006,7 +1096,10 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         )
     }
 
-    func testHomeHeroKeepsTheFullIPadCompositionAndNeverTurnsBlank() {
+    func testHomeHeroKeepsTheFullIPadCompositionAndNeverTurnsBlank() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("该构图与黑屏门禁只适用于 iPad；iPhone 由首页控件与辅助功能用例覆盖")
+        }
         let heroArguments = [
             "-hold-home-remote-images-for-visual-testing",
             "-expose-home-hero-state-for-visual-testing",
@@ -1197,6 +1290,9 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
     }
 
     private func attachScreenshot(named name: String, app: XCUIApplication) {
+        guard ProcessInfo.processInfo.environment["YISHU_UI_TEST_ATTACH_SCREENSHOTS"] == "1" else {
+            return
+        }
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name
         attachment.lifetime = .keepAlways

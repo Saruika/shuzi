@@ -6,9 +6,43 @@ enum ContentOrigin: Equatable {
     case network
 }
 
+/// Chooses one active launch poster per process launch. The order is derived
+/// only from server-owned fields, so it remains deterministic across devices;
+/// the persisted previous identifier prevents consecutive repetition without
+/// persisting any protected image data.
+enum LaunchPosterSelectionPolicy {
+    static func activeCandidates(
+        in posters: [LaunchPosterContent],
+        at date: Date = .now
+    ) -> [LaunchPosterContent] {
+        posters
+            .filter { $0.isActive(at: date) }
+            .sorted {
+                if $0.startsAt != $1.startsAt { return $0.startsAt < $1.startsAt }
+                return $0.id < $1.id
+            }
+    }
+
+    static func select(
+        from posters: [LaunchPosterContent],
+        at date: Date = .now,
+        previousID: String?
+    ) -> LaunchPosterContent? {
+        let candidates = activeCandidates(in: posters, at: date)
+        guard !candidates.isEmpty else { return nil }
+        guard candidates.count > 1,
+              let previousID,
+              let previousIndex = candidates.firstIndex(where: { $0.id == previousID }) else {
+            return candidates[0]
+        }
+        return candidates[(previousIndex + 1) % candidates.count]
+    }
+}
+
 @MainActor
 final class PortfolioStore: ObservableObject {
-    nonisolated private static let offlinePreviewImageCount = 3
+    nonisolated private static let cachedManifestPreviewImageCount = 3
+    nonisolated private static let lastLaunchPosterIDKey = "cn.com.shuzijun.yishu.last-launch-poster-id"
     @Published private(set) var portfolios: [Portfolio] = Portfolio.fallback
     @Published private(set) var heroImages: [URL] = ContentCatalog.heroImages
     @Published private(set) var aboutPortraitURL: URL? = ContentCatalog.aboutPortraitURL
@@ -90,10 +124,19 @@ final class PortfolioStore: ObservableObject {
         }
     }
 
-    var activeLaunchPoster: LaunchPosterContent? {
-        launchPosters
-            .filter { $0.isActive() }
-            .max { $0.startsAt < $1.startsAt }
+    func selectLaunchPosterForColdLaunch(
+        at date: Date = .now,
+        defaults: UserDefaults = .standard
+    ) -> LaunchPosterContent? {
+        let selected = LaunchPosterSelectionPolicy.select(
+            from: launchPosters,
+            at: date,
+            previousID: defaults.string(forKey: Self.lastLaunchPosterIDKey)
+        )
+        if let selected {
+            defaults.set(selected.id, forKey: Self.lastLaunchPosterIDKey)
+        }
+        return selected
     }
 
     func applyPublishedManifest(_ manifest: AppContentManifest) {
@@ -126,7 +169,7 @@ final class PortfolioStore: ObservableObject {
     func enforcePermissionScope(canViewFullGallery: Bool, canViewVideo: Bool) {
         var didReduceScope = false
         if !canViewFullGallery {
-            portfolios = Self.offlinePreviewPortfolios(from: portfolios)
+            portfolios = Self.permissionScopedPreviewPortfolios(from: portfolios)
             didReduceScope = true
         }
         if !canViewVideo {
@@ -235,9 +278,10 @@ final class PortfolioStore: ObservableObject {
         dramas: [DramaWork],
         updatedAt: Date
     ) {
-        // Keep only a small authorized offline preview on disk. The complete
+        // Persist only a small authorized metadata snapshot (IDs, text and
+        // URLs). No image bytes are encoded or written to disk; the complete
         // live gallery remains an in-memory response.
-        let cachedPortfolios = offlinePreviewPortfolios(from: portfolios)
+        let cachedPortfolios = permissionScopedPreviewPortfolios(from: portfolios)
         guard let url = cacheFileURL(createDirectory: true),
               let data = try? JSONEncoder().encode(
                 PortfolioCacheEnvelope(
@@ -267,11 +311,11 @@ final class PortfolioStore: ObservableObject {
         }
     }
 
-    nonisolated private static func offlinePreviewPortfolios(
+    nonisolated private static func permissionScopedPreviewPortfolios(
         from portfolios: [Portfolio]
     ) -> [Portfolio] {
         portfolios.map { portfolio in
-            let preview = Array(portfolio.images.prefix(offlinePreviewImageCount))
+            let preview = Array(portfolio.images.prefix(cachedManifestPreviewImageCount))
             return Portfolio(
                 id: portfolio.id,
                 title: portfolio.title,

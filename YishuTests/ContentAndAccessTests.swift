@@ -6,6 +6,26 @@ import WeatherKit
 @testable import Yishu
 
 final class ContentAndAccessTests: XCTestCase {
+    func testAboutSocialBrandIconsAreBundledAtDisplayResolution() throws {
+        let requiredPixelEdge = Int(ceil(24 * UIScreen.main.scale))
+        for assetName in [
+            "XiaohongshuBrandIcon",
+            "DouyinBrandIcon",
+            "HongguoBrandIcon",
+        ] {
+            let image = try XCTUnwrap(
+                UIImage(named: assetName),
+                "关于页缺少官方社交平台图标资产 \(assetName)"
+            )
+            let cgImage = try XCTUnwrap(image.cgImage)
+            XCTAssertGreaterThanOrEqual(
+                min(cgImage.width, cgImage.height),
+                requiredPixelEdge,
+                "\(assetName) 不足以在当前屏幕的 24pt 展示中保持清晰"
+            )
+        }
+    }
+
     func testSafeIdentifiedBindingFallsBackAfterRowRemoval() {
         let fallback = ContentCatalog.launchPosters[0]
         var posters = [fallback]
@@ -147,14 +167,24 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(portfolio.displayImageCount, portfolio.images.count)
     }
 
-    func testEveryBundledHeroHasAStableMatchingFallback() {
+    func testEveryHomeHeroUsesOnlyTrustedRemoteMedia() {
         XCTAssertEqual(ContentCatalog.heroImages.count, 5)
-        for (index, url) in ContentCatalog.heroImages.enumerated() {
+        for url in ContentCatalog.heroImages {
             XCTAssertEqual(url.scheme, "https")
-            XCTAssertNotNil(ContentCatalog.heroAssetName(at: index))
             XCTAssertTrue(ContentSecurityPolicy.isTrustedMediaURL(url))
         }
-        XCTAssertNil(ContentCatalog.heroAssetName(at: ContentCatalog.heroImages.count))
+    }
+
+    func testProtectedPortraitPhotosAreNotBundledInTheApp() {
+        let forbiddenAssetNames = [
+            "HeroOne", "HeroTwo", "HeroThree", "HeroFour", "HeroFive",
+            "AboutPortrait", "ShowreelPoster", "LaunchPosterFallback",
+            "LaunchPosterLanternOne", "LaunchPosterLanternTwo", "LaunchPosterLanternThree",
+        ]
+
+        for assetName in forbiddenAssetNames {
+            XCTAssertNil(UIImage(named: assetName), "受保护人物照片不得打包进 App：\(assetName)")
+        }
     }
 
     func testHomeHeroShowsTheFullPhotoOnlyForLandscapeIPadWindows() {
@@ -185,6 +215,23 @@ final class ContentAndAccessTests: XCTestCase {
                 idiom: .phone
             ),
             .fill
+        )
+    }
+
+    func testLandscapeIPadHeroFitPreservesThePortraitAspectRatio() {
+        let source = CGSize(width: 959, height: 1_440)
+        let viewport = CGSize(width: 1_376, height: 1_032)
+        let fitted = HomeHeroRenderPolicy.fittedSize(
+            sourceSize: source,
+            in: viewport
+        )
+
+        XCTAssertEqual(fitted.height, viewport.height, accuracy: 0.001)
+        XCTAssertLessThanOrEqual(fitted.width, viewport.width)
+        XCTAssertEqual(
+            fitted.width / fitted.height,
+            source.width / source.height,
+            accuracy: 0.0001
         )
     }
 
@@ -227,13 +274,92 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
-    func testBundledLaunchPosterDoesNotReuseAHomeHero() {
+    func testRemoteLaunchPostersDoNotReuseAHomeHero() {
         let homeHeroes = Set(ContentCatalog.heroImages)
 
-        XCTAssertFalse(ContentCatalog.launchPosters.isEmpty)
+        XCTAssertEqual(ContentCatalog.launchPosters.count, 3)
         for poster in ContentCatalog.launchPosters {
             XCTAssertFalse(homeHeroes.contains(poster.imageURL))
+            XCTAssertTrue(ContentSecurityPolicy.isTrustedMediaURL(poster.imageURL))
         }
+        XCTAssertEqual(Set(ContentCatalog.launchPosters.map(\.id)).count, 3)
+    }
+
+    func testColdLaunchPosterSelectionIsClearedBetweenAccounts() {
+        let firstAccountPoster = ContentCatalog.launchPosters[0]
+        let secondAccountPoster = ContentCatalog.launchPosters[1]
+        var state = ColdLaunchPosterSelectionState()
+
+        state.record(firstAccountPoster)
+        XCTAssertTrue(state.hasSelected)
+        XCTAssertEqual(state.snapshot, firstAccountPoster)
+
+        state.reset()
+        XCTAssertFalse(state.hasSelected)
+        XCTAssertNil(state.snapshot)
+
+        state.record(secondAccountPoster)
+        XCTAssertEqual(state.snapshot, secondAccountPoster)
+        XCTAssertNotEqual(state.snapshot, firstAccountPoster)
+    }
+
+    func testLaunchPosterSelectionRotatesDeterministicallyWithoutRepeating() {
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        let posters = [
+            makeLaunchPoster(id: "third", startsAt: now.addingTimeInterval(-100)),
+            makeLaunchPoster(id: "first", startsAt: now.addingTimeInterval(-300)),
+            makeLaunchPoster(id: "second", startsAt: now.addingTimeInterval(-200)),
+            makeLaunchPoster(
+                id: "future",
+                startsAt: now.addingTimeInterval(100),
+                endsAt: now.addingTimeInterval(500)
+            ),
+        ]
+
+        XCTAssertEqual(
+            LaunchPosterSelectionPolicy.activeCandidates(in: posters, at: now).map(\.id),
+            ["first", "second", "third"]
+        )
+        XCTAssertEqual(
+            LaunchPosterSelectionPolicy.select(
+                from: posters,
+                at: now,
+                previousID: nil
+            )?.id,
+            "first"
+        )
+        XCTAssertEqual(
+            LaunchPosterSelectionPolicy.select(
+                from: posters,
+                at: now,
+                previousID: "first"
+            )?.id,
+            "second"
+        )
+        XCTAssertEqual(
+            LaunchPosterSelectionPolicy.select(
+                from: posters,
+                at: now,
+                previousID: "third"
+            )?.id,
+            "first",
+            "轮换回首张时也必须避免连续重复末张"
+        )
+    }
+
+    func testLaunchPosterIgnoresLegacyFallbackMetadata() throws {
+        let poster = makeLaunchPoster(
+            id: "bundled-original",
+            startsAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let encoded = try JSONEncoder().encode(poster)
+        var legacyObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        legacyObject["fallbackAssetName"] = "LaunchPosterOriginalOne"
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
+        let decoded = try JSONDecoder().decode(LaunchPosterContent.self, from: legacyData)
+        XCTAssertEqual(decoded, poster)
     }
 
     func testAboutPortraitAcceptsOnlyTrustedHTTPSMedia() {
@@ -309,8 +435,12 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(nil))
         XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(1))
         XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(2))
-        XCTAssertTrue(ContentManifestPolicy.isSupportedCacheSchemaVersion(3))
-        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(4))
+        XCTAssertFalse(
+            ContentManifestPolicy.isSupportedCacheSchemaVersion(3),
+            "Build 41 必须拒绝可能保留旧开屏 URL 的缓存"
+        )
+        XCTAssertTrue(ContentManifestPolicy.isSupportedCacheSchemaVersion(4))
+        XCTAssertFalse(ContentManifestPolicy.isSupportedCacheSchemaVersion(5))
     }
 
     func testInsecureOrUnknownMediaHostsAreRejected() {
@@ -467,89 +597,6 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertTrue(ContentSecurityPolicy.isTrusted(scoped))
     }
 
-    func testSecureCanvasFallbackPolicyRetriesThenFailsClosed() {
-        XCTAssertEqual(
-            SecureCanvasFallbackPolicy.nextStep(
-                attempt: 1,
-                maximumAttempts: 3,
-                failure: .canvasMissing
-            ),
-            .retry
-        )
-        XCTAssertEqual(
-            SecureCanvasFallbackPolicy.nextStep(
-                attempt: 3,
-                maximumAttempts: 3,
-                failure: .canvasMissing
-            ),
-            .showPrivacyFallback(.canvasMissing)
-        )
-        XCTAssertEqual(
-            SecureCanvasFallbackPolicy.nextStep(
-                attempt: 1,
-                maximumAttempts: 3,
-                failure: nil
-            ),
-            .attachSecureCanvas
-        )
-    }
-
-    @MainActor
-    func testSecureContainerHostsProtectedContentOnlyInsideAttachedCanvas() {
-        var observedStates: [SecureCanvasInstallationState] = []
-        let container = SecureHostingContainerView(
-            rootView: AnyView(Text("protected-content")),
-            fallbackView: AnyView(Text("privacy-fallback")),
-            maximumProbeAttempts: 1,
-            secureCanvasResolver: { textField in
-                let canvas = UIView(frame: textField.bounds)
-                textField.addSubview(canvas)
-                return canvas
-            },
-            stateObserver: { observedStates.append($0) }
-        )
-
-        XCTAssertEqual(container.installationState, .secured)
-        XCTAssertTrue(container.hostsProtectedContent)
-        XCTAssertFalse(container.hostsVisiblePrivacyFallback)
-        XCTAssertEqual(observedStates.last, .secured)
-    }
-
-    @MainActor
-    func testSecureContainerShowsVisiblePrivacyFallbackWhenCanvasIsMissing() {
-        var observedStates: [SecureCanvasInstallationState] = []
-        let container = SecureHostingContainerView(
-            rootView: AnyView(Text("protected-content")),
-            fallbackView: AnyView(Text("privacy-fallback")),
-            maximumProbeAttempts: 1,
-            secureCanvasResolver: { _ in nil },
-            stateObserver: { observedStates.append($0) }
-        )
-
-        XCTAssertEqual(container.installationState, .privacyFallback(.canvasMissing))
-        XCTAssertFalse(container.hostsProtectedContent)
-        XCTAssertTrue(container.hostsVisiblePrivacyFallback)
-        XCTAssertEqual(observedStates.last, .privacyFallback(.canvasMissing))
-
-        container.update(rootView: AnyView(Text("updated-protected-content")))
-        XCTAssertFalse(container.hostsProtectedContent)
-        XCTAssertTrue(container.hostsVisiblePrivacyFallback)
-    }
-
-    @MainActor
-    func testSecureContainerRejectsDetachedCanvas() {
-        let container = SecureHostingContainerView(
-            rootView: AnyView(Text("protected-content")),
-            fallbackView: AnyView(Text("privacy-fallback")),
-            maximumProbeAttempts: 1,
-            secureCanvasResolver: { _ in UIView() }
-        )
-
-        XCTAssertEqual(container.installationState, .privacyFallback(.canvasNotAttached))
-        XCTAssertFalse(container.hostsProtectedContent)
-        XCTAssertTrue(container.hostsVisiblePrivacyFallback)
-    }
-
     @MainActor
     func testPermissionDowngradeFailsClosedInMemoryAndCannotExpandLocally() {
         let store = PortfolioStore()
@@ -646,6 +693,17 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
+    func testAdministratorMediaPreviewsAlwaysPreserveTheCompleteAsset() {
+        switch AdminMediaPreviewPolicy.contentMode {
+        case .fit:
+            break
+        case .fill:
+            XCTFail("Administrator previews must not crop the source asset")
+        @unknown default:
+            XCTFail("Administrator previews use an unsupported content mode")
+        }
+    }
+
     func testFanIdentityCodesAreNormalizedWithoutAmbiguousCharacters() {
         XCTAssertEqual(
             FanAccountValidation.normalizedIdentityCode("hs-abcd-2345"),
@@ -660,12 +718,26 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(FanAccountValidation.normalizedIdentityCode("HS-ABCD-234"))
     }
 
-    func testFanRegistrationRequiresASafeDouyinID() {
+    func testNewFanAcknowledgementsUseTheCurrentPrivacyPolicyVersion() {
+        XCTAssertEqual(
+            FanAccountConsentPolicy.currentVersion,
+            "2026-09-02-approval-v3"
+        )
+    }
+
+    func testFanRegistrationAcceptsBlankOrNormalizesASafeOptionalDouyinID() {
         XCTAssertEqual(FanAccountValidation.normalizedDouyinID(" @YiShu_2026 "), "yishu_2026")
         XCTAssertEqual(FanAccountValidation.normalizedDouyinID("一只梳子君"), "一只梳子君")
         XCTAssertNil(FanAccountValidation.normalizedDouyinID("https://v.douyin.com/example"))
         XCTAssertNil(FanAccountValidation.normalizedDouyinID("a b"))
         XCTAssertNil(FanAccountValidation.normalizedDouyinID("@"))
+        XCTAssertEqual(FanAccountValidation.normalizedOptionalDouyinID("   "), "")
+        XCTAssertEqual(
+            FanAccountValidation.normalizedOptionalDouyinID(" @YiShu_2026 "),
+            "yishu_2026"
+        )
+        XCTAssertNil(FanAccountValidation.normalizedOptionalDouyinID("https://v.douyin.com/example"))
+        XCTAssertNil(FanAccountValidation.normalizedOptionalDouyinID("@"))
     }
 
     func testFanPasswordPolicyRequiresLengthAndTwoCharacterCategories() {
@@ -836,7 +908,7 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(object["nonce"])
     }
 
-    func testAppleRegistrationRequiresExplicitNameDouyinAndConsent() throws {
+    func testAppleRegistrationRequiresNameAndConsentButKeepsDouyinOptional() throws {
         XCTAssertEqual(
             try FanAccountValidation.validatedAppleRegistration(
                 displayName: " 梳子粉丝 ",
@@ -853,6 +925,19 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertThrowsError(try FanAccountValidation.validatedAppleRegistration(
             displayName: "",
             douyinID: "fan_2026",
+            acceptedDataUse: true
+        ))
+        XCTAssertEqual(
+            try FanAccountValidation.validatedAppleRegistration(
+                displayName: "梳子粉丝",
+                douyinID: "  ",
+                acceptedDataUse: true
+            ),
+            FanAppleRegistrationInput(displayName: "梳子粉丝", douyinID: "")
+        )
+        XCTAssertThrowsError(try FanAccountValidation.validatedAppleRegistration(
+            displayName: "梳子粉丝",
+            douyinID: "https://v.douyin.com/example",
             acceptedDataUse: true
         ))
     }
@@ -1132,7 +1217,7 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(unmarkedPlaceholder))
     }
 
-    func testAdminDirectoryAcceptsOnlyMarkedIncompleteAppleRegistration() throws {
+    func testAdminDirectorySeparatesIncompleteAppleRegistrationFromCompletedOptionalDouyin() throws {
         let data = Data(
             """
             {
@@ -1156,7 +1241,7 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertTrue(user.requiresIdentityCompletion)
         XCTAssertTrue(FanAccountValidation.isValidAdminFanUser(user))
 
-        let unmarked = AdminFanUser(
+        let completedWithoutDouyin = AdminFanUser(
             userID: user.userID,
             identityCode: user.identityCode,
             displayName: user.displayName,
@@ -1168,7 +1253,8 @@ final class ContentAndAccessTests: XCTestCase {
             accountSource: FanAccountSource.apple.rawValue,
             requiresAppleRegistration: false
         )
-        XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(unmarked))
+        XCTAssertFalse(completedWithoutDouyin.requiresIdentityCompletion)
+        XCTAssertTrue(FanAccountValidation.isValidAdminFanUser(completedWithoutDouyin))
 
         let wrongSource = AdminFanUser(
             userID: user.userID,
@@ -1183,6 +1269,25 @@ final class ContentAndAccessTests: XCTestCase {
             requiresAppleRegistration: true
         )
         XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(wrongSource))
+    }
+
+    func testApprovedProfileWithoutOptionalDouyinRemainsCompleteAndUsable() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let profile = FanProfile(
+            userID: "00000000-0000-4000-8000-000000000005",
+            identityCode: "HS-EFGH-6789",
+            displayName: "未填抖音的粉丝",
+            douyinID: "",
+            installationCode: "IN-ABC-234",
+            permissions: [FanPermission.galleryFull.rawValue],
+            status: FanAccountStatus.active.rawValue,
+            sessionExpiresAt: now.addingTimeInterval(3_600)
+        )
+
+        XCTAssertTrue(profile.hasConsistentAccountSetupState)
+        XCTAssertTrue(FanAccountValidation.isValidProfile(profile, now: now))
+        XCTAssertTrue(profile.isApproved(at: now))
+        XCTAssertTrue(profile.hasPermission(.galleryFull, at: now))
     }
 
     func testNormalProfileRejectsIncompleteAppleRegistrationMarker() {
@@ -1302,7 +1407,7 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
-    func testRequiredSetupValidationRequiresRealIdentityAndPasswordRotation() throws {
+    func testRequiredSetupValidationAllowsBlankOptionalDouyinAndRequiresPasswordRotation() throws {
         let temporaryPassword = "Tmp-abcdefghijklmnopqrstuvwx-9!"
         let valid = try FanAccountValidation.validatedRequiredSetup(
             displayName: "  测试粉丝  ",
@@ -1314,6 +1419,16 @@ final class ContentAndAccessTests: XCTestCase {
         )
         XCTAssertEqual(valid.displayName, "测试粉丝")
         XCTAssertEqual(valid.douyinID, "real_fan")
+
+        let withoutDouyin = try FanAccountValidation.validatedRequiredSetup(
+            displayName: "测试粉丝",
+            douyinID: "   ",
+            currentPassword: temporaryPassword,
+            newPassword: "new-password-2026",
+            newPasswordConfirmation: "new-password-2026",
+            acceptedDataUse: true
+        )
+        XCTAssertEqual(withoutDouyin.douyinID, "")
 
         XCTAssertThrowsError(
             try FanAccountValidation.validatedRequiredSetup(
@@ -1472,6 +1587,21 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(ArtworkImageRetryPolicy.shouldRetry(ArtworkImageLoadError.decodeFailed))
     }
 
+    func testPurgedImageReloadsWhenTheAppBecomesActive() {
+        let url = URL(string: "https://img.shuzijun.com.cn/images/test.jpg")
+
+        XCTAssertTrue(
+            ArtworkImageLifecyclePolicy.shouldReloadWhenActive(url: url, hasImage: false),
+            "后台安全清理取消下载后，回到前台必须重新请求空白图片"
+        )
+        XCTAssertFalse(
+            ArtworkImageLifecyclePolicy.shouldReloadWhenActive(url: url, hasImage: true)
+        )
+        XCTAssertFalse(
+            ArtworkImageLifecyclePolicy.shouldReloadWhenActive(url: nil, hasImage: false)
+        )
+    }
+
     func testArtworkImageDiagnosticsUseStableNonSensitiveCategories() {
         XCTAssertEqual(
             ArtworkImageRetryPolicy.diagnosticCode(for: URLError(.timedOut)),
@@ -1553,6 +1683,24 @@ final class ContentAndAccessTests: XCTestCase {
             websiteURL: URL(string: "https://www.shuzijun.com.cn/portfolio/test/")!,
             coverURL: images.first?.url,
             images: images
+        )
+    }
+
+    private func makeLaunchPoster(
+        id: String,
+        startsAt: Date,
+        endsAt: Date? = nil
+    ) -> LaunchPosterContent {
+        LaunchPosterContent(
+            id: id,
+            isEnabled: true,
+            imageURL: URL(string: "https://img.shuzijun.com.cn/launch/\(id).jpg")!,
+            eyebrow: "YI SHU",
+            title: "易姝",
+            subtitle: "镜头之内，自有叙事。",
+            startsAt: startsAt,
+            endsAt: endsAt ?? Date(timeIntervalSince1970: 4_102_444_800),
+            displaySeconds: 2.5
         )
     }
 

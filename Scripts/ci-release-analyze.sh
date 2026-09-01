@@ -34,6 +34,23 @@ executable="$app_path/Yishu"
 test -d "$app_path"
 test -x "$executable"
 
+assets_car="$app_path/Assets.car"
+test -f "$assets_car"
+asset_manifest="$temporary_root/assets.json"
+/usr/bin/assetutil --info "$assets_car" > "$asset_manifest"
+if grep -Eiq 'Hero(One|Two|Three|Four|Five)|AboutPortrait|ShowreelPoster|LaunchPoster' \
+  "$asset_manifest"; then
+  printf 'release-bundle-audit: protected portrait asset found\n' >&2
+  exit 1
+fi
+
+if find "$app_path" -type f \
+  \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \
+  -o -iname '*.webp' -o -iname '*.avif' \) -print -quit | grep -q .; then
+  printf 'release-bundle-audit: standalone content image found\n' >&2
+  exit 1
+fi
+
 if find "$app_path" -type f \
   \( -iname '*.p8' -o -iname '*.p12' -o -iname '*.pem' -o -iname '*.key' \
   -o -iname '.env*' -o -iname 'AuthKey_*' \) -print -quit | grep -q .; then

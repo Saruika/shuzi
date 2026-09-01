@@ -70,12 +70,18 @@ class WP_REST_Response {
 
     public function header(string $name, string $value): void { $this->headers[$name] = $value; }
 }
+final class WP_REST_Server {
+    public const READABLE = 'GET';
+    public const CREATABLE = 'POST';
+    public const EDITABLE = 'POST,PUT,PATCH';
+}
 
 $GLOBALS['yishu_test_options'] = array();
 $GLOBALS['yishu_test_filters'] = array();
 $GLOBALS['yishu_test_scheduled'] = array();
 $GLOBALS['yishu_test_registered_actions'] = array();
 $GLOBALS['yishu_test_registered_filters'] = array();
+$GLOBALS['yishu_test_registered_routes'] = array();
 $GLOBALS['yishu_test_lock_result'] = '1';
 $GLOBALS['yishu_test_lock_results'] = array();
 
@@ -117,6 +123,14 @@ function add_action(...$args): void {
 function add_filter(...$args): void {
     $GLOBALS['yishu_test_registered_filters'][] = $args;
 }
+function register_rest_route(string $namespace, string $route, array $arguments): bool {
+    $GLOBALS['yishu_test_registered_routes'][] = array(
+        'namespace' => $namespace,
+        'route' => $route,
+        'arguments' => $arguments,
+    );
+    return true;
+}
 function apply_filters(string $hook, $value, ...$args) {
     $callback = $GLOBALS['yishu_test_filters'][$hook] ?? null;
     return is_callable($callback) ? $callback($value, ...$args) : $value;
@@ -148,6 +162,9 @@ function maybe_unserialize($value) {
     if (!is_string($value)) { return $value; }
     $decoded = @unserialize($value);
     return $decoded === false && $value !== serialize(false) ? $value : $decoded;
+}
+function wp_json_encode($value, int $flags = 0, int $depth = 512) {
+    return json_encode($value, $flags, $depth);
 }
 function wp_cache_delete(...$args): bool { return true; }
 function rest_ensure_response($value): WP_REST_Response {
@@ -195,6 +212,16 @@ function sanitize_key($value): string {
     $value = strtolower((string) $value);
     return (string) preg_replace('/[^a-z0-9_\-]/', '', $value);
 }
+function sanitize_email($value): string {
+    if (!is_scalar($value)) { return ''; }
+    $email = filter_var(trim((string) $value), FILTER_SANITIZE_EMAIL);
+    return is_string($email) ? $email : '';
+}
+function is_email($value) {
+    return is_string($value) && filter_var($value, FILTER_VALIDATE_EMAIL) !== false
+        ? $value
+        : false;
+}
 function rest_sanitize_boolean($value): bool {
     if (is_string($value)) {
         return !in_array(strtolower($value), array('false', '0', ''), true);
@@ -221,6 +248,23 @@ function invoke_plugin_method(string $name, array $arguments = array()) {
     return $method->invokeArgs(null, $arguments);
 }
 
+function plugin_method_source(string $source, string $name): string {
+    $public_start = strpos($source, 'public static function ' . $name);
+    $private_start = strpos($source, 'private static function ' . $name);
+    if ($public_start === false && $private_start === false) { return ''; }
+    $start = $public_start === false
+        ? $private_start
+        : ($private_start === false ? $public_start : min($public_start, $private_start));
+    $next_public = strpos($source, "\n    public static function ", $start + 1);
+    $next_private = strpos($source, "\n    private static function ", $start + 1);
+    $ends = array_values(array_filter(
+        array($next_public, $next_private),
+        static fn ($value): bool => $value !== false
+    ));
+    $end = $ends ? min($ends) : strlen($source);
+    return substr($source, $start, $end - $start);
+}
+
 function expect_true(bool $condition, string $message): void {
     if (!$condition) {
         fwrite(STDERR, "plugin-contract-test: {$message}\n");
@@ -237,6 +281,44 @@ function expect_error_code(string $code, $actual, string $message): void {
     expect_same($code, $actual->get_error_code(), $message . '（错误代码不符）');
 }
 
+expect_true(
+    !defined('YISHU_ENABLE_COLLABORATION_PHASE1')
+        && Shuzijun_App_Content_API::collaboration_phase1_enabled() === false,
+    '未定义显式 PHP 布尔常量时，合作邀约 Phase 1 必须默认关闭'
+);
+Shuzijun_App_Content_API::register_routes();
+$default_route_names = array_map(
+    static fn (array $record): string => (string) ($record['route'] ?? ''),
+    $GLOBALS['yishu_test_registered_routes']
+);
+expect_true(
+    !in_array('/collaboration-requests', $default_route_names, true)
+        && !in_array('/app-admin/collaboration-requests', $default_route_names, true)
+        && !in_array(
+            '/app-admin/collaboration-requests/(?P<request_id>[a-f0-9-]{36})',
+            $default_route_names,
+            true
+        ),
+    '默认关闭时不得注册粉丝或管理员合作邀约 REST 路由'
+);
+$disabled_collaboration_request = new WP_REST_Request();
+expect_true(
+    Shuzijun_App_Content_API::can_submit_collaboration($disabled_collaboration_request) === false
+        && Shuzijun_App_Content_API::can_manage_collaboration($disabled_collaboration_request) === false,
+    '默认关闭时合作邀约权限回调必须失败关闭'
+);
+foreach (array(
+    Shuzijun_App_Content_API::create_collaboration_request($disabled_collaboration_request),
+    Shuzijun_App_Content_API::list_collaboration_requests($disabled_collaboration_request),
+    Shuzijun_App_Content_API::update_collaboration_request($disabled_collaboration_request),
+) as $disabled_collaboration_response) {
+    expect_error_code(
+        'collaboration_feature_disabled',
+        $disabled_collaboration_response,
+        '即使直接调用回调，默认关闭也不得处理合作邀约数据'
+    );
+}
+
 $registered_action_names = array_map(
     static fn (array $record): string => (string) ($record[0] ?? ''),
     $GLOBALS['yishu_test_registered_actions']
@@ -244,10 +326,18 @@ $registered_action_names = array_map(
 expect_true(
     !in_array('yishu_process_fan_apple_event', $registered_action_names, true)
         && !in_array('yishu_retry_fan_apple_revocation', $registered_action_names, true)
+        && !in_array(Shuzijun_App_Content_API::COLLABORATION_OUTBOX_HOOK, $registered_action_names, true)
+        && !in_array(Shuzijun_App_Content_API::COLLABORATION_SWEEP_HOOK, $registered_action_names, true)
         && !in_array('delete_user', $registered_action_names, true)
         && !in_array('save_post_portfolio', $registered_action_names, true)
         && !in_array('init', $registered_action_names, true),
     '未配置权威节点时不得注册异步账号写入回调'
+);
+expect_true(
+    Shuzijun_App_Content_API::process_collaboration_outbox(1) === false
+        && Shuzijun_App_Content_API::sweep_collaboration_outbox() === false
+        && Shuzijun_App_Content_API::ensure_collaboration_outbox_schedule() === false,
+    '备用节点即使直接调用也不得领取、发送或安排合作邀约 Outbox'
 );
 $authority_filters = array_values(array_filter(
     $GLOBALS['yishu_test_registered_filters'],
@@ -297,6 +387,8 @@ expect_same(
 foreach (array(
     '/shuzijun/v1/app-content',
     '/shuzijun/v1/app-admin/fans',
+    '/shuzijun/v1/collaboration-requests',
+    '/shuzijun/v1/app-admin/collaboration-requests',
     '/shuzijun/v1/fan/apple-notifications',
 ) as $protected_route) {
     expect_error_code(
@@ -345,10 +437,19 @@ $authority_action_names = array_map(
 expect_true(
     in_array('yishu_process_fan_apple_event', $authority_action_names, true)
         && in_array('yishu_retry_fan_apple_revocation', $authority_action_names, true)
+        && !in_array(Shuzijun_App_Content_API::COLLABORATION_OUTBOX_HOOK, $authority_action_names, true)
+        && !in_array(Shuzijun_App_Content_API::COLLABORATION_SWEEP_HOOK, $authority_action_names, true)
         && in_array('delete_user', $authority_action_names, true)
         && in_array('save_post_portfolio', $authority_action_names, true)
         && in_array('init', $authority_action_names, true),
-    '权威节点必须注册账号清理、撤销和删除回调'
+    '权威节点必须注册账号回调，但默认仍不得注册合作邀约 worker'
+);
+expect_true(
+    Shuzijun_App_Content_API::ensure_collaboration_storage() === false
+        && Shuzijun_App_Content_API::process_collaboration_outbox(1) === false
+        && Shuzijun_App_Content_API::sweep_collaboration_outbox() === false
+        && Shuzijun_App_Content_API::ensure_collaboration_outbox_schedule() === false,
+    '即使是权威节点，默认关闭时也不得建表、领取、扫描或安排合作邀约任务'
 );
 
 $authority_method_start = strpos($plugin_source, 'public static function account_authority_enabled');
@@ -413,6 +514,460 @@ expect_same(
     '',
     invoke_plugin_method('normalize_douyin_id', array('https://v.douyin.com/test')),
     '抖音 ID 必须拒绝链接'
+);
+expect_same(
+    '',
+    invoke_plugin_method('normalize_optional_douyin_id', array("  \n")),
+    '选填抖音 ID 留空必须是有效值'
+);
+expect_same(
+    '',
+    invoke_plugin_method('normalize_optional_douyin_id', array(null)),
+    '选填抖音 ID 缺失时必须按空值处理'
+);
+expect_same(
+    'yishu_2026',
+    invoke_plugin_method('normalize_optional_douyin_id', array(' @YiShu_2026 ')),
+    '选填抖音 ID 有值时必须保持归一化'
+);
+expect_error_code(
+    'fan_douyin_id_invalid',
+    invoke_plugin_method('normalize_optional_douyin_id', array('https://v.douyin.com/test')),
+    '选填抖音 ID 非空时仍必须拒绝链接'
+);
+expect_error_code(
+    'fan_douyin_id_invalid',
+    invoke_plugin_method(
+        'normalize_optional_douyin_id',
+        array('invite_' . str_repeat('a', 24))
+    ),
+    '邀请占位值不得伪装为用户选填的抖音 ID'
+);
+
+$fan_registration_source = plugin_method_source($plugin_source, 'register_fan');
+$apple_registration_completion_source = plugin_method_source(
+    $plugin_source,
+    'complete_fan_apple_registration'
+);
+$invitation_completion_optional_source = plugin_method_source(
+    $plugin_source,
+    'complete_fan_invitation'
+);
+expect_true(
+    $fan_registration_source !== ''
+        && $apple_registration_completion_source !== ''
+        && $invitation_completion_optional_source !== ''
+        && strpos($fan_registration_source, 'normalize_optional_douyin_id') !== false
+        && strpos($apple_registration_completion_source, 'normalize_optional_douyin_id') !== false
+        && strpos($invitation_completion_optional_source, 'normalize_optional_douyin_id') !== false
+        && strpos($fan_registration_source, "\$douyin_reservation = \$douyin_id !== ''") !== false
+        && strpos($fan_registration_source, "\$douyin_reservation !== ''") !== false
+        && strpos($apple_registration_completion_source, "\$reservation = \$douyin_id !== ''") !== false
+        && strpos($apple_registration_completion_source, "if (\$douyin_id !== '')") !== false
+        && strpos($invitation_completion_optional_source, "if (\$douyin_id !== '')") !== false
+        && strpos(
+            $invitation_completion_optional_source,
+            "(\$real_reservation !== ''"
+        ) !== false,
+    '注册、Apple 申请和邀请完成必须允许空抖音 ID，且空值不得创建唯一预留'
+);
+
+expect_same(
+    '2026-09-02-approval-v3',
+    Shuzijun_App_Content_API::FAN_CONSENT_VERSION,
+    '当前隐私同意版本必须与 2026-09-02 政策一致'
+);
+expect_same(
+    array('2026-08-31-approval-v2'),
+    Shuzijun_App_Content_API::FAN_ACCEPTED_LEGACY_CONSENT_VERSIONS,
+    '存量同意兼容只能使用显式最小白名单'
+);
+expect_true(
+    Shuzijun_App_Content_API::fan_consent_version_is_current(
+        '2026-09-02-approval-v3'
+    )
+        && !Shuzijun_App_Content_API::fan_consent_version_is_current(
+            '2026-08-31-approval-v2'
+        )
+        && !Shuzijun_App_Content_API::fan_consent_version_is_current(null),
+    '新注册、Apple 首次资料和邀请完成只能接受当前 v3 同意'
+);
+expect_true(
+    Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
+        'version' => '2026-09-02-approval-v3',
+        'acceptedAt' => '2026-09-02T00:00:00+00:00',
+    ))
+        && Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
+            'version' => '2026-08-31-approval-v2',
+            'acceptedAt' => '2026-08-31T00:00:00+00:00',
+        ))
+        && !Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
+            'version' => '2026-08-30-approval-v1',
+        ))
+        && !Shuzijun_App_Content_API::fan_stored_consent_is_accepted(null),
+    '已存 v2 和 v3 记录必须保持有效，未知或缺失记录必须失败关闭'
+);
+foreach (array(
+    $fan_registration_source,
+    $apple_registration_completion_source,
+    $invitation_completion_optional_source,
+) as $new_consent_source) {
+    expect_true(
+        strpos(
+            $new_consent_source,
+            "fan_consent_version_is_current(\$request->get_param('consentVersion'))"
+        ) !== false
+            && strpos($new_consent_source, "'version' => self::FAN_CONSENT_VERSION") !== false,
+        '每个新同意入口都必须校验并持久化当前版本'
+    );
+}
+
+$collaboration_submission_id = '123e4567-e89b-42d3-a456-426614174000';
+$collaboration_date = gmdate('Y-m-d', time() + DAY_IN_SECONDS);
+$valid_collaboration_request = new WP_REST_Request(array(
+    'submissionID' => strtoupper($collaboration_submission_id),
+    'contactName' => '合作方',
+    'contactMethod' => 'contact@example.com',
+    'organization' => '测试项目',
+    'projectType' => 'commercial',
+    'city' => '杭州',
+    'preferredDate' => $collaboration_date,
+    'budget' => '5000-10000',
+    'details' => "第一行\r\n第二行",
+));
+$normalized_collaboration = invoke_plugin_method(
+    'sanitize_collaboration_submission',
+    array($valid_collaboration_request)
+);
+expect_true(
+    is_array($normalized_collaboration)
+        && ($normalized_collaboration['submissionID'] ?? '') === $collaboration_submission_id
+        && ($normalized_collaboration['details'] ?? '') === "第一行\n第二行"
+        && ($normalized_collaboration['preferredDate'] ?? '') === $collaboration_date
+        && preg_match('/^[a-f0-9]{64}$/', (string) ($normalized_collaboration['payloadHash'] ?? '')) === 1,
+    '合作邀约必须归一化 UUID、多行说明和幂等 payload hash'
+);
+$collaboration_crlf_request = new WP_REST_Request(array(
+    'submissionID' => $collaboration_submission_id,
+    'contactName' => "合作方\r\nBcc: attacker@example.com",
+    'contactMethod' => 'contact@example.com',
+    'organization' => '',
+    'projectType' => 'drama',
+    'city' => '',
+    'preferredDate' => $collaboration_date,
+    'budget' => '',
+    'details' => '',
+));
+expect_error_code(
+    'collaboration_field_invalid',
+    invoke_plugin_method('sanitize_collaboration_submission', array($collaboration_crlf_request)),
+    '单行合作字段必须拒绝 CRLF 邮件头注入'
+);
+$collaboration_invalid_date_request = new WP_REST_Request(array(
+    'submissionID' => $collaboration_submission_id,
+    'contactName' => '合作方',
+    'contactMethod' => 'contact@example.com',
+    'organization' => '',
+    'projectType' => 'brand',
+    'city' => '',
+    'preferredDate' => '2027-02-30',
+    'budget' => '',
+    'details' => '',
+));
+expect_error_code(
+    'collaboration_date_invalid',
+    invoke_plugin_method('sanitize_collaboration_submission', array($collaboration_invalid_date_request)),
+    '合作邀约日期必须是真实 YYYY-MM-DD 日期'
+);
+$collaboration_nested_request = new WP_REST_Request(array(
+    'submissionID' => $collaboration_submission_id,
+    'contactName' => array('注入'),
+    'contactMethod' => 'contact@example.com',
+    'organization' => '',
+    'projectType' => 'other',
+    'city' => '',
+    'preferredDate' => $collaboration_date,
+    'budget' => '',
+    'details' => '',
+));
+expect_error_code(
+    'collaboration_field_invalid',
+    invoke_plugin_method('sanitize_collaboration_submission', array($collaboration_nested_request)),
+    '合作邀约不得将嵌套 JSON 静默转为文本'
+);
+$collaboration_overlong_request = new WP_REST_Request(array(
+    'submissionID' => $collaboration_submission_id,
+    'contactName' => str_repeat('a', 81),
+    'contactMethod' => 'contact@example.com',
+    'organization' => '',
+    'projectType' => 'event',
+    'city' => '',
+    'preferredDate' => $collaboration_date,
+    'budget' => '',
+    'details' => '',
+));
+expect_error_code(
+    'collaboration_field_invalid',
+    invoke_plugin_method('sanitize_collaboration_submission', array($collaboration_overlong_request)),
+    '合作邀约单行字段必须严格限制长度'
+);
+$collaboration_unknown_type_request = new WP_REST_Request(array(
+    'submissionID' => $collaboration_submission_id,
+    'contactName' => '合作方',
+    'contactMethod' => 'contact@example.com',
+    'organization' => '',
+    'projectType' => 'arbitrary-client-value',
+    'city' => '',
+    'preferredDate' => $collaboration_date,
+    'budget' => '',
+    'details' => '',
+));
+expect_error_code(
+    'collaboration_project_type_invalid',
+    invoke_plugin_method('sanitize_collaboration_submission', array($collaboration_unknown_type_request)),
+    '合作类型必须使用服务端 allowlist'
+);
+expect_error_code(
+    'collaboration_details_invalid',
+    invoke_plugin_method('normalize_collaboration_details', array(str_repeat('a', 4001))),
+    '合作邀约项目说明必须限制为 4000 字符'
+);
+$collaboration_bad_uuid_request = new WP_REST_Request(array(
+    'submissionID' => '123e4567-e89b-12d3-a456-426614174000',
+));
+expect_error_code(
+    'collaboration_submission_id_invalid',
+    invoke_plugin_method('sanitize_collaboration_submission', array($collaboration_bad_uuid_request)),
+    '合作邀约幂等标识必须是 UUIDv4'
+);
+$duplicate_collaboration_response = invoke_plugin_method(
+    'collaboration_submission_response',
+    array(array(
+        'public_id' => '223e4567-e89b-42d3-a456-426614174000',
+        'payload_hash' => $normalized_collaboration['payloadHash'],
+        'status' => 'received',
+        'created_at' => '2026-09-02 10:00:00',
+    ), $normalized_collaboration['payloadHash'], true)
+);
+expect_true(
+    $duplicate_collaboration_response instanceof WP_REST_Response
+        && $duplicate_collaboration_response->status === 200
+        && ($duplicate_collaboration_response->data['duplicate'] ?? false) === true
+        && ($duplicate_collaboration_response->headers['Cache-Control'] ?? '')
+            === 'private, no-store, max-age=0',
+    '同一粉丝、同一 submission UUID 与同一 payload 必须幂等返回原请求'
+);
+expect_error_code(
+    'collaboration_idempotency_conflict',
+    invoke_plugin_method('collaboration_submission_response', array(array(
+        'public_id' => '223e4567-e89b-42d3-a456-426614174000',
+        'payload_hash' => str_repeat('a', 64),
+        'status' => 'received',
+        'created_at' => '2026-09-02 10:00:00',
+    ), str_repeat('b', 64), true)),
+    '同一 submission UUID 不得覆盖不同 payload'
+);
+expect_same(
+    array('status' => 'pending', 'delay' => 60),
+    invoke_plugin_method('collaboration_outbox_failure_state', array(1)),
+    'Outbox 首次失败必须进入有界重试'
+);
+expect_same(
+    array('status' => 'dead', 'delay' => 0),
+    invoke_plugin_method(
+        'collaboration_outbox_failure_state',
+        array(Shuzijun_App_Content_API::COLLABORATION_OUTBOX_MAX_ATTEMPTS)
+    ),
+    'Outbox 达到最大尝试次数必须进入 dead 终态'
+);
+$sanitized_audit_metadata = invoke_plugin_method(
+    'sanitize_collaboration_audit_metadata',
+    array(array(
+        'fromStatus' => 'received',
+        'toStatus' => 'reviewing',
+        'attempt' => 2,
+        'errorCode' => 'mail_rejected',
+        'contactName' => '不得进入审计',
+        'contactMethod' => 'secret@example.com',
+        'details' => '私密项目说明',
+    ))
+);
+expect_same(
+    array(
+        'fromStatus' => 'received',
+        'toStatus' => 'reviewing',
+        'attempt' => 2,
+        'errorCode' => 'mail_rejected',
+    ),
+    $sanitized_audit_metadata,
+    '合作邀约审计只能保留状态、次数和错误码，不得包含 PII'
+);
+expect_same(
+    Shuzijun_App_Content_API::COLLABORATION_EMAIL,
+    invoke_plugin_method('collaboration_work_email'),
+    '合作邀约 Outbox 必须使用服务端固定工作邮箱'
+);
+$GLOBALS['yishu_test_filters']['yishu_collaboration_work_email'] = static function (): string {
+    return "recipient@example.com\r\nBcc: attacker@example.com";
+};
+expect_same(
+    '',
+    invoke_plugin_method('collaboration_work_email'),
+    '工作收件人配置中的 CRLF 必须失败关闭'
+);
+unset($GLOBALS['yishu_test_filters']['yishu_collaboration_work_email']);
+
+$collaboration_schema_start = strpos($plugin_source, 'public static function ensure_collaboration_storage');
+$collaboration_schema_end = strpos($plugin_source, 'public static function create_collaboration_request', $collaboration_schema_start);
+$collaboration_schema_source = ($collaboration_schema_start === false || $collaboration_schema_end === false)
+    ? ''
+    : substr($plugin_source, $collaboration_schema_start, $collaboration_schema_end - $collaboration_schema_start);
+$collaboration_submit_start = strpos($plugin_source, 'public static function create_collaboration_request');
+$collaboration_submit_end = strpos($plugin_source, 'public static function list_collaboration_requests', $collaboration_submit_start);
+$collaboration_submit_source = ($collaboration_submit_start === false || $collaboration_submit_end === false)
+    ? ''
+    : substr($plugin_source, $collaboration_submit_start, $collaboration_submit_end - $collaboration_submit_start);
+$collaboration_permission_start = strpos($plugin_source, 'public static function can_submit_collaboration');
+$collaboration_permission_end = strpos($plugin_source, 'private static function can_manage_capability', $collaboration_permission_start);
+$collaboration_permission_source = ($collaboration_permission_start === false || $collaboration_permission_end === false)
+    ? ''
+    : substr($plugin_source, $collaboration_permission_start, $collaboration_permission_end - $collaboration_permission_start);
+$collaboration_worker_start = strpos($plugin_source, 'public static function process_collaboration_outbox');
+$collaboration_worker_end = strpos($plugin_source, 'private static function collaboration_tables', $collaboration_worker_start);
+$collaboration_worker_source = ($collaboration_worker_start === false || $collaboration_worker_end === false)
+    ? ''
+    : substr($plugin_source, $collaboration_worker_start, $collaboration_worker_end - $collaboration_worker_start);
+$collaboration_update_start = strpos($plugin_source, 'public static function update_collaboration_request');
+$collaboration_update_end = strpos($plugin_source, 'public static function ensure_collaboration_outbox_schedule', $collaboration_update_start);
+$collaboration_update_source = ($collaboration_update_start === false || $collaboration_update_end === false)
+    ? ''
+    : substr($plugin_source, $collaboration_update_start, $collaboration_update_end - $collaboration_update_start);
+$collaboration_audit_start = strpos($plugin_source, 'private static function sanitize_collaboration_audit_metadata');
+$collaboration_audit_end = strpos($plugin_source, 'private static function schedule_collaboration_outbox_job', $collaboration_audit_start);
+$collaboration_audit_source = ($collaboration_audit_start === false || $collaboration_audit_end === false)
+    ? ''
+    : substr($plugin_source, $collaboration_audit_start, $collaboration_audit_end - $collaboration_audit_start);
+$collaboration_gate_source = plugin_method_source(
+    $plugin_source,
+    'collaboration_phase1_enabled'
+);
+expect_true(
+    $collaboration_gate_source !== ''
+        && strpos($collaboration_gate_source, "defined('YISHU_ENABLE_COLLABORATION_PHASE1')") !== false
+        && strpos($collaboration_gate_source, "constant('YISHU_ENABLE_COLLABORATION_PHASE1') === true") !== false
+        && strpos($collaboration_gate_source, 'apply_filters') === false
+        && strpos($collaboration_gate_source, 'get_option') === false
+        && strpos($collaboration_gate_source, 'getenv') === false,
+    'Phase 1 只能由服务器代码中显式的 strict-true PHP 常量开启'
+);
+foreach (array(
+    'can_manage_collaboration',
+    'can_submit_collaboration',
+    'ensure_collaboration_storage',
+    'create_collaboration_request',
+    'list_collaboration_requests',
+    'update_collaboration_request',
+    'ensure_collaboration_outbox_schedule',
+    'sweep_collaboration_outbox',
+    'process_collaboration_outbox',
+    'collaboration_storage_ready',
+    'schedule_collaboration_outbox_job',
+) as $gated_collaboration_method) {
+    $gated_source = plugin_method_source($plugin_source, $gated_collaboration_method);
+    expect_true(
+        $gated_source !== ''
+            && strpos($gated_source, 'self::collaboration_phase1_enabled()') !== false,
+        $gated_collaboration_method . ' 必须自身执行 Phase 1 硬门禁'
+    );
+}
+$collaboration_init_source = plugin_method_source($plugin_source, 'init');
+$collaboration_routes_source = plugin_method_source($plugin_source, 'register_routes');
+$collaboration_roles_source = plugin_method_source($plugin_source, 'ensure_roles');
+$application_passwords_source = plugin_method_source(
+    $plugin_source,
+    'application_passwords_for_user'
+);
+expect_true(
+    $collaboration_init_source !== ''
+        && $collaboration_routes_source !== ''
+        && $collaboration_roles_source !== ''
+        && $application_passwords_source !== ''
+        && strpos($collaboration_init_source, 'if (self::collaboration_phase1_enabled())') !== false
+        && strpos($collaboration_routes_source, 'if (self::collaboration_phase1_enabled())') !== false
+        && strpos($collaboration_roles_source, 'self::collaboration_phase1_enabled()') !== false
+        && strpos($application_passwords_source, 'self::collaboration_phase1_enabled()') !== false
+        && strpos($plugin_source, "define('YISHU_ENABLE_COLLABORATION_PHASE1'") === false
+        && strpos($plugin_source, 'register_activation_hook') === false,
+    '合作路由、权限、schema/Cron hook 注册与激活时动作必须全部受硬门禁保护'
+);
+expect_true(
+    strpos($plugin_source, "'/collaboration-requests'") !== false
+        && strpos($plugin_source, "'/app-admin/collaboration-requests'") !== false
+        && strpos($plugin_source, "'/app-admin/collaboration-requests/(?P<request_id>[a-f0-9-]{36})'") !== false
+        && strpos($plugin_source, "'permission_callback' => array(__CLASS__, 'can_submit_collaboration')") !== false
+        && substr_count($plugin_source, "'permission_callback' => array(__CLASS__, 'can_manage_collaboration')") === 2,
+    '启用后的合作邀约提交、管理员收件箱与状态更新必须使用专用权限路由'
+);
+expect_true(
+    $collaboration_permission_source !== ''
+        && strpos($collaboration_permission_source, 'self::$fan_session_context = null') !== false
+        && strpos($collaboration_permission_source, 'self::can_access_app_content($request)') !== false
+        && strpos($collaboration_permission_source, "(\$context['scope'] ?? '') !== 'normal'") !== false,
+    '提交合作邀约必须复用 App 内容门禁并且只接受已批准 normal 粉丝会话'
+);
+expect_true(
+    $collaboration_schema_source !== ''
+        && substr_count($collaboration_schema_source, 'CREATE TABLE') === 3
+        && strpos($collaboration_schema_source, 'ENGINE=InnoDB') !== false
+        && strpos($collaboration_schema_source, 'UNIQUE KEY fan_submission (fan_user_id, submission_id)') !== false
+        && strpos($collaboration_schema_source, 'UNIQUE KEY dedupe_key (dedupe_key)') !== false
+        && strpos($collaboration_schema_source, 'UNIQUE KEY request_channel (request_id, channel)') !== false
+        && strpos($collaboration_schema_source, 'dbDelta($requests_sql)') !== false
+        && strpos($collaboration_schema_source, 'self::account_authority_enabled()') !== false,
+    '合作邀约、Outbox 和审计必须使用权威节点创建的 InnoDB 专用表与唯一键'
+);
+expect_true(
+    $collaboration_submit_source !== ''
+        && strpos($collaboration_submit_source, "array('collaboration_user'") !== false
+        && strpos($collaboration_submit_source, "array('collaboration_install'") !== false
+        && strpos($collaboration_submit_source, "array('collaboration_net'") !== false
+        && strpos($collaboration_submit_source, "query('START TRANSACTION')") !== false
+        && strpos($collaboration_submit_source, "query('COMMIT')") !== false
+        && strpos($collaboration_submit_source, "query('ROLLBACK')") !== false
+        && strpos($collaboration_submit_source, "'request_received'") !== false,
+    '新合作邀约必须经用户、安装、网络三层限流并事务性写入请求、Outbox 和审计'
+);
+expect_true(
+    $collaboration_worker_source !== ''
+        && strpos($collaboration_worker_source, 'self::account_authority_enabled()') !== false
+        && strpos($collaboration_worker_source, "status = 'processing'") !== false
+        && strpos($collaboration_worker_source, 'lease_token = %s') !== false
+        && strpos($collaboration_worker_source, 'attempts = attempts + 1') !== false
+        && strpos($collaboration_worker_source, 'wp_mail(') !== false
+        && strpos($plugin_source, "array('status' => 'dead', 'delay' => 0)") !== false
+        && strpos($plugin_source, 'mark_exhausted_collaboration_outbox_jobs') !== false
+        && strpos($plugin_source, "'worker_interrupted'") !== false
+        && strpos($plugin_source, 'COLLABORATION_OUTBOX_MAX_ATTEMPTS') !== false,
+    'Outbox 必须仅在权威节点以 lease 领取，并有界重试至 dead 终态'
+);
+expect_true(
+    $collaboration_update_source !== ''
+        && strpos($collaboration_update_source, 'LIMIT 1 FOR UPDATE') !== false
+        && strpos($collaboration_update_source, "get_param('version')") !== false
+        && strpos($collaboration_update_source, "'collaboration_version_conflict'") !== false
+        && strpos($collaboration_update_source, "'request_status_updated'") !== false
+        && strpos($collaboration_update_source, "'fromStatus'") !== false
+        && strpos($collaboration_update_source, "'toStatus'") !== false,
+    '管理员更新邀约状态必须锁行、检查乐观并发版本并写入脱敏审计'
+);
+expect_true(
+    $collaboration_audit_source !== ''
+        && strpos($collaboration_audit_source, "'fromStatus', 'toStatus', 'channel', 'attempt', 'errorCode', 'version'") !== false
+        && strpos($collaboration_audit_source, 'contact_name') === false
+        && strpos($collaboration_audit_source, 'contact_method') === false
+        && strpos($collaboration_audit_source, 'details') === false
+        && strpos($collaboration_audit_source, 'metadata_json') !== false,
+    '合作邀约审计表必须是严格 allowlist，不得写入联系资料或项目说明'
 );
 
 $apple_now = time();
@@ -761,7 +1316,7 @@ $invitation_meta_source = ($invitation_meta_start === false || $invitation_meta_
     ? ''
     : substr($plugin_source, $invitation_meta_start, $invitation_meta_end - $invitation_meta_start);
 expect_true(
-    strpos($plugin_source, 'Version: 1.5.8') !== false
+    strpos($plugin_source, 'Version: 1.5.9') !== false
         && Shuzijun_App_Content_API::FAN_CAPABILITY === 'manage_yishu_fan_accounts'
         && Shuzijun_App_Content_API::FAN_INVITATION_TTL === 86400
         && Shuzijun_App_Content_API::FAN_ONBOARDING_SESSION_TTL === 600
@@ -965,7 +1520,7 @@ expect_true(
         && strpos($plugin_source, "'https://appleid.apple.com/auth/keys'") !== false
         && strpos($plugin_source, "JWK::parseKeySet(\$filtered, 'RS256')") !== false
         && strpos($plugin_source, "(string) (\$headers->alg ?? '') !== 'RS256'") !== false
-        && strpos($plugin_source, 'Version: 1.5.8') !== false,
+        && strpos($plugin_source, 'Version: 1.5.9') !== false,
     'Apple 认证必须强制 authorization code 交换并用 RS256/JWKS 严格验证'
 );
 $apple_jwks_start = strpos($plugin_source, 'private static function fetch_apple_jwk_keys');
@@ -1110,7 +1665,7 @@ expect_true(
         && strpos($plugin_source, 'FAN_META_APPLE_SETUP') !== false
         && strpos($plugin_source, "\$status === 'active'") !== false
         && strpos($plugin_source, "'apple_onboarding'") !== false,
-    'Apple sub 必须 HMAC 唯一预留，补齐抖音与 consent 后仍须管理员审批'
+    'Apple sub 必须 HMAC 唯一预留，完成昵称与 consent 后仍须管理员审批'
 );
 expect_true(
     strpos($plugin_source, 'YISHU_APPLE_DATA_KEY_PATH') !== false
@@ -1179,6 +1734,8 @@ expect_true(
         && $apple_registration_readiness_source !== ''
         && strpos($apple_registration_readiness_source, 'FAN_META_CODE') !== false
         && strpos($apple_registration_readiness_source, 'FAN_META_DOUYIN_ID') !== false
+        && strpos($apple_registration_readiness_source, 'normalize_optional_douyin_id') !== false
+        && strpos($apple_registration_readiness_source, "\$douyin_id !== ''") === false
         && strpos($apple_registration_readiness_source, 'FAN_META_CONSENT') !== false
         && strpos($plugin_source, '!self::apple_registration_is_complete($owner)') !== false
         && strpos($plugin_source, '!self::apple_account_runtime_is_valid($owner)') !== false
@@ -1246,8 +1803,10 @@ expect_true(
         && $fan_update_source !== ''
         && strpos($fan_update_source, "\$status === 'active'") !== false
         && strpos($fan_update_source, 'FAN_META_APPLE_SETUP') !== false
+        && strpos($fan_update_source, 'normalize_optional_douyin_id') !== false
+        && strpos($fan_update_source, '(!$douyin_id ||') === false
         && strpos($fan_update_source, "'fan_account_setup_required'") !== false,
-    '管理目录只显示 Apple 来源/完成状态，未补齐抖音的 Apple 账号不得被提前激活'
+    '管理目录只显示 Apple 来源/完成状态，资料未提交时不得提前激活，已提交的空抖音 ID 不得阻断审批'
 );
 expect_true(
     is_string($backup_proxy_source)
@@ -1264,7 +1823,9 @@ expect_true(
         && strpos($privacy_policy_source, '最长 30 天保留') !== false
         && strpos($privacy_policy_source, '旧授权并发重建账号') !== false
         && strpos($privacy_policy_source, 'Apple 是 Apple ID 登录身份验证的处理方') !== false
-        && strpos($privacy_policy_source, '尚未补填抖音 ID 的 Apple 待完成申请也可删除') !== false
+        && strpos($privacy_policy_source, '抖音 ID 为明确选填') !== false
+        && strpos($privacy_policy_source, '不影响注册、账号完整性、审批、登录、权限或删号') !== false
+        && strpos($privacy_policy_source, '尚未完成 Apple 账号申请的用户也可删除') !== false
         && strpos($privacy_policy_source, '管理员内容上传') !== false
         && strpos($privacy_policy_source, '照片、视频和封面') !== false
         && strpos($privacy_policy_source, '哈希化网络指纹') !== false
@@ -1292,8 +1853,9 @@ expect_true(
         && strpos($plugin_source, "'fan_wordpress_login_restricted'") !== false
         && strpos($plugin_source, 'self::FAN_META_UUID, true') !== false
         && strpos($plugin_source, 'user_can($user, self::CAPABILITY)') !== false
-        && strpos($plugin_source, 'user_can($user, self::FAN_CAPABILITY)') !== false,
-    '粉丝账号不得使用 WordPress 常规登录，subscriber 不得获得 Application Password'
+        && strpos($plugin_source, 'user_can($user, self::FAN_CAPABILITY)') !== false
+        && strpos($plugin_source, 'user_can($user, self::COLLABORATION_CAPABILITY)') !== false,
+    '粉丝账号不得使用 WordPress 常规登录，Application Password 只对三类专用管理 capability 开放'
 );
 expect_true(
     $invitation_meta_source !== ''
@@ -1332,13 +1894,28 @@ expect_true(
         && substr_count($plugin_source, 'reservation_owner_from_database') >= 3,
     '邀请领取必须使用原子数据库锁、事务和不可变占位预留'
 );
-$transaction_start = strpos($plugin_source, "query('START TRANSACTION')");
+$invitation_transaction_method_source = plugin_method_source(
+    $plugin_source,
+    'complete_fan_invitation'
+);
+$transaction_start = strpos(
+    $invitation_transaction_method_source,
+    "query('START TRANSACTION')"
+);
 $transaction_commit = $transaction_start === false
     ? false
-    : strpos($plugin_source, "query('COMMIT')", $transaction_start);
+    : strpos(
+        $invitation_transaction_method_source,
+        "query('COMMIT')",
+        $transaction_start
+    );
 $transaction_source = ($transaction_start === false || $transaction_commit === false)
     ? ''
-    : substr($plugin_source, $transaction_start, $transaction_commit - $transaction_start);
+    : substr(
+        $invitation_transaction_method_source,
+        $transaction_start,
+        $transaction_commit - $transaction_start
+    );
 expect_true(
     $transaction_source !== ''
         && strpos($transaction_source, 'set_fan_meta_in_transaction') !== false

@@ -223,7 +223,7 @@ register_status=$(curl "${curl_common[@]}" --output "$test_dir/register.json" \
     --arg douyinID "$douyin_id" \
     --arg password "$password" \
     --arg installID "$install_id" \
-    --arg consentVersion '2026-08-31-approval-v2' \
+    --arg consentVersion '2026-09-02-approval-v3' \
     '{displayName:$displayName,douyinID:$douyinID,password:$password,installID:$installID,consentVersion:$consentVersion}')" \
   "${api_root}/fan/register")
 if [[ "$register_status" != '201' ]]; then
@@ -601,7 +601,7 @@ invitation_same_password_status=$(curl "${curl_common[@]}" \
     --arg currentPassword "$invitation_temporary_password" \
     --arg newPassword "$invitation_temporary_password" \
     --arg installID "$invitation_install_id" \
-    --arg consentVersion '2026-08-31-approval-v2' \
+    --arg consentVersion '2026-09-02-approval-v3' \
     '{displayName:$displayName,douyinID:$douyinID,currentPassword:$currentPassword,newPassword:$newPassword,installID:$installID,consentVersion:$consentVersion}')" \
   "${api_root}/fan/complete-invitation")
 [[ "$invitation_same_password_status" == '400' ]]
@@ -629,7 +629,7 @@ invitation_complete_status=$(curl "${curl_common[@]}" \
     --arg currentPassword "$invitation_temporary_password" \
     --arg newPassword "$invitation_new_password" \
     --arg installID "$invitation_install_id" \
-    --arg consentVersion '2026-08-31-approval-v2' \
+    --arg consentVersion '2026-09-02-approval-v3' \
     '{displayName:$displayName,douyinID:$douyinID,currentPassword:$currentPassword,newPassword:$newPassword,installID:$installID,consentVersion:$consentVersion}')" \
   "${api_root}/fan/complete-invitation")
 [[ "$invitation_complete_status" == '200' ]]
