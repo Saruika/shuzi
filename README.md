@@ -82,6 +82,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.5.10-build41.6.md`](Server/releases/v1.5.10-build41.6.md)：保持业务字节不变的 authority/standby 内部健康监控热修信任记录。
 - [`Server/releases/v1.5.10-build41.7.md`](Server/releases/v1.5.10-build41.7.md)：健康监控的可回滚生产安装事务与双节点精确验收基线。
 - [`Server/releases/v1.5.10-build41.8.md`](Server/releases/v1.5.10-build41.8.md)：版本化健康监控安装器、clean-env 信任入口与生产事务合同。
+- [`Server/releases/v1.5.10-build41.9.md`](Server/releases/v1.5.10-build41.9.md)：空锁文件跨平台类型校验修复与双节点生产入口。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

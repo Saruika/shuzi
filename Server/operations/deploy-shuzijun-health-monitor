@@ -31,8 +31,8 @@ OLD_SERVICE_SHA=db95b5410561ce9e0cca235b7faf09e16d4a954c3c593565681cca49221c9537
 OLD_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6
 APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
 APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
-RELEASE_ID=build41.8
-DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.8
+RELEASE_ID=build41.9
+DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.9
 
 [[ $# -eq 2 ]] || { printf 'usage: %s <primary|backup> <authority|standby>\n' "$DEPLOYER_PATH" >&2; exit 2; }
 NODE=${1:-}
@@ -41,7 +41,7 @@ case "$NODE:$ROLE" in
     primary:authority|backup:standby) ;;
     *) printf 'invalid node/role\n' >&2; exit 2 ;;
 esac
-STAGE=/run/shuzijun-health-build41.8-$NODE
+STAGE=/run/shuzijun-health-build41.9-$NODE
 
 [[ $EUID -eq 0 ]] || { printf 'root required\n' >&2; exit 1; }
 [[ "$0" == "$DEPLOYER_PATH" ]] || { printf 'fixed deployer path required\n' >&2; exit 1; }
@@ -118,14 +118,17 @@ else
     sync -f "$LOCK_DIR"
     sync -f /run
 fi
-if [[ -e "$LOCK_FILE" ]]; then
+if [[ -e "$LOCK_FILE" || -L "$LOCK_FILE" ]]; then
     [[ ! -L "$LOCK_FILE" && -f "$LOCK_FILE" ]]
-    [[ "$(stat -c '%F:%u:%g:%a:%h' "$LOCK_FILE")" == 'regular file:0:0:600:1' ]]
+    [[ "$(realpath -e -- "$LOCK_FILE")" == "$LOCK_FILE" ]]
+    [[ "$(stat -c '%u:%g:%a:%h' -- "$LOCK_FILE")" == '0:0:600:1' ]]
 fi
 exec 9>>"$LOCK_FILE"
 chown root:root "$LOCK_FILE"
 chmod 600 "$LOCK_FILE"
-[[ "$(stat -c '%F:%u:%g:%a:%h' "$LOCK_FILE")" == 'regular file:0:0:600:1' ]]
+[[ ! -L "$LOCK_FILE" && -f "$LOCK_FILE" ]]
+[[ "$(realpath -e -- "$LOCK_FILE")" == "$LOCK_FILE" ]]
+[[ "$(stat -c '%u:%g:%a:%h' -- "$LOCK_FILE")" == '0:0:600:1' ]]
 flock -n 9 || { printf 'health monitor install lock busy\n' >&2; exit 1; }
 
 PHASE=LOCKED
@@ -450,7 +453,7 @@ atomic_install() {
     local source=$1 target=$2 mode=$3 expected_sha=$4 parent base tmp
     parent=$(dirname -- "$target") || return 1
     base=$(basename -- "$target") || return 1
-    tmp=$parent/.$base.build41.8.$$
+    tmp=$parent/.$base.build41.9.$$
     [[ ! -e "$tmp" ]] || return 1
     install -o root -g root -m "$mode" -- "$source" "$tmp" || return 1
     require_file "$tmp" "$mode" "$expected_sha" || return 1
@@ -1035,7 +1038,7 @@ else
 fi
 require_dir "$BACKUP_ROOT" 700
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.8
+BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.9
 [[ ! -e "$BACKUP_DIR" ]]
 install -d -o root -g root -m 700 "$BACKUP_DIR"
 write_marker PREPARED "node=$NODE role=$ROLE release=$RELEASE_ID deployer_sha=$DEPLOYER_SHA timer_enabled=enabled timer_active=active old_script=$OLD_SCRIPT_SHA old_service=$OLD_SERVICE_SHA old_timer=$OLD_TIMER_SHA"

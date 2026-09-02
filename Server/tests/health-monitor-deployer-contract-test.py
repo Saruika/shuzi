@@ -8,7 +8,7 @@ from pathlib import Path
 
 DEPLOYER = Path("Server/operations/deploy-shuzijun-health-monitor")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE = Path("Server/releases/v1.5.10-build41.8.md")
+RELEASE = Path("Server/releases/v1.5.10-build41.9.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -409,9 +409,9 @@ def main() -> None:
     assert "unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true" in lines
 
     for fixed_value in (
-        "RELEASE_ID=build41.8",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.8",
-        "STAGE=/run/shuzijun-health-build41.8-$NODE",
+        "RELEASE_ID=build41.9",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.9",
+        "STAGE=/run/shuzijun-health-build41.9-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -435,6 +435,7 @@ def main() -> None:
         assert fixed_value in lines, fixed_value
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
+    assert "build41.8" not in text
     assert "build41.7" not in text
     assert "[[ $# -eq 2 ]]" in text
     assert '[[ "$0" == "$DEPLOYER_PATH" ]]' in text
@@ -478,7 +479,13 @@ def main() -> None:
         assert f"require_safe_parent {parent} || return 1" in frozen
     assert "(( (8#$RUN_MODE & 0022) == 0 ))" in text
     assert "directory:0:0:700" in text
-    assert "regular file:0:0:600:1" in text
+    lock_prelude = "\n".join(lines[: line_number(lines, 'flock -n 9') + 1])
+    assert 'if [[ -e "$LOCK_FILE" || -L "$LOCK_FILE" ]]' in lock_prelude
+    assert lock_prelude.count('[[ ! -L "$LOCK_FILE" && -f "$LOCK_FILE" ]]') == 2
+    assert lock_prelude.count('[[ "$(realpath -e -- "$LOCK_FILE")" == "$LOCK_FILE" ]]') == 2
+    assert lock_prelude.count("stat -c '%u:%g:%a:%h' -- \"$LOCK_FILE\"") == 2
+    assert "stat -c '%F:%u:%g:%a:%h' \"$LOCK_FILE\"" not in lock_prelude
+    assert lock_prelude.count("'0:0:600:1'") == 2
     assert "flock -n 9" in text
 
     require_status = function_body(lines, "require_status", "unit_value")

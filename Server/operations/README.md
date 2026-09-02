@@ -1,6 +1,6 @@
 # Server operation fixes
 
-## Build 41.8 内部健康监控事务安装器
+## Build 41.9 内部健康监控事务安装器
 
 `deploy-shuzijun-health-monitor` 只升级内部健康脚本及其 service/timer，
 不会运行同步、故障切换，也不会修改 Nginx、PHP-FPM、MySQL、DNS、CDN、
@@ -10,14 +10,14 @@ WordPress 内容或媒体。生产执行顺序固定为备用节点 `backup stan
 生产信任锚为：
 
 ```text
-DEPLOYER_SHA256=9d603a7524af6d6c04ee4e2b7dd06883d3af4ad9c38ff55c5fddf07229be9021
+DEPLOYER_SHA256=fd402b62bd5eaab96f3689cf503d1602fc11e11548be604876b563b8e1b5a857
 ```
 
-先把 Git 标签 `v1.3.29-build41.8` 中的安装器以原子 rename 放到
-`/run/deploy-shuzijun-health-build41.8`，设为 `root:root 0700`、regular、
+先把 Git 标签 `v1.3.29-build41.9` 中的安装器以原子 rename 放到
+`/run/deploy-shuzijun-health-build41.9`，设为 `root:root 0700`、regular、
 non-link、nlink=1；三个 runtime 文件则分别放入仅含这三项的
-`/run/shuzijun-health-build41.8-backup` 和
-`/run/shuzijun-health-build41.8-primary`。不得直接执行仓库副本，也不得从
+`/run/shuzijun-health-build41.9-backup` 和
+`/run/shuzijun-health-build41.9-primary`。不得直接执行仓库副本，也不得从
 `/private/tmp` 或可被非 root 写入的路径启动。
 
 Bash 会在读取脚本正文前处理调用环境中的 `BASH_ENV`，所以执行前校验和
@@ -27,8 +27,8 @@ Bash 会在读取脚本正文前处理调用环境中的 `BASH_ENV`，所以执�
 ```bash
 sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C /bin/bash --noprofile --norc -c '
 set -Eeuo pipefail
-DEPLOYER=/run/deploy-shuzijun-health-build41.8
-DEPLOYER_SHA256=9d603a7524af6d6c04ee4e2b7dd06883d3af4ad9c38ff55c5fddf07229be9021
+DEPLOYER=/run/deploy-shuzijun-health-build41.9
+DEPLOYER_SHA256=fd402b62bd5eaab96f3689cf503d1602fc11e11548be604876b563b8e1b5a857
 [[ ! -L "$DEPLOYER" && -f "$DEPLOYER" ]]
 [[ "$(/usr/bin/realpath -e -- "$DEPLOYER")" == "$DEPLOYER" ]]
 [[ "$(/usr/bin/stat -c "%F:%u:%g:%a:%h" -- "$DEPLOYER")" == "regular file:0:0:700:1" ]]
@@ -52,6 +52,10 @@ status 后才原子替换。显式 health invocation 必须精确返回 degraded
 内发生调度，则最后一次 InvocationID、原始 D-Bus wall/monotonic 微秒时间窗、
 status、角色、路由、业务哈希和 reason 集都必须重新通过。计时器下一次触发
 还必须连续两次稳定落在 60–360 秒后，才可写入 `DONE`。
+
+Build 41.9 不再用 `stat %F` 的本地化文案判定空锁文件；它分别验证
+regular `-f`、非链接、canonical path 及数值 owner/group/mode/nlink，因此
+Ubuntu 返回 `regular empty file` 时也不会误拒绝，异常类型仍会 fail-closed。
 
 `/etc/systemd/system/timers.target.wants` 允许在 disabled 阶段被 systemd
 删除，但存在时必须是可信实目录；enabled 阶段必须存在 root 所有的绝对目标
