@@ -8,7 +8,7 @@ from pathlib import Path
 
 DEPLOYER = Path("Server/operations/deploy-shuzijun-health-monitor")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE = Path("Server/releases/v1.5.10-build41.10.md")
+RELEASE = Path("Server/releases/v1.5.10-build41.11.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -77,16 +77,19 @@ def assert_old_loaded_definition_negative_paths(old_loaded: str) -> None:
         '/usr/bin/python3 -I "$ROLE_VERIFY" "$ROLE" || return 1',
         'verify_role "$ROLE" || return 1',
     )
-    for drift, timer_state, timer_substate, service_state, service_substate, expected_timer, service_policy, should_pass in (
-        ("none", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", True),
-        ("exec", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", False),
-        ("flags", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", False),
-        ("reload", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", False),
-        ("timer-unit", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", False),
-        ("none", "inactive", "dead", "inactive", "dead", "inactive", "inactive", True),
-        ("none", "inactive", "dead", "failed", "failed", "inactive", "inactive", False),
+    for drift, timer_state, timer_substate, service_state, service_substate, expected_timer, service_policy, timer_policy, should_pass in (
+        ("none", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", "strict", True),
+        ("none", "active", "elapsed", "inactive", "dead", "active", "inactive-or-failed", "preflight", True),
+        ("none", "active", "elapsed", "inactive", "dead", "active", "inactive-or-failed", "strict", False),
+        ("none", "active", "running", "inactive", "dead", "active", "inactive-or-failed", "preflight", False),
+        ("exec", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", "strict", False),
+        ("flags", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", "strict", False),
+        ("reload", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", "strict", False),
+        ("timer-unit", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", "strict", False),
+        ("none", "inactive", "dead", "inactive", "dead", "inactive", "inactive", "strict", True),
+        ("none", "inactive", "dead", "failed", "failed", "inactive", "inactive", "strict", False),
     ):
-        invocation = f"require_old_runtime_loaded {expected_timer} {service_policy}"
+        invocation = f"require_old_runtime_loaded {expected_timer} {service_policy} {timer_policy}"
         expectation = (
             invocation
             if should_pass
@@ -286,6 +289,57 @@ start_disabled_timer_and_settle
     subprocess.run(["/bin/bash", "-c", harness], check=True)
 
 
+def assert_timer_activation_evidence_contract(classifier: str) -> None:
+    harness = f"""
+set -Eeuo pipefail
+{classifier}
+classify_timer_activation_evidence old-sha 100 old-sha 100
+[[ "$TIMER_ACTIVATION_EVIDENCE" == unchanged ]]
+classify_timer_activation_evidence old-sha 100 new-sha 101
+[[ "$TIMER_ACTIVATION_EVIDENCE" == invoked ]]
+for candidate in \
+    'new-sha 100' \
+    'old-sha 101'; do
+    read -r digest inode <<< "$candidate"
+    if classify_timer_activation_evidence old-sha 100 "$digest" "$inode"; then
+        exit 95
+    fi
+    [[ -z "$TIMER_ACTIVATION_EVIDENCE" ]]
+done
+"""
+    subprocess.run(["/bin/bash", "-c", harness], check=True)
+
+
+def assert_old_state_stability_retry(stable: str) -> None:
+    harness = f"""
+set -Eeuo pipefail
+checks=0
+wait_health_idle() {{ return 0; }}
+require_old_state() {{
+    checks=$((checks + 1))
+    (( checks >= 2 ))
+}}
+sleep() {{ return 0; }}
+{stable}
+require_old_state_stable
+(( checks == 3 ))
+"""
+    subprocess.run(["/bin/bash", "-c", harness], check=True)
+
+    negative = f"""
+set -Eeuo pipefail
+wait_health_idle() {{ return 0; }}
+require_old_state() {{ return 1; }}
+sleep() {{ return 0; }}
+seq() {{ printf '1\n2\n'; }}
+{stable}
+if require_old_state_stable; then
+    exit 96
+fi
+"""
+    subprocess.run(["/bin/bash", "-c", negative], check=True)
+
+
 def assert_rollback_isolator_negative_path(rollback: str) -> None:
     harness = f"""
 set -Eeuo pipefail
@@ -372,6 +426,13 @@ settle_timer_schedule() {{
     SETTLED_TIMER_TRIGGER=4242
     return 0
 }}
+wait_health_idle() {{
+    service_busy=0
+    if (( timer_started == 1 )); then
+        service_failed=1
+    fi
+    return 0
+}}
 require_status() {{ return 0; }}
 sha() {{ printf '%s\\n' status-sha; }}
 stat() {{ printf '%s\\n' 99; }}
@@ -394,6 +455,9 @@ systemctl() {{
                 timer_started=1
                 service_busy=1
                 service_failed=0
+            elif [[ "$2" == shuzijun-internal-health.service ]]; then
+                service_busy=1
+                service_failed=1
             fi
             ;;
         stop) service_busy=0 ;;
@@ -427,7 +491,8 @@ rollback 7
     assert "COMMIT" in events, events
     assert "OLD_ACTIVE_BUSY" not in events, events
     assert sum(event.startswith("disable --now") for event in events) == 1, events
-    assert sum(event.startswith("reset-failed shuzijun-internal-health.service") for event in events) == 1, events
+    assert sum(event.startswith("reset-failed shuzijun-internal-health.service") for event in events) == 2, events
+    assert sum(event.startswith("start shuzijun-internal-health.service") for event in events) == 1, events
 
 
 def main() -> None:
@@ -450,9 +515,9 @@ def main() -> None:
     assert "unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true" in lines
 
     for fixed_value in (
-        "RELEASE_ID=build41.10",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.10",
-        "STAGE=/run/shuzijun-health-build41.10-$NODE",
+        "RELEASE_ID=build41.11",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.11",
+        "STAGE=/run/shuzijun-health-build41.11-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -466,7 +531,7 @@ def main() -> None:
         "ROLE_VERIFY_SHA=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58",
         "NEW_SCRIPT_SHA=e5f89d04ad4498396a8abdc32eaad645587c6ec6b7da7fe70c56498286fbd129",
         "NEW_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc",
-        "NEW_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6",
+        "NEW_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e",
         "OLD_SCRIPT_SHA=71698f025ff467f837e8b7430b4188d05576d2010f9c4f181eea1e56625ca390",
         "OLD_SERVICE_SHA=db95b5410561ce9e0cca235b7faf09e16d4a954c3c593565681cca49221c9537",
         "OLD_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6",
@@ -476,6 +541,7 @@ def main() -> None:
         assert fixed_value in lines, fixed_value
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
+    assert "build41.10" not in text
     assert "build41.9" not in text
     assert "build41.8" not in text
     assert "build41.7" not in text
@@ -595,7 +661,7 @@ def main() -> None:
     )
     old_active = function_body(lines, "require_old_runtime_active", "require_stage")
     new_units = function_body(lines, "require_new_units", "marker_matches")
-    assert "require_old_runtime_loaded active inactive-or-failed || return 1" in old_state
+    assert "require_old_runtime_loaded active inactive-or-failed preflight || return 1" in old_state
     for body in (old_loaded, new_units):
         assert "service_dropins=$(unit_value" in body
         assert "timer_dropins=$(unit_value" in body
@@ -626,6 +692,8 @@ def main() -> None:
     ):
         assert guard in old_loaded, guard
     assert '[[ "$expected_service_state" == inactive || "$expected_service_state" == inactive-or-failed ]] || return 1' in old_loaded
+    assert '[[ "$timer_policy" == strict || "$timer_policy" == preflight ]] || return 1' in old_loaded
+    assert '[[ "$timer_substate" == waiting || "$timer_substate" == elapsed ]] || return 1' in old_loaded
     assert "inactive:dead" in old_loaded and "failed:failed" in old_loaded
     assert '[[ "$service_result" == exit-code && "$service_main_status" == 1 ]] || return 1' in old_loaded
     assert 'require_exact_exec_start "$SERVICE_OBJECT_PATH" /usr/local/sbin/shuzijun-internal-health /usr/local/sbin/shuzijun-internal-health || return 1' in old_loaded
@@ -713,10 +781,17 @@ def main() -> None:
         assert guard in harden
     assert "O_TRUNC" not in harden and "O_CREAT" not in harden
 
-    idle = function_body(lines, "wait_health_idle", "validate_timer_quiescent")
+    idle = function_body(lines, "wait_health_idle", "require_old_state_stable")
     assert idle.count("ActiveState") >= 2
     assert idle.count("Job") >= 2
     assert "state_again" in idle and "job_again" in idle
+    stable_old_state = function_body(
+        lines, "require_old_state_stable", "validate_timer_quiescent"
+    )
+    assert "for attempt in $(seq 1 40)" in stable_old_state
+    assert stable_old_state.count("if require_old_state; then") == 2
+    assert "wait_health_idle || return 1" in stable_old_state
+    assert_old_state_stability_retry(stable_old_state)
     timer_validation = function_body(lines, "validate_timer_quiescent", "settle_timer_schedule")
     assert "for attempt in 1 2" in timer_validation
     assert "Job" in timer_validation
@@ -729,12 +804,18 @@ def main() -> None:
     assert 'validate_timer_quiescent "$invocation" "$trigger" 60000000 360000000' in settle
     assert "SETTLED_INVOCATION=$invocation" in settle
     timer_start_helper = function_body(
-        lines, "start_disabled_timer_and_settle", "validate_status"
+        lines, "start_disabled_timer_and_settle", "classify_timer_activation_evidence"
     )
     assert "systemctl start shuzijun-internal-health.timer || return 1" in timer_start_helper
     assert "settle_timer_schedule || return 1" in timer_start_helper
     assert "NextElapseUSecMonotonic" not in timer_start_helper
     assert_main_immediate_timer_fire_path(timer_start_helper)
+    timer_evidence = function_body(
+        lines, "classify_timer_activation_evidence", "validate_status"
+    )
+    assert "TIMER_ACTIVATION_EVIDENCE=unchanged" in timer_evidence
+    assert "TIMER_ACTIVATION_EVIDENCE=invoked" in timer_evidence
+    assert_timer_activation_evidence_contract(timer_evidence)
     assert re.search(r"LastTriggerUSec(?!Monotonic)", text) is None
 
     validator = function_body(lines, "validate_last_invocation", "require_new_units")
@@ -804,8 +885,18 @@ def main() -> None:
         "systemctl start shuzijun-internal-health.timer",
         rollback_verify_enabled,
     )
+    rollback_rearm_reset = line_number(
+        rollback_lines,
+        "systemctl reset-failed shuzijun-internal-health.service",
+        rollback_start,
+    )
+    rollback_service_start = line_number(
+        rollback_lines,
+        "systemctl start shuzijun-internal-health.service",
+        rollback_rearm_reset,
+    )
     rollback_settle = line_number(
-        rollback_lines, "settle_timer_schedule || rollback_ok=0", rollback_start
+        rollback_lines, "settle_timer_schedule || rollback_ok=0", rollback_service_start
     )
     rollback_active_gate = line_number(
         rollback_lines, "require_old_runtime_active || rollback_ok=0", rollback_settle
@@ -815,6 +906,8 @@ def main() -> None:
         < rollback_enable
         < rollback_verify_enabled
         < rollback_start
+        < rollback_rearm_reset
+        < rollback_service_start
         < rollback_settle
         < rollback_active_gate
     )
@@ -861,7 +954,7 @@ def main() -> None:
 
     main_start = line_number(lines, "# All preflight decisions are repeated")
     main_text = "\n".join(lines[main_start:])
-    old_state_gate = line_number(lines, "require_old_state", main_start)
+    old_state_gate = line_number(lines, "require_old_state_stable", main_start)
     prepared = line_number(lines, "write_marker PREPARED", main_start)
     disable = line_number(lines, "systemctl disable --now", prepared)
     main_stop = line_number(
@@ -881,9 +974,9 @@ def main() -> None:
     committed = line_number(lines, "write_marker COMMITTED", disable)
     harden_call = line_number(lines, "harden_logs", committed)
     status_may_change = line_number(lines, "write_marker STATUS_MAY_CHANGE", harden_call)
-    first_start = line_number(lines, "systemctl start shuzijun-internal-health.service", status_may_change)
-    timer_start = line_number(lines, "start_disabled_timer_and_settle", first_start)
-    accepted = line_number(lines, "write_marker ACCEPTED", timer_start)
+    timer_start = line_number(lines, "start_disabled_timer_and_settle", status_may_change)
+    first_start = line_number(lines, "systemctl start shuzijun-internal-health.service", timer_start)
+    accepted = line_number(lines, "write_marker ACCEPTED", first_start)
     enable = line_number(lines, "systemctl enable shuzijun-internal-health.timer", accepted)
     done_prepare = line_number(lines, "prepare_terminal_marker DONE", enable)
     done = line_number(lines, "commit_terminal_marker DONE", done_prepare)
@@ -905,10 +998,18 @@ def main() -> None:
             r"^\s*systemctl\s+(?:disable|enable|mask|reload|reset-failed|restart|start|stop|try-restart|unmask)\b",
             line,
         ), line
-    assert status_may_change < first_start < timer_start < accepted < enable < done < clear_traps
+    assert status_may_change < timer_start < first_start < accepted < enable < done < clear_traps
+    pre_pin_evidence = "\n".join(lines[status_may_change:timer_start])
+    assert "timer_usec" not in pre_pin_evidence
+    assert "InvocationID" not in pre_pin_evidence
     assert "systemctl enable --now" not in main_text
     assert "start_disabled_timer_and_settle" in main_text
-    assert '[[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" && "$AFTER_TIMER_TRIGGER" != "$BEFORE_TIMER_TRIGGER" ]]' in main_text
+    assert 'PREVIOUS_INVOCATION=$PINNED_INVOCATION' in main_text
+    assert "classify_timer_activation_evidence" in main_text
+    assert "BEFORE_TIMER_TRIGGER" not in main_text
+    assert '[[ "$TIMER_ACTIVATION_EVIDENCE" == unchanged ]]' in main_text
+    assert '[[ "$TIMER_ACTIVATION_EVIDENCE" == invoked ]]' in main_text
+    assert '[[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" && "$AFTER_TIMER_TRIGGER" != "$PINNED_TIMER_TRIGGER" ]]' in main_text
     assert main_text.count("sync_timer_enable_state") >= 3
     assert main_text.count("persist_status_snapshot") >= 2
     final_persist = line_number(

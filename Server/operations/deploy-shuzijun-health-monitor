@@ -25,14 +25,14 @@ ROLE_VERIFY_SHA=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 
 NEW_SCRIPT_SHA=e5f89d04ad4498396a8abdc32eaad645587c6ec6b7da7fe70c56498286fbd129
 NEW_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc
-NEW_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6
+NEW_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e
 OLD_SCRIPT_SHA=71698f025ff467f837e8b7430b4188d05576d2010f9c4f181eea1e56625ca390
 OLD_SERVICE_SHA=db95b5410561ce9e0cca235b7faf09e16d4a954c3c593565681cca49221c9537
 OLD_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6
 APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
 APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
-RELEASE_ID=build41.10
-DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.10
+RELEASE_ID=build41.11
+DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.11
 
 [[ $# -eq 2 ]] || { printf 'usage: %s <primary|backup> <authority|standby>\n' "$DEPLOYER_PATH" >&2; exit 2; }
 NODE=${1:-}
@@ -41,7 +41,7 @@ case "$NODE:$ROLE" in
     primary:authority|backup:standby) ;;
     *) printf 'invalid node/role\n' >&2; exit 2 ;;
 esac
-STAGE=/run/shuzijun-health-build41.10-$NODE
+STAGE=/run/shuzijun-health-build41.11-$NODE
 
 [[ $EUID -eq 0 ]] || { printf 'root required\n' >&2; exit 1; }
 [[ "$0" == "$DEPLOYER_PATH" ]] || { printf 'fixed deployer path required\n' >&2; exit 1; }
@@ -308,18 +308,20 @@ require_frozen_files() {
 }
 
 require_old_state() {
-    require_old_runtime_loaded active inactive-or-failed || return 1
+    require_old_runtime_loaded active inactive-or-failed preflight || return 1
     [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]] || return 1
     require_timer_enabled_link || return 1
 }
 
 require_old_runtime_loaded() {
     local expected_timer_state=$1 expected_service_state=$2
+    local timer_policy=${3:-strict}
     local timer_state timer_substate timer_job timer_unit timer_reload
     local service_state service_substate service_job service_result service_main_status service_reload service_type
     local service_dropins timer_dropins exec_condition exec_start_pre exec_start_post exec_reload exec_stop exec_stop_post success_status
     [[ "$expected_timer_state" == inactive || "$expected_timer_state" == active ]] || return 1
     [[ "$expected_service_state" == inactive || "$expected_service_state" == inactive-or-failed ]] || return 1
+    [[ "$timer_policy" == strict || "$timer_policy" == preflight ]] || return 1
     require_frozen_files || return 1
     require_file "$ROLE_VERIFY" 755 "$ROLE_VERIFY_SHA" || return 1
     /usr/bin/python3 -I "$ROLE_VERIFY" "$ROLE" || return 1
@@ -335,7 +337,11 @@ require_old_runtime_loaded() {
     service_type=$(unit_value shuzijun-internal-health.service Type) || return 1
     [[ "$timer_state" == "$expected_timer_state" && -z "$timer_job" ]] || return 1
     if [[ "$expected_timer_state" == active ]]; then
-        [[ "$timer_substate" == waiting ]] || return 1
+        if [[ "$timer_policy" == preflight ]]; then
+            [[ "$timer_substate" == waiting || "$timer_substate" == elapsed ]] || return 1
+        else
+            [[ "$timer_substate" == waiting ]] || return 1
+        fi
     else
         [[ "$timer_substate" == dead ]] || return 1
     fi
@@ -453,7 +459,7 @@ atomic_install() {
     local source=$1 target=$2 mode=$3 expected_sha=$4 parent base tmp
     parent=$(dirname -- "$target") || return 1
     base=$(basename -- "$target") || return 1
-    tmp=$parent/.$base.build41.10.$$
+    tmp=$parent/.$base.build41.11.$$
     [[ ! -e "$tmp" ]] || return 1
     install -o root -g root -m "$mode" -- "$source" "$tmp" || return 1
     require_file "$tmp" "$mode" "$expected_sha" || return 1
@@ -569,6 +575,22 @@ wait_health_idle() {
     return 1
 }
 
+require_old_state_stable() {
+    local attempt
+    for attempt in $(seq 1 40); do
+        wait_health_idle || return 1
+        if require_old_state; then
+            sleep 0.25
+            if require_old_state; then
+                return 0
+            fi
+        fi
+        sleep 0.25
+    done
+    printf 'old health runtime did not reach a stable deployable state\n' >&2
+    return 1
+}
+
 validate_timer_quiescent() {
     local expected_invocation=$1 expected_trigger=$2 minimum_future_usec=$3 maximum_future_usec=$4 attempt state job invocation trigger next_elapse now_ns now_mono now_usec
     for attempt in 1 2; do
@@ -619,6 +641,21 @@ start_disabled_timer_and_settle() {
     [[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]] || return 1
     require_timer_disabled_link || return 1
     settle_timer_schedule || return 1
+}
+
+classify_timer_activation_evidence() {
+    local before_sha=$1 before_inode=$2 after_sha=$3 after_inode=$4
+    TIMER_ACTIVATION_EVIDENCE=
+    if [[ "$after_sha" == "$before_sha" && "$after_inode" == "$before_inode" ]]; then
+        TIMER_ACTIVATION_EVIDENCE=unchanged
+        return 0
+    fi
+    if [[ "$after_sha" != "$before_sha" && "$after_inode" != "$before_inode" ]]; then
+        TIMER_ACTIVATION_EVIDENCE=invoked
+        return 0
+    fi
+    printf 'timer activation produced inconsistent invocation evidence\n' >&2
+    return 1
 }
 
 validate_status() {
@@ -968,6 +1005,10 @@ rollback() {
         [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]] || rollback_ok=0
         [[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]] || rollback_ok=0
         require_timer_enabled_link || rollback_ok=0
+        wait_health_idle || rollback_ok=0
+        systemctl reset-failed shuzijun-internal-health.service >/dev/null 2>&1 || rollback_ok=0
+        systemctl start shuzijun-internal-health.service >/dev/null 2>&1 || true
+        wait_health_idle || rollback_ok=0
         settle_timer_schedule || rollback_ok=0
         RESTORED_INVOCATION=$SETTLED_INVOCATION
         RESTORED_TIMER_TRIGGER=$SETTLED_TIMER_TRIGGER
@@ -1035,7 +1076,7 @@ trap 'on_signal 129' HUP
 
 # All preflight decisions are repeated while holding the deployment lock.
 require_stage
-require_old_state
+require_old_state_stable
 
 require_safe_parent /var
 require_safe_parent /var/backups
@@ -1048,7 +1089,7 @@ else
 fi
 require_dir "$BACKUP_ROOT" 700
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.10
+BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.11
 [[ ! -e "$BACKUP_DIR" ]]
 install -d -o root -g root -m 700 "$BACKUP_DIR"
 write_marker PREPARED "node=$NODE role=$ROLE release=$RELEASE_ID deployer_sha=$DEPLOYER_SHA timer_enabled=enabled timer_active=active old_script=$OLD_SCRIPT_SHA old_service=$OLD_SERVICE_SHA old_timer=$OLD_TIMER_SHA"
@@ -1104,30 +1145,46 @@ require_timer_disabled_link
 
 write_marker STATUS_MAY_CHANGE "old_status_sha=$OLD_STATUS_SHA old_status_inode=$OLD_STATUS_INODE"
 PHASE=STATUS_MAY_CHANGE
-PREVIOUS_INVOCATION=$(unit_value shuzijun-internal-health.service InvocationID)
-systemctl reset-failed shuzijun-internal-health.service
-IFS=$'\t' read -r FIRST_START_NS FIRST_START_MONO < <(clock_pair)
-systemctl start shuzijun-internal-health.service
-wait_health_idle
-IFS=$'\t' read -r FIRST_END_NS FIRST_END_MONO < <(clock_pair)
-validate_last_invocation "$OLD_STATUS_INODE" "$OLD_STATUS_SHA" "$PREVIOUS_INVOCATION" "$FIRST_START_NS" "$FIRST_END_NS" "$FIRST_START_MONO" "$FIRST_END_MONO"
-FIRST_INVOCATION=$VALIDATED_INVOCATION
-FIRST_STATUS_SHA=$(sha "$STATUS_FILE")
-FIRST_STATUS_INODE=$(stat -c '%i' -- "$STATUS_FILE")
-
 [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]]
-BEFORE_TIMER_TRIGGER=$(timer_usec LastTriggerUSecMonotonic)
 IFS=$'\t' read -r TIMER_START_NS TIMER_START_MONO < <(clock_pair)
 start_disabled_timer_and_settle
 IFS=$'\t' read -r TIMER_END_NS TIMER_END_MONO < <(clock_pair)
+PINNED_INVOCATION=$SETTLED_INVOCATION
+PINNED_TIMER_TRIGGER=$SETTLED_TIMER_TRIGGER
+require_status
+PINNED_STATUS_SHA=$(sha "$STATUS_FILE")
+PINNED_STATUS_INODE=$(stat -c '%i' -- "$STATUS_FILE")
+classify_timer_activation_evidence "$OLD_STATUS_SHA" "$OLD_STATUS_INODE" "$PINNED_STATUS_SHA" "$PINNED_STATUS_INODE"
+if [[ "$TIMER_ACTIVATION_EVIDENCE" == unchanged ]]; then
+    PREVIOUS_INVOCATION=$PINNED_INVOCATION
+    systemctl reset-failed shuzijun-internal-health.service
+    IFS=$'\t' read -r FIRST_START_NS FIRST_START_MONO < <(clock_pair)
+    systemctl start shuzijun-internal-health.service
+    wait_health_idle
+    IFS=$'\t' read -r FIRST_END_NS FIRST_END_MONO < <(clock_pair)
+    validate_last_invocation "$OLD_STATUS_INODE" "$OLD_STATUS_SHA" "$PREVIOUS_INVOCATION" "$FIRST_START_NS" "$FIRST_END_NS" "$FIRST_START_MONO" "$FIRST_END_MONO"
+    FIRST_INVOCATION=$VALIDATED_INVOCATION
+    FIRST_STATUS_SHA=$(sha "$STATUS_FILE")
+    FIRST_STATUS_INODE=$(stat -c '%i' -- "$STATUS_FILE")
+else
+    [[ "$TIMER_ACTIVATION_EVIDENCE" == invoked ]]
+    validate_last_invocation "$OLD_STATUS_INODE" "$OLD_STATUS_SHA" "" "$TIMER_START_NS" "$TIMER_END_NS" "$TIMER_START_MONO" "$TIMER_END_MONO"
+    [[ "$VALIDATED_INVOCATION" == "$PINNED_INVOCATION" ]]
+    FIRST_INVOCATION=$PINNED_INVOCATION
+    FIRST_STATUS_SHA=$PINNED_STATUS_SHA
+    FIRST_STATUS_INODE=$PINNED_STATUS_INODE
+fi
+IFS=$'\t' read -r SETTLE_START_NS SETTLE_START_MONO < <(clock_pair)
+settle_timer_schedule
+IFS=$'\t' read -r SETTLE_END_NS SETTLE_END_MONO < <(clock_pair)
 AFTER_INVOCATION=$SETTLED_INVOCATION
 AFTER_TIMER_TRIGGER=$SETTLED_TIMER_TRIGGER
 require_status
 AFTER_STATUS_SHA=$(sha "$STATUS_FILE")
 AFTER_STATUS_INODE=$(stat -c '%i' -- "$STATUS_FILE")
-if [[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" || "$AFTER_TIMER_TRIGGER" != "$BEFORE_TIMER_TRIGGER" || "$AFTER_STATUS_SHA" != "$FIRST_STATUS_SHA" || "$AFTER_STATUS_INODE" != "$FIRST_STATUS_INODE" ]]; then
-    [[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" && "$AFTER_TIMER_TRIGGER" != "$BEFORE_TIMER_TRIGGER" ]]
-    validate_last_invocation "$FIRST_STATUS_INODE" "$FIRST_STATUS_SHA" "$FIRST_INVOCATION" "$TIMER_START_NS" "$TIMER_END_NS" "$TIMER_START_MONO" "$TIMER_END_MONO"
+if [[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" || "$AFTER_STATUS_SHA" != "$FIRST_STATUS_SHA" || "$AFTER_STATUS_INODE" != "$FIRST_STATUS_INODE" ]]; then
+    [[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" && "$AFTER_TIMER_TRIGGER" != "$PINNED_TIMER_TRIGGER" ]]
+    validate_last_invocation "$FIRST_STATUS_INODE" "$FIRST_STATUS_SHA" "$FIRST_INVOCATION" "$SETTLE_START_NS" "$SETTLE_END_NS" "$SETTLE_START_MONO" "$SETTLE_END_MONO"
     [[ "$VALIDATED_INVOCATION" == "$AFTER_INVOCATION" ]]
 fi
 validate_timer_quiescent "$AFTER_INVOCATION" "$AFTER_TIMER_TRIGGER" 60000000 360000000

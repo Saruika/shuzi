@@ -242,6 +242,8 @@ def main() -> None:
     assert "ReadWritePaths=/var/lib/shuzijun-health" in service
     assert "StateDirectory=shuzijun-health" in service
     assert "StateDirectoryMode=0700" in service
+    assert "OnActiveSec=2min" in timer
+    assert "OnBootSec=" not in timer
     assert "OnUnitActiveSec=5min" in timer
     assert "Persistent=true" in timer
 
