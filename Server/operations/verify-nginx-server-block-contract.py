@@ -23,6 +23,8 @@ from typing import Iterable, Sequence
 
 WWW_HOST = "www.shuzijun.com.cn"
 IMG_HOST = "img.shuzijun.com.cn"
+WP_LOGIN_LOCATION_ARGS = ("=", "/wp-login.php")
+WP_LOGIN_LIMIT_REQ_ARGS = ("zone=sj_wp_login", "burst=10", "nodelay")
 TLS_443_ENDPOINT_PATTERN = re.compile(
     r"(?:443|\[[^\]\s]+\]:443|[^:\s]+:443)\Z", re.IGNORECASE
 )
@@ -1053,6 +1055,34 @@ def validate_php_execution_contract(
         raise ContractError(f"{hostname} reviewed PHP preflight semantics drifted")
 
 
+def validate_php_limit_req_contract(
+    hostname: str, location: EffectiveDirective
+) -> None:
+    """Permit one exact production login throttle and reject PHP-scope drift."""
+
+    all_limit_requests = [
+        item
+        for item in effective_descendants(location)
+        if item.name.lower() == "limit_req"
+    ]
+    if not all_limit_requests:
+        return
+    direct_limit_requests = effective_direct(location, "limit_req")
+    if location.args != WP_LOGIN_LOCATION_ARGS:
+        raise ContractError(
+            f"{hostname} limit_req is allowed only in the exact /wp-login.php location"
+        )
+    if (
+        len(all_limit_requests) != 1
+        or all_limit_requests != direct_limit_requests
+        or all_limit_requests[0].children is not None
+        or all_limit_requests[0].args != WP_LOGIN_LIMIT_REQ_ARGS
+    ):
+        raise ContractError(
+            f"{hostname} exact /wp-login.php limit_req parameters drifted"
+        )
+
+
 def validate_php_handler_contract(
     hostname: str, location: EffectiveDirective
 ) -> None:
@@ -1072,6 +1102,7 @@ def validate_php_handler_contract(
         or passes[0].args != ("unix:/var/run/php/php8.3-fpm.sock",)
     ):
         raise ContractError(f"{hostname} reviewed PHP handler drifted")
+    validate_php_limit_req_contract(hostname, location)
     validate_php_execution_contract(hostname, location)
 
 

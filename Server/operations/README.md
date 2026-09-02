@@ -330,32 +330,34 @@ JWT autoloader 及真实 `wp-load.php`，对 `/index.php?...` 和 `/?...`
 或任何整站/代码同步内容。成功后仍由操作者先完成 marker、Nginx
 路由和单写者验收，再在独立操作中显式决定是否 unmask/start FPM。
 
-典型调用如下；SHA-256 是非敏感的发布校验值，不能替换成现场重新计算后
-未经核对的值。备节点先用 `standby` dry-run/apply，上海节点再用
-`authority` dry-run/apply：
+完成 1.5.8 bridge 后，普通版本升级使用目标版本自己的发布包。下面是
+Build 41 / 服务端 1.5.10 的已记录调用；独立信任值见
+[`../releases/v1.5.10-build41.md`](../releases/v1.5.10-build41.md)。SHA-256
+不能替换成服务器现场重新计算后未经 Git 发布记录核对的值。备节点先用
+`standby` dry-run/apply，上海节点再用 `authority` dry-run/apply：
 
 ```bash
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
-  --manifest-sha256 <CI 记录的 release.sha256 哈希> \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.29-build41.1-server-1.5.10 \
+  --manifest-sha256 76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9 \
   --authority-role standby \
   --dry-run
 
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
-  --manifest-sha256 <同一个已核对哈希> \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.29-build41.1-server-1.5.10 \
+  --manifest-sha256 76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9 \
   --authority-role standby \
   --apply
 
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
-  --manifest-sha256 <同一个已核对哈希> \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.29-build41.1-server-1.5.10 \
+  --manifest-sha256 76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9 \
   --authority-role authority \
   --dry-run
 
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
-  --manifest-sha256 <同一个已核对哈希> \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.29-build41.1-server-1.5.10 \
+  --manifest-sha256 76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9 \
   --authority-role authority \
   --apply
 ```

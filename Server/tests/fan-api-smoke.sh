@@ -16,9 +16,17 @@ second_install_id=$(cat /proc/sys/kernel/random/uuid)
 invitation_install_id=$(cat /proc/sys/kernel/random/uuid)
 deletion_invitation_install_id=$(cat /proc/sys/kernel/random/uuid)
 apple_install_id=$(cat /proc/sys/kernel/random/uuid)
+empty_v3_install_id=$(cat /proc/sys/kernel/random/uuid)
+transition_v2_install_id=$(cat /proc/sys/kernel/random/uuid)
+unknown_consent_install_id=$(cat /proc/sys/kernel/random/uuid)
 suffix=$(openssl rand -hex 6)
 douyin_id="codex_test_${suffix}"
 password="Fan-${suffix}-2026!"
+empty_v3_password="Empty-${suffix}-2026!"
+transition_v2_password="V2-${suffix}-2026!"
+unknown_consent_password="Unknown-${suffix}-2026!"
+transition_v2_douyin_id="codex_v2_${suffix}"
+unknown_consent_douyin_id="codex_unknown_${suffix}"
 invitation_douyin_id="codex_invite_${suffix}"
 invitation_fault_douyin_id="codex_fault_${suffix}"
 invitation_new_password="Inv-${suffix}-New-2026!"
@@ -60,12 +68,45 @@ cleanup() {
       "${api_root}/fan/logout" || true
   fi
 
-  local user_ids
-  user_ids=$(sudo -u www-data wp --path="$wordpress_root" user list \
-    --meta_key=_yishu_fan_douyin_id --meta_value="$douyin_id" --field=ID 2>/dev/null || true)
-  for user_id in $user_ids; do
-    if [[ "$user_id" =~ ^[0-9]+$ ]]; then
-      sudo -u www-data wp --path="$wordpress_root" user delete "$user_id" --yes >/dev/null 2>&1 || true
+  local user_ids user_id cleanup_douyin_id cleanup_user_uuid cleanup_token cleanup_token_hash
+  local registration_file
+  for cleanup_douyin_id in "$douyin_id" "$transition_v2_douyin_id" "$unknown_consent_douyin_id"; do
+    user_ids=$(sudo -u www-data wp --path="$wordpress_root" user list \
+      --meta_key=_yishu_fan_douyin_id --meta_value="$cleanup_douyin_id" \
+      --field=ID 2>/dev/null || true)
+    for user_id in $user_ids; do
+      if [[ "$user_id" =~ ^[0-9]+$ ]]; then
+        sudo -u www-data wp --path="$wordpress_root" user delete \
+          "$user_id" --yes >/dev/null 2>&1 || true
+      fi
+    done
+  done
+
+  # Empty-Douyin registrations cannot be recovered by reservation lookup.
+  # Recover every synthetic UUID/token from its root-only response file so an
+  # interruption immediately after HTTP 201 still removes the user and session.
+  for registration_file in \
+      "$test_dir/empty-v3-register.json" \
+      "$test_dir/transition-v2-register.json" \
+      "$test_dir/unknown-consent-register.json"; do
+    [[ -f "$registration_file" ]] || continue
+    cleanup_user_uuid=$(jq -r '.profile.userID // empty' "$registration_file" 2>/dev/null || true)
+    if [[ "$cleanup_user_uuid" =~ ^[a-f0-9-]{36}$ ]]; then
+      user_ids=$(sudo -u www-data wp --path="$wordpress_root" user list \
+        --meta_key=_yishu_fan_uuid --meta_value="$cleanup_user_uuid" \
+        --field=ID 2>/dev/null || true)
+      for user_id in $user_ids; do
+        if [[ "$user_id" =~ ^[0-9]+$ ]]; then
+          sudo -u www-data wp --path="$wordpress_root" user delete \
+            "$user_id" --yes >/dev/null 2>&1 || true
+        fi
+      done
+    fi
+    cleanup_token=$(jq -r '.token // empty' "$registration_file" 2>/dev/null || true)
+    if [[ "$cleanup_token" =~ ^[A-Za-z0-9_-]{43,128}$ ]]; then
+      cleanup_token_hash=$(printf '%s' "$cleanup_token" | sha256sum | awk '{print $1}')
+      sudo -u www-data wp --path="$wordpress_root" option delete \
+        "yishu_fan_session_${cleanup_token_hash}" >/dev/null 2>&1 || true
     fi
   done
 
@@ -100,11 +141,11 @@ cleanup() {
     done
   fi
 
-  local option_hash
-  option_hash=$(printf '%s' "$douyin_id" | sha256sum | awk '{print $1}')
-  sudo -u www-data wp --path="$wordpress_root" option delete \
-    "yishu_fan_douyin_${option_hash}" >/dev/null 2>&1 || true
-  for invitation_value in "$invitation_douyin_id" "$invitation_fault_douyin_id" "$invitation_placeholder" "$cleanup_invitation_placeholder"; do
+  local option_hash invitation_value
+  for invitation_value in "$douyin_id" "$transition_v2_douyin_id" \
+      "$unknown_consent_douyin_id" "$invitation_douyin_id" \
+      "$invitation_fault_douyin_id" "$invitation_placeholder" \
+      "$cleanup_invitation_placeholder"; do
     if [[ -n "$invitation_value" ]]; then
       option_hash=$(printf '%s' "$invitation_value" | sha256sum | awk '{print $1}')
       sudo -u www-data wp --path="$wordpress_root" option delete \
@@ -212,6 +253,174 @@ apple_replay_status=$(curl "${curl_common[@]}" \
 jq -e '.code == "fan_apple_challenge_invalid"' "$test_dir/apple-replay.json" >/dev/null
 unset fake_identity_token apple_challenge_state
 echo 'fan-api-smoke: Apple challenge hash-only storage, fail-closed verification and replay rejection passed'
+
+unknown_consent_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/unknown-consent-register.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${unknown_consent_install_id}" \
+  --data "$(jq -nc \
+    --arg displayName '同意版本拒绝验收' \
+    --arg douyinID "$unknown_consent_douyin_id" \
+    --arg password "$unknown_consent_password" \
+    --arg installID "$unknown_consent_install_id" \
+    --arg consentVersion '2099-01-01-approval-v999' \
+    '{displayName:$displayName,douyinID:$douyinID,password:$password,installID:$installID,consentVersion:$consentVersion}')" \
+  "${api_root}/fan/register")
+if [[ "$unknown_consent_status" != '400' ]]; then
+  unknown_consent_error=$(jq -r '.code // "unknown"' \
+    "$test_dir/unknown-consent-register.json" 2>/dev/null || true)
+  echo "fan-api-smoke: unknown consent was not rejected status=${unknown_consent_status} code=${unknown_consent_error:-unknown}" >&2
+  exit 1
+fi
+jq -e '.code == "fan_consent_required"' \
+  "$test_dir/unknown-consent-register.json" >/dev/null
+unknown_consent_remaining=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_douyin_id --meta_value="$unknown_consent_douyin_id" \
+  --field=ID 2>/dev/null || true)
+[[ -z "$unknown_consent_remaining" ]]
+unknown_consent_reservation_hash=$(printf '%s' "$unknown_consent_douyin_id" \
+  | sha256sum | awk '{print $1}')
+if sudo -u www-data wp --path="$wordpress_root" option get \
+    "yishu_fan_douyin_${unknown_consent_reservation_hash}" >/dev/null 2>&1; then
+  echo 'fan-api-smoke: rejected unknown consent left a Douyin reservation' >&2
+  exit 1
+fi
+echo 'fan-api-smoke: unknown consent version failed closed without account state'
+
+empty_v3_register_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/empty-v3-register.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${empty_v3_install_id}" \
+  --data "$(jq -nc \
+    --arg displayName '空抖音验收用户' \
+    --arg douyinID '' \
+    --arg password "$empty_v3_password" \
+    --arg installID "$empty_v3_install_id" \
+    --arg consentVersion '2026-09-02-approval-v3' \
+    '{displayName:$displayName,douyinID:$douyinID,password:$password,installID:$installID,consentVersion:$consentVersion}')" \
+  "${api_root}/fan/register")
+if [[ "$empty_v3_register_status" != '201' ]]; then
+  empty_v3_error=$(jq -r '.code // "unknown"' \
+    "$test_dir/empty-v3-register.json" 2>/dev/null || true)
+  echo "fan-api-smoke: empty-Douyin v3 registration failed status=${empty_v3_register_status} code=${empty_v3_error:-unknown}" >&2
+  exit 1
+fi
+jq -e '
+  (.token | test("^[A-Za-z0-9_-]{43,128}$")) and
+  (.profile.userID | test("^[a-f0-9-]{36}$")) and
+  .profile.douyinID == "" and .profile.status == "pending"
+' "$test_dir/empty-v3-register.json" >/dev/null
+empty_v3_user_uuid=$(jq -r '.profile.userID' "$test_dir/empty-v3-register.json")
+empty_v3_token=$(jq -r '.token' "$test_dir/empty-v3-register.json")
+empty_v3_token_hash=$(printf '%s' "$empty_v3_token" | sha256sum | awk '{print $1}')
+empty_v3_internal_user_id=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_uuid --meta_value="$empty_v3_user_uuid" --field=ID)
+[[ "$empty_v3_internal_user_id" =~ ^[0-9]+$ ]]
+sudo -u www-data wp --path="$wordpress_root" user meta get \
+  "$empty_v3_internal_user_id" _yishu_fan_consent --format=json \
+  > "$test_dir/empty-v3-consent.json"
+jq -e '.version == "2026-09-02-approval-v3"' \
+  "$test_dir/empty-v3-consent.json" >/dev/null
+empty_v3_delete_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/empty-v3-delete.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${empty_v3_token}" \
+  --header "X-Yishu-Install-ID: ${empty_v3_install_id}" \
+  --data "$(jq -nc \
+    --arg currentPassword "$empty_v3_password" \
+    --arg installID "$empty_v3_install_id" \
+    '{confirmation:"DELETE_ACCOUNT",currentPassword:$currentPassword,installID:$installID}')" \
+  "${api_root}/fan/delete")
+[[ "$empty_v3_delete_status" == '200' ]]
+jq -e '.ok == true' "$test_dir/empty-v3-delete.json" >/dev/null
+if sudo -u www-data wp --path="$wordpress_root" option get \
+    "yishu_fan_session_${empty_v3_token_hash}" >/dev/null 2>&1; then
+  echo 'fan-api-smoke: empty-Douyin v3 deletion left a session' >&2
+  exit 1
+fi
+empty_v3_remaining=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_uuid --meta_value="$empty_v3_user_uuid" --field=ID 2>/dev/null || true)
+[[ -z "$empty_v3_remaining" ]]
+empty_v3_token=''
+empty_v3_password=''
+echo 'fan-api-smoke: v3 empty-Douyin registration preserved empty profile and deleted cleanly'
+
+transition_v2_register_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/transition-v2-register.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "X-Yishu-Install-ID: ${transition_v2_install_id}" \
+  --data "$(jq -nc \
+    --arg displayName 'Build 40 过渡验收用户' \
+    --arg douyinID "$transition_v2_douyin_id" \
+    --arg password "$transition_v2_password" \
+    --arg installID "$transition_v2_install_id" \
+    --arg consentVersion '2026-08-31-approval-v2' \
+    '{displayName:$displayName,douyinID:$douyinID,password:$password,installID:$installID,consentVersion:$consentVersion}')" \
+  "${api_root}/fan/register")
+if [[ "$transition_v2_register_status" != '201' ]]; then
+  transition_v2_error=$(jq -r '.code // "unknown"' \
+    "$test_dir/transition-v2-register.json" 2>/dev/null || true)
+  echo "fan-api-smoke: transition v2 registration failed status=${transition_v2_register_status} code=${transition_v2_error:-unknown}" >&2
+  exit 1
+fi
+jq -e --arg douyinID "$transition_v2_douyin_id" '
+  (.token | test("^[A-Za-z0-9_-]{43,128}$")) and
+  (.profile.userID | test("^[a-f0-9-]{36}$")) and
+  .profile.douyinID == $douyinID and .profile.status == "pending"
+' "$test_dir/transition-v2-register.json" >/dev/null
+transition_v2_user_uuid=$(jq -r '.profile.userID' \
+  "$test_dir/transition-v2-register.json")
+transition_v2_token=$(jq -r '.token' "$test_dir/transition-v2-register.json")
+transition_v2_token_hash=$(printf '%s' "$transition_v2_token" | sha256sum | awk '{print $1}')
+transition_v2_internal_user_id=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_uuid --meta_value="$transition_v2_user_uuid" --field=ID)
+[[ "$transition_v2_internal_user_id" =~ ^[0-9]+$ ]]
+sudo -u www-data wp --path="$wordpress_root" user meta get \
+  "$transition_v2_internal_user_id" _yishu_fan_consent --format=json \
+  > "$test_dir/transition-v2-consent.json"
+jq -e '.version == "2026-08-31-approval-v2"' \
+  "$test_dir/transition-v2-consent.json" >/dev/null
+transition_v2_delete_status=$(curl "${curl_common[@]}" \
+  --output "$test_dir/transition-v2-delete.json" \
+  --write-out '%{http_code}' \
+  --request POST \
+  --header 'Content-Type: application/json' \
+  --header "Authorization: Bearer ${transition_v2_token}" \
+  --header "X-Yishu-Install-ID: ${transition_v2_install_id}" \
+  --data "$(jq -nc \
+    --arg currentPassword "$transition_v2_password" \
+    --arg installID "$transition_v2_install_id" \
+    '{confirmation:"DELETE_ACCOUNT",currentPassword:$currentPassword,installID:$installID}')" \
+  "${api_root}/fan/delete")
+[[ "$transition_v2_delete_status" == '200' ]]
+jq -e '.ok == true' "$test_dir/transition-v2-delete.json" >/dev/null
+if sudo -u www-data wp --path="$wordpress_root" option get \
+    "yishu_fan_session_${transition_v2_token_hash}" >/dev/null 2>&1; then
+  echo 'fan-api-smoke: transition v2 deletion left a session' >&2
+  exit 1
+fi
+transition_v2_remaining=$(sudo -u www-data wp --path="$wordpress_root" user list \
+  --meta_key=_yishu_fan_uuid --meta_value="$transition_v2_user_uuid" --field=ID 2>/dev/null || true)
+[[ -z "$transition_v2_remaining" ]]
+transition_v2_reservation_hash=$(printf '%s' "$transition_v2_douyin_id" \
+  | sha256sum | awk '{print $1}')
+if sudo -u www-data wp --path="$wordpress_root" option get \
+    "yishu_fan_douyin_${transition_v2_reservation_hash}" >/dev/null 2>&1; then
+  echo 'fan-api-smoke: transition v2 deletion left a Douyin reservation' >&2
+  exit 1
+fi
+transition_v2_token=''
+transition_v2_password=''
+unknown_consent_password=''
+echo 'fan-api-smoke: allowlisted v2 registration preserved submitted version and deleted cleanly'
 
 register_status=$(curl "${curl_common[@]}" --output "$test_dir/register.json" \
   --write-out '%{http_code}' \

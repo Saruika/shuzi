@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned access-controlled content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.5.9
+ * Version: 1.5.10
  * Author: Shuzijun
  */
 
@@ -64,6 +64,10 @@ final class Shuzijun_App_Content_API {
     const FAN_APPLE_CLIENT_ID = 'cn.com.shuzijun.yishu';
     const FAN_APPLE_JWKS_URL = 'https://appleid.apple.com/auth/keys';
     const ACCOUNT_AUTHORITY_ROLE_PATH = '/etc/shuzijun/account-authority-role';
+    // Build 41 ships the dormant collaboration implementation with an
+    // irreversible release-level fuse. An external wp-config constant is only
+    // a future second gate; it cannot activate code from this release.
+    const COLLABORATION_PHASE1_RELEASE_FUSE = false;
     const FAN_INVITATION_TTL = 86400;
     const FAN_MAX_INSTALLATIONS = 16;
     const FAN_MAX_SESSIONS = 8;
@@ -77,23 +81,34 @@ final class Shuzijun_App_Content_API {
     private static $fan_session_context = null;
 
     /**
-     * Phase 1 is intentionally unavailable unless a server owner explicitly
-     * opts in with a strict boolean constant. Do not replace this gate with an
-     * option, request value, environment variable or filter: the incomplete
-     * privacy/database work must not be remotely enabled.
+     * Phase 1 is intentionally unavailable in Build 41 even if an external
+     * configuration defines the future strict-boolean opt-in. Do not replace
+     * either gate with an option, request value, environment variable or
+     * filter: the incomplete privacy/database work must not be remotely enabled.
      */
     public static function collaboration_phase1_enabled() {
-        return defined('YISHU_ENABLE_COLLABORATION_PHASE1')
+        return self::COLLABORATION_PHASE1_RELEASE_FUSE === true
+            && defined('YISHU_ENABLE_COLLABORATION_PHASE1')
             && constant('YISHU_ENABLE_COLLABORATION_PHASE1') === true;
     }
 
-    /**
-     * New acknowledgements must always match the policy shipped by the
-     * current server. Legacy versions are deliberately not accepted here.
-     */
+    /** Return whether a submitted version exactly matches the current policy. */
     public static function fan_consent_version_is_current($version) {
         return is_string($version)
             && hash_equals(self::FAN_CONSENT_VERSION, $version);
+    }
+
+    /**
+     * Release 1.5.10 is the bounded Build 40/41 rollout bridge: a new
+     * acknowledgement may use the current v3 or an exact allowlisted v2.
+     * Missing, malformed and unknown versions still fail closed. A later
+     * release must remove this new-acknowledgement bridge after Build 40 is
+     * retired, without rewriting the version the client actually submitted.
+     */
+    public static function fan_new_consent_version_is_accepted($version) {
+        if (self::fan_consent_version_is_current($version)) { return true; }
+        return is_string($version)
+            && in_array($version, self::FAN_ACCEPTED_LEGACY_CONSENT_VERSIONS, true);
     }
 
     /**
@@ -1713,7 +1728,8 @@ final class Shuzijun_App_Content_API {
         $douyin_id = self::normalize_optional_douyin_id($request->get_param('douyinID'));
         if (is_wp_error($douyin_id)) { return $douyin_id; }
         $password = (string) $request->get_param('password');
-        if (!self::fan_consent_version_is_current($request->get_param('consentVersion'))) {
+        $consent_version = $request->get_param('consentVersion');
+        if (!self::fan_new_consent_version_is_accepted($consent_version)) {
             return new WP_Error('fan_consent_required', '请先阅读并确认账号资料的使用说明。', array('status' => 400));
         }
         $display_error = self::validate_fan_display_name($display_name);
@@ -1767,7 +1783,7 @@ final class Shuzijun_App_Content_API {
             && update_user_meta($user_id, self::FAN_META_CREDENTIAL_EPOCH, 1)
             && update_user_meta($user_id, self::FAN_META_ACCOUNT_SOURCE, 'password')
             && update_user_meta($user_id, self::FAN_META_CONSENT, array(
-                'version' => self::FAN_CONSENT_VERSION,
+                'version' => $consent_version,
                 'acceptedAt' => gmdate('c'),
             ));
         if (!$saved) {
@@ -2390,7 +2406,8 @@ final class Shuzijun_App_Content_API {
         if (is_wp_error($douyin_id)) { return $douyin_id; }
         $display_error = self::validate_fan_display_name($display_name);
         if (is_wp_error($display_error)) { return $display_error; }
-        if (!self::fan_consent_version_is_current($request->get_param('consentVersion'))) {
+        $consent_version = $request->get_param('consentVersion');
+        if (!self::fan_new_consent_version_is_accepted($consent_version)) {
             return new WP_Error('fan_consent_required', '请先阅读并确认账号资料的使用说明。', array('status' => 400));
         }
         $network_limit = self::rate_limit(
@@ -2491,7 +2508,7 @@ final class Shuzijun_App_Content_API {
                     array('gallery_full', 'video_view')
                 )
                 && self::set_fan_meta_in_transaction($user_id, self::FAN_META_CONSENT, array(
-                    'version' => self::FAN_CONSENT_VERSION,
+                    'version' => $consent_version,
                     'acceptedAt' => gmdate('c'),
                     'source' => 'apple_registration',
                 ))
@@ -3231,7 +3248,8 @@ final class Shuzijun_App_Content_API {
         $new_password = (string) $request->get_param('newPassword');
         $display_error = self::validate_fan_display_name($display_name);
         if (is_wp_error($display_error)) { return $display_error; }
-        if (!self::fan_consent_version_is_current($request->get_param('consentVersion'))) {
+        $consent_version = $request->get_param('consentVersion');
+        if (!self::fan_new_consent_version_is_accepted($consent_version)) {
             return new WP_Error('fan_consent_required', '请先阅读并确认账号资料的使用说明。', array('status' => 400));
         }
         $password_error = self::validate_fan_password($new_password);
@@ -3330,7 +3348,7 @@ final class Shuzijun_App_Content_API {
                 $user_id,
                 self::FAN_META_CONSENT,
                 array(
-                    'version' => self::FAN_CONSENT_VERSION,
+                    'version' => $consent_version,
                     'acceptedAt' => gmdate('c'),
                     'source' => 'invitation_completion',
                 )

@@ -23,7 +23,7 @@ readonly BACKUP_ROOT=/var/backups/shuzijun-app-content
 readonly LOCK_PATH="$STAGING_ROOT"
 readonly AUTHORITY_LOCK_PATH="$SITE"
 readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
-readonly VERIFY_SHA256=99a365008564d9c3377a77d93c1dbbc1dd9cb54ba032d2a3978b7d83f24818e0
+readonly VERIFY_SHA256=5c2f109000ae721cae772416a4c5c58fa579078f229443e8691c7be6cb7576cd
 readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
 readonly AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 readonly FPM_SERVICE=php8.3-fpm
@@ -67,10 +67,11 @@ Usage:
       --manifest-sha256 SHA256 --bundle-preflight
 
 The default mode is --dry-run. --bundle-preflight performs only the immutable
-bundle, manifest, PHP, Composer and dependency checks; it does not inspect the
-currently installed release unit, issue production-origin health probes,
-create a backup, stop a service or write the webroot. Composer security audit
-may use its configured public advisory source. The bundle must be a canonical,
+bundle, manifest, isolated collaboration-fuse, PHP, Composer and dependency
+checks; it does not inspect the currently installed release unit, issue
+production-origin health probes, create a backup, stop a service or write the
+webroot. The candidate fuse probe runs before Composer security audit may use
+its configured public advisory source. The bundle must be a canonical,
 root-owned directory immediately below /var/lib/shuzijun-app-content/releases
 and contain only these release entries plus release.sha256:
   shuzijun-app-content.php
@@ -485,6 +486,40 @@ run_composer() {
         --no-plugins --no-scripts "$@"
 }
 
+probe_candidate_collaboration_release_fuse() {
+    # Load the immutable candidate as the PHP worker in a no-network,
+    # no-write process. Defining the future external opt-in as strict true
+    # proves that a release carrying Phase 1 still has its internal fuse hard
+    # false. The pinned 1.5.8 bootstrap/seed bundle predates every Phase 1
+    # symbol, so an entirely absent gate is the only backward-compatible pass.
+    timeout --signal=KILL 20s runuser -u www-data -- env -i \
+        PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
+        "$PHP_BIN" -n -d display_errors=0 -d log_errors=0 \
+        -d allow_url_fopen=0 -d "open_basedir=$BUNDLE" \
+        -d 'disable_functions=exec,passthru,shell_exec,system,proc_open,popen,putenv,mail,pcntl_exec,dl,link,symlink,rename,unlink,rmdir,mkdir,chmod,chown,chgrp,touch,copy,file_put_contents,fsockopen,pfsockopen,stream_socket_client' \
+        -r '
+        $root = $argv[1];
+        define("ABSPATH", $root . "/");
+        define("YISHU_ENABLE_COLLABORATION_PHASE1", true);
+        function add_action(...$arguments): void {}
+        function add_filter(...$arguments): void {}
+        require $root . "/shuzijun-app-content.php";
+
+        $class = "Shuzijun_App_Content_API";
+        $gate = "collaboration_phase1_enabled";
+        $fuse = $class . "::COLLABORATION_PHASE1_RELEASE_FUSE";
+        if (!class_exists($class, false)) { exit(19); }
+        $has_gate = method_exists($class, $gate);
+        $has_fuse = defined($fuse);
+        if (constant("YISHU_ENABLE_COLLABORATION_PHASE1") !== true) { exit(20); }
+        if (!$has_gate && !$has_fuse) { exit(0); }
+        if (!$has_gate || !$has_fuse) { exit(21); }
+        if (constant($fuse) !== false) { exit(22); }
+        exit($class::$gate() === false ? 0 : 23);
+    ' "$BUNDLE" \
+        || fail 'candidate collaboration Phase 1 release fuse is not hard-disabled'
+}
+
 preflight_release() {
     local file scan_complete=0
     while IFS= read -r -d '' file; do
@@ -496,6 +531,8 @@ preflight_release() {
             "$PHP_BIN" -n -l "$file" >/dev/null
     done < <(find "$BUNDLE" -type f -name '*.php' -print0 && printf '\0')
     [[ "$scan_complete" -eq 1 ]] || fail 'PHP source scan did not complete'
+
+    probe_candidate_collaboration_release_fuse
 
     run_composer --working-dir="$BUNDLE" validate \
         --strict --no-check-publish >/dev/null

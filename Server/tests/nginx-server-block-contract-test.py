@@ -115,6 +115,7 @@ class Fixture:
             f"  include {self.legacy};\n"
             "  location = /favicon.ico { alias /var/www/favicon.ico; }\n"
             "  location = /wp-login.php {\n"
+            "    limit_req zone=sj_wp_login burst=10 nodelay;\n"
             "    include snippets/fastcgi-php.conf;\n"
             "    fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;\n"
             "  }\n"
@@ -777,6 +778,42 @@ def main() -> None:
             ),
             "reviewed PHP handler drifted",
         )
+
+    reviewed_login_limit = "    limit_req zone=sj_wp_login burst=10 nodelay;\n"
+    for drifted_limit in (
+        "    limit_req zone=sj_other burst=10 nodelay;\n",
+        "    limit_req zone=sj_wp_login burst=11 nodelay;\n",
+        "    limit_req zone=sj_wp_login burst=10;\n",
+        "    limit_req burst=10 zone=sj_wp_login nodelay;\n",
+        reviewed_login_limit + reviewed_login_limit,
+    ):
+        run_case(
+            lambda fixture, replacement=drifted_limit: fixture.replace(
+                reviewed_login_limit, replacement
+            ),
+            "exact /wp-login.php limit_req parameters drifted",
+        )
+
+    def generic_php_login_limit(fixture: Fixture) -> None:
+        original = fixture.generic_php_block()
+        changed = original.replace(
+            "    include snippets/fastcgi-php.conf;\n",
+            reviewed_login_limit + "    include snippets/fastcgi-php.conf;\n",
+            1,
+        )
+        fixture.replace(original, changed)
+
+    run_case(
+        generic_php_login_limit,
+        "limit_req is allowed only in the exact /wp-login.php location",
+    )
+    run_case(
+        lambda fixture: fixture.replace(
+            "  location = /wp-login.php {\n",
+            "  location = /xmlrpc.php {\n",
+        ),
+        "limit_req is allowed only in the exact /wp-login.php location",
+    )
 
     def recursive_php_override(fixture: Fixture) -> None:
         attack = fixture.snippets / "php-override.conf"

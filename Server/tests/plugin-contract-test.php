@@ -6,6 +6,9 @@ declare(strict_types=1);
 define('ABSPATH', __DIR__ . '/');
 define('WP_ENVIRONMENT_TYPE', 'local');
 define('YISHU_APPLE_TEST_MODE', true);
+// Simulate a mistakenly enabled external wp-config flag. Build 41's internal
+// release fuse must keep every collaboration path dormant anyway.
+define('YISHU_ENABLE_COLLABORATION_PHASE1', true);
 $authority_test_path = tempnam(sys_get_temp_dir(), 'yishu-authority-role-');
 if (!is_string($authority_test_path)) { throw new RuntimeException('无法创建角色标记测试文件'); }
 file_put_contents($authority_test_path, "standby\n");
@@ -282,9 +285,11 @@ function expect_error_code(string $code, $actual, string $message): void {
 }
 
 expect_true(
-    !defined('YISHU_ENABLE_COLLABORATION_PHASE1')
+    defined('YISHU_ENABLE_COLLABORATION_PHASE1')
+        && constant('YISHU_ENABLE_COLLABORATION_PHASE1') === true
+        && Shuzijun_App_Content_API::COLLABORATION_PHASE1_RELEASE_FUSE === false
         && Shuzijun_App_Content_API::collaboration_phase1_enabled() === false,
-    '未定义显式 PHP 布尔常量时，合作邀约 Phase 1 必须默认关闭'
+    '即使外部显式定义 true，Build 41 内建发布熔断也必须保持 Phase 1 关闭'
 );
 Shuzijun_App_Content_API::register_routes();
 $default_route_names = array_map(
@@ -590,7 +595,23 @@ expect_true(
             '2026-08-31-approval-v2'
         )
         && !Shuzijun_App_Content_API::fan_consent_version_is_current(null),
-    '新注册、Apple 首次资料和邀请完成只能接受当前 v3 同意'
+    '当前版本匹配器只能精确识别 v3'
+);
+expect_true(
+    Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
+        '2026-09-02-approval-v3'
+    )
+        && Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
+            '2026-08-31-approval-v2'
+        )
+        && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
+            '2026-08-30-approval-v1'
+        )
+        && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(null)
+        && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(array(
+            '2026-08-31-approval-v2',
+        )),
+    '1.5.10 过渡期新同意只能精确接受 v3 与白名单 v2，未知、缺失或非字符串必须失败'
 );
 expect_true(
     Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
@@ -615,10 +636,15 @@ foreach (array(
     expect_true(
         strpos(
             $new_consent_source,
-            "fan_consent_version_is_current(\$request->get_param('consentVersion'))"
+            "\$consent_version = \$request->get_param('consentVersion');"
         ) !== false
-            && strpos($new_consent_source, "'version' => self::FAN_CONSENT_VERSION") !== false,
-        '每个新同意入口都必须校验并持久化当前版本'
+            && strpos(
+                $new_consent_source,
+                'fan_new_consent_version_is_accepted($consent_version)'
+            ) !== false
+            && strpos($new_consent_source, "'version' => \$consent_version") !== false
+            && strpos($new_consent_source, "'version' => self::FAN_CONSENT_VERSION") === false,
+        '每个新同意入口都必须使用 1.5.10 过渡白名单，并保存客户端实际提交的原版本'
     );
 }
 
@@ -853,12 +879,20 @@ $collaboration_gate_source = plugin_method_source(
 );
 expect_true(
     $collaboration_gate_source !== ''
+        && strpos(
+            $plugin_source,
+            'const COLLABORATION_PHASE1_RELEASE_FUSE = false;'
+        ) !== false
+        && strpos(
+            $collaboration_gate_source,
+            'self::COLLABORATION_PHASE1_RELEASE_FUSE === true'
+        ) !== false
         && strpos($collaboration_gate_source, "defined('YISHU_ENABLE_COLLABORATION_PHASE1')") !== false
         && strpos($collaboration_gate_source, "constant('YISHU_ENABLE_COLLABORATION_PHASE1') === true") !== false
         && strpos($collaboration_gate_source, 'apply_filters') === false
         && strpos($collaboration_gate_source, 'get_option') === false
         && strpos($collaboration_gate_source, 'getenv') === false,
-    'Phase 1 只能由服务器代码中显式的 strict-true PHP 常量开启'
+    'Build 41 必须同时要求内建 release fuse 与外部 strict-true 常量，且内建 fuse 固定为 false'
 );
 foreach (array(
     'can_manage_collaboration',
@@ -1316,7 +1350,7 @@ $invitation_meta_source = ($invitation_meta_start === false || $invitation_meta_
     ? ''
     : substr($plugin_source, $invitation_meta_start, $invitation_meta_end - $invitation_meta_start);
 expect_true(
-    strpos($plugin_source, 'Version: 1.5.9') !== false
+    strpos($plugin_source, 'Version: 1.5.10') !== false
         && Shuzijun_App_Content_API::FAN_CAPABILITY === 'manage_yishu_fan_accounts'
         && Shuzijun_App_Content_API::FAN_INVITATION_TTL === 86400
         && Shuzijun_App_Content_API::FAN_ONBOARDING_SESSION_TTL === 600
@@ -1520,7 +1554,7 @@ expect_true(
         && strpos($plugin_source, "'https://appleid.apple.com/auth/keys'") !== false
         && strpos($plugin_source, "JWK::parseKeySet(\$filtered, 'RS256')") !== false
         && strpos($plugin_source, "(string) (\$headers->alg ?? '') !== 'RS256'") !== false
-        && strpos($plugin_source, 'Version: 1.5.9') !== false,
+        && strpos($plugin_source, 'Version: 1.5.10') !== false,
     'Apple 认证必须强制 authorization code 交换并用 RS256/JWKS 严格验证'
 );
 $apple_jwks_start = strpos($plugin_source, 'private static function fetch_apple_jwk_keys');

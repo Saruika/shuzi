@@ -74,6 +74,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/entitlement-verifier/README.md`](Server/entitlement-verifier/README.md)：Apple 订阅凭证校验服务。
 - [`Server/nginx/README.md`](Server/nginx/README.md)：REST 认证头转发配置。
 - [`Server/operations/README.md`](Server/operations/README.md)：线上运维修复记录。
+- [`Server/releases/v1.5.10-build41.md`](Server/releases/v1.5.10-build41.md)：Build 41 服务端发布清单、迁移桥及运维工具独立信任记录。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
@@ -112,7 +113,7 @@ xcodebuild -project Yishu.xcodeproj \
 - 默认上线三张古风竖版开屏；网络衍生图约 850–950 KB，均来自原始高清照片的等比下采样，不使用 Q 版、AI 放大或模糊修复素材。
 - 管理页海报预览改为完整 `fit` 构图；真实开屏则采用窄屏 `fill`、宽窗口“同图模糊背景 + `fit` 前景”的自适应策略。
 - iPad 横屏首页的竖版原图以原始宽高比完整展示，五张轮播在横竖屏与明暗配置下都会验证逐张切换和无黑屏；Pro Max 关于页职业说明与装饰文字同时通过完整可见与对比度门禁。
-- 注册、Apple 首次申请与邀请完成统一使用 2026-09-02 隐私同意版本；新申请必须同意新版，已存的 9 月 1 日合法同意保持有效，未知版本失败关闭。
+- Build 41 提交 2026-09-02 v3 隐私同意；服务端 1.5.10 过渡期在注册、Apple 首次申请与邀请完成入口精确接受 v3 及 Build 40 的白名单 v2，并保存实际提交版本；未知或缺失版本失败关闭。Build 40 退役后须另发服务器版本收紧新申请至仅 v3。
 - 合作邀约在 App 内和网页隐私政策中补齐字段、用途、用户主动发送、保留和查阅/更正/删除说明；合作 Phase 1 仍默认禁用，不宣称未上线能力。
 - 屏幕保护仅使用 Apple 公开 API：移除借用安全文本输入层的非预期截图画布，保留录屏、投屏、退后台遮罩与截图后提示，并不再宣称可以阻止普通静态截图。
 - WeatherKit 归属信息仅放在“关于”页为产品方明确例外，已记录 App Review 风险；合作邀约服务端 Phase 1 仍未启用、未部署。

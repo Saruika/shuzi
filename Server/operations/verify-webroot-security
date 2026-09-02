@@ -14,7 +14,7 @@ nginx_enabled_site=${5:-/etc/nginx/sites-enabled/shuzijun-ssl.conf}
 nginx_config_owner=${6:-root:root}
 site_root_owner=${7:-root:www-data}
 readonly nginx_contract_checker=/usr/local/sbin/verify-nginx-server-block-contract.py
-readonly nginx_contract_checker_sha256=9b6819ccbae6b2826277e827f6a33f6fd3b961170cc17c169f05888dffd5d12c
+readonly nginx_contract_checker_sha256=9e9996089bd6044ceb0f98521195f403e2835ec2436fecf1ec83c74777e8c7e9
 readonly nginx_contract_checker_fd=/proc/self/fd/9
 
 reject_checker_find_match() {

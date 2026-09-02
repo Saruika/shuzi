@@ -39,6 +39,8 @@ SENSITIVE_INCLUDE = "/etc/nginx/snippets/shuzijun-sensitive-files-deny.conf"
 LEGACY_INCLUDE = "/etc/nginx/snippets/shuzijun-legacy-images-alias.conf"
 ACCOUNT_API_INCLUDE = "/etc/nginx/snippets/shuzijun-account-api-backup-proxy.conf"
 ACCOUNT_API_PATH = "/wp-json/shuzijun/v1/"
+WP_LOGIN_LOCATION_ARGS = ("=", "/wp-login.php")
+WP_LOGIN_LIMIT_REQ_ARGS = ("zone=sj_wp_login", "burst=10", "nodelay")
 DEFAULT_ACTIVE = Path("/etc/nginx/sites-enabled/shuzijun-ssl.conf")
 DEFAULT_AVAILABLE = Path("/etc/nginx/sites-available/shuzijun-ssl.conf")
 DEFAULT_SENSITIVE_TARGET = Path(SENSITIVE_INCLUDE)
@@ -1697,6 +1699,32 @@ def validate_application_regex_order(node: Directive, hostname: str) -> None:
             )
 
 
+def validate_php_limit_req_contract(location: Directive, hostname: str) -> None:
+    """Allow the production login throttle without widening PHP execution."""
+
+    all_limit_requests = [
+        item
+        for item in descendants(location)
+        if item.name.lower() == "limit_req"
+    ]
+    if not all_limit_requests:
+        return
+    direct_limit_requests = direct(location, "limit_req")
+    if location.args != WP_LOGIN_LOCATION_ARGS:
+        raise InstallError(
+            f"{hostname} limit_req is allowed only in the exact /wp-login.php location"
+        )
+    if (
+        len(all_limit_requests) != 1
+        or all_limit_requests != direct_limit_requests
+        or all_limit_requests[0].children is not None
+        or all_limit_requests[0].args != WP_LOGIN_LIMIT_REQ_ARGS
+    ):
+        raise InstallError(
+            f"{hostname} exact /wp-login.php limit_req parameters drifted"
+        )
+
+
 def validate_fastcgi_handler(location: Directive, hostname: str) -> None:
     children = tuple(location.children or ())
     passes = [item for item in children if item.name.lower() == "fastcgi_pass"]
@@ -1715,6 +1743,7 @@ def validate_fastcgi_handler(location: Directive, hostname: str) -> None:
         raise InstallError(
             f"{hostname} PHP handler must use the reviewed fastcgi-php.conf to fastcgi.conf chain"
         )
+    validate_php_limit_req_contract(location, hostname)
     allowed = {
         EXPANDED_INCLUDE_MARKER,
         "fastcgi_cache",
@@ -1732,6 +1761,7 @@ def validate_fastcgi_handler(location: Directive, hostname: str) -> None:
         "fastcgi_param",
         "fastcgi_pass",
         "fastcgi_split_path_info",
+        "limit_req",
         "set",
         "try_files",
     }

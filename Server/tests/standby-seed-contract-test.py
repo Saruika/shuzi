@@ -18,6 +18,7 @@ def body(text: str, name: str, next_name: str) -> str:
 def main() -> None:
     text = SEED.read_text(encoding="utf-8")
     readme = README.read_text(encoding="utf-8")
+    deployer = DEPLOYER.read_text(encoding="utf-8")
     deployer_sha = hashlib.sha256(DEPLOYER.read_bytes()).hexdigest()
     verifier_sha = hashlib.sha256(AUTHORITY_VERIFIER.read_bytes()).hexdigest()
     webroot_verifier_sha = hashlib.sha256(WEBROOT_VERIFIER.read_bytes()).hexdigest()
@@ -71,6 +72,20 @@ def main() -> None:
     plan_check = text.index('[[ "$APPROVED_PLAN_SHA256" == "$PLAN_SHA256" ]]')
     assert fpm_first < authority < preflight < plan_check < write_first
     assert "--bundle-preflight" in text
+    candidate_probe = body(
+        deployer, "probe_candidate_collaboration_release_fuse", "preflight_release"
+    )
+    deployer_preflight = body(
+        deployer, "preflight_release", "verify_installed_jwt_autoload"
+    )
+    assert 'define("YISHU_ENABLE_COLLABORATION_PHASE1", true);' in candidate_probe
+    assert 'if (!$has_gate && !$has_fuse) { exit(0); }' in candidate_probe
+    assert 'if (constant($fuse) !== false) { exit(22); }' in candidate_probe
+    assert 'exit($class::$gate() === false ? 0 : 23);' in candidate_probe
+    assert "probe_candidate_collaboration_release_fuse" in deployer_preflight
+    assert deployer_preflight.index(
+        "probe_candidate_collaboration_release_fuse"
+    ) < deployer_preflight.index('run_composer --working-dir="$BUNDLE" validate')
     assert "plan-sha256=%s" in text
     assert "approved plan SHA256 does not match" in text
 

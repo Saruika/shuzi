@@ -106,6 +106,24 @@ def main() -> None:
         deployer_lines, "verify_current_webroot", bundle_preflight_exit
     )
     assert deploy_preflight < bundle_preflight_exit < live_webroot_check
+    candidate_probe = function_body(
+        deployer_lines,
+        "probe_candidate_collaboration_release_fuse",
+        "preflight_release",
+    )
+    deployer_preflight_body = function_body(
+        deployer_lines, "preflight_release", "verify_installed_jwt_autoload"
+    )
+    assert 'define("YISHU_ENABLE_COLLABORATION_PHASE1", true);' in candidate_probe
+    assert 'if (!$has_gate && !$has_fuse) { exit(0); }' in candidate_probe
+    assert 'if (constant($fuse) !== false) { exit(22); }' in candidate_probe
+    assert 'exit($class::$gate() === false ? 0 : 23);' in candidate_probe
+    assert "probe_candidate_collaboration_release_fuse" in deployer_preflight_body
+    assert deployer_preflight_body.index(
+        "probe_candidate_collaboration_release_fuse"
+    ) < deployer_preflight_body.index(
+        'run_composer --working-dir="$BUNDLE" validate'
+    )
 
     root_check = line_number(lines, '[[ "$EUID" -eq 0 ]]')
     authority_only = line_number(

@@ -126,7 +126,9 @@ def main() -> None:
     assert "runtime tools must be owned by root" in runtime_body
     assert "command -v composer" not in runtime_body
 
-    composer_body = function_body(lines, "run_composer", "preflight_release")
+    composer_body = function_body(
+        lines, "run_composer", "probe_candidate_collaboration_release_fuse"
+    )
     for operation in (
         "env -i",
         "COMPOSER_HOME=/dev/null",
@@ -136,6 +138,39 @@ def main() -> None:
         "--no-scripts",
     ):
         assert operation in composer_body
+
+    collaboration_probe = function_body(
+        lines, "probe_candidate_collaboration_release_fuse", "preflight_release"
+    )
+    for probe_guard in (
+        "timeout --signal=KILL 20s runuser -u www-data -- env -i",
+        '"$PHP_BIN" -n -d display_errors=0 -d log_errors=0',
+        'allow_url_fopen=0 -d "open_basedir=$BUNDLE"',
+        "disable_functions=exec,passthru,shell_exec,system",
+        'define("YISHU_ENABLE_COLLABORATION_PHASE1", true);',
+        'require $root . "/shuzijun-app-content.php";',
+        'if (!class_exists($class, false)) { exit(19); }',
+        'method_exists($class, $gate)',
+        '$class . "::COLLABORATION_PHASE1_RELEASE_FUSE"',
+        'constant("YISHU_ENABLE_COLLABORATION_PHASE1") !== true',
+        'if (!$has_gate && !$has_fuse) { exit(0); }',
+        'if (!$has_gate || !$has_fuse) { exit(21); }',
+        'if (constant($fuse) !== false) { exit(22); }',
+        'exit($class::$gate() === false ? 0 : 23);',
+        "candidate collaboration Phase 1 release fuse is not hard-disabled",
+    ):
+        assert probe_guard in collaboration_probe, (
+            f"missing candidate collaboration fuse probe: {probe_guard}"
+        )
+    for forbidden_probe_effect in (
+        "$SITE",
+        "$TARGET_DIR",
+        "curl ",
+        "systemctl ",
+        "create_code_backup",
+        "install_release_unit",
+    ):
+        assert forbidden_probe_effect not in collaboration_probe
 
     preflight_body = function_body(
         lines, "preflight_release", "verify_installed_jwt_autoload"
@@ -151,6 +186,16 @@ def main() -> None:
         "validate_manifest",
     ):
         assert operation in preflight_body, f"missing runtime preflight: {operation}"
+    candidate_probe_call = preflight_body.index(
+        "probe_candidate_collaboration_release_fuse"
+    )
+    composer_validate_call = preflight_body.index(
+        'run_composer --working-dir="$BUNDLE" validate'
+    )
+    composer_audit_call = preflight_body.index(
+        'run_composer --working-dir="$BUNDLE" audit'
+    )
+    assert candidate_probe_call < composer_validate_call < composer_audit_call
     assert 'require $root . "/vendor/autoload.php"' not in preflight_body
 
     installed_autoload = function_body(
@@ -307,8 +352,16 @@ def main() -> None:
     assert 'systemctl stop "$FPM_SERVICE"' in isolation_body
     assert isolation_body.count("is_fpm_persistently_masked") >= 2
 
-    dry_run = line_number(lines, 'if [[ "$MODE" == dry-run ]]')
+    release_preflight = line_number(lines, "preflight_release", fixed_validation + 1)
+    bundle_preflight_exit = line_number(
+        lines, 'if [[ "$MODE" == bundle-preflight ]]', release_preflight + 1
+    )
+    current_webroot = line_number(
+        lines, "verify_current_webroot", bundle_preflight_exit + 1
+    )
+    dry_run = line_number(lines, 'if [[ "$MODE" == dry-run ]]', current_webroot + 1)
     first_authority_check = line_number(lines, "verify_authority_role", fixed_validation + 1)
+    assert release_preflight < bundle_preflight_exit < current_webroot < dry_run
     assert fixed_validation < first_authority_check < dry_run
     enabled_policy = line_number(lines, "require_fpm_enabled_policy", dry_run + 1)
     first_direct_probe = line_number(lines, "probe_direct_php_blocked", enabled_policy + 1)
@@ -340,6 +393,8 @@ def main() -> None:
     )
     final_guard_release = line_number(lines, "release_fpm_boot_guard", final_probe + 1)
     rollback_disarm = line_number(lines, "ROLLBACK_READY=0", final_guard_release + 1)
+    assert release_preflight < enabled_policy < first_direct_probe < first_apply_probe
+    assert release_preflight < backup < fpm_stop < install
     assert dry_run < enabled_policy < first_direct_probe < first_apply_probe
     assert first_apply_probe < second_authority_check < backup
     assert backup < boot_guard < fpm_stop < install < live_hash

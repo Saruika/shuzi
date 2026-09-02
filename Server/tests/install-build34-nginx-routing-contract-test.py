@@ -373,7 +373,15 @@ def php_include_active_config() -> bytes:
         ),
         1,
     )
-    return config
+    generic_php = b"    location ~ \\.php$ {\n"
+    wp_login = (
+        b"    location = /wp-login.php {\n"
+        b"        limit_req zone=sj_wp_login burst=10 nodelay;\n"
+        b"        include snippets/fastcgi-php.conf;\n"
+        b"        fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;\n"
+        b"    }\n"
+    )
+    return config.replace(generic_php, wp_login + generic_php, 1)
 
 
 def add_reviewed_include_entries(entries: dict[Path, object]) -> None:
@@ -1555,6 +1563,8 @@ def assert_production_regex_profiles() -> None:
         MODULE.REQUIRED_SECURITY_REGEX_PROFILES
         == VERIFIER_MODULE.REQUIRED_SECURITY_REGEX_PROFILES
     )
+    assert MODULE.WP_LOGIN_LOCATION_ARGS == VERIFIER_MODULE.WP_LOGIN_LOCATION_ARGS
+    assert MODULE.WP_LOGIN_LIMIT_REQ_ARGS == VERIFIER_MODULE.WP_LOGIN_LIMIT_REQ_ARGS
 
     config = production_regex_active_config()
     unsafe_document = MODULE.parse(config.decode(), "unsafe production fixture")
@@ -1954,6 +1964,48 @@ def assert_recursive_include_contract() -> None:
             ),
             "PHP handler must use the reviewed FPM socket",
         )
+
+    reviewed_login_limit = b"        limit_req zone=sj_wp_login burst=10 nodelay;\n"
+
+    def replace_active(fs, args, old: bytes, new: bytes) -> None:
+        changed = fs.entries[ACTIVE].data.replace(old, new, 1)
+        assert changed != fs.entries[ACTIVE].data
+        fs.entries[ACTIVE] = file_state(changed)
+        args["expected_active_sha256"] = MODULE.sha256(changed)
+        args["expected_old_location_sha256"] = old_location_hash(changed)
+
+    for drifted_limit in (
+        b"        limit_req zone=sj_other burst=10 nodelay;\n",
+        b"        limit_req zone=sj_wp_login burst=11 nodelay;\n",
+        b"        limit_req zone=sj_wp_login burst=10;\n",
+        b"        limit_req burst=10 zone=sj_wp_login nodelay;\n",
+        reviewed_login_limit + reviewed_login_limit,
+    ):
+        reject_include(
+            lambda fs, args, replacement=drifted_limit: replace_active(
+                fs, args, reviewed_login_limit, replacement
+            ),
+            "exact /wp-login.php limit_req parameters drifted",
+        )
+
+    reject_include(
+        lambda fs, args: replace_active(
+            fs,
+            args,
+            b"    location = /wp-login.php {\n",
+            b"    location = /xmlrpc.php {\n",
+        ),
+        "limit_req is allowed only in the exact /wp-login.php location",
+    )
+    reject_include(
+        lambda fs, args: replace_active(
+            fs,
+            args,
+            b"    location ~ \\.php$ {\n",
+            b"    location ~ \\.php$ {\n" + reviewed_login_limit,
+        ),
+        "limit_req is allowed only in the exact /wp-login.php location",
+    )
 
     def unknown_server_include(fs, args) -> None:
         unknown = Path("/etc/nginx/snippets/unreviewed.conf")
