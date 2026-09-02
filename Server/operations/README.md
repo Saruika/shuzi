@@ -1,6 +1,6 @@
 # Server operation fixes
 
-## Build 41.11 内部健康监控事务安装器
+## Build 41.12 内部健康监控事务安装器
 
 `deploy-shuzijun-health-monitor` 只升级内部健康脚本及其 service/timer，
 不会运行同步、故障切换，也不会修改 Nginx、PHP-FPM、MySQL、DNS、CDN、
@@ -10,14 +10,14 @@ WordPress 内容或媒体。生产执行顺序固定为备用节点 `backup stan
 生产信任锚为：
 
 ```text
-DEPLOYER_SHA256=7dca0a3324e6bcaa362972f5be0479d4342514d64c72ad44731872a9ef532ea6
+DEPLOYER_SHA256=4693d935bd56a809677a2283bae347bdf7d7ceaeaba3f03bfeac44615e542c5d
 ```
 
-先把 Git 标签 `v1.3.29-build41.11` 中的安装器以原子 rename 放到
-`/run/deploy-shuzijun-health-build41.11`，设为 `root:root 0700`、regular、
+先把 Git 标签 `v1.3.29-build41.12` 中的安装器以原子 rename 放到
+`/run/deploy-shuzijun-health-build41.12`，设为 `root:root 0700`、regular、
 non-link、nlink=1；三个 runtime 文件则分别放入仅含这三项的
-`/run/shuzijun-health-build41.11-backup` 和
-`/run/shuzijun-health-build41.11-primary`。不得直接执行仓库副本，也不得从
+`/run/shuzijun-health-build41.12-backup` 和
+`/run/shuzijun-health-build41.12-primary`。不得直接执行仓库副本，也不得从
 `/private/tmp` 或可被非 root 写入的路径启动。
 
 Bash 会在读取脚本正文前处理调用环境中的 `BASH_ENV`，所以执行前校验和
@@ -27,8 +27,8 @@ Bash 会在读取脚本正文前处理调用环境中的 `BASH_ENV`，所以执�
 ```bash
 sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C /bin/bash --noprofile --norc -c '
 set -Eeuo pipefail
-DEPLOYER=/run/deploy-shuzijun-health-build41.11
-DEPLOYER_SHA256=7dca0a3324e6bcaa362972f5be0479d4342514d64c72ad44731872a9ef532ea6
+DEPLOYER=/run/deploy-shuzijun-health-build41.12
+DEPLOYER_SHA256=4693d935bd56a809677a2283bae347bdf7d7ceaeaba3f03bfeac44615e542c5d
 [[ ! -L "$DEPLOYER" && -f "$DEPLOYER" ]]
 [[ "$(/usr/bin/realpath -e -- "$DEPLOYER")" == "$DEPLOYER" ]]
 [[ "$(/usr/bin/stat -c "%F:%u:%g:%a:%h" -- "$DEPLOYER")" == "regular file:0:0:700:1" ]]
@@ -53,7 +53,7 @@ status 后才原子替换。显式 health invocation 必须精确返回 degraded
 status、角色、路由、业务哈希和 reason 集都必须重新通过。计时器下一次触发
 还必须连续两次稳定落在 60–360 秒后，才可写入 `DONE`。
 
-Build 41.11 保留不依赖 `stat %F` 本地化文案的空锁文件校验；它分别验证
+Build 41.12 保留不依赖 `stat %F` 本地化文案的空锁文件校验；它分别验证
 regular `-f`、非链接、canonical path 及数值 owner/group/mode/nlink，因此
 Ubuntu 返回 `regular empty file` 时也不会误拒绝，异常类型仍会 fail-closed。
 它还在主事务和回滚的 timer/service 隔离后显式执行 `reset-failed`：
@@ -71,6 +71,12 @@ inactive unit 后清空 InvocationID 与时间戳。旧状态预检必须连续�
 跨越五分钟触发边界时会有限重试。回滚恢复旧 timer 后会显式执行一次旧 health
 service 来重新建立 `OnUnitActiveSec`，再验收 60–360 秒窗口，防止恢复出一个
 表面 active、实际不再调度的 timer。
+
+Build 41.12 修复停止 timer 后 service unit 已被 systemd 回收时的隔离误判。
+`reset-failed` 在 unit 未加载时会返回非零，但这并不代表 service 仍在运行；
+安装器现在无论命令返回值如何，都会重新加载并逐项证明 service 为
+`inactive/dead` 且 Job 为空，只有这个终态成立才继续。主事务和 rollback 的
+首次隔离共用同一严格 helper；failed、active 或残留 Job 仍会 fail-closed。
 
 `/etc/systemd/system/timers.target.wants` 允许在 disabled 阶段被 systemd
 删除，但存在时必须是可信实目录；enabled 阶段必须存在 root 所有的绝对目标

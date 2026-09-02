@@ -8,7 +8,7 @@ from pathlib import Path
 
 DEPLOYER = Path("Server/operations/deploy-shuzijun-health-monitor")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE = Path("Server/releases/v1.5.10-build41.11.md")
+RELEASE = Path("Server/releases/v1.5.10-build41.12.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -340,6 +340,89 @@ fi
     subprocess.run(["/bin/bash", "-c", negative], check=True)
 
 
+def assert_stopped_service_normalizer_contract(normalizer: str) -> None:
+    for reset_rc, load_state, state, substate, job, should_pass in (
+        (0, "loaded", "inactive", "dead", "", True),
+        (5, "loaded", "inactive", "dead", "", True),
+        (5, "not-found", "inactive", "dead", "", False),
+        (5, "masked", "inactive", "dead", "", False),
+        (5, "loaded", "failed", "failed", "", False),
+        (5, "loaded", "active", "running", "", False),
+        (5, "loaded", "inactive", "dead", "queued-job", False),
+    ):
+        invocation = "normalize_stopped_health_service"
+        expectation = invocation if should_pass else f"if {invocation}; then exit 97; fi"
+        harness = f"""
+set -Eeuo pipefail
+RESET_RC={reset_rc}
+LOAD_STATE={load_state}
+STATE={state}
+SUBSTATE={substate}
+JOB={job}
+systemctl() {{
+    [[ "$1" == reset-failed && "$2" == shuzijun-internal-health.service ]]
+    return "$RESET_RC"
+}}
+unit_value() {{
+    [[ "$1" == shuzijun-internal-health.service ]]
+    case "$2" in
+        LoadState) printf '%s\\n' "$LOAD_STATE" ;;
+        ActiveState) printf '%s\\n' "$STATE" ;;
+        SubState) printf '%s\\n' "$SUBSTATE" ;;
+        Job) printf '%s\\n' "$JOB" ;;
+        *) return 71 ;;
+    esac
+}}
+{normalizer}
+{expectation}
+"""
+        subprocess.run(["/bin/bash", "-c", harness], check=True)
+
+    drift = f"""
+set -Eeuo pipefail
+second_sample=0
+systemctl() {{ return 5; }}
+sleep() {{ second_sample=1; }}
+unit_value() {{
+    [[ "$1" == shuzijun-internal-health.service ]]
+    case "$2" in
+        LoadState) printf '%s\\n' loaded ;;
+        ActiveState) (( second_sample == 0 )) && printf '%s\\n' inactive || printf '%s\\n' active ;;
+        SubState) (( second_sample == 0 )) && printf '%s\\n' dead || printf '%s\\n' running ;;
+        Job) printf '\\n' ;;
+        *) return 71 ;;
+    esac
+}}
+{normalizer}
+if normalize_stopped_health_service; then
+    exit 98
+fi
+"""
+    subprocess.run(["/bin/bash", "-c", drift], check=True)
+
+    read_failure = f"""
+set -Eeuo pipefail
+second_sample=0
+systemctl() {{ return 5; }}
+sleep() {{ second_sample=1; }}
+unit_value() {{
+    (( second_sample == 0 )) || return 72
+    case "$2" in
+        LoadState) printf '%s\\n' loaded ;;
+        ActiveState) printf '%s\\n' inactive ;;
+        SubState) printf '%s\\n' dead ;;
+        Job) printf '\\n' ;;
+        *) return 71 ;;
+    esac
+}}
+{normalizer}
+if normalize_stopped_health_service; then
+    exit 99
+fi
+"""
+    subprocess.run(["/bin/bash", "-c", read_failure], check=True)
+
+
 def assert_rollback_isolator_negative_path(rollback: str) -> None:
     harness = f"""
 set -Eeuo pipefail
@@ -353,6 +436,7 @@ done_marker_matches() {{ return 1; }}
 sync_path() {{ return 0; }}
 require_timer_disabled_link() {{ return 0; }}
 sync_timer_enable_state() {{ return 0; }}
+normalize_stopped_health_service() {{ return 0; }}
 require_old_runtime_isolated() {{ return 97; }}
 systemctl() {{
     printf '%s\\n' "$*" >&3
@@ -408,6 +492,11 @@ sync_path() {{ return 0; }}
 require_timer_disabled_link() {{ return 0; }}
 require_timer_enabled_link() {{ return 0; }}
 sync_timer_enable_state() {{ return 0; }}
+normalize_stopped_health_service() {{
+    service_failed=0
+    printf '%s\n' NORMALIZE >&3
+    return 0
+}}
 require_old_runtime_isolated() {{ (( service_busy == 0 && service_failed == 0 )); }}
 require_old_runtime_enabled_inactive() {{ (( service_busy == 0 && service_failed == 0 )); }}
 require_old_runtime_active() {{
@@ -491,7 +580,8 @@ rollback 7
     assert "COMMIT" in events, events
     assert "OLD_ACTIVE_BUSY" not in events, events
     assert sum(event.startswith("disable --now") for event in events) == 1, events
-    assert sum(event.startswith("reset-failed shuzijun-internal-health.service") for event in events) == 2, events
+    assert events.count("NORMALIZE") == 1, events
+    assert sum(event.startswith("reset-failed shuzijun-internal-health.service") for event in events) == 1, events
     assert sum(event.startswith("start shuzijun-internal-health.service") for event in events) == 1, events
 
 
@@ -515,9 +605,9 @@ def main() -> None:
     assert "unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true" in lines
 
     for fixed_value in (
-        "RELEASE_ID=build41.11",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.11",
-        "STAGE=/run/shuzijun-health-build41.11-$NODE",
+        "RELEASE_ID=build41.12",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.12",
+        "STAGE=/run/shuzijun-health-build41.12-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -541,6 +631,7 @@ def main() -> None:
         assert fixed_value in lines, fixed_value
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
+    assert "build41.11" not in text
     assert "build41.10" not in text
     assert "build41.9" not in text
     assert "build41.8" not in text
@@ -781,10 +872,20 @@ def main() -> None:
         assert guard in harden
     assert "O_TRUNC" not in harden and "O_CREAT" not in harden
 
-    idle = function_body(lines, "wait_health_idle", "require_old_state_stable")
+    idle = function_body(lines, "wait_health_idle", "normalize_stopped_health_service")
     assert idle.count("ActiveState") >= 2
     assert idle.count("Job") >= 2
     assert "state_again" in idle and "job_again" in idle
+    stopped_normalizer = function_body(
+        lines, "normalize_stopped_health_service", "require_old_state_stable"
+    )
+    assert "if systemctl reset-failed shuzijun-internal-health.service; then" in stopped_normalizer
+    assert "for sample in 1 2" in stopped_normalizer
+    assert "LoadState" in stopped_normalizer
+    assert "ActiveState" in stopped_normalizer
+    assert "SubState" in stopped_normalizer
+    assert "Job" in stopped_normalizer
+    assert_stopped_service_normalizer_contract(stopped_normalizer)
     stable_old_state = function_body(
         lines, "require_old_state_stable", "validate_timer_quiescent"
     )
@@ -854,7 +955,7 @@ def main() -> None:
     )
     rollback_reset = line_number(
         rollback.splitlines(),
-        "systemctl reset-failed shuzijun-internal-health.service",
+        "normalize_stopped_health_service",
         rollback_stop,
     )
     isolation_gate = line_number(rollback.splitlines(), "if (( isolation_ok == 1 ))")
@@ -962,7 +1063,7 @@ def main() -> None:
     )
     main_reset = line_number(
         lines,
-        "systemctl reset-failed shuzijun-internal-health.service",
+        "normalize_stopped_health_service",
         main_stop,
     )
     main_service_inactive = line_number(
