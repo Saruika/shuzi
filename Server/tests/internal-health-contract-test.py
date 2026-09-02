@@ -1,5 +1,10 @@
 from pathlib import Path
+import os
 import runpy
+import stat
+import tempfile
+from types import SimpleNamespace
+from unittest import mock
 
 
 SCRIPT = Path("Server/operations/shuzijun-internal-health")
@@ -46,6 +51,36 @@ def main() -> None:
     assert 'rb"(?:0|[1-9][0-9]{0,18})\\n"' in source
     assert "int(value[:-1]) < 2**63" in source
     assert "stat.S_IMODE(metadata.st_mode) & 0o022 == 0" in source
+    assert "def secure_root_directory_chain(path):" in source
+    assert "if not secure_root_directory_chain(item.parent):" in source
+    stable_log_source = source[
+        source.index("def stable_log_tail(") : source.index("def success_generation(")
+    ]
+    log_summary_source = source[
+        source.index("def log_summary(") : source.index("def success_generation(")
+    ]
+    assert log_summary_source.index("secure_root_directory_chain(item.parent)") < log_summary_source.index(
+        "stable_log_tail(item)"
+    )
+    assert "item.exists()" not in stable_log_source
+    assert "file_mtime(item)" not in stable_log_source
+    assert "item.read_text" not in stable_log_source
+    for stable_read_guard in (
+        "O_DIRECTORY",
+        "O_NOFOLLOW",
+        "O_NONBLOCK",
+        "os.pread",
+        "before_fd.st_dev",
+        "before_fd.st_ino",
+        "value.st_nlink",
+        "before_fd.st_size",
+        "value.st_mtime_ns",
+        "value.st_ctime_ns",
+        "after_path.st_dev",
+        "after_path.st_ino",
+        "secure_root_directory_chain(item.parent)",
+    ):
+        assert stable_read_guard in stable_log_source
     assert "incremental sync completed" in source
     assert "signed uploads/database sync applied" in source
     for forbidden in (
@@ -64,6 +99,157 @@ def main() -> None:
     age_within = namespace["age_within"]
     sync_reasons = namespace["sync_operation_reasons"]
     cdn_ok = namespace["authority_cdn_ok"]
+    secure_directory_chain = namespace["secure_root_directory_chain"]
+    secure_directory = namespace["secure_root_directory"]
+    secure_directory_metadata = namespace["secure_root_directory_metadata"]
+    secure_file_metadata = namespace["secure_regular_file_metadata"]
+    stable_log_tail = namespace["stable_log_tail"]
+    log_summary = namespace["log_summary"]
+    safe_directory = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+    assert secure_directory_metadata(safe_directory)
+    for unsafe_directory in (
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=1, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=1),
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o775, st_uid=0, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o757, st_uid=0, st_gid=0),
+    ):
+        assert not secure_directory_metadata(unsafe_directory)
+    safe_file = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600,
+        st_uid=0,
+        st_nlink=1,
+    )
+    assert secure_file_metadata(safe_file)
+    for unsafe_file in (
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o600, st_uid=0, st_nlink=1),
+        SimpleNamespace(st_mode=stat.S_IFLNK | 0o600, st_uid=0, st_nlink=1),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=1, st_nlink=1),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_nlink=2),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o620, st_uid=0, st_nlink=1),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o602, st_uid=0, st_nlink=1),
+    ):
+        assert not secure_file_metadata(unsafe_file)
+    assert secure_directory_chain("/")
+    assert not secure_directory_chain("/tmp")
+    with mock.patch.object(Path, "resolve", side_effect=RuntimeError("symlink loop")):
+        assert not secure_directory("/")
+    untrusted_log = log_summary(
+        "/tmp/shuzijun-health-contract-must-not-be-read.log",
+        26,
+        ("success",),
+    )
+    assert untrusted_log == {
+        "path": "/tmp/shuzijun-health-contract-must-not-be-read.log",
+        "present": False,
+        "trusted": False,
+        "parent_trusted": False,
+        "mtime": None,
+        "recent": False,
+        "success_marker": False,
+        "generation": None,
+        "incomplete": False,
+        "recent_error": None,
+    }
+    with tempfile.TemporaryDirectory(prefix="sj-untrusted-log-") as temporary:
+        forged_log = Path(temporary) / "snapshot.log"
+        forged_log.write_text("created success generation=42\n", encoding="utf-8")
+        with mock.patch.object(os, "open", side_effect=AssertionError("untrusted log was opened")):
+            forged_summary = log_summary(str(forged_log), 36, ("created ",))
+        assert forged_summary["present"] is False
+        assert forged_summary["trusted"] is False
+        assert forged_summary["parent_trusted"] is False
+        assert forged_summary["success_marker"] is False
+        assert forged_summary["generation"] is None
+        globals_map = log_summary.__globals__
+        with mock.patch.dict(
+            globals_map,
+            {
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_root_directory_metadata": lambda _metadata: True,
+                "secure_regular_file_metadata": lambda _metadata: True,
+            },
+        ):
+            trusted_summary = log_summary(str(forged_log), 36, ("created ",))
+        assert trusted_summary["present"] is True
+        assert trusted_summary["trusted"] is True
+        assert trusted_summary["parent_trusted"] is True
+        assert trusted_summary["success_marker"] is True
+        assert trusted_summary["generation"] == 42
+
+        forged_log.write_bytes(
+            b"created success generation=7\n" + b"x" * 30000
+        )
+        with mock.patch.dict(
+            globals_map,
+            {
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_root_directory_metadata": lambda _metadata: True,
+                "secure_regular_file_metadata": lambda _metadata: True,
+            },
+        ):
+            tail_trusted, tail_present, tail, tail_mtime = stable_log_tail(forged_log)
+        assert tail_trusted is True
+        assert tail_present is True
+        assert len(tail) == 24000
+        assert "generation=7" not in tail
+        assert isinstance(tail_mtime, float)
+
+        real_os_close = os.close
+        close_calls = 0
+
+        def close_then_report_error(descriptor):
+            nonlocal close_calls
+            close_calls += 1
+            real_os_close(descriptor)
+            raise OSError("simulated close reporting error")
+
+        with mock.patch.dict(
+            globals_map,
+            {
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_root_directory_metadata": lambda _metadata: True,
+                "secure_regular_file_metadata": lambda _metadata: True,
+            },
+        ), mock.patch.object(os, "close", side_effect=close_then_report_error):
+            close_trusted, close_present, close_tail, close_mtime = stable_log_tail(
+                forged_log
+            )
+        assert close_calls == 2
+        assert close_trusted is True
+        assert close_present is True
+        assert len(close_tail) == 24000
+        assert isinstance(close_mtime, float)
+
+        forged_log.write_text("created success generation=43\n", encoding="utf-8")
+        real_os_stat = os.stat
+        child_stat_calls = 0
+
+        def rotate_after_read(path, *args, **kwargs):
+            nonlocal child_stat_calls
+            if kwargs.get("dir_fd") is not None:
+                child_stat_calls += 1
+                if child_stat_calls == 2:
+                    raise FileNotFoundError("simulated log rotation")
+            return real_os_stat(path, *args, **kwargs)
+
+        with mock.patch.dict(
+            globals_map,
+            {
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_root_directory_metadata": lambda _metadata: True,
+                "secure_regular_file_metadata": lambda _metadata: True,
+            },
+        ), mock.patch.object(os, "stat", side_effect=rotate_after_read):
+            rotated_summary = log_summary(str(forged_log), 36, ("created ",))
+        assert child_stat_calls == 2
+        assert rotated_summary["present"] is True
+        assert rotated_summary["trusted"] is False
+        assert rotated_summary["parent_trusted"] is True
+        assert rotated_summary["mtime"] is None
+        assert rotated_summary["success_marker"] is False
+        assert rotated_summary["generation"] is None
     assert classify([], []) == ("healthy", 0)
     assert classify([], ["sync_timer_missing_or_disabled"]) == ("degraded", 2)
     assert classify(["authority_role_unverified"], []) == ("critical", 1)

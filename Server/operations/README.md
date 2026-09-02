@@ -1,6 +1,6 @@
 # Server operation fixes
 
-## Build 41.12 内部健康监控事务安装器
+## Build 41.13 内部健康监控事务安装器
 
 `deploy-shuzijun-health-monitor` 只升级内部健康脚本及其 service/timer，
 不会运行同步、故障切换，也不会修改 Nginx、PHP-FPM、MySQL、DNS、CDN、
@@ -10,14 +10,14 @@ WordPress 内容或媒体。生产执行顺序固定为备用节点 `backup stan
 生产信任锚为：
 
 ```text
-DEPLOYER_SHA256=4693d935bd56a809677a2283bae347bdf7d7ceaeaba3f03bfeac44615e542c5d
+DEPLOYER_SHA256=041b7f57f8136655e7829950327e479b8879b78842811107bb00f35c5f855218
 ```
 
-先把 Git 标签 `v1.3.29-build41.12` 中的安装器以原子 rename 放到
-`/run/deploy-shuzijun-health-build41.12`，设为 `root:root 0700`、regular、
+先把 Git 标签 `v1.3.29-build41.13` 中的安装器以原子 rename 放到
+`/run/deploy-shuzijun-health-build41.13`，设为 `root:root 0700`、regular、
 non-link、nlink=1；三个 runtime 文件则分别放入仅含这三项的
-`/run/shuzijun-health-build41.12-backup` 和
-`/run/shuzijun-health-build41.12-primary`。不得直接执行仓库副本，也不得从
+`/run/shuzijun-health-build41.13-backup` 和
+`/run/shuzijun-health-build41.13-primary`。不得直接执行仓库副本，也不得从
 `/private/tmp` 或可被非 root 写入的路径启动。
 
 Bash 会在读取脚本正文前处理调用环境中的 `BASH_ENV`，所以执行前校验和
@@ -27,8 +27,8 @@ Bash 会在读取脚本正文前处理调用环境中的 `BASH_ENV`，所以执�
 ```bash
 sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C /bin/bash --noprofile --norc -c '
 set -Eeuo pipefail
-DEPLOYER=/run/deploy-shuzijun-health-build41.12
-DEPLOYER_SHA256=4693d935bd56a809677a2283bae347bdf7d7ceaeaba3f03bfeac44615e542c5d
+DEPLOYER=/run/deploy-shuzijun-health-build41.13
+DEPLOYER_SHA256=041b7f57f8136655e7829950327e479b8879b78842811107bb00f35c5f855218
 [[ ! -L "$DEPLOYER" && -f "$DEPLOYER" ]]
 [[ "$(/usr/bin/realpath -e -- "$DEPLOYER")" == "$DEPLOYER" ]]
 [[ "$(/usr/bin/stat -c "%F:%u:%g:%a:%h" -- "$DEPLOYER")" == "regular file:0:0:700:1" ]]
@@ -53,7 +53,7 @@ status 后才原子替换。显式 health invocation 必须精确返回 degraded
 status、角色、路由、业务哈希和 reason 集都必须重新通过。计时器下一次触发
 还必须连续两次稳定落在 60–360 秒后，才可写入 `DONE`。
 
-Build 41.12 保留不依赖 `stat %F` 本地化文案的空锁文件校验；它分别验证
+Build 41.13 保留不依赖 `stat %F` 本地化文案的空锁文件校验；它分别验证
 regular `-f`、非链接、canonical path 及数值 owner/group/mode/nlink，因此
 Ubuntu 返回 `regular empty file` 时也不会误拒绝，异常类型仍会 fail-closed。
 它还在主事务和回滚的 timer/service 隔离后显式执行 `reset-failed`：
@@ -78,12 +78,19 @@ Build 41.12 修复停止 timer 后 service unit 已被 systemd 回收时的隔�
 `inactive/dead` 且 Job 为空，只有这个终态成立才继续。主事务和 rollback 的
 首次隔离共用同一严格 helper；failed、active 或残留 Job 仍会 fail-closed。
 
+Build 41.13 不把 Ubuntu 由 rsyslog 管理的 `root:syslog 0775` `/var/log`
+误当作 root-only 信任边界，也不修改系统目录或其中任何日志。健康脚本会先从
+根目录到日志父目录验证整条父链；任一目录不是 root:root、可被非 root 写入、
+不是实目录或路径不规范时，都会在 `exists`、mtime 或内容读取之前直接把证据
+标为 untrusted。当前两个节点因此透明保持 degraded，并精确报告 snapshot 与
+sync 成功证据尚未迁入可信目录；这些日志内容不能再改变可信结论或伪造成功。
+
 `/etc/systemd/system/timers.target.wants` 允许在 disabled 阶段被 systemd
 删除，但存在时必须是可信实目录；enabled 阶段必须存在 root 所有的绝对目标
 链接。链接目录、systemd 父目录、status 文件系统与事务 journal 均在终态前
-执行耐久性屏障并复验。历史上曾允许非 root 写入的日志不会仅凭 chmod 被
-“洗白”为可信数据；它会保持原样并继续让监控报告 degraded，直到未来由
-受信 writer 安全轮换。
+执行耐久性屏障并复验。安装器不会创建、删除、chmod、chown 或读取
+`/var/log` 中的文件；可信快照/同步证据后续必须迁入 root:root 0700 的专用
+`/var/lib` 父链并由受信 writer 原子发布，不能靠修改旧日志权限“洗白”。
 
 回滚必须先证明 timer/service 已隔离，再从同一 root-only 事务目录恢复固定
 旧哈希；恢复后的 enable 链接、timer 稳定性、status 和 `ROLLED_BACK` journal

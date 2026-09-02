@@ -23,7 +23,7 @@ LOCK_FILE=$LOCK_DIR/deploy.lock
 ROLE_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
 ROLE_VERIFY_SHA=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 
-NEW_SCRIPT_SHA=e5f89d04ad4498396a8abdc32eaad645587c6ec6b7da7fe70c56498286fbd129
+NEW_SCRIPT_SHA=c7630bdc54dc7d869c16cf0ba6856f341668a74689724c532a9058711837e945
 NEW_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc
 NEW_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e
 OLD_SCRIPT_SHA=71698f025ff467f837e8b7430b4188d05576d2010f9c4f181eea1e56625ca390
@@ -31,8 +31,8 @@ OLD_SERVICE_SHA=db95b5410561ce9e0cca235b7faf09e16d4a954c3c593565681cca49221c9537
 OLD_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6
 APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
 APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
-RELEASE_ID=build41.12
-DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.12
+RELEASE_ID=build41.13
+DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.13
 
 [[ $# -eq 2 ]] || { printf 'usage: %s <primary|backup> <authority|standby>\n' "$DEPLOYER_PATH" >&2; exit 2; }
 NODE=${1:-}
@@ -41,7 +41,7 @@ case "$NODE:$ROLE" in
     primary:authority|backup:standby) ;;
     *) printf 'invalid node/role\n' >&2; exit 2 ;;
 esac
-STAGE=/run/shuzijun-health-build41.12-$NODE
+STAGE=/run/shuzijun-health-build41.13-$NODE
 
 [[ $EUID -eq 0 ]] || { printf 'root required\n' >&2; exit 1; }
 [[ "$0" == "$DEPLOYER_PATH" ]] || { printf 'fixed deployer path required\n' >&2; exit 1; }
@@ -459,7 +459,7 @@ atomic_install() {
     local source=$1 target=$2 mode=$3 expected_sha=$4 parent base tmp
     parent=$(dirname -- "$target") || return 1
     base=$(basename -- "$target") || return 1
-    tmp=$parent/.$base.build41.12.$$
+    tmp=$parent/.$base.build41.13.$$
     [[ ! -e "$tmp" ]] || return 1
     install -o root -g root -m "$mode" -- "$source" "$tmp" || return 1
     require_file "$tmp" "$mode" "$expected_sha" || return 1
@@ -481,72 +481,6 @@ atomic_restore() {
     mv -T -- "$tmp" "$target" || return 1
     sync_path "$parent" || return 1
     require_file "$target" "$mode" "$expected_sha" || return 1
-}
-
-harden_logs() {
-    local role_log
-    if [[ "$ROLE" == authority ]]; then
-        role_log=wp-sync.log
-    else
-        role_log=shuzijun-sync-receiver.log
-    fi
-    /usr/bin/python3 -I - "$role_log" <<'PY'
-import os
-import stat
-import sys
-
-directory = "/var/log"
-parent = os.lstat(directory)
-if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0 or parent.st_gid != 0:
-    raise SystemExit("unsafe /var/log")
-if stat.S_IMODE(parent.st_mode) & 0o022:
-    raise SystemExit("/var/log writable by non-root")
-dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
-dir_fd = os.open(directory, dir_flags)
-try:
-    for name in ("tencent-snapshot.log", sys.argv[1]):
-        try:
-            before_path = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            continue
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(name, flags, dir_fd=dir_fd)
-        try:
-            before_fd = os.fstat(fd)
-            if not stat.S_ISREG(before_fd.st_mode) or before_fd.st_uid != 0 or before_fd.st_nlink != 1:
-                raise SystemExit(f"unsafe log metadata: {name}")
-            if (before_path.st_dev, before_path.st_ino) != (before_fd.st_dev, before_fd.st_ino):
-                raise SystemExit(f"log changed before hardening: {name}")
-            if stat.S_IMODE(before_fd.st_mode) & 0o022:
-                print(f"log remains untrusted until its writer rotates it safely: {name}", file=sys.stderr)
-                continue
-            os.fchown(fd, 0, 0)
-            os.fchmod(fd, 0o600)
-            os.fsync(fd)
-            after_fd = os.fstat(fd)
-            after_path = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-            if not stat.S_ISREG(after_fd.st_mode):
-                raise SystemExit(f"log type changed: {name}")
-            if (after_fd.st_uid, after_fd.st_gid, stat.S_IMODE(after_fd.st_mode), after_fd.st_nlink) != (0, 0, 0o600, 1):
-                raise SystemExit(f"log hardening failed: {name}")
-            if (before_fd.st_dev, before_fd.st_ino, before_fd.st_mtime_ns) != (after_fd.st_dev, after_fd.st_ino, after_fd.st_mtime_ns):
-                raise SystemExit(f"log inode or mtime changed: {name}")
-            if (after_path.st_dev, after_path.st_ino) != (after_fd.st_dev, after_fd.st_ino):
-                raise SystemExit(f"log path changed during hardening: {name}")
-        finally:
-            os.close(fd)
-    os.fsync(dir_fd)
-    after_parent_fd = os.fstat(dir_fd)
-    after_parent_path = os.lstat(directory)
-    if (after_parent_fd.st_dev, after_parent_fd.st_ino) != (after_parent_path.st_dev, after_parent_path.st_ino):
-        raise SystemExit("/var/log path changed during hardening")
-    if not stat.S_ISDIR(after_parent_fd.st_mode) or after_parent_fd.st_uid != 0 or after_parent_fd.st_gid != 0:
-        raise SystemExit("/var/log metadata changed during hardening")
-    if stat.S_IMODE(after_parent_fd.st_mode) & 0o022:
-        raise SystemExit("/var/log became writable by non-root")
-finally:
-    os.close(dir_fd)
-PY
 }
 
 wait_health_idle() {
@@ -735,6 +669,8 @@ expected = {
         "primary",
         [
             "authority_sync_generation_missing_or_invalid",
+            "snapshot_last_success_untrusted_or_stale",
+            "sync_last_success_untrusted_or_stale",
             "sync_log_generation_missing_or_invalid",
             "sync_timer_missing_or_disabled",
         ],
@@ -742,9 +678,11 @@ expected = {
     "standby": (
         "backup",
         [
+            "snapshot_last_success_untrusted_or_stale",
             "standby_failover_state_unhealthy_or_stale",
             "standby_failover_timer_disabled",
             "standby_sync_generation_missing_or_invalid",
+            "sync_last_success_untrusted_or_stale",
             "sync_log_generation_missing_or_invalid",
         ],
     ),
@@ -1104,7 +1042,7 @@ else
 fi
 require_dir "$BACKUP_ROOT" 700
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.12
+BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.13
 [[ ! -e "$BACKUP_DIR" ]]
 install -d -o root -g root -m 700 "$BACKUP_DIR"
 write_marker PREPARED "node=$NODE role=$ROLE release=$RELEASE_ID deployer_sha=$DEPLOYER_SHA timer_enabled=enabled timer_active=active old_script=$OLD_SCRIPT_SHA old_service=$OLD_SERVICE_SHA old_timer=$OLD_TIMER_SHA"
@@ -1146,8 +1084,6 @@ sync_path "$BACKUP_ROOT"
 (cd "$BACKUP_DIR" && sha256sum -c integrity.sha256)
 write_marker COMMITTED "old_status_sha=$OLD_STATUS_SHA old_status_inode=$OLD_STATUS_INODE"
 PHASE=COMMITTED
-
-harden_logs
 
 atomic_install "$STAGE/shuzijun-internal-health" "$SCRIPT_TARGET" 700 "$NEW_SCRIPT_SHA"
 atomic_install "$STAGE/shuzijun-internal-health.service" "$SERVICE_TARGET" 644 "$NEW_SERVICE_SHA"

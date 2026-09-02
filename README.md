@@ -86,6 +86,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.5.10-build41.10.md`](Server/releases/v1.5.10-build41.10.md)：健康 oneshot 失败态隔离、回滚恢复与生产重试合同。
 - [`Server/releases/v1.5.10-build41.11.md`](Server/releases/v1.5.10-build41.11.md)：timer 重启排程、oneshot 取证固定与回滚重排程修复。
 - [`Server/releases/v1.5.10-build41.12.md`](Server/releases/v1.5.10-build41.12.md)：systemd 回收未加载 service 后的隔离归一化修复。
+- [`Server/releases/v1.5.10-build41.13.md`](Server/releases/v1.5.10-build41.13.md)：共享日志父链信任修复与零日志变更部署。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

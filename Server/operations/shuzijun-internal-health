@@ -80,18 +80,58 @@ def age_within(timestamp, max_age_hours, now_timestamp=None):
     return 0 <= age_hours <= max_age_hours
 
 
-def secure_regular_file(path):
-    item = pathlib.Path(path)
-    try:
-        metadata = item.lstat()
-    except OSError:
-        return False
+def secure_regular_file_metadata(metadata):
     return (
         stat.S_ISREG(metadata.st_mode)
         and metadata.st_uid == 0
         and metadata.st_nlink == 1
         and stat.S_IMODE(metadata.st_mode) & 0o022 == 0
     )
+
+
+def secure_regular_file(path):
+    item = pathlib.Path(path)
+    try:
+        metadata = item.lstat()
+    except OSError:
+        return False
+    return secure_regular_file_metadata(metadata)
+
+
+def secure_root_directory_metadata(metadata):
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == 0
+        and metadata.st_gid == 0
+        and stat.S_IMODE(metadata.st_mode) & 0o022 == 0
+    )
+
+
+def secure_root_directory(path):
+    item = pathlib.Path(path)
+    try:
+        metadata = item.lstat()
+        resolved = item.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return (
+        item.is_absolute()
+        and resolved == item
+        and secure_root_directory_metadata(metadata)
+    )
+
+
+def secure_root_directory_chain(path):
+    current = pathlib.Path(path)
+    if not current.is_absolute():
+        return False
+    while True:
+        if not secure_root_directory(current):
+            return False
+        parent = current.parent
+        if parent == current:
+            return True
+        current = parent
 
 
 def verified_account_role():
@@ -173,26 +213,135 @@ def local_http(path, expected_status=200, marker="", json_code=""):
         temporary.unlink(missing_ok=True)
 
 
-def log_summary(path, max_age_hours, success_markers, start_markers=()):
-    item = pathlib.Path(path)
-    trusted = secure_regular_file(item)
-    result = {
+def empty_log_summary(item, parent_trusted=False, present=False):
+    return {
         "path": str(item),
-        "present": item.exists(),
-        "trusted": trusted,
-        "mtime": file_mtime(item),
+        "present": present,
+        "trusted": False,
+        "parent_trusted": parent_trusted,
+        "mtime": None,
         "recent": False,
         "success_marker": False,
         "generation": None,
         "incomplete": False,
         "recent_error": None,
     }
+
+
+def stable_log_tail(item, limit=24000):
+    directory_fd = None
+    file_fd = None
+    present = False
+    try:
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        directory_fd = os.open(item.parent, directory_flags)
+        parent_before_fd = os.fstat(directory_fd)
+        parent_before_path = os.lstat(item.parent)
+        if not (
+            secure_root_directory_metadata(parent_before_fd)
+            and secure_root_directory_metadata(parent_before_path)
+            and (parent_before_fd.st_dev, parent_before_fd.st_ino)
+            == (parent_before_path.st_dev, parent_before_path.st_ino)
+        ):
+            return False, present, None, None
+
+        before_path = os.stat(item.name, dir_fd=directory_fd, follow_symlinks=False)
+        present = True
+        file_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        file_fd = os.open(item.name, file_flags, dir_fd=directory_fd)
+        before_fd = os.fstat(file_fd)
+        if not secure_regular_file_metadata(before_fd):
+            return False, present, None, None
+        if (before_path.st_dev, before_path.st_ino) != (
+            before_fd.st_dev,
+            before_fd.st_ino,
+        ):
+            return False, present, None, None
+
+        length = min(before_fd.st_size, limit)
+        offset = before_fd.st_size - length
+        payload = bytearray()
+        while len(payload) < length:
+            chunk = os.pread(file_fd, length - len(payload), offset + len(payload))
+            if not chunk:
+                return False, present, None, None
+            payload.extend(chunk)
+
+        after_fd = os.fstat(file_fd)
+        after_path = os.stat(item.name, dir_fd=directory_fd, follow_symlinks=False)
+        parent_after_fd = os.fstat(directory_fd)
+        parent_after_path = os.lstat(item.parent)
+        file_fingerprint = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_uid,
+            value.st_gid,
+            value.st_nlink,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+        parent_fingerprint = lambda value: (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_uid,
+            value.st_gid,
+        )
+        if file_fingerprint(before_fd) != file_fingerprint(after_fd):
+            return False, present, None, None
+        if (after_path.st_dev, after_path.st_ino) != (
+            after_fd.st_dev,
+            after_fd.st_ino,
+        ):
+            return False, present, None, None
+        if parent_fingerprint(parent_before_fd) != parent_fingerprint(parent_after_fd):
+            return False, present, None, None
+        if parent_fingerprint(parent_after_fd) != parent_fingerprint(parent_after_path):
+            return False, present, None, None
+        if not secure_root_directory_chain(item.parent):
+            return False, present, None, None
+        return (
+            True,
+            present,
+            bytes(payload).decode("utf-8", errors="replace"),
+            before_fd.st_mtime,
+        )
+    except OSError:
+        return False, present, None, None
+    finally:
+        for descriptor in (file_fd, directory_fd):
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def log_summary(path, max_age_hours, success_markers, start_markers=()):
+    item = pathlib.Path(path)
+    if not secure_root_directory_chain(item.parent):
+        return empty_log_summary(item)
+    trusted, present, tail, mtime = stable_log_tail(item)
+    result = empty_log_summary(item, parent_trusted=True, present=present)
     if not trusted:
         return result
-    try:
-        tail = item.read_text(encoding="utf-8", errors="replace")[-24000:]
-    except OSError:
-        return result
+    result["trusted"] = True
+    result["mtime"] = datetime.datetime.fromtimestamp(
+        mtime, datetime.timezone.utc
+    ).isoformat(timespec="seconds")
     lowered = tail.lower()
     latest_success = max((lowered.rfind(value.lower()) for value in success_markers), default=-1)
     latest_start = max((lowered.rfind(value.lower()) for value in start_markers), default=-1)
@@ -208,7 +357,7 @@ def log_summary(path, max_age_hours, success_markers, start_markers=()):
     result["recent_error"] = any(
         value in scan for value in ("traceback", "fatal", "permission denied", "failed")
     )
-    result["recent"] = age_within(item.stat().st_mtime, max_age_hours)
+    result["recent"] = age_within(mtime, max_age_hours)
     return result
 
 

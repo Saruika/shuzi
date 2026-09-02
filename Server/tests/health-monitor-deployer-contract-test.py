@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import json
 import re
@@ -7,8 +8,12 @@ from pathlib import Path
 
 
 DEPLOYER = Path("Server/operations/deploy-shuzijun-health-monitor")
+HEALTH_SCRIPT = Path("Server/operations/shuzijun-internal-health")
+HEALTH_SERVICE = Path("Server/operations/shuzijun-internal-health.service")
+HEALTH_TIMER = Path("Server/operations/shuzijun-internal-health.timer")
+INTERNAL_HEALTH_TEST = Path("Server/tests/internal-health-contract-test.py")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE = Path("Server/releases/v1.5.10-build41.12.md")
+RELEASE = Path("Server/releases/v1.5.10-build41.13.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -593,6 +598,12 @@ def main() -> None:
     readme = OPERATIONS_README.read_text(encoding="utf-8")
     release = RELEASE.read_text(encoding="utf-8")
     test_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    health_script_sha256 = hashlib.sha256(HEALTH_SCRIPT.read_bytes()).hexdigest()
+    health_service_sha256 = hashlib.sha256(HEALTH_SERVICE.read_bytes()).hexdigest()
+    health_timer_sha256 = hashlib.sha256(HEALTH_TIMER.read_bytes()).hexdigest()
+    internal_health_test_sha256 = hashlib.sha256(
+        INTERNAL_HEALTH_TEST.read_bytes()
+    ).hexdigest()
 
     subprocess.run(["/bin/bash", "-n", str(DEPLOYER)], check=True)
     assert lines[:4] == [
@@ -605,9 +616,9 @@ def main() -> None:
     assert "unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true" in lines
 
     for fixed_value in (
-        "RELEASE_ID=build41.12",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.12",
-        "STAGE=/run/shuzijun-health-build41.12-$NODE",
+        "RELEASE_ID=build41.13",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.13",
+        "STAGE=/run/shuzijun-health-build41.13-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -619,7 +630,7 @@ def main() -> None:
         "BACKUP_ROOT=/var/backups/shuzijun-health-monitor",
         "LOCK_DIR=/run/shuzijun-health-monitor-install",
         "ROLE_VERIFY_SHA=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58",
-        "NEW_SCRIPT_SHA=e5f89d04ad4498396a8abdc32eaad645587c6ec6b7da7fe70c56498286fbd129",
+        "NEW_SCRIPT_SHA=c7630bdc54dc7d869c16cf0ba6856f341668a74689724c532a9058711837e945",
         "NEW_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc",
         "NEW_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e",
         "OLD_SCRIPT_SHA=71698f025ff467f837e8b7430b4188d05576d2010f9c4f181eea1e56625ca390",
@@ -629,8 +640,16 @@ def main() -> None:
         "APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3",
     ):
         assert fixed_value in lines, fixed_value
+    assert f"NEW_SCRIPT_SHA={health_script_sha256}" in lines
+    assert f"NEW_SERVICE_SHA={health_service_sha256}" in lines
+    assert f"NEW_TIMER_SHA={health_timer_sha256}" in lines
+    assert f"HEALTH_SCRIPT_SHA256={health_script_sha256}" in release
+    assert f"INTERNAL_HEALTH_TEST_SHA256={internal_health_test_sha256}" in release
+    assert f"HEALTH_SERVICE_SHA256={health_service_sha256}" in release
+    assert f"HEALTH_TIMER_SHA256={health_timer_sha256}" in release
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
+    assert "build41.12" not in text
     assert "build41.11" not in text
     assert "build41.10" not in text
     assert "build41.9" not in text
@@ -853,24 +872,43 @@ def main() -> None:
     terminal_first_sync = line_number(commit_lines, 'sync_path "$final_path"')
     assert terminal_rename < terminal_published < terminal_first_sync
 
-    # Writable historical logs must not become trusted merely because this
-    # transaction changed their mode. Safe logs may be tightened in place.
-    harden = function_body(lines, "harden_logs", "wait_health_idle")
-    skip_untrusted = harden.index("stat.S_IMODE(before_fd.st_mode) & 0o022")
-    chmod_trusted = harden.index("os.fchmod(fd, 0o600)")
-    assert skip_untrusted < chmod_trusted
-    assert "log remains untrusted until its writer rotates it safely" in harden
-    for guard in (
-        "role_log=wp-sync.log",
-        "role_log=shuzijun-sync-receiver.log",
-        '("tencent-snapshot.log", sys.argv[1])',
-        "O_NOFOLLOW",
-        "before_fd.st_mtime_ns",
-        "after_fd.st_mtime_ns",
-        "log path changed during hardening",
-    ):
-        assert guard in harden
-    assert "O_TRUNC" not in harden and "O_CREAT" not in harden
+    # The health runtime treats shared /var/log evidence as untrusted. The
+    # deployer must never mutate that OS-managed namespace or its files.
+    assert "harden_logs" not in text
+    assert "/var/log" not in text
+    assert "os.fchmod" not in text and "os.fchown" not in text
+
+    validate_status = function_body(lines, "validate_status", "validate_last_invocation")
+    expected_match = re.search(
+        r"expected = (\{.*?\n\})\nlegacy_role, reasons = expected\[role\]",
+        validate_status,
+        re.DOTALL,
+    )
+    assert expected_match is not None
+    assert ast.literal_eval(expected_match.group(1)) == {
+        "authority": (
+            "primary",
+            [
+                "authority_sync_generation_missing_or_invalid",
+                "snapshot_last_success_untrusted_or_stale",
+                "sync_last_success_untrusted_or_stale",
+                "sync_log_generation_missing_or_invalid",
+                "sync_timer_missing_or_disabled",
+            ],
+        ),
+        "standby": (
+            "backup",
+            [
+                "snapshot_last_success_untrusted_or_stale",
+                "standby_failover_state_unhealthy_or_stale",
+                "standby_failover_timer_disabled",
+                "standby_sync_generation_missing_or_invalid",
+                "sync_last_success_untrusted_or_stale",
+                "sync_log_generation_missing_or_invalid",
+            ],
+        ),
+    }
+    assert 'payload.get("operation_reasons") != reasons' in validate_status
 
     idle = function_body(lines, "wait_health_idle", "normalize_stopped_health_service")
     assert idle.count("ActiveState") >= 2
@@ -1073,8 +1111,12 @@ def main() -> None:
     )
     backup_start = line_number(lines, 'backup_one "$SCRIPT_TARGET"', main_service_inactive)
     committed = line_number(lines, "write_marker COMMITTED", disable)
-    harden_call = line_number(lines, "harden_logs", committed)
-    status_may_change = line_number(lines, "write_marker STATUS_MAY_CHANGE", harden_call)
+    first_install = line_number(
+        lines,
+        'atomic_install "$STAGE/shuzijun-internal-health"',
+        committed,
+    )
+    status_may_change = line_number(lines, "write_marker STATUS_MAY_CHANGE", first_install)
     timer_start = line_number(lines, "start_disabled_timer_and_settle", status_may_change)
     first_start = line_number(lines, "systemctl start shuzijun-internal-health.service", timer_start)
     accepted = line_number(lines, "write_marker ACCEPTED", first_start)
@@ -1091,7 +1133,7 @@ def main() -> None:
         < main_service_inactive
         < backup_start
         < committed
-        < harden_call
+        < first_install
         < status_may_change
     )
     for line in lines[main_start:prepared]:
