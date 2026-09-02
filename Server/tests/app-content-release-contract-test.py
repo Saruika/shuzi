@@ -3,9 +3,12 @@ from pathlib import Path
 
 
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
+STANDBY_SEEDER = Path("Server/operations/seed-standby-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
+LEGACY_MANIFEST_SHA256 = "64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134"
+TARGET_MANIFEST_SHA256 = "76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9"
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -24,6 +27,88 @@ def function_range(lines: list[str], name: str, next_name: str) -> tuple[int, in
 def function_body(lines: list[str], name: str, next_name: str) -> str:
     start, end = function_range(lines, name, next_name)
     return "\n".join(lines[start:end])
+
+
+def assert_manifest_lifecycle_regressions(text: str, lines: list[str]) -> None:
+    """Bind the three supported manifest transitions to executable state checks."""
+
+    seed_text = STANDBY_SEEDER.read_text(encoding="utf-8")
+    assert (
+        "for relative in vendor composer.lock composer.json "
+        "shuzijun-app-content.php release.sha256; do"
+    ) in seed_text
+
+    install_body = function_body(lines, "install_release_unit", "verify_restored_release_matches_backup")
+    assert install_body.rindex("install_live_manifest_atomic") > install_body.rindex(
+        '"$BUNDLE/shuzijun-app-content.php" "$TARGET_DIR/shuzijun-app-content.php"'
+    )
+    assert 'mv -T -- "$LIVE_MANIFEST_STAGE" "$LIVE_MANIFEST"' in text
+
+    release_entries = (
+        "vendor",
+        "composer.lock",
+        "composer.json",
+        "shuzijun-app-content.php",
+        "release.sha256",
+    )
+
+    # A complete 1.5.8 standby seed is a valid ordinary-deploy baseline. The
+    # subsequent ordinary publication changes all payload bytes before the
+    # final manifest commit, leaving one complete 1.5.10 release.
+    live: dict[str, str] = {}
+    for entry in release_entries:
+        live[entry] = LEGACY_MANIFEST_SHA256
+    assert live["release.sha256"] == LEGACY_MANIFEST_SHA256
+    publish_order: list[str] = []
+    for entry in release_entries:
+        live[entry] = TARGET_MANIFEST_SHA256
+        publish_order.append(entry)
+    assert publish_order[-1] == "release.sha256"
+    assert set(live.values()) == {TARGET_MANIFEST_SHA256}
+
+    # Rollback is presence-sensitive: a manifested baseline restores the exact
+    # prior bytes, while the sole legacy transition restores manifest absence.
+    for previous_manifest in (LEGACY_MANIFEST_SHA256, None):
+        before = {entry: "old" for entry in release_entries[:-1]}
+        if previous_manifest is not None:
+            before["release.sha256"] = previous_manifest
+        backup_state = "present" if "release.sha256" in before else "absent"
+        backup_manifest = before.get("release.sha256")
+
+        failed_live = {entry: "partial" for entry in release_entries}
+        for entry in release_entries[:-1]:
+            failed_live[entry] = before[entry]
+        if backup_state == "present":
+            failed_live["release.sha256"] = backup_manifest  # type: ignore[assignment]
+        else:
+            failed_live.pop("release.sha256", None)
+        assert failed_live == before
+
+    backup_integrity = function_body(
+        lines, "write_backup_integrity_manifest", "validate_code_backup"
+    )
+    assert 'BACKUP_MANIFEST="$BACKUP_DIR/$BACKUP_INTEGRITY_NAME"' in backup_integrity
+    assert 'BACKUP_MANIFEST="$BACKUP_DIR/$MANIFEST_NAME"' not in text
+    assert 'backup_paths+=("$MANIFEST_NAME")' in backup_integrity
+
+    backup_validation = function_body(lines, "validate_code_backup", "create_code_backup")
+    for guard in (
+        "code backup integrity manifest has an invalid record",
+        "code backup integrity manifest is not bytewise sorted and unique",
+        "code backup integrity manifest does not cover every backup file",
+        "code backup integrity manifest has a missing or extra file",
+        'sha256sum --strict --quiet --check "$BACKUP_MANIFEST"',
+        "present:8)",
+        "absent:7)",
+    ):
+        assert guard in backup_validation
+
+    backup_body = function_body(lines, "create_code_backup", "remove_live_vendor")
+    rollback_body = function_body(lines, "restore_code_backup", "isolate_failed_fpm")
+    assert "BACKUP_LIVE_MANIFEST_STATE=present" in backup_body
+    assert "BACKUP_LIVE_MANIFEST_STATE=absent" in backup_body
+    assert '"$BACKUP_LIVE_MANIFEST_STATE" == present' in rollback_body
+    assert 'rm -f -- "$TARGET_DIR/shuzijun-app-content.php"' in text
 
 
 def main() -> None:
@@ -48,11 +133,22 @@ def main() -> None:
         f"readonly AUTHORITY_VERIFY_SHA256={authority_verifier_sha256}",
         "readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security",
         f"readonly VERIFY_SHA256={webroot_verifier_sha256}",
+        'readonly LIVE_MANIFEST="$TARGET_DIR/$MANIFEST_NAME"',
+        "readonly BACKUP_INTEGRITY_NAME=backup-integrity.sha256",
+        "readonly BACKUP_MANIFEST_STATE_NAME=live-release-manifest.state",
+        "readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134",
+        "readonly TARGET_RELEASE_MANIFEST_SHA256=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9",
+        "readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a",
         "readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0",
         "readonly TARGET_RELEASE_PHP_SHA256=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3",
         "readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1",
     ):
         assert fixed_path in lines
+    assert "不得从 bootstrap 混合态\n直接跳到 1.5.10" in readme
+    assert (
+        "--manifest-sha256 "
+        "64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134"
+    ) in readme
     assert "LOCK_FILE=" not in text
     assert 'exec 9<"$LOCK_PATH"' in lines
     assert 'exec 9<>"$LOCK_PATH"' not in lines
@@ -256,6 +352,37 @@ def main() -> None:
     ):
         assert boundary in current_unit
     assert "|| return 1" in current_unit
+    assert "validate_live_manifested_release" in current_unit
+    assert "validate_unmanifested_legacy_bridge" in current_unit
+    assert "a stale live manifest staging entry requires manual inspection" in current_unit
+
+    live_manifested = function_body(
+        lines, "validate_live_manifested_release", "validate_unmanifested_legacy_bridge"
+    )
+    for guard in (
+        "live release manifest metadata is unsafe",
+        'stat -c \'%u:%g:%h:%a\'',
+        "validate_allowed_release_manifest_sha256",
+        "live release manifest paths must be unique and bytewise sorted",
+        "live release manifest does not allow every release file",
+        "live release manifest contains a missing or extra file",
+        'sha256sum --strict --quiet --check "$LIVE_MANIFEST"',
+    ):
+        assert guard in live_manifested
+
+    unmanifested_bridge = function_body(
+        lines, "validate_unmanifested_legacy_bridge", "validate_current_release_unit"
+    )
+    for guard in (
+        '"$AUTHORITY_ROLE" == authority',
+        "a missing live manifest is allowed only on the authority bootstrap transition",
+        '"$EXPECTED_MANIFEST_SHA256" == "$LEGACY_BRIDGE_MANIFEST_SHA256"',
+        '"$actual_php_sha" == "$LEGACY_PRE_MANIFEST_PHP_SHA256"',
+        "unmanifested live PHP does not declare version 1.5.7",
+        "unmanifested release support differs from the reviewed 1.5.8 unit",
+        'done < "$MANIFEST" | sha256sum --strict --quiet --check -',
+    ):
+        assert guard in unmanifested_bridge
 
     direct_probe_body = function_body(
         lines, "probe_direct_php_blocked", "probe_unauthorized_api"
@@ -301,6 +428,11 @@ def main() -> None:
         "vendor",
     ):
         assert f'$TARGET_DIR/{release_entry}' in backup_body
+    assert 'cp -a -- "$LIVE_MANIFEST" "$BACKUP_DIR/$MANIFEST_NAME"' in backup_body
+    assert "BACKUP_LIVE_MANIFEST_STATE=present" in backup_body
+    assert "BACKUP_LIVE_MANIFEST_STATE=absent" in backup_body
+    assert "write_backup_integrity_manifest" in backup_body
+    assert "validate_code_backup" in backup_body
     assert 'sync -f "$BACKUP_DIR"' in backup_body
     assert 'sync -f "$BACKUP_ROOT"' in backup_body
     assert backup_body.index('sync -f "$BACKUP_ROOT"') < backup_body.index("ROLLBACK_READY=1")
@@ -311,12 +443,30 @@ def main() -> None:
     assert 'rm -rf --one-file-system -- "$live_vendor"' in removal_body
     assert "|| return 1" in removal_body
     metadata_removal = function_body(
-        lines, "remove_live_metadata", "install_release_unit"
+        lines, "remove_live_metadata", "install_live_manifest_atomic"
     )
     assert "wp-content/mu-plugins/*" in metadata_removal
     assert 'rm -f -- "$TARGET_DIR/shuzijun-app-content.php"' in metadata_removal
+    assert '"$TARGET_DIR/composer.lock" "$LIVE_MANIFEST"' in metadata_removal
+    assert "LIVE_MANIFEST_STAGE" in metadata_removal
     assert "|| return 1" in metadata_removal
     assert 'rm -rf -- "$TARGET_DIR"' not in text
+
+    manifest_install = function_body(
+        lines, "install_live_manifest_atomic", "install_release_unit"
+    )
+    for guard in (
+        '.shuzijun-release-manifest-$EXPECTED_MANIFEST_SHA256',
+        'install -o root -g www-data -m 0644 "$MANIFEST" "$LIVE_MANIFEST_STAGE"',
+        'sync -f "$LIVE_MANIFEST_STAGE"',
+        'mv -T -- "$LIVE_MANIFEST_STAGE" "$LIVE_MANIFEST"',
+        'sync -f "$TARGET_DIR"',
+        '"$actual_manifest_sha" == "$EXPECTED_MANIFEST_SHA256"',
+    ):
+        assert guard in manifest_install
+    assert manifest_install.index('sync -f "$LIVE_MANIFEST_STAGE"') < manifest_install.index(
+        'mv -T -- "$LIVE_MANIFEST_STAGE" "$LIVE_MANIFEST"'
+    )
 
     install_start, install_end = function_range(
         lines, "install_release_unit", "restore_code_backup"
@@ -333,15 +483,21 @@ def main() -> None:
         '"$BUNDLE/shuzijun-app-content.php" "$TARGET_DIR/shuzijun-app-content.php"',
         install_start,
     )
+    manifest_install_call = line_number(
+        lines, "install_live_manifest_atomic", plugin_install + 1
+    )
     assert vendor_install < composer_json_install < composer_lock_install < plugin_install
-    assert plugin_install < install_end
+    assert plugin_install < manifest_install_call < install_end
 
     rollback_body = function_body(lines, "restore_code_backup", "isolate_failed_fpm")
     assert "protect_fpm_from_incomplete_boot" in rollback_body
     assert "is_fpm_persistently_masked" in rollback_body
     assert "release_fpm_boot_guard" in rollback_body
     assert 'systemctl stop "$FPM_SERVICE"' in rollback_body
-    assert "sha256sum --strict --quiet --check" in rollback_body
+    assert "validate_code_backup" in rollback_body
+    assert '"$BACKUP_LIVE_MANIFEST_STATE" == present' in rollback_body
+    assert 'cp -a -- "$BACKUP_DIR/$MANIFEST_NAME" "$LIVE_MANIFEST"' in rollback_body
+    assert "verify_restored_release_matches_backup" in rollback_body
     assert '[[ "$restore_status" -eq 0 && "$FPM_WAS_ACTIVE" -eq 1 ]]' in rollback_body
     assert 'systemctl start "$FPM_SERVICE"' in rollback_body
     offline_rollback_role = line_number(
@@ -521,6 +677,7 @@ def main() -> None:
     ):
         assert documented_prerequisite in readme
 
+    assert_manifest_lifecycle_regressions(text, lines)
     print("app-content-release-contract-test: passed")
 
 

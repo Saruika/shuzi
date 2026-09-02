@@ -35,8 +35,14 @@ readonly HEALTH_INDEX_URL="https://$HEALTH_HOST/index.php?rest_route=%2Fshuzijun
 readonly DIRECT_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/shuzijun-app-content.php"
 readonly DIRECT_VENDOR_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/vendor/autoload.php"
 readonly MANIFEST_NAME=release.sha256
+readonly LIVE_MANIFEST="$TARGET_DIR/$MANIFEST_NAME"
+readonly BACKUP_INTEGRITY_NAME=backup-integrity.sha256
+readonly BACKUP_MANIFEST_STATE_NAME=live-release-manifest.state
 readonly JWT_README=vendor/firebase/php-jwt/README.md
 readonly JWT_README_SHA256=8e2392c48204a21ad0d73068fb273b7ec1f79ccf13eab3fe6f256382f741dc39
+readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134
+readonly TARGET_RELEASE_MANIFEST_SHA256=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
+readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a
 readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0
 readonly TARGET_RELEASE_PHP_SHA256=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
 readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1
@@ -51,6 +57,8 @@ PHP_BIN=
 COMPOSER_BIN=
 BACKUP_DIR=
 BACKUP_MANIFEST=
+BACKUP_LIVE_MANIFEST_STATE=
+LIVE_MANIFEST_STAGE=
 ROLLBACK_READY=0
 CODE_MUTATED=0
 FPM_WAS_ACTIVE=0
@@ -342,6 +350,13 @@ validate_bundle_tree() {
         -o -name '*.save*' -o -name '*.swp*' -o -name '*.tmp*' \)
 }
 
+validate_allowed_release_manifest_sha256() {
+    case "$1" in
+        "$LEGACY_BRIDGE_MANIFEST_SHA256"|"$TARGET_RELEASE_MANIFEST_SHA256") ;;
+        *) fail 'release manifest SHA256 is not in the reviewed release allowlist' ;;
+    esac
+}
+
 validate_manifest() {
     local actual_manifest_sha line digest relative previous_relative='' file
     local actual_file_count=0 scan_complete=0
@@ -349,6 +364,7 @@ validate_manifest() {
 
     [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[a-f0-9]{64}$ ]] \
         || fail 'expected manifest SHA256 must be 64 lowercase hexadecimal characters'
+    validate_allowed_release_manifest_sha256 "$EXPECTED_MANIFEST_SHA256"
     LC_ALL=C tail -c 1 -- "$MANIFEST" | grep -qx '' \
         || fail 'release manifest must be nonempty and end with one newline'
     actual_manifest_sha=$(sha256sum -- "$MANIFEST")
@@ -702,6 +718,118 @@ validate_target_boundary() {
     return 0
 }
 
+validate_live_manifested_release() {
+    local actual_manifest_sha line digest relative previous_relative='' file worker_gid
+    local actual_file_count=0 scan_complete=0 target_device
+    local -a release_paths=(
+        "$TARGET_DIR/shuzijun-app-content.php"
+        "$TARGET_DIR/composer.json"
+        "$TARGET_DIR/composer.lock"
+        "$TARGET_DIR/vendor"
+    )
+    declare -A manifest_paths=()
+
+    worker_gid=$(id -g www-data) \
+        || { fail 'www-data identity is unavailable'; return 1; }
+    target_device=$(stat -c '%d' "$TARGET_DIR")
+    [[ -f "$LIVE_MANIFEST" && ! -L "$LIVE_MANIFEST" \
+        && "$(realpath -e -- "$LIVE_MANIFEST")" == "$LIVE_MANIFEST" \
+        && "$(stat -c '%u:%g:%h:%a' "$LIVE_MANIFEST")" == "0:$worker_gid:1:644" \
+        && "$(stat -c '%d' "$LIVE_MANIFEST")" == "$target_device" ]] \
+        || { fail 'live release manifest metadata is unsafe'; return 1; }
+    reject_find_match 'live release manifest is writable by a non-root identity' \
+        "$LIVE_MANIFEST" -maxdepth 0 -perm /022 || return 1
+
+    actual_manifest_sha=$(sha256sum -- "$LIVE_MANIFEST")
+    actual_manifest_sha=${actual_manifest_sha%% *}
+    validate_allowed_release_manifest_sha256 "$actual_manifest_sha" || return 1
+    LC_ALL=C tail -c 1 -- "$LIVE_MANIFEST" | grep -qx '' \
+        || { fail 'live release manifest must be nonempty and end with one newline'; return 1; }
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^([a-f0-9]{64})\ \ ([A-Za-z0-9._/-]+)$ ]] \
+            || { fail 'live release manifest has an invalid record'; return 1; }
+        digest=${BASH_REMATCH[1]}
+        relative=${BASH_REMATCH[2]}
+        validate_relative_path "$relative" || return 1
+        [[ -z "$previous_relative" || "$relative" > "$previous_relative" ]] \
+            || { fail 'live release manifest paths must be unique and bytewise sorted'; return 1; }
+        [[ -z "${manifest_paths[$relative]+present}" ]] \
+            || { fail 'live release manifest contains a duplicate path'; return 1; }
+        manifest_paths["$relative"]=$digest
+        previous_relative=$relative
+    done < "$LIVE_MANIFEST"
+
+    for relative in shuzijun-app-content.php composer.json composer.lock vendor/autoload.php; do
+        [[ -n "${manifest_paths[$relative]+present}" ]] \
+            || { fail 'live release manifest omits a required file'; return 1; }
+    done
+    while IFS= read -r -d '' file; do
+        if [[ -z "$file" ]]; then
+            scan_complete=1
+            continue
+        fi
+        relative=${file#"$TARGET_DIR/"}
+        actual_file_count=$((actual_file_count + 1))
+        [[ -n "${manifest_paths[$relative]+present}" ]] \
+            || { fail 'live release manifest does not allow every release file'; return 1; }
+    done < <(find "${release_paths[@]}" -type f -print0 && printf '\0')
+    [[ "$scan_complete" -eq 1 ]] \
+        || { fail 'live release file scan did not complete'; return 1; }
+    [[ "$actual_file_count" -eq "${#manifest_paths[@]}" ]] \
+        || { fail 'live release manifest contains a missing or extra file'; return 1; }
+    (
+        cd "$TARGET_DIR"
+        sha256sum --strict --quiet --check "$LIVE_MANIFEST"
+    ) >/dev/null || { fail 'live release files do not match the reviewed manifest'; return 1; }
+}
+
+validate_unmanifested_legacy_bridge() {
+    local actual_php_sha line relative file
+    local support_manifest_count=0 actual_support_file_count=0 scan_complete=0
+    local -a support_paths=(
+        "$TARGET_DIR/composer.json"
+        "$TARGET_DIR/composer.lock"
+        "$TARGET_DIR/vendor"
+    )
+
+    [[ "$AUTHORITY_ROLE" == authority ]] \
+        || { fail 'a missing live manifest is allowed only on the authority bootstrap transition'; return 1; }
+    [[ "$EXPECTED_MANIFEST_SHA256" == "$LEGACY_BRIDGE_MANIFEST_SHA256" ]] \
+        || { fail 'a missing live manifest is allowed only for the reviewed 1.5.8 transition'; return 1; }
+    actual_php_sha=$(sha256sum -- "$TARGET_DIR/shuzijun-app-content.php")
+    actual_php_sha=${actual_php_sha%% *}
+    [[ "$actual_php_sha" == "$LEGACY_PRE_MANIFEST_PHP_SHA256" ]] \
+        || { fail 'unmanifested live PHP is not the reviewed 1.5.7 transition'; return 1; }
+    grep -qxF ' * Version: 1.5.7' "$TARGET_DIR/shuzijun-app-content.php" \
+        || { fail 'unmanifested live PHP does not declare version 1.5.7'; return 1; }
+
+    while IFS= read -r line; do
+        relative=${line#*  }
+        [[ "$relative" == shuzijun-app-content.php ]] && continue
+        support_manifest_count=$((support_manifest_count + 1))
+    done < "$MANIFEST"
+    while IFS= read -r -d '' file; do
+        if [[ -z "$file" ]]; then
+            scan_complete=1
+            continue
+        fi
+        actual_support_file_count=$((actual_support_file_count + 1))
+    done < <(find "${support_paths[@]}" -type f -print0 && printf '\0')
+    [[ "$scan_complete" -eq 1 ]] \
+        || { fail 'unmanifested release support scan did not complete'; return 1; }
+    [[ "$actual_support_file_count" -eq "$support_manifest_count" ]] \
+        || { fail 'unmanifested release support differs from the reviewed 1.5.8 unit'; return 1; }
+    (
+        cd "$TARGET_DIR"
+        while IFS= read -r line; do
+            [[ "${line#*  }" == shuzijun-app-content.php ]] && continue
+            printf '%s\n' "$line"
+        done < "$MANIFEST" | sha256sum --strict --quiet --check -
+    ) >/dev/null \
+        || { fail 'unmanifested release support does not match the reviewed 1.5.8 manifest'; return 1; }
+}
+
 validate_current_release_unit() {
     local entry target_device scan_complete=0
     local -a release_paths=(
@@ -712,6 +840,9 @@ validate_current_release_unit() {
     )
 
     validate_target_boundary || return 1
+    reject_find_match 'a stale live manifest staging entry requires manual inspection' \
+        "$TARGET_DIR" -mindepth 1 -maxdepth 1 \
+        -name '.shuzijun-release-manifest-*' || return 1
     if ! [[ -f "${release_paths[0]}" && ! -L "${release_paths[0]}" \
         && -f "${release_paths[1]}" && ! -L "${release_paths[1]}" \
         && -f "${release_paths[2]}" && ! -L "${release_paths[2]}" \
@@ -742,6 +873,11 @@ validate_current_release_unit() {
     if [[ "$scan_complete" -ne 1 ]]; then
         fail 'current release unit scan did not complete'
         return 1
+    fi
+    if [[ -e "$LIVE_MANIFEST" || -L "$LIVE_MANIFEST" ]]; then
+        validate_live_manifested_release || return 1
+    else
+        validate_unmanifested_legacy_bridge || return 1
     fi
     return 0
 }
@@ -868,16 +1004,26 @@ PY
 }
 
 verify_live_release_hashes() {
+    local actual_manifest_sha
     validate_current_release_unit
-    (
-        cd "$TARGET_DIR"
-        sha256sum --strict --quiet --check "$MANIFEST"
-    ) >/dev/null
+    actual_manifest_sha=$(sha256sum -- "$LIVE_MANIFEST")
+    actual_manifest_sha=${actual_manifest_sha%% *}
+    [[ "$actual_manifest_sha" == "$EXPECTED_MANIFEST_SHA256" ]] \
+        || fail 'installed live manifest differs from the reviewed candidate'
 }
 
-write_backup_manifest() {
+write_backup_integrity_manifest() {
     local relative scan_complete=0
-    BACKUP_MANIFEST="$BACKUP_DIR/$MANIFEST_NAME"
+    local -a backup_paths=(
+        shuzijun-app-content.php
+        composer.json
+        composer.lock
+        vendor
+        "$BACKUP_MANIFEST_STATE_NAME"
+    )
+    [[ "$BACKUP_LIVE_MANIFEST_STATE" == present ]] \
+        && backup_paths+=("$MANIFEST_NAME")
+    BACKUP_MANIFEST="$BACKUP_DIR/$BACKUP_INTEGRITY_NAME"
     (
         cd "$BACKUP_DIR"
         while IFS= read -r -d '' relative; do
@@ -886,11 +1032,126 @@ write_backup_manifest() {
                 continue
             fi
             sha256sum "$relative"
-        done < <(find shuzijun-app-content.php composer.json composer.lock vendor \
-            -xdev -type f -print0 | sort -z && printf '\0')
+        done < <(find "${backup_paths[@]}" -xdev -type f -print0 | sort -z && printf '\0')
         [[ "$scan_complete" -eq 1 ]] || fail 'backup file scan did not complete'
     ) > "$BACKUP_MANIFEST"
     chmod 600 "$BACKUP_MANIFEST"
+}
+
+validate_code_backup() {
+    local entry relative line digest previous_relative='' file state_size target_device
+    local actual_file_count=0 manifest_file_count=0 scan_complete=0
+    declare -A manifest_paths=()
+
+    [[ "$BACKUP_DIR" == "$BACKUP_ROOT/"* \
+        && "${BACKUP_DIR#$BACKUP_ROOT/}" != */* \
+        && -d "$BACKUP_DIR" && ! -L "$BACKUP_DIR" \
+        && "$(realpath -e -- "$BACKUP_DIR")" == "$BACKUP_DIR" \
+        && "$(stat -c '%u:%a' "$BACKUP_DIR")" == '0:700' ]] \
+        || { fail 'code backup boundary is unsafe'; return 1; }
+    reject_find_match 'code backup contains a symbolic link' \
+        "$BACKUP_DIR" -type l || return 1
+    reject_find_match 'code backup contains a non-regular entry' \
+        "$BACKUP_DIR" ! -type d ! -type f || return 1
+    reject_find_match 'code backup contains a hard-linked file' \
+        "$BACKUP_DIR" -type f -links +1 || return 1
+    reject_find_match 'code backup has unsafe ownership or write access' \
+        "$BACKUP_DIR" \( ! -uid 0 -o -perm /022 \) || return 1
+    target_device=$(stat -c '%d' "$BACKUP_DIR")
+    while IFS= read -r -d '' entry; do
+        if [[ -z "$entry" ]]; then
+            scan_complete=1
+            continue
+        fi
+        [[ "$(stat -c '%d' "$entry")" == "$target_device" ]] \
+            || { fail 'code backup crosses a filesystem boundary'; return 1; }
+        relative=${entry#"$BACKUP_DIR/"}
+        case "$relative" in
+            shuzijun-app-content.php|composer.json|composer.lock|vendor|vendor/*|\
+                "$MANIFEST_NAME"|"$BACKUP_MANIFEST_STATE_NAME"|"$BACKUP_INTEGRITY_NAME") ;;
+            *) fail 'code backup contains an unknown entry'; return 1 ;;
+        esac
+    done < <(find "$BACKUP_DIR" -mindepth 1 -print0 && printf '\0')
+    [[ "$scan_complete" -eq 1 ]] \
+        || { fail 'code backup tree scan did not complete'; return 1; }
+
+    [[ -f "$BACKUP_DIR/$BACKUP_MANIFEST_STATE_NAME" \
+        && ! -L "$BACKUP_DIR/$BACKUP_MANIFEST_STATE_NAME" ]] \
+        || { fail 'code backup manifest state is missing or unsafe'; return 1; }
+    state_size=$(stat -c '%s' "$BACKUP_DIR/$BACKUP_MANIFEST_STATE_NAME")
+    BACKUP_LIVE_MANIFEST_STATE=$(cat -- "$BACKUP_DIR/$BACKUP_MANIFEST_STATE_NAME")
+    case "$BACKUP_LIVE_MANIFEST_STATE:$state_size" in
+        present:8)
+            [[ -f "$BACKUP_DIR/$MANIFEST_NAME" && ! -L "$BACKUP_DIR/$MANIFEST_NAME" ]] \
+                || { fail 'code backup omitted the previous live manifest'; return 1; }
+            ;;
+        absent:7)
+            [[ ! -e "$BACKUP_DIR/$MANIFEST_NAME" && ! -L "$BACKUP_DIR/$MANIFEST_NAME" ]] \
+                || { fail 'code backup contains a manifest declared absent'; return 1; }
+            ;;
+        *) fail 'code backup manifest state is invalid'; return 1 ;;
+    esac
+    BACKUP_MANIFEST="$BACKUP_DIR/$BACKUP_INTEGRITY_NAME"
+    [[ -f "$BACKUP_MANIFEST" && ! -L "$BACKUP_MANIFEST" \
+        && "$(stat -c '%u:%h:%a' "$BACKUP_MANIFEST")" == '0:1:600' ]] \
+        || { fail 'code backup integrity manifest is missing or unsafe'; return 1; }
+    LC_ALL=C tail -c 1 -- "$BACKUP_MANIFEST" | grep -qx '' \
+        || { fail 'code backup integrity manifest must end with one newline'; return 1; }
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^([a-f0-9]{64})\ \ ([A-Za-z0-9._/-]+)$ ]] \
+            || { fail 'code backup integrity manifest has an invalid record'; return 1; }
+        digest=${BASH_REMATCH[1]}
+        relative=${BASH_REMATCH[2]}
+        [[ "$relative" != /* && "$relative" != *'//'* \
+            && "$relative" != *'/./'* && "$relative" != */. \
+            && "$relative" != .. && "$relative" != ../* \
+            && "$relative" != *'/../'* && "$relative" != */.. ]] \
+            || { fail 'code backup integrity manifest contains path traversal'; return 1; }
+        case "$relative" in
+            shuzijun-app-content.php|composer.json|composer.lock|vendor/*|\
+                "$BACKUP_MANIFEST_STATE_NAME") ;;
+            "$MANIFEST_NAME")
+                [[ "$BACKUP_LIVE_MANIFEST_STATE" == present ]] \
+                    || { fail 'code backup integrity manifest contradicts absent state'; return 1; }
+                ;;
+            *) fail 'code backup integrity manifest contains an unknown path'; return 1 ;;
+        esac
+        [[ -z "$previous_relative" || "$relative" > "$previous_relative" ]] \
+            || { fail 'code backup integrity manifest is not bytewise sorted and unique'; return 1; }
+        [[ -z "${manifest_paths[$relative]+present}" ]] \
+            || { fail 'code backup integrity manifest contains a duplicate path'; return 1; }
+        manifest_paths["$relative"]=$digest
+        previous_relative=$relative
+        manifest_file_count=$((manifest_file_count + 1))
+    done < "$BACKUP_MANIFEST"
+    for relative in shuzijun-app-content.php composer.json composer.lock \
+        vendor/autoload.php "$BACKUP_MANIFEST_STATE_NAME"; do
+        [[ -n "${manifest_paths[$relative]+present}" ]] \
+            || { fail 'code backup integrity manifest omits a required file'; return 1; }
+    done
+    if [[ "$BACKUP_LIVE_MANIFEST_STATE" == present ]]; then
+        [[ -n "${manifest_paths[$MANIFEST_NAME]+present}" ]] \
+            || { fail 'code backup integrity manifest omits the previous live manifest'; return 1; }
+    fi
+    scan_complete=0
+    while IFS= read -r -d '' file; do
+        if [[ -z "$file" ]]; then
+            scan_complete=1
+            continue
+        fi
+        [[ "$file" == "$BACKUP_MANIFEST" ]] && continue
+        relative=${file#"$BACKUP_DIR/"}
+        actual_file_count=$((actual_file_count + 1))
+        [[ -n "${manifest_paths[$relative]+present}" ]] \
+            || { fail 'code backup integrity manifest does not cover every backup file'; return 1; }
+    done < <(find "$BACKUP_DIR" -type f -print0 && printf '\0')
+    [[ "$scan_complete" -eq 1 && "$actual_file_count" -eq "$manifest_file_count" ]] \
+        || { fail 'code backup integrity manifest has a missing or extra file'; return 1; }
+    (
+        cd "$BACKUP_DIR"
+        sha256sum --strict --quiet --check "$BACKUP_MANIFEST"
+    ) >/dev/null || { fail 'code backup integrity verification failed'; return 1; }
 }
 
 create_code_backup() {
@@ -914,16 +1175,24 @@ create_code_backup() {
     cp -a -- "$TARGET_DIR/composer.json" "$BACKUP_DIR/"
     cp -a -- "$TARGET_DIR/composer.lock" "$BACKUP_DIR/"
     cp -a -- "$TARGET_DIR/vendor" "$BACKUP_DIR/"
-    write_backup_manifest
+    if [[ -e "$LIVE_MANIFEST" || -L "$LIVE_MANIFEST" ]]; then
+        [[ -f "$LIVE_MANIFEST" && ! -L "$LIVE_MANIFEST" ]] \
+            || fail 'previous live manifest became unsafe before backup'
+        cp -a -- "$LIVE_MANIFEST" "$BACKUP_DIR/$MANIFEST_NAME"
+        BACKUP_LIVE_MANIFEST_STATE=present
+    else
+        BACKUP_LIVE_MANIFEST_STATE=absent
+    fi
+    printf '%s\n' "$BACKUP_LIVE_MANIFEST_STATE" \
+        > "$BACKUP_DIR/$BACKUP_MANIFEST_STATE_NAME"
+    chmod 600 "$BACKUP_DIR/$BACKUP_MANIFEST_STATE_NAME"
+    write_backup_integrity_manifest
     # The persistent FPM boot guard can intentionally leave the node offline
     # after power loss. Make the rollback unit durable before arming rollback
     # or performing the first live-code mutation.
     sync -f "$BACKUP_DIR"
     sync -f "$BACKUP_ROOT"
-    (
-        cd "$BACKUP_DIR"
-        sha256sum --strict --quiet --check "$BACKUP_MANIFEST"
-    ) >/dev/null
+    validate_code_backup
     ROLLBACK_READY=1
 }
 
@@ -953,7 +1222,7 @@ remove_live_vendor() {
 remove_live_metadata() {
     local path relative
     validate_target_boundary || return 1
-    for relative in shuzijun-app-content.php composer.json composer.lock; do
+    for relative in shuzijun-app-content.php composer.json composer.lock "$MANIFEST_NAME"; do
         path="$TARGET_DIR/$relative"
         if [[ "$path" != /var/www/html/shuzijun.com.cn/wp-content/mu-plugins/* ]]; then
             fail 'live metadata removal target is unsafe'
@@ -967,14 +1236,58 @@ remove_live_metadata() {
         fi
     done
     rm -f -- "$TARGET_DIR/shuzijun-app-content.php" \
-        "$TARGET_DIR/composer.json" "$TARGET_DIR/composer.lock" || return 1
-    for relative in shuzijun-app-content.php composer.json composer.lock; do
+        "$TARGET_DIR/composer.json" "$TARGET_DIR/composer.lock" "$LIVE_MANIFEST" \
+        || return 1
+    if [[ -n "$LIVE_MANIFEST_STAGE" ]]; then
+        [[ "$LIVE_MANIFEST_STAGE" == \
+            "$TARGET_DIR/.shuzijun-release-manifest-$EXPECTED_MANIFEST_SHA256" ]] \
+            || { fail 'live manifest staging removal target is unsafe'; return 1; }
+        if [[ -e "$LIVE_MANIFEST_STAGE" || -L "$LIVE_MANIFEST_STAGE" ]]; then
+            [[ -f "$LIVE_MANIFEST_STAGE" && ! -L "$LIVE_MANIFEST_STAGE" \
+                && "$(stat -c '%d' "$LIVE_MANIFEST_STAGE")" == \
+                    "$(stat -c '%d' "$TARGET_DIR")" ]] \
+                || { fail 'live manifest staging entry is unsafe'; return 1; }
+            rm -f -- "$LIVE_MANIFEST_STAGE" || return 1
+        fi
+        LIVE_MANIFEST_STAGE=
+    fi
+    for relative in shuzijun-app-content.php composer.json composer.lock "$MANIFEST_NAME"; do
         if [[ -e "$TARGET_DIR/$relative" || -L "$TARGET_DIR/$relative" ]]; then
             fail 'live metadata could not be removed safely'
             return 1
         fi
     done
     return 0
+}
+
+install_live_manifest_atomic() {
+    local actual_manifest_sha worker_gid
+    validate_target_boundary || return 1
+    LIVE_MANIFEST_STAGE="$TARGET_DIR/.shuzijun-release-manifest-$EXPECTED_MANIFEST_SHA256"
+    [[ ! -e "$LIVE_MANIFEST_STAGE" && ! -L "$LIVE_MANIFEST_STAGE" ]] \
+        || { fail 'live manifest staging entry already exists'; return 1; }
+    install -o root -g www-data -m 0644 "$MANIFEST" "$LIVE_MANIFEST_STAGE"
+    worker_gid=$(id -g www-data) \
+        || { fail 'www-data identity is unavailable'; return 1; }
+    [[ -f "$LIVE_MANIFEST_STAGE" && ! -L "$LIVE_MANIFEST_STAGE" \
+        && "$(realpath -e -- "$LIVE_MANIFEST_STAGE")" == "$LIVE_MANIFEST_STAGE" \
+        && "$(stat -c '%u:%g:%h:%a' "$LIVE_MANIFEST_STAGE")" == \
+            "0:$worker_gid:1:644" \
+        && "$(stat -c '%d' "$LIVE_MANIFEST_STAGE")" == \
+            "$(stat -c '%d' "$TARGET_DIR")" ]] \
+        || { fail 'staged live manifest metadata is unsafe'; return 1; }
+    actual_manifest_sha=$(sha256sum -- "$LIVE_MANIFEST_STAGE")
+    actual_manifest_sha=${actual_manifest_sha%% *}
+    [[ "$actual_manifest_sha" == "$EXPECTED_MANIFEST_SHA256" ]] \
+        || { fail 'staged live manifest differs from the reviewed candidate'; return 1; }
+    sync -f "$LIVE_MANIFEST_STAGE"
+    mv -T -- "$LIVE_MANIFEST_STAGE" "$LIVE_MANIFEST"
+    LIVE_MANIFEST_STAGE=
+    sync -f "$TARGET_DIR"
+    actual_manifest_sha=$(sha256sum -- "$LIVE_MANIFEST")
+    actual_manifest_sha=${actual_manifest_sha%% *}
+    [[ "$actual_manifest_sha" == "$EXPECTED_MANIFEST_SHA256" ]] \
+        || fail 'atomically installed live manifest differs from the reviewed candidate'
 }
 
 install_release_unit() {
@@ -991,9 +1304,35 @@ install_release_unit() {
     install -o root -g www-data -m 0644 "$BUNDLE/composer.json" "$TARGET_DIR/composer.json"
     install -o root -g www-data -m 0644 "$BUNDLE/composer.lock" "$TARGET_DIR/composer.lock"
 
-    # Install the entry point last, after its complete autoloader is in place.
+    # Install the entry point after its complete autoloader is in place.  The
+    # manifest is the final release item and crosses into place with one
+    # same-filesystem rename, so a live manifest always describes complete
+    # bytes rather than a partially copied checksum file.
     install -o root -g www-data -m 0644 \
         "$BUNDLE/shuzijun-app-content.php" "$TARGET_DIR/shuzijun-app-content.php"
+    install_live_manifest_atomic
+}
+
+verify_restored_release_matches_backup() {
+    local line digest relative actual_digest
+    validate_code_backup || return 1
+    while IFS= read -r line; do
+        [[ "$line" =~ ^([a-f0-9]{64})\ \ ([A-Za-z0-9._/-]+)$ ]] || return 1
+        digest=${BASH_REMATCH[1]}
+        relative=${BASH_REMATCH[2]}
+        [[ "$relative" == "$BACKUP_MANIFEST_STATE_NAME" ]] && continue
+        [[ -f "$TARGET_DIR/$relative" && ! -L "$TARGET_DIR/$relative" ]] \
+            || return 1
+        actual_digest=$(sha256sum -- "$TARGET_DIR/$relative")
+        actual_digest=${actual_digest%% *}
+        [[ "$actual_digest" == "$digest" ]] || return 1
+    done < "$BACKUP_MANIFEST"
+    if [[ "$BACKUP_LIVE_MANIFEST_STATE" == absent ]]; then
+        [[ ! -e "$LIVE_MANIFEST" && ! -L "$LIVE_MANIFEST" ]] || return 1
+    else
+        [[ -f "$LIVE_MANIFEST" && ! -L "$LIVE_MANIFEST" ]] || return 1
+    fi
+    validate_current_release_unit
 }
 
 require_fpm_enabled_policy() {
@@ -1046,14 +1385,7 @@ restore_code_backup() {
     local restore_status=0
     [[ "$ROLLBACK_READY" -eq 1 && -n "$BACKUP_DIR" ]] || return 0
 
-    [[ "$BACKUP_DIR" == "$BACKUP_ROOT/"* \
-        && "${BACKUP_DIR#$BACKUP_ROOT/}" != */* \
-        && -d "$BACKUP_DIR" && ! -L "$BACKUP_DIR" \
-        && "$(realpath -e -- "$BACKUP_DIR")" == "$BACKUP_DIR" ]] || return 1
-    (
-        cd "$BACKUP_DIR"
-        sha256sum --strict --quiet --check "$BACKUP_MANIFEST"
-    ) >/dev/null 2>&1 || return 1
+    validate_code_backup >/dev/null 2>&1 || return 1
 
     if [[ "$CODE_MUTATED" -eq 1 ]]; then
         # The flag can lag behind systemd if unmask changed state immediately
@@ -1074,13 +1406,17 @@ restore_code_backup() {
                 || restore_status=1
             cp -a -- "$BACKUP_DIR/composer.json" "$TARGET_DIR/" || restore_status=1
             cp -a -- "$BACKUP_DIR/composer.lock" "$TARGET_DIR/" || restore_status=1
+            if [[ "$restore_status" -eq 0 \
+                && "$BACKUP_LIVE_MANIFEST_STATE" == present ]]; then
+                # Restore the exact previous bytes last, mirroring ordinary
+                # publication and keeping the rollback release self-describing.
+                cp -a -- "$BACKUP_DIR/$MANIFEST_NAME" "$LIVE_MANIFEST" \
+                    || restore_status=1
+            fi
         fi
         if [[ "$restore_status" -eq 0 ]]; then
-            validate_current_release_unit >/dev/null 2>&1 || restore_status=1
-            (
-                cd "$TARGET_DIR"
-                sha256sum --strict --quiet --check "$BACKUP_MANIFEST"
-            ) >/dev/null 2>&1 || restore_status=1
+            verify_restored_release_matches_backup >/dev/null 2>&1 \
+                || restore_status=1
         fi
     fi
 
@@ -1231,8 +1567,8 @@ elif [[ "$AUTHORITY_ROLE" != authority && "$AUTHORITY_ROLE" != standby ]]; then
 fi
 
 for command_name in realpath stat find grep awk sha256sum flock nginx systemctl curl cat \
-    install cp rm sort date mkdir chmod chown sleep tail env timeout runuser mktemp \
-    python3 sync; do
+    install cp mv rm sort date mkdir chmod chown sleep tail env timeout runuser mktemp \
+    python3 sync id; do
     require_command "$command_name"
 done
 

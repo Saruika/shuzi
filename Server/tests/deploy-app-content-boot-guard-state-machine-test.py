@@ -173,6 +173,8 @@ class DeploymentModel:
     active: bool = True
     guard_flag: int = 0
     code: str = "old"
+    manifest: str | None = "old"
+    backup_manifest: str | None = None
     code_mutated: bool = False
     rollback_ready: bool = False
     main_failure: str | None = None
@@ -235,6 +237,7 @@ class DeploymentModel:
             self.stop("rollback.stop", rollback=True)
             self.checkpoint("rollback.restore", rollback=True)
             self.code = "old"
+            self.manifest = self.backup_manifest
 
         self.release("rollback.unmask-before-start", rollback=True)
         self.start("rollback.start", rollback=True)
@@ -258,6 +261,7 @@ class DeploymentModel:
         assert self.unit_state == "enabled"
         assert self.active
         self.events.append("backup")
+        self.backup_manifest = self.manifest
         self.rollback_ready = True
         try:
             self.protect("main.mask-initial")
@@ -269,6 +273,9 @@ class DeploymentModel:
             self.code = "partial"
             self.checkpoint("main.mutate")
             self.code = "new"
+            self.checkpoint("main.payload-written-manifest-unwritten")
+            self.manifest = "new"
+            self.checkpoint("main.manifest-written")
             self.checkpoint("main.offline-verify")
 
             self.release("main.unmask-before-start")
@@ -396,6 +403,17 @@ def assert_source_is_bound_to_state_machine() -> None:
         assert next_offset >= 0, f"missing ordered deployment transition: {token}"
         cursor = next_offset + len(token)
 
+    install = source_between("install_release_unit", "verify_restored_release_matches_backup")
+    payload = install.index(
+        '"$BUNDLE/shuzijun-app-content.php" "$TARGET_DIR/shuzijun-app-content.php"'
+    )
+    manifest_commit = install.index("install_live_manifest_atomic", payload)
+    assert payload < manifest_commit
+    atomic_manifest = source_between("install_live_manifest_atomic", "install_release_unit")
+    assert atomic_manifest.index('sync -f "$LIVE_MANIFEST_STAGE"') < atomic_manifest.index(
+        'mv -T -- "$LIVE_MANIFEST_STAGE" "$LIVE_MANIFEST"'
+    )
+
     handler = SOURCE[
         SOURCE.index("handle_failure() {") : SOURCE.index("trap 'handle_failure $?'")
     ]
@@ -410,6 +428,7 @@ def assert_fault_injection_contract() -> None:
     success = DeploymentModel()
     assert success.deploy()
     assert success.code == "new"
+    assert success.manifest == "new"
     assert success.unit_state == "enabled" and success.active
     assert success.guard_flag == 0 and not success.rollback_ready
     assert success.events.index("main.mask-initial") < success.events.index("main.stop")
@@ -423,6 +442,8 @@ def assert_fault_injection_contract() -> None:
         "main.mask-initial",
         "main.stop",
         "main.mutate",
+        "main.payload-written-manifest-unwritten",
+        "main.manifest-written",
         "main.offline-verify",
         "main.unmask-before-start",
         "main.start",
@@ -436,6 +457,7 @@ def assert_fault_injection_contract() -> None:
         model = DeploymentModel(main_failure=failure)
         assert not model.deploy(), failure
         assert model.code == "old", failure
+        assert model.manifest == "old", failure
         assert model.unit_state == "enabled" and model.active, failure
         assert model.guard_flag == 0, failure
         assert model.events.index("rollback.mask-online") < model.events.index(
@@ -444,6 +466,28 @@ def assert_fault_injection_contract() -> None:
         assert model.events.index("rollback.api") < model.events.index(
             "rollback.final-unmask"
         )
+
+    # Exercise both sides of the final atomic manifest commit explicitly. A
+    # failure after payload writes but before the rename and a failure after
+    # the rename both restore the prior manifest presence and exact value.
+    for previous_manifest in ("old", None):
+        before_commit = DeploymentModel(
+            manifest=previous_manifest,
+            main_failure="main.payload-written-manifest-unwritten",
+        )
+        assert not before_commit.deploy()
+        assert before_commit.code == "old"
+        assert before_commit.manifest == previous_manifest
+        assert "main.manifest-written" not in before_commit.events
+
+        after_commit = DeploymentModel(
+            manifest=previous_manifest,
+            main_failure="main.manifest-written",
+        )
+        assert not after_commit.deploy()
+        assert after_commit.code == "old"
+        assert after_commit.manifest == previous_manifest
+        assert "main.manifest-written" in after_commit.events
 
     # An online rollback failure is never allowed to leave PHP-FPM running or
     # reboot-startable, regardless of which acceptance layer fails.

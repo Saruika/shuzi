@@ -270,8 +270,27 @@ query-form App API 仍返回受保护的 401。它先在 Web 根目录外建立 
 目录中完整校验，再按 `vendor`、`composer.lock`、`composer.json` 顺序原子发布，
 避免出现元数据先于依赖。中断后留下的任何 byte-exact 支持子集都可以安全续跑；
 未知或不一致的文件、目录或 staging 会立即拒绝。失败只清理尚未发布的临时项，
-不会替换 1.5.7 PHP、删除已核验的支持子集或停止 FPM。Bootstrap 成功后立即
-执行下方普通发布器 dry-run/apply，不要把它当作日常升级命令重复使用。
+不会替换 1.5.7 PHP、删除已核验的支持子集或停止 FPM。Bootstrap 成功后，
+必须先使用**同一个 1.5.8 bundle 与同一个 manifest SHA**执行普通发布器
+authority dry-run/apply，把混合态收敛成完整 1.5.8；不得从 bootstrap 混合态
+直接跳到 1.5.10。这一步完成并验证 live manifest 后，才可执行下方
+1.5.10 普通发布。Bootstrap 不得当作日常升级命令重复使用。
+这个一次性 authority 过渡态为精确审核的 1.5.7 PHP 加 1.5.8 Composer
+支持文件，因此故意不冒充为完整 1.5.8，也不写 live `release.sha256`。
+普通发布器只在 `authority` marker、目标为已审核 1.5.8、旧 PHP
+与全部支持文件逐字节符合记录时接受这一次缺失状态；standby
+或任何其他缺失 manifest 的情形都失败关闭。
+
+```bash
+sudo /usr/local/sbin/deploy-app-content-release \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.23-build34.2 \
+  --manifest-sha256 64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134 \
+  --authority-role authority \
+  --dry-run
+
+# dry-run 成功后原样重跑，只把 --dry-run 改为 --apply。
+# Apply 成功后 live release.sha256 自身 SHA-256 必须精确为上述值。
+```
 
 ### Standby 历史单文件首次种子
 
@@ -332,7 +351,7 @@ JWT autoloader 及真实 `wp-load.php`，对 `/index.php?...` 和 `/?...`
 
 完成 1.5.8 bridge 后，普通版本升级使用目标版本自己的发布包。下面是
 Build 41 / 服务端 1.5.10 的已记录调用；独立信任值见
-[`../releases/v1.5.10-build41.3.md`](../releases/v1.5.10-build41.3.md)。SHA-256
+[`../releases/v1.5.10-build41.4.md`](../releases/v1.5.10-build41.4.md)。SHA-256
 不能替换成服务器现场重新计算后未经 Git 发布记录核对的值。备节点先用
 `standby` dry-run/apply，上海节点再用 `authority` dry-run/apply：
 
@@ -390,10 +409,15 @@ DNS/扩展网络出口且
 `--dry-run` 不创建锁/备份、不停止服务、不写入 Web 根目录，也不会发出可能
 触发访问日志、缓存、Cron 或角色元数据写入的 HTTP 请求。
 
-`--apply` 会先将当前四项完整备份到
-`/var/backups/shuzijun-app-content`。备份和 staging 都在 Web 根目录之外。
-发布阶段短暂停止 `php8.3-fpm`，先安装 `vendor/` 和 Composer 元数据，最后
-安装插件入口；在 FPM 仍停止时，以 `www-data` 身份加载 JWT autoloader。
+`--apply` 会先将当前四项 payload、live `release.sha256` 的原始字节
+或其精确缺失状态完整备份到 `/var/backups/shuzijun-app-content`。
+备份使用独立 `backup-integrity.sha256` 校验，不会用现场重算结果覆盖
+发布 provenance；备份和 staging 都在 Web 根目录之外。发布阶段
+短暂停止 `php8.3-fpm`，先安装 `vendor/`、Composer 元数据和插件入口，
+最后将已审核的 bundle `release.sha256` 在同一文件系统内同步并原子换入。
+发布器要求 live manifest 自身 SHA-256 等于 Git/CI 记录的独立值，并从
+live 目录使用该 manifest 复验全部 payload。在 FPM 仍停止时，以
+`www-data` 身份加载 JWT autoloader。
 在停止服务前，发布器会使用 `systemctl mask` 安装持久启动保护；完整发布单元
 的哈希和 autoloader 在离线状态通过后，发布器还会以 `www-data`、清空环境和
 固定 PHP 8.3 加载实际 `wp-load.php`，离线构造
@@ -422,8 +446,9 @@ PHP-FPM 停止且持久 mask，不会重新开放 query-form 绕过。探针继�
 `X-Robots-Tag`/`Vary` 安全头。它还在改动前、改动后及自动回滚验收中分别
 请求插件入口和 `vendor/autoload.php`，两者都必须由 Nginx 精确返回 404；
 403 或 200 都视为发布失败。安装、哈希复核、Web 根目录校验、Nginx、FPM 或
-本地 API 健康检查任一步触发 `ERR`，都会在 FPM 停止状态下只恢复这四项
-代码，再恢复 FPM。自动回滚绝不恢复数据库，也不触碰站点配置、媒体或
+本地 API 健康检查任一步触发 `ERR`，都会在 FPM 停止状态下先恢复
+四项 payload，最后恢复原 live manifest 的精确字节或精确 absent 状态，
+再恢复 FPM。自动回滚绝不恢复数据库，也不触碰站点配置、媒体或
 `/etc/shuzijun` 中的 Apple p8/data key。成功后保留节点本地备份，直至观察
 期结束。如果删除/复制/哈希复核任一步使回滚无法完整验证，发布器会保持
 FPM 停止而不是带着部分恢复的代码重新上线，并输出人工恢复所需的备份目录。
