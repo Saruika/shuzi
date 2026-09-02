@@ -1,6 +1,6 @@
 # Server operation fixes
 
-## Build 41.9 内部健康监控事务安装器
+## Build 41.10 内部健康监控事务安装器
 
 `deploy-shuzijun-health-monitor` 只升级内部健康脚本及其 service/timer，
 不会运行同步、故障切换，也不会修改 Nginx、PHP-FPM、MySQL、DNS、CDN、
@@ -10,14 +10,14 @@ WordPress 内容或媒体。生产执行顺序固定为备用节点 `backup stan
 生产信任锚为：
 
 ```text
-DEPLOYER_SHA256=fd402b62bd5eaab96f3689cf503d1602fc11e11548be604876b563b8e1b5a857
+DEPLOYER_SHA256=4f36f9ee749af33d1b155d4a8e8d32ee31240b7a7688721a028af2738c7f7ffc
 ```
 
-先把 Git 标签 `v1.3.29-build41.9` 中的安装器以原子 rename 放到
-`/run/deploy-shuzijun-health-build41.9`，设为 `root:root 0700`、regular、
+先把 Git 标签 `v1.3.29-build41.10` 中的安装器以原子 rename 放到
+`/run/deploy-shuzijun-health-build41.10`，设为 `root:root 0700`、regular、
 non-link、nlink=1；三个 runtime 文件则分别放入仅含这三项的
-`/run/shuzijun-health-build41.9-backup` 和
-`/run/shuzijun-health-build41.9-primary`。不得直接执行仓库副本，也不得从
+`/run/shuzijun-health-build41.10-backup` 和
+`/run/shuzijun-health-build41.10-primary`。不得直接执行仓库副本，也不得从
 `/private/tmp` 或可被非 root 写入的路径启动。
 
 Bash 会在读取脚本正文前处理调用环境中的 `BASH_ENV`，所以执行前校验和
@@ -27,8 +27,8 @@ Bash 会在读取脚本正文前处理调用环境中的 `BASH_ENV`，所以执�
 ```bash
 sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C /bin/bash --noprofile --norc -c '
 set -Eeuo pipefail
-DEPLOYER=/run/deploy-shuzijun-health-build41.9
-DEPLOYER_SHA256=fd402b62bd5eaab96f3689cf503d1602fc11e11548be604876b563b8e1b5a857
+DEPLOYER=/run/deploy-shuzijun-health-build41.10
+DEPLOYER_SHA256=4f36f9ee749af33d1b155d4a8e8d32ee31240b7a7688721a028af2738c7f7ffc
 [[ ! -L "$DEPLOYER" && -f "$DEPLOYER" ]]
 [[ "$(/usr/bin/realpath -e -- "$DEPLOYER")" == "$DEPLOYER" ]]
 [[ "$(/usr/bin/stat -c "%F:%u:%g:%a:%h" -- "$DEPLOYER")" == "regular file:0:0:700:1" ]]
@@ -53,9 +53,15 @@ status 后才原子替换。显式 health invocation 必须精确返回 degraded
 status、角色、路由、业务哈希和 reason 集都必须重新通过。计时器下一次触发
 还必须连续两次稳定落在 60–360 秒后，才可写入 `DONE`。
 
-Build 41.9 不再用 `stat %F` 的本地化文案判定空锁文件；它分别验证
+Build 41.10 保留不依赖 `stat %F` 本地化文案的空锁文件校验；它分别验证
 regular `-f`、非链接、canonical path 及数值 owner/group/mode/nlink，因此
 Ubuntu 返回 `regular empty file` 时也不会误拒绝，异常类型仍会 fail-closed。
+它还在主事务和回滚的 timer/service 隔离后显式执行 `reset-failed`：
+systemd oneshot 即使已 stop 也可能保留 `failed` 状态，现在必须归一到
+`inactive/dead` 后才能备份或恢复 timer。
+timer 刚启动时若立即触发，systemd 可在短暂的 running 状态中把 next-elapse
+暴露为无穷大；安装器不再于 settle 前对它做有符号 Bash 整数判定，
+而是等待 health oneshot 空闲后，再由两次 60–360 秒精确采样统一验收。
 
 `/etc/systemd/system/timers.target.wants` 允许在 disabled 阶段被 systemd
 删除，但存在时必须是可信实目录；enabled 阶段必须存在 root 所有的绝对目标

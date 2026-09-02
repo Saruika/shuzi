@@ -31,8 +31,8 @@ OLD_SERVICE_SHA=db95b5410561ce9e0cca235b7faf09e16d4a954c3c593565681cca49221c9537
 OLD_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6
 APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
 APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
-RELEASE_ID=build41.9
-DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.9
+RELEASE_ID=build41.10
+DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.10
 
 [[ $# -eq 2 ]] || { printf 'usage: %s <primary|backup> <authority|standby>\n' "$DEPLOYER_PATH" >&2; exit 2; }
 NODE=${1:-}
@@ -41,7 +41,7 @@ case "$NODE:$ROLE" in
     primary:authority|backup:standby) ;;
     *) printf 'invalid node/role\n' >&2; exit 2 ;;
 esac
-STAGE=/run/shuzijun-health-build41.9-$NODE
+STAGE=/run/shuzijun-health-build41.10-$NODE
 
 [[ $EUID -eq 0 ]] || { printf 'root required\n' >&2; exit 1; }
 [[ "$0" == "$DEPLOYER_PATH" ]] || { printf 'fixed deployer path required\n' >&2; exit 1; }
@@ -453,7 +453,7 @@ atomic_install() {
     local source=$1 target=$2 mode=$3 expected_sha=$4 parent base tmp
     parent=$(dirname -- "$target") || return 1
     base=$(basename -- "$target") || return 1
-    tmp=$parent/.$base.build41.9.$$
+    tmp=$parent/.$base.build41.10.$$
     [[ ! -e "$tmp" ]] || return 1
     install -o root -g root -m "$mode" -- "$source" "$tmp" || return 1
     require_file "$tmp" "$mode" "$expected_sha" || return 1
@@ -610,6 +610,15 @@ settle_timer_schedule() {
 
 clock_pair() {
     /usr/bin/python3 -I -c 'import time; print(f"{time.time_ns()}\t{time.monotonic_ns()}")'
+}
+
+start_disabled_timer_and_settle() {
+    [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]] || return 1
+    systemctl start shuzijun-internal-health.timer || return 1
+    [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]] || return 1
+    [[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]] || return 1
+    require_timer_disabled_link || return 1
+    settle_timer_schedule || return 1
 }
 
 validate_status() {
@@ -915,6 +924,7 @@ rollback() {
     fi
     systemctl disable --now shuzijun-internal-health.timer >/dev/null 2>&1 || isolation_ok=0
     systemctl stop shuzijun-internal-health.service >/dev/null 2>&1 || isolation_ok=0
+    systemctl reset-failed shuzijun-internal-health.service >/dev/null 2>&1 || isolation_ok=0
     [[ "$(systemctl is-active shuzijun-internal-health.timer 2>/dev/null)" == inactive ]] || isolation_ok=0
     [[ "$(systemctl is-active shuzijun-internal-health.service 2>/dev/null)" == inactive ]] || isolation_ok=0
     require_timer_disabled_link || isolation_ok=0
@@ -1038,7 +1048,7 @@ else
 fi
 require_dir "$BACKUP_ROOT" 700
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.9
+BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.10
 [[ ! -e "$BACKUP_DIR" ]]
 install -d -o root -g root -m 700 "$BACKUP_DIR"
 write_marker PREPARED "node=$NODE role=$ROLE release=$RELEASE_ID deployer_sha=$DEPLOYER_SHA timer_enabled=enabled timer_active=active old_script=$OLD_SCRIPT_SHA old_service=$OLD_SERVICE_SHA old_timer=$OLD_TIMER_SHA"
@@ -1046,6 +1056,7 @@ PHASE=PREPARED
 
 systemctl disable --now shuzijun-internal-health.timer
 systemctl stop shuzijun-internal-health.service
+systemctl reset-failed shuzijun-internal-health.service
 [[ "$(systemctl is-active shuzijun-internal-health.timer)" == inactive ]]
 [[ "$(systemctl is-active shuzijun-internal-health.service)" == inactive ]]
 require_timer_disabled_link
@@ -1107,12 +1118,7 @@ FIRST_STATUS_INODE=$(stat -c '%i' -- "$STATUS_FILE")
 [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]]
 BEFORE_TIMER_TRIGGER=$(timer_usec LastTriggerUSecMonotonic)
 IFS=$'\t' read -r TIMER_START_NS TIMER_START_MONO < <(clock_pair)
-systemctl start shuzijun-internal-health.timer
-[[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]]
-[[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]]
-require_timer_disabled_link
-[[ "$(timer_usec NextElapseUSecMonotonic)" -gt 0 ]]
-settle_timer_schedule
+start_disabled_timer_and_settle
 IFS=$'\t' read -r TIMER_END_NS TIMER_END_MONO < <(clock_pair)
 AFTER_INVOCATION=$SETTLED_INVOCATION
 AFTER_TIMER_TRIGGER=$SETTLED_TIMER_TRIGGER

@@ -8,7 +8,7 @@ from pathlib import Path
 
 DEPLOYER = Path("Server/operations/deploy-shuzijun-health-monitor")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE = Path("Server/releases/v1.5.10-build41.9.md")
+RELEASE = Path("Server/releases/v1.5.10-build41.10.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -247,6 +247,45 @@ unit_value() {{
         subprocess.run(["/bin/bash", "-c", harness], check=True)
 
 
+def assert_main_immediate_timer_fire_path(timer_start: str) -> None:
+    harness = f"""
+set -Eeuo pipefail
+timer_enabled=0
+timer_active=0
+service_busy=0
+require_timer_disabled_link() {{ return 0; }}
+timer_usec() {{ exit 95; }}
+settle_timer_schedule() {{
+    (( service_busy == 1 )) || return 96
+    service_busy=0
+    SETTLED_INVOCATION=settled-invocation
+    SETTLED_TIMER_TRIGGER=4242
+    return 0
+}}
+systemctl() {{
+    case "$1" in
+        is-enabled)
+            (( timer_enabled == 0 )) && printf '%s\\n' disabled || printf '%s\\n' enabled
+            ;;
+        start)
+            [[ "$2" == shuzijun-internal-health.timer ]] || return 97
+            timer_active=1
+            service_busy=1
+            ;;
+        is-active)
+            [[ "$2" == shuzijun-internal-health.timer ]] || return 98
+            (( timer_active == 1 )) && printf '%s\\n' active || printf '%s\\n' inactive
+            ;;
+        *) return 99 ;;
+    esac
+}}
+{timer_start}
+start_disabled_timer_and_settle
+[[ "$SETTLED_INVOCATION" == settled-invocation && "$SETTLED_TIMER_TRIGGER" == 4242 ]]
+"""
+    subprocess.run(["/bin/bash", "-c", harness], check=True)
+
+
 def assert_rollback_isolator_negative_path(rollback: str) -> None:
     harness = f"""
 set -Eeuo pipefail
@@ -309,14 +348,14 @@ TERMINAL_MARKER_COMMITTED=0
 timer_started=0
 timer_enabled=1
 service_busy=0
-service_failed=0
+service_failed=1
 done_marker_matches() {{ return 1; }}
 sync_path() {{ return 0; }}
 require_timer_disabled_link() {{ return 0; }}
 require_timer_enabled_link() {{ return 0; }}
 sync_timer_enable_state() {{ return 0; }}
-require_old_runtime_isolated() {{ return 0; }}
-require_old_runtime_enabled_inactive() {{ return 0; }}
+require_old_runtime_isolated() {{ (( service_busy == 0 && service_failed == 0 )); }}
+require_old_runtime_enabled_inactive() {{ (( service_busy == 0 && service_failed == 0 )); }}
 require_old_runtime_active() {{
     if (( service_busy == 1 )); then
         printf '%s\\n' OLD_ACTIVE_BUSY >&3
@@ -347,8 +386,9 @@ marker_matches() {{ return 0; }}
 systemctl() {{
     printf '%s\\n' "$*" >&3
     case "$1" in
-        disable) timer_enabled=0; timer_started=0; service_busy=0; service_failed=0 ;;
+        disable) timer_enabled=0; timer_started=0; service_busy=0 ;;
         enable) timer_enabled=1 ;;
+        reset-failed) service_failed=0 ;;
         start)
             if [[ "$2" == shuzijun-internal-health.timer ]]; then
                 timer_started=1
@@ -356,7 +396,7 @@ systemctl() {{
                 service_failed=0
             fi
             ;;
-        stop) service_busy=0; service_failed=0 ;;
+        stop) service_busy=0 ;;
         is-enabled)
             (( timer_enabled == 1 )) && printf '%s\\n' enabled || printf '%s\\n' disabled
             ;;
@@ -387,6 +427,7 @@ rollback 7
     assert "COMMIT" in events, events
     assert "OLD_ACTIVE_BUSY" not in events, events
     assert sum(event.startswith("disable --now") for event in events) == 1, events
+    assert sum(event.startswith("reset-failed shuzijun-internal-health.service") for event in events) == 1, events
 
 
 def main() -> None:
@@ -409,9 +450,9 @@ def main() -> None:
     assert "unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true" in lines
 
     for fixed_value in (
-        "RELEASE_ID=build41.9",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.9",
-        "STAGE=/run/shuzijun-health-build41.9-$NODE",
+        "RELEASE_ID=build41.10",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.10",
+        "STAGE=/run/shuzijun-health-build41.10-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -435,6 +476,7 @@ def main() -> None:
         assert fixed_value in lines, fixed_value
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
+    assert "build41.9" not in text
     assert "build41.8" not in text
     assert "build41.7" not in text
     assert "[[ $# -eq 2 ]]" in text
@@ -686,6 +728,13 @@ def main() -> None:
     assert "wait_health_idle || return 1" in settle
     assert 'validate_timer_quiescent "$invocation" "$trigger" 60000000 360000000' in settle
     assert "SETTLED_INVOCATION=$invocation" in settle
+    timer_start_helper = function_body(
+        lines, "start_disabled_timer_and_settle", "validate_status"
+    )
+    assert "systemctl start shuzijun-internal-health.timer || return 1" in timer_start_helper
+    assert "settle_timer_schedule || return 1" in timer_start_helper
+    assert "NextElapseUSecMonotonic" not in timer_start_helper
+    assert_main_immediate_timer_fire_path(timer_start_helper)
     assert re.search(r"LastTriggerUSec(?!Monotonic)", text) is None
 
     validator = function_body(lines, "validate_last_invocation", "require_new_units")
@@ -719,9 +768,17 @@ def main() -> None:
     )
     assert "no rollback was performed" in rollback
     isolate = line_number(rollback.splitlines(), "systemctl disable --now")
+    rollback_stop = line_number(
+        rollback.splitlines(), "systemctl stop shuzijun-internal-health.service", isolate
+    )
+    rollback_reset = line_number(
+        rollback.splitlines(),
+        "systemctl reset-failed shuzijun-internal-health.service",
+        rollback_stop,
+    )
     isolation_gate = line_number(rollback.splitlines(), "if (( isolation_ok == 1 ))")
     first_restore = line_number(rollback.splitlines(), "atomic_restore")
-    assert isolate < isolation_gate < first_restore
+    assert isolate < rollback_stop < rollback_reset < isolation_gate < first_restore
     assert "(( isolation_ok == 1 )) || rollback_ok=0" in rollback
     rollback_lines = rollback.splitlines()
     old_isolation = line_number(
@@ -807,17 +864,42 @@ def main() -> None:
     old_state_gate = line_number(lines, "require_old_state", main_start)
     prepared = line_number(lines, "write_marker PREPARED", main_start)
     disable = line_number(lines, "systemctl disable --now", prepared)
+    main_stop = line_number(
+        lines, "systemctl stop shuzijun-internal-health.service", disable
+    )
+    main_reset = line_number(
+        lines,
+        "systemctl reset-failed shuzijun-internal-health.service",
+        main_stop,
+    )
+    main_service_inactive = line_number(
+        lines,
+        '[[ "$(systemctl is-active shuzijun-internal-health.service)" == inactive ]]',
+        main_reset,
+    )
+    backup_start = line_number(lines, 'backup_one "$SCRIPT_TARGET"', main_service_inactive)
     committed = line_number(lines, "write_marker COMMITTED", disable)
     harden_call = line_number(lines, "harden_logs", committed)
     status_may_change = line_number(lines, "write_marker STATUS_MAY_CHANGE", harden_call)
     first_start = line_number(lines, "systemctl start shuzijun-internal-health.service", status_may_change)
-    timer_start = line_number(lines, "systemctl start shuzijun-internal-health.timer", first_start)
+    timer_start = line_number(lines, "start_disabled_timer_and_settle", first_start)
     accepted = line_number(lines, "write_marker ACCEPTED", timer_start)
     enable = line_number(lines, "systemctl enable shuzijun-internal-health.timer", accepted)
     done_prepare = line_number(lines, "prepare_terminal_marker DONE", enable)
     done = line_number(lines, "commit_terminal_marker DONE", done_prepare)
     clear_traps = line_number(lines, "trap - ERR INT TERM HUP", done)
-    assert old_state_gate < prepared < disable < committed < harden_call < status_may_change
+    assert (
+        old_state_gate
+        < prepared
+        < disable
+        < main_stop
+        < main_reset
+        < main_service_inactive
+        < backup_start
+        < committed
+        < harden_call
+        < status_may_change
+    )
     for line in lines[main_start:prepared]:
         assert not re.search(
             r"^\s*systemctl\s+(?:disable|enable|mask|reload|reset-failed|restart|start|stop|try-restart|unmask)\b",
@@ -825,7 +907,7 @@ def main() -> None:
         ), line
     assert status_may_change < first_start < timer_start < accepted < enable < done < clear_traps
     assert "systemctl enable --now" not in main_text
-    assert "settle_timer_schedule" in main_text
+    assert "start_disabled_timer_and_settle" in main_text
     assert '[[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" && "$AFTER_TIMER_TRIGGER" != "$BEFORE_TIMER_TRIGGER" ]]' in main_text
     assert main_text.count("sync_timer_enable_state") >= 3
     assert main_text.count("persist_status_snapshot") >= 2
