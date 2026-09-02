@@ -1,0 +1,1167 @@
+#!/bin/bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true
+
+SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health
+SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service
+TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer
+WANTS_DIR=/etc/systemd/system/timers.target.wants
+WANTS_LINK=$WANTS_DIR/shuzijun-internal-health.timer
+SERVICE_OBJECT_PATH=/org/freedesktop/systemd1/unit/shuzijun_2dinternal_2dhealth_2eservice
+TIMER_OBJECT_PATH=/org/freedesktop/systemd1/unit/shuzijun_2dinternal_2dhealth_2etimer
+STATUS_DIR=/var/lib/shuzijun-health
+STATUS_FILE=$STATUS_DIR/status.json
+BACKUP_ROOT=/var/backups/shuzijun-health-monitor
+LOCK_DIR=/run/shuzijun-health-monitor-install
+LOCK_FILE=$LOCK_DIR/deploy.lock
+ROLE_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
+ROLE_VERIFY_SHA=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
+
+NEW_SCRIPT_SHA=e5f89d04ad4498396a8abdc32eaad645587c6ec6b7da7fe70c56498286fbd129
+NEW_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc
+NEW_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6
+OLD_SCRIPT_SHA=71698f025ff467f837e8b7430b4188d05576d2010f9c4f181eea1e56625ca390
+OLD_SERVICE_SHA=db95b5410561ce9e0cca235b7faf09e16d4a954c3c593565681cca49221c9537
+OLD_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6
+APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
+APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
+RELEASE_ID=build41.8
+DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.8
+
+[[ $# -eq 2 ]] || { printf 'usage: %s <primary|backup> <authority|standby>\n' "$DEPLOYER_PATH" >&2; exit 2; }
+NODE=${1:-}
+ROLE=${2:-}
+case "$NODE:$ROLE" in
+    primary:authority|backup:standby) ;;
+    *) printf 'invalid node/role\n' >&2; exit 2 ;;
+esac
+STAGE=/run/shuzijun-health-build41.8-$NODE
+
+[[ $EUID -eq 0 ]] || { printf 'root required\n' >&2; exit 1; }
+[[ "$0" == "$DEPLOYER_PATH" ]] || { printf 'fixed deployer path required\n' >&2; exit 1; }
+ROOT_BASHPID=$BASHPID
+readonly ROOT_BASHPID
+[[ ! -L /run && -d /run && "$(realpath -e /run)" == /run ]]
+RUN_METADATA=$(stat -c '%u:%g:%a' /run)
+[[ "${RUN_METADATA%%:*}" == 0 && "${RUN_METADATA#*:}" == 0:* ]]
+RUN_MODE=${RUN_METADATA##*:}
+(( (8#$RUN_MODE & 0022) == 0 ))
+DEPLOYER_SHA=$(/usr/bin/python3 -I - "$DEPLOYER_PATH" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+directory, name = os.path.split(path)
+dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+dir_fd = os.open(directory, dir_flags)
+try:
+    before_path = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, dir_fd=dir_fd)
+    try:
+        before_fd = os.fstat(fd)
+        if not stat.S_ISREG(before_fd.st_mode):
+            raise SystemExit("deployer is not a regular file")
+        if (
+            before_fd.st_uid,
+            before_fd.st_gid,
+            stat.S_IMODE(before_fd.st_mode),
+            before_fd.st_nlink,
+        ) != (0, 0, 0o700, 1):
+            raise SystemExit("deployer metadata mismatch")
+        if (before_path.st_dev, before_path.st_ino) != (before_fd.st_dev, before_fd.st_ino):
+            raise SystemExit("deployer path changed before hashing")
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            digest.update(chunk)
+        after_fd = os.fstat(fd)
+        after_path = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if (
+            before_fd.st_dev,
+            before_fd.st_ino,
+            before_fd.st_size,
+            before_fd.st_mtime_ns,
+        ) != (
+            after_fd.st_dev,
+            after_fd.st_ino,
+            after_fd.st_size,
+            after_fd.st_mtime_ns,
+        ):
+            raise SystemExit("deployer changed while hashing")
+        if (after_path.st_dev, after_path.st_ino) != (after_fd.st_dev, after_fd.st_ino):
+            raise SystemExit("deployer path changed while hashing")
+        print(digest.hexdigest())
+    finally:
+        os.close(fd)
+finally:
+    os.close(dir_fd)
+PY
+)
+[[ "$DEPLOYER_SHA" =~ ^[0-9a-f]{64}$ ]]
+if [[ -e "$LOCK_DIR" ]]; then
+    [[ ! -L "$LOCK_DIR" && -d "$LOCK_DIR" ]]
+    [[ "$(realpath -e "$LOCK_DIR")" == "$LOCK_DIR" ]]
+    [[ "$(stat -c '%F:%u:%g:%a' "$LOCK_DIR")" == 'directory:0:0:700' ]]
+else
+    install -d -o root -g root -m 700 "$LOCK_DIR"
+    sync -f "$LOCK_DIR"
+    sync -f /run
+fi
+if [[ -e "$LOCK_FILE" ]]; then
+    [[ ! -L "$LOCK_FILE" && -f "$LOCK_FILE" ]]
+    [[ "$(stat -c '%F:%u:%g:%a:%h' "$LOCK_FILE")" == 'regular file:0:0:600:1' ]]
+fi
+exec 9>>"$LOCK_FILE"
+chown root:root "$LOCK_FILE"
+chmod 600 "$LOCK_FILE"
+[[ "$(stat -c '%F:%u:%g:%a:%h' "$LOCK_FILE")" == 'regular file:0:0:600:1' ]]
+flock -n 9 || { printf 'health monitor install lock busy\n' >&2; exit 1; }
+
+PHASE=LOCKED
+BACKUP_DIR=
+OLD_STATUS_SHA=
+OLD_STATUS_INODE=
+VALIDATED_INVOCATION=
+SETTLED_INVOCATION=
+SETTLED_TIMER_TRIGGER=
+PREPARED_TERMINAL_NAME=
+PREPARED_TERMINAL_CONTENT=
+TERMINAL_MARKER_COMMITTED=0
+ROLLBACK_RUNNING=0
+
+sha() {
+    sha256sum -- "$1" | cut -d' ' -f1
+}
+
+require_dir() {
+    local path=$1 mode=$2 metadata
+    [[ ! -L "$path" && -d "$path" ]] || { printf 'unsafe directory: %s\n' "$path" >&2; return 1; }
+    [[ "$(realpath -e -- "$path")" == "$path" ]] || { printf 'non-canonical directory: %s\n' "$path" >&2; return 1; }
+    metadata=$(stat -c '%u:%g:%a' -- "$path") || return 1
+    [[ "$metadata" == "0:0:$mode" ]] || { printf 'directory metadata mismatch: %s %s\n' "$path" "$metadata" >&2; return 1; }
+}
+
+require_safe_parent() {
+    local path=$1 metadata mode_value
+    [[ ! -L "$path" && -d "$path" ]] || { printf 'unsafe parent: %s\n' "$path" >&2; return 1; }
+    [[ "$(realpath -e -- "$path")" == "$path" ]] || { printf 'non-canonical parent: %s\n' "$path" >&2; return 1; }
+    metadata=$(stat -c '%u:%g:%a' -- "$path") || return 1
+    [[ "${metadata%%:*}" == 0 && "${metadata#*:}" == 0:* ]] || { printf 'parent not root-owned: %s\n' "$path" >&2; return 1; }
+    mode_value=${metadata##*:}
+    (( (8#$mode_value & 0022) == 0 )) || { printf 'parent writable by non-root: %s\n' "$path" >&2; return 1; }
+}
+
+require_file() {
+    local path=$1 mode=$2 expected_sha=$3 metadata
+    [[ ! -L "$path" && -f "$path" ]] || { printf 'unsafe file: %s\n' "$path" >&2; return 1; }
+    [[ "$(realpath -e -- "$path")" == "$path" ]] || { printf 'non-canonical file: %s\n' "$path" >&2; return 1; }
+    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$path") || return 1
+    [[ "$metadata" == "regular file:0:0:$mode:1" ]] || { printf 'file metadata mismatch: %s %s\n' "$path" "$metadata" >&2; return 1; }
+    [[ "$(sha "$path")" == "$expected_sha" ]] || { printf 'file hash mismatch: %s\n' "$path" >&2; return 1; }
+}
+
+require_status() {
+    require_dir "$STATUS_DIR" 700 || return 1
+    require_safe_parent /var || return 1
+    require_safe_parent /var/lib || return 1
+    local metadata
+    [[ ! -L "$STATUS_FILE" && -f "$STATUS_FILE" ]] || { printf 'unsafe status file\n' >&2; return 1; }
+    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$STATUS_FILE") || return 1
+    [[ "$metadata" == 'regular file:0:0:600:1' ]] || { printf 'status metadata mismatch: %s\n' "$metadata" >&2; return 1; }
+}
+
+require_timer_enabled_link() {
+    local metadata target
+    require_safe_parent "$WANTS_DIR" || return 1
+    [[ -L "$WANTS_LINK" ]] || return 1
+    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$WANTS_LINK") || return 1
+    [[ "$metadata" == 'symbolic link:0:0:777:1' ]] || return 1
+    target=$(readlink -- "$WANTS_LINK") || return 1
+    [[ "$target" == "$TIMER_TARGET" ]] || return 1
+    [[ "$(realpath -e -- "$WANTS_LINK")" == "$TIMER_TARGET" ]] || return 1
+}
+
+require_timer_disabled_link() {
+    if [[ ! -e "$WANTS_DIR" && ! -L "$WANTS_DIR" ]]; then
+        require_safe_parent /etc/systemd/system || return 1
+        return 0
+    fi
+    require_safe_parent "$WANTS_DIR" || return 1
+    [[ ! -e "$WANTS_LINK" && ! -L "$WANTS_LINK" ]] || return 1
+}
+
+sync_timer_enable_state() {
+    if [[ -e "$WANTS_DIR" || -L "$WANTS_DIR" ]]; then
+        require_safe_parent "$WANTS_DIR" || return 1
+        sync_path "$WANTS_DIR" || return 1
+    else
+        require_safe_parent /etc/systemd/system || return 1
+    fi
+    sync_path /etc/systemd/system || return 1
+}
+
+unit_value() {
+    systemctl show "$1" --property="$2" --value
+}
+
+exec_start_ex_json() {
+    local object=$1
+    [[ "$object" == "$SERVICE_OBJECT_PATH" ]] || return 1
+    /usr/bin/busctl --json=short --system get-property \
+        org.freedesktop.systemd1 "$object" \
+        org.freedesktop.systemd1.Service ExecStartEx
+}
+
+require_exact_exec_start() {
+    local object=$1 expected_path=$2 output
+    shift 2
+    (( $# > 0 )) || return 1
+    output=$(exec_start_ex_json "$object") || return 1
+    /usr/bin/python3 -I - "$output" "$expected_path" "$@" <<'PY'
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+expected_path = sys.argv[2]
+expected_argv = sys.argv[3:]
+if set(payload) != {"type", "data"}:
+    raise SystemExit(1)
+if payload["type"] != "a(sasasttttuii)":
+    raise SystemExit(1)
+data = payload["data"]
+if not isinstance(data, list) or len(data) != 1:
+    raise SystemExit(1)
+entry = data[0]
+if not isinstance(entry, list) or len(entry) != 10:
+    raise SystemExit(1)
+if entry[0] != expected_path or entry[1] != expected_argv or entry[2] != []:
+    raise SystemExit(1)
+if any(type(value) is not int for value in entry[3:]):
+    raise SystemExit(1)
+PY
+}
+
+require_service_execution_context() {
+    local unit=$1 user group environment environment_files pass_environment unset_environment
+    local working_directory root_directory root_image exec_search_path
+    [[ "$unit" == shuzijun-internal-health.service ]] || return 1
+    user=$(unit_value "$unit" User) || return 1
+    group=$(unit_value "$unit" Group) || return 1
+    environment=$(unit_value "$unit" Environment) || return 1
+    environment_files=$(unit_value "$unit" EnvironmentFiles) || return 1
+    pass_environment=$(unit_value "$unit" PassEnvironment) || return 1
+    unset_environment=$(unit_value "$unit" UnsetEnvironment) || return 1
+    working_directory=$(unit_value "$unit" WorkingDirectory) || return 1
+    root_directory=$(unit_value "$unit" RootDirectory) || return 1
+    root_image=$(unit_value "$unit" RootImage) || return 1
+    exec_search_path=$(unit_value "$unit" ExecSearchPath) || return 1
+    [[ "$user" == root && "$group" == root ]] || return 1
+    [[ -z "$environment" && -z "$environment_files" && -z "$pass_environment" ]] || return 1
+    [[ -z "$unset_environment" && -z "$working_directory" && -z "$root_directory" ]] || return 1
+    [[ -z "$root_image" && -z "$exec_search_path" ]] || return 1
+}
+
+unit_uint64() {
+    local object=$1 interface=$2 property=$3 output signature value extra
+    output=$(/usr/bin/busctl --system get-property org.freedesktop.systemd1 "$object" "$interface" "$property") || return 1
+    IFS=' ' read -r signature value extra <<< "$output"
+    [[ "$signature" == t && "$value" =~ ^[0-9]+$ && -z "${extra:-}" ]] || {
+        printf 'invalid uint64 systemd property: %s\n' "$property" >&2
+        return 1
+    }
+    printf '%s\n' "$value"
+}
+
+service_usec() {
+    unit_uint64 "$SERVICE_OBJECT_PATH" org.freedesktop.systemd1.Service "$1"
+}
+
+timer_usec() {
+    unit_uint64 "$TIMER_OBJECT_PATH" org.freedesktop.systemd1.Timer "$1"
+}
+
+require_frozen_files() {
+    require_safe_parent /usr || return 1
+    require_safe_parent /usr/local || return 1
+    require_safe_parent /usr/local/sbin || return 1
+    require_safe_parent /etc || return 1
+    require_safe_parent /etc/systemd || return 1
+    require_safe_parent /etc/systemd/system || return 1
+    require_file "$SCRIPT_TARGET" 700 "$OLD_SCRIPT_SHA" || return 1
+    require_file "$SERVICE_TARGET" 644 "$OLD_SERVICE_SHA" || return 1
+    require_file "$TIMER_TARGET" 644 "$OLD_TIMER_SHA" || return 1
+    require_status || return 1
+}
+
+require_old_state() {
+    require_old_runtime_loaded active inactive-or-failed || return 1
+    [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]] || return 1
+    require_timer_enabled_link || return 1
+}
+
+require_old_runtime_loaded() {
+    local expected_timer_state=$1 expected_service_state=$2
+    local timer_state timer_substate timer_job timer_unit timer_reload
+    local service_state service_substate service_job service_result service_main_status service_reload service_type
+    local service_dropins timer_dropins exec_condition exec_start_pre exec_start_post exec_reload exec_stop exec_stop_post success_status
+    [[ "$expected_timer_state" == inactive || "$expected_timer_state" == active ]] || return 1
+    [[ "$expected_service_state" == inactive || "$expected_service_state" == inactive-or-failed ]] || return 1
+    require_frozen_files || return 1
+    require_file "$ROLE_VERIFY" 755 "$ROLE_VERIFY_SHA" || return 1
+    /usr/bin/python3 -I "$ROLE_VERIFY" "$ROLE" || return 1
+    timer_state=$(unit_value shuzijun-internal-health.timer ActiveState) || return 1
+    timer_substate=$(unit_value shuzijun-internal-health.timer SubState) || return 1
+    timer_job=$(unit_value shuzijun-internal-health.timer Job) || return 1
+    timer_unit=$(unit_value shuzijun-internal-health.timer Unit) || return 1
+    timer_reload=$(unit_value shuzijun-internal-health.timer NeedDaemonReload) || return 1
+    service_state=$(unit_value shuzijun-internal-health.service ActiveState) || return 1
+    service_substate=$(unit_value shuzijun-internal-health.service SubState) || return 1
+    service_job=$(unit_value shuzijun-internal-health.service Job) || return 1
+    service_reload=$(unit_value shuzijun-internal-health.service NeedDaemonReload) || return 1
+    service_type=$(unit_value shuzijun-internal-health.service Type) || return 1
+    [[ "$timer_state" == "$expected_timer_state" && -z "$timer_job" ]] || return 1
+    if [[ "$expected_timer_state" == active ]]; then
+        [[ "$timer_substate" == waiting ]] || return 1
+    else
+        [[ "$timer_substate" == dead ]] || return 1
+    fi
+    [[ "$timer_unit" == shuzijun-internal-health.service && "$timer_reload" == no ]] || return 1
+    [[ -z "$service_job" && "$service_reload" == no && "$service_type" == oneshot ]] || return 1
+    if [[ "$expected_service_state" == inactive ]]; then
+        [[ "$service_state" == inactive && "$service_substate" == dead ]] || return 1
+    else
+        case "$service_state:$service_substate" in
+            inactive:dead) ;;
+            failed:failed)
+                service_result=$(unit_value shuzijun-internal-health.service Result) || return 1
+                service_main_status=$(unit_value shuzijun-internal-health.service ExecMainStatus) || return 1
+                [[ "$service_result" == exit-code && "$service_main_status" == 1 ]] || return 1
+                ;;
+            *) return 1 ;;
+        esac
+    fi
+    [[ "$(unit_value shuzijun-internal-health.service FragmentPath)" == "$SERVICE_TARGET" ]] || return 1
+    [[ "$(unit_value shuzijun-internal-health.timer FragmentPath)" == "$TIMER_TARGET" ]] || return 1
+    service_dropins=$(unit_value shuzijun-internal-health.service DropInPaths) || return 1
+    timer_dropins=$(unit_value shuzijun-internal-health.timer DropInPaths) || return 1
+    [[ -z "$service_dropins" && -z "$timer_dropins" ]] || return 1
+    require_exact_exec_start "$SERVICE_OBJECT_PATH" /usr/local/sbin/shuzijun-internal-health /usr/local/sbin/shuzijun-internal-health || return 1
+    require_service_execution_context shuzijun-internal-health.service || return 1
+    exec_condition=$(unit_value shuzijun-internal-health.service ExecCondition) || return 1
+    exec_start_pre=$(unit_value shuzijun-internal-health.service ExecStartPre) || return 1
+    exec_start_post=$(unit_value shuzijun-internal-health.service ExecStartPost) || return 1
+    exec_reload=$(unit_value shuzijun-internal-health.service ExecReload) || return 1
+    exec_stop=$(unit_value shuzijun-internal-health.service ExecStop) || return 1
+    exec_stop_post=$(unit_value shuzijun-internal-health.service ExecStopPost) || return 1
+    [[ -z "$exec_condition" && -z "$exec_start_pre" && -z "$exec_start_post" ]] || return 1
+    [[ -z "$exec_reload" && -z "$exec_stop" && -z "$exec_stop_post" ]] || return 1
+    success_status=$(unit_value shuzijun-internal-health.service SuccessExitStatus) || return 1
+    [[ -z "$success_status" ]] || return 1
+    systemd-analyze verify "$SERVICE_TARGET" "$TIMER_TARGET" || return 1
+}
+
+require_old_runtime_isolated() {
+    require_old_runtime_loaded inactive inactive || return 1
+    [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]] || return 1
+    require_timer_disabled_link || return 1
+}
+
+require_old_runtime_enabled_inactive() {
+    require_old_runtime_loaded inactive inactive || return 1
+    [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]] || return 1
+    require_timer_enabled_link || return 1
+}
+
+require_old_runtime_active() {
+    require_old_runtime_loaded active inactive-or-failed || return 1
+    [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]] || return 1
+    require_timer_enabled_link || return 1
+}
+
+require_stage() {
+    require_dir "$STAGE" 700 || return 1
+    local listing expected
+    listing=$(find "$STAGE" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort) || return 1
+    expected=$'shuzijun-internal-health\nshuzijun-internal-health.service\nshuzijun-internal-health.timer'
+    [[ "$listing" == "$expected" ]] || { printf 'stage contains unexpected entries\n' >&2; return 1; }
+    require_file "$STAGE/shuzijun-internal-health" 700 "$NEW_SCRIPT_SHA" || return 1
+    require_file "$STAGE/shuzijun-internal-health.service" 644 "$NEW_SERVICE_SHA" || return 1
+    require_file "$STAGE/shuzijun-internal-health.timer" 644 "$NEW_TIMER_SHA" || return 1
+    /usr/bin/python3 -I -c 'import pathlib,sys; compile(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"), sys.argv[1], "exec")' "$STAGE/shuzijun-internal-health" || return 1
+    systemd-analyze verify "$STAGE/shuzijun-internal-health.service" "$STAGE/shuzijun-internal-health.timer" || return 1
+}
+
+sync_path() {
+    sync -f -- "$1"
+}
+
+persist_status_snapshot() {
+    local expected_sha=$1 expected_inode=$2 current_sha current_inode
+    require_status || return 1
+    current_sha=$(sha "$STATUS_FILE") || return 1
+    current_inode=$(stat -c '%i' -- "$STATUS_FILE") || return 1
+    [[ "$current_sha" == "$expected_sha" && "$current_inode" == "$expected_inode" ]] || return 1
+    sync_path "$STATUS_FILE" || return 1
+    sync_path "$STATUS_DIR" || return 1
+    require_status || return 1
+    current_sha=$(sha "$STATUS_FILE") || return 1
+    current_inode=$(stat -c '%i' -- "$STATUS_FILE") || return 1
+    [[ "$current_sha" == "$expected_sha" && "$current_inode" == "$expected_inode" ]] || return 1
+}
+
+write_marker() {
+    local name=$1 content=$2 tmp
+    case "$name" in
+        PREPARED|COMMITTED|STATUS_MAY_CHANGE|ACCEPTED) ;;
+        *) return 1 ;;
+    esac
+    tmp=$BACKUP_DIR/.$name.$$
+    [[ ! -e "$tmp" && ! -L "$tmp" ]] || return 1
+    printf '%s\n' "$content" > "$tmp" || return 1
+    chown root:root "$tmp" || return 1
+    chmod 600 "$tmp" || return 1
+    sync_path "$tmp" || return 1
+    mv -T -- "$tmp" "$BACKUP_DIR/$name" || return 1
+    sync_path "$BACKUP_DIR" || return 1
+    sync_path "$BACKUP_ROOT" || return 1
+    sync_path "$(dirname -- "$BACKUP_ROOT")" || return 1
+}
+
+backup_one() {
+    local source=$1 name=$2 expected_sha=$3 mode=$4 copy
+    copy=$BACKUP_DIR/$name
+    cp -a --reflink=never -- "$source" "$copy" || return 1
+    require_file "$copy" "$mode" "$expected_sha" || return 1
+    require_file "$source" "$mode" "$expected_sha" || return 1
+}
+
+atomic_install() {
+    local source=$1 target=$2 mode=$3 expected_sha=$4 parent base tmp
+    parent=$(dirname -- "$target") || return 1
+    base=$(basename -- "$target") || return 1
+    tmp=$parent/.$base.build41.8.$$
+    [[ ! -e "$tmp" ]] || return 1
+    install -o root -g root -m "$mode" -- "$source" "$tmp" || return 1
+    require_file "$tmp" "$mode" "$expected_sha" || return 1
+    sync_path "$tmp" || return 1
+    mv -T -- "$tmp" "$target" || return 1
+    sync_path "$parent" || return 1
+    require_file "$target" "$mode" "$expected_sha" || return 1
+}
+
+atomic_restore() {
+    local source=$1 target=$2 expected_sha=$3 mode=$4 parent base tmp
+    parent=$(dirname -- "$target") || return 1
+    base=$(basename -- "$target") || return 1
+    tmp=$parent/.$base.rollback.$$
+    [[ ! -e "$tmp" ]] || return 1
+    cp -a --reflink=never -- "$source" "$tmp" || return 1
+    require_file "$tmp" "$mode" "$expected_sha" || return 1
+    sync_path "$tmp" || return 1
+    mv -T -- "$tmp" "$target" || return 1
+    sync_path "$parent" || return 1
+    require_file "$target" "$mode" "$expected_sha" || return 1
+}
+
+harden_logs() {
+    local role_log
+    if [[ "$ROLE" == authority ]]; then
+        role_log=wp-sync.log
+    else
+        role_log=shuzijun-sync-receiver.log
+    fi
+    /usr/bin/python3 -I - "$role_log" <<'PY'
+import os
+import stat
+import sys
+
+directory = "/var/log"
+parent = os.lstat(directory)
+if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != 0 or parent.st_gid != 0:
+    raise SystemExit("unsafe /var/log")
+if stat.S_IMODE(parent.st_mode) & 0o022:
+    raise SystemExit("/var/log writable by non-root")
+dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+dir_fd = os.open(directory, dir_flags)
+try:
+    for name in ("tencent-snapshot.log", sys.argv[1]):
+        try:
+            before_path = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(name, flags, dir_fd=dir_fd)
+        try:
+            before_fd = os.fstat(fd)
+            if not stat.S_ISREG(before_fd.st_mode) or before_fd.st_uid != 0 or before_fd.st_nlink != 1:
+                raise SystemExit(f"unsafe log metadata: {name}")
+            if (before_path.st_dev, before_path.st_ino) != (before_fd.st_dev, before_fd.st_ino):
+                raise SystemExit(f"log changed before hardening: {name}")
+            if stat.S_IMODE(before_fd.st_mode) & 0o022:
+                print(f"log remains untrusted until its writer rotates it safely: {name}", file=sys.stderr)
+                continue
+            os.fchown(fd, 0, 0)
+            os.fchmod(fd, 0o600)
+            os.fsync(fd)
+            after_fd = os.fstat(fd)
+            after_path = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            if not stat.S_ISREG(after_fd.st_mode):
+                raise SystemExit(f"log type changed: {name}")
+            if (after_fd.st_uid, after_fd.st_gid, stat.S_IMODE(after_fd.st_mode), after_fd.st_nlink) != (0, 0, 0o600, 1):
+                raise SystemExit(f"log hardening failed: {name}")
+            if (before_fd.st_dev, before_fd.st_ino, before_fd.st_mtime_ns) != (after_fd.st_dev, after_fd.st_ino, after_fd.st_mtime_ns):
+                raise SystemExit(f"log inode or mtime changed: {name}")
+            if (after_path.st_dev, after_path.st_ino) != (after_fd.st_dev, after_fd.st_ino):
+                raise SystemExit(f"log path changed during hardening: {name}")
+        finally:
+            os.close(fd)
+    os.fsync(dir_fd)
+    after_parent_fd = os.fstat(dir_fd)
+    after_parent_path = os.lstat(directory)
+    if (after_parent_fd.st_dev, after_parent_fd.st_ino) != (after_parent_path.st_dev, after_parent_path.st_ino):
+        raise SystemExit("/var/log path changed during hardening")
+    if not stat.S_ISDIR(after_parent_fd.st_mode) or after_parent_fd.st_uid != 0 or after_parent_fd.st_gid != 0:
+        raise SystemExit("/var/log metadata changed during hardening")
+    if stat.S_IMODE(after_parent_fd.st_mode) & 0o022:
+        raise SystemExit("/var/log became writable by non-root")
+finally:
+    os.close(dir_fd)
+PY
+}
+
+wait_health_idle() {
+    local attempt state job state_again job_again
+    for attempt in $(seq 1 1000); do
+        state=$(unit_value shuzijun-internal-health.service ActiveState) || return 1
+        job=$(unit_value shuzijun-internal-health.service Job) || return 1
+        case "$state" in
+            active|activating|deactivating) sleep 0.25 ;;
+            *)
+                if [[ -n "$job" ]]; then
+                    sleep 0.25
+                    continue
+                fi
+                sleep 0.25
+                state_again=$(unit_value shuzijun-internal-health.service ActiveState) || return 1
+                job_again=$(unit_value shuzijun-internal-health.service Job) || return 1
+                case "$state_again" in
+                    active|activating|deactivating) continue ;;
+                esac
+                [[ -z "$job_again" ]] && return 0
+                ;;
+        esac
+    done
+    printf 'health service did not become idle\n' >&2
+    return 1
+}
+
+validate_timer_quiescent() {
+    local expected_invocation=$1 expected_trigger=$2 minimum_future_usec=$3 maximum_future_usec=$4 attempt state job invocation trigger next_elapse now_ns now_mono now_usec
+    for attempt in 1 2; do
+        state=$(unit_value shuzijun-internal-health.service ActiveState) || return 1
+        job=$(unit_value shuzijun-internal-health.service Job) || return 1
+        invocation=$(unit_value shuzijun-internal-health.service InvocationID) || return 1
+        trigger=$(timer_usec LastTriggerUSecMonotonic) || return 1
+        next_elapse=$(timer_usec NextElapseUSecMonotonic) || return 1
+        case "$state" in
+            inactive|failed) ;;
+            *) return 1 ;;
+        esac
+        [[ -z "$job" && "$invocation" == "$expected_invocation" && "$trigger" == "$expected_trigger" ]] || return 1
+        IFS=$'\t' read -r now_ns now_mono < <(clock_pair) || return 1
+        [[ "$now_ns" =~ ^[0-9]+$ && "$now_mono" =~ ^[0-9]+$ ]] || return 1
+        now_usec=$((now_mono / 1000))
+        (( next_elapse > now_usec + minimum_future_usec )) || return 1
+        (( next_elapse <= now_usec + maximum_future_usec )) || return 1
+        (( attempt == 2 )) || sleep 0.25
+    done
+}
+
+settle_timer_schedule() {
+    local attempt invocation trigger
+    for attempt in $(seq 1 1400); do
+        wait_health_idle || return 1
+        invocation=$(unit_value shuzijun-internal-health.service InvocationID) || return 1
+        trigger=$(timer_usec LastTriggerUSecMonotonic) || return 1
+        if validate_timer_quiescent "$invocation" "$trigger" 60000000 360000000; then
+            SETTLED_INVOCATION=$invocation
+            SETTLED_TIMER_TRIGGER=$trigger
+            return 0
+        fi
+        sleep 0.25
+    done
+    printf 'timer did not reach a quiescent bounded future schedule\n' >&2
+    return 1
+}
+
+clock_pair() {
+    /usr/bin/python3 -I -c 'import time; print(f"{time.time_ns()}\t{time.monotonic_ns()}")'
+}
+
+validate_status() {
+    local previous_inode=$1 previous_sha=$2 start_ns=$3 end_ns=$4
+    /usr/bin/python3 -I - "$STATUS_FILE" "$ROLE" "$previous_inode" "$previous_sha" "$start_ns" "$end_ns" "$APP_MANIFEST_SHA" "$APP_PLUGIN_SHA" <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import stat
+import sys
+
+path = pathlib.Path(sys.argv[1])
+role = sys.argv[2]
+old_inode = int(sys.argv[3])
+old_sha = sys.argv[4]
+start_ns = int(sys.argv[5])
+end_ns = int(sys.argv[6])
+manifest_sha = sys.argv[7]
+plugin_sha = sys.argv[8]
+
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(path, flags)
+try:
+    metadata = os.fstat(fd)
+    if not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit("status is not a regular file")
+    if (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode), metadata.st_nlink) != (0, 0, 0o600, 1):
+        raise SystemExit("status metadata mismatch")
+    if metadata.st_ino == old_inode:
+        raise SystemExit("status inode did not change")
+    chunks = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    after = os.fstat(fd)
+finally:
+    os.close(fd)
+path_metadata = path.lstat()
+if (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+    raise SystemExit("status changed while being read")
+if (path_metadata.st_dev, path_metadata.st_ino) != (metadata.st_dev, metadata.st_ino) or not stat.S_ISREG(path_metadata.st_mode):
+    raise SystemExit("status path changed while being read")
+digest = hashlib.sha256(data).hexdigest()
+if digest == old_sha:
+    raise SystemExit("status hash did not change")
+if not start_ns <= metadata.st_mtime_ns <= end_ns:
+    raise SystemExit("status mtime outside invocation window")
+payload = json.loads(data.decode("utf-8"))
+checked = datetime.datetime.fromisoformat(payload["checked_at"])
+if checked.tzinfo is None:
+    raise SystemExit("checked_at lacks timezone")
+checked_ns = int(checked.timestamp()) * 1_000_000_000
+if not (checked_ns < end_ns and checked_ns + 1_000_000_000 > start_ns):
+    raise SystemExit("checked_at outside invocation window")
+expected = {
+    "authority": (
+        "primary",
+        [
+            "authority_sync_generation_missing_or_invalid",
+            "sync_log_generation_missing_or_invalid",
+            "sync_timer_missing_or_disabled",
+        ],
+    ),
+    "standby": (
+        "backup",
+        [
+            "standby_failover_state_unhealthy_or_stale",
+            "standby_failover_timer_disabled",
+            "standby_sync_generation_missing_or_invalid",
+            "sync_log_generation_missing_or_invalid",
+        ],
+    ),
+}
+legacy_role, reasons = expected[role]
+if payload.get("schema") != 2 or payload.get("role_verified") is not True:
+    raise SystemExit("status schema or role verification mismatch")
+if payload.get("account_authority_role") != role or payload.get("role") != legacy_role:
+    raise SystemExit("status role mismatch")
+if payload.get("status") != "degraded" or payload.get("critical_reasons") != []:
+    raise SystemExit("status classification mismatch")
+if payload.get("operation_reasons") != reasons:
+    raise SystemExit("status reasons mismatch")
+if payload.get("hashes", {}).get("app_content_manifest") != manifest_sha:
+    raise SystemExit("app manifest hash mismatch")
+if payload.get("hashes", {}).get("app_content_plugin") != plugin_sha:
+    raise SystemExit("app plugin hash mismatch")
+if not all(value == "active" for value in payload.get("services", {}).values()):
+    raise SystemExit("required service is not active")
+if not payload.get("routes") or not all(value.get("ok") is True for value in payload["routes"].values()):
+    raise SystemExit("required route failed")
+print(f"status_sha={digest} status_inode={metadata.st_ino}")
+PY
+}
+
+validate_last_invocation() {
+    local previous_inode=$1 previous_sha=$2 previous_invocation=$3 start_ns=$4 end_ns=$5 outer_start_mono=$6 outer_end_mono=$7
+    local start_wall exit_wall start_mono exit_mono invocation invocation_after result main_status active sub
+    invocation=$(unit_value shuzijun-internal-health.service InvocationID) || return 1
+    [[ -n "$invocation" && "$invocation" != "$previous_invocation" ]] || return 1
+    result=$(unit_value shuzijun-internal-health.service Result) || return 1
+    main_status=$(unit_value shuzijun-internal-health.service ExecMainStatus) || return 1
+    active=$(unit_value shuzijun-internal-health.service ActiveState) || return 1
+    sub=$(unit_value shuzijun-internal-health.service SubState) || return 1
+    [[ "$result" == success && "$main_status" == 2 && "$active" == inactive && "$sub" == dead ]] || return 1
+    start_wall=$(service_usec ExecMainStartTimestamp) || return 1
+    exit_wall=$(service_usec ExecMainExitTimestamp) || return 1
+    start_mono=$(service_usec ExecMainStartTimestampMonotonic) || return 1
+    exit_mono=$(service_usec ExecMainExitTimestampMonotonic) || return 1
+    invocation_after=$(unit_value shuzijun-internal-health.service InvocationID) || return 1
+    [[ "$invocation_after" == "$invocation" ]] || return 1
+    [[ "$start_wall" =~ ^[0-9]+$ && "$exit_wall" =~ ^[0-9]+$ && "$start_wall" -gt 0 && "$exit_wall" -ge "$start_wall" ]] || return 1
+    [[ "$start_mono" =~ ^[0-9]+$ && "$exit_mono" =~ ^[0-9]+$ && "$start_mono" -gt 0 && "$exit_mono" -ge "$start_mono" ]] || return 1
+    [[ "$start_ns" =~ ^[0-9]+$ && "$end_ns" =~ ^[0-9]+$ && "$end_ns" -ge "$start_ns" ]] || return 1
+    [[ "$outer_start_mono" =~ ^[0-9]+$ && "$outer_end_mono" =~ ^[0-9]+$ && "$outer_end_mono" -ge "$outer_start_mono" ]] || return 1
+    (( start_wall * 1000 >= start_ns && exit_wall * 1000 <= end_ns )) || return 1
+    (( start_mono * 1000 >= outer_start_mono && exit_mono * 1000 <= outer_end_mono )) || return 1
+    validate_status "$previous_inode" "$previous_sha" "$((start_wall * 1000))" "$((exit_wall * 1000))" >/dev/null || return 1
+    VALIDATED_INVOCATION=$invocation
+}
+
+require_new_units() {
+    local service_dropins timer_dropins service_job timer_job service_reload timer_reload timer_unit service_type
+    local exec_condition exec_start_pre exec_start_post exec_reload exec_stop exec_stop_post success_status
+    require_file "$SCRIPT_TARGET" 700 "$NEW_SCRIPT_SHA" || return 1
+    require_file "$SERVICE_TARGET" 644 "$NEW_SERVICE_SHA" || return 1
+    require_file "$TIMER_TARGET" 644 "$NEW_TIMER_SHA" || return 1
+    systemd-analyze verify "$SERVICE_TARGET" "$TIMER_TARGET" || return 1
+    [[ "$(unit_value shuzijun-internal-health.service FragmentPath)" == "$SERVICE_TARGET" ]] || return 1
+    [[ "$(unit_value shuzijun-internal-health.timer FragmentPath)" == "$TIMER_TARGET" ]] || return 1
+    service_dropins=$(unit_value shuzijun-internal-health.service DropInPaths) || return 1
+    timer_dropins=$(unit_value shuzijun-internal-health.timer DropInPaths) || return 1
+    [[ -z "$service_dropins" && -z "$timer_dropins" ]] || return 1
+    service_job=$(unit_value shuzijun-internal-health.service Job) || return 1
+    timer_job=$(unit_value shuzijun-internal-health.timer Job) || return 1
+    service_reload=$(unit_value shuzijun-internal-health.service NeedDaemonReload) || return 1
+    timer_reload=$(unit_value shuzijun-internal-health.timer NeedDaemonReload) || return 1
+    timer_unit=$(unit_value shuzijun-internal-health.timer Unit) || return 1
+    service_type=$(unit_value shuzijun-internal-health.service Type) || return 1
+    [[ -z "$service_job" && -z "$timer_job" ]] || return 1
+    [[ "$service_reload" == no && "$timer_reload" == no && "$service_type" == oneshot ]] || return 1
+    [[ "$timer_unit" == shuzijun-internal-health.service ]] || return 1
+    require_exact_exec_start "$SERVICE_OBJECT_PATH" /usr/bin/python3 /usr/bin/python3 -I /usr/local/sbin/shuzijun-internal-health || return 1
+    require_service_execution_context shuzijun-internal-health.service || return 1
+    exec_condition=$(unit_value shuzijun-internal-health.service ExecCondition) || return 1
+    exec_start_pre=$(unit_value shuzijun-internal-health.service ExecStartPre) || return 1
+    exec_start_post=$(unit_value shuzijun-internal-health.service ExecStartPost) || return 1
+    exec_reload=$(unit_value shuzijun-internal-health.service ExecReload) || return 1
+    exec_stop=$(unit_value shuzijun-internal-health.service ExecStop) || return 1
+    exec_stop_post=$(unit_value shuzijun-internal-health.service ExecStopPost) || return 1
+    [[ -z "$exec_condition" && -z "$exec_start_pre" && -z "$exec_start_post" ]] || return 1
+    [[ -z "$exec_reload" && -z "$exec_stop" && -z "$exec_stop_post" ]] || return 1
+    success_status=$(unit_value shuzijun-internal-health.service SuccessExitStatus) || return 1
+    [[ " $success_status " == *' 2 '* || "$success_status" == 2 ]] || return 1
+}
+
+marker_matches() {
+    local name=$1 expected=$2
+    [[ -n "${BACKUP_DIR:-}" ]] || return 1
+    if [[ "$name" != DONE && "$name" != ROLLED_BACK ]]; then
+        [[ -n "${PREPARED_TERMINAL_NAME:-}" && "$name" == "$PREPARED_TERMINAL_NAME" ]] || return 1
+    fi
+    /usr/bin/python3 -I - "$BACKUP_DIR" "$name" "$expected" <<'PY'
+import os
+import stat
+import sys
+
+directory = sys.argv[1]
+name = sys.argv[2]
+expected = (sys.argv[3] + "\n").encode("utf-8")
+parent = os.lstat(directory)
+if not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode):
+    raise SystemExit(1)
+if (parent.st_uid, parent.st_gid, stat.S_IMODE(parent.st_mode)) != (0, 0, 0o700):
+    raise SystemExit(1)
+dir_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+dir_fd = os.open(directory, dir_flags)
+try:
+    before_path = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(name, flags, dir_fd=dir_fd)
+    try:
+        before_fd = os.fstat(fd)
+        if not stat.S_ISREG(before_fd.st_mode):
+            raise SystemExit(1)
+        if (
+            before_fd.st_uid,
+            before_fd.st_gid,
+            stat.S_IMODE(before_fd.st_mode),
+            before_fd.st_nlink,
+        ) != (0, 0, 0o600, 1):
+            raise SystemExit(1)
+        if (before_path.st_dev, before_path.st_ino) != (before_fd.st_dev, before_fd.st_ino):
+            raise SystemExit(1)
+        data = b""
+        while len(data) <= len(expected):
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            data += chunk
+        after_fd = os.fstat(fd)
+        after_path = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if data != expected:
+            raise SystemExit(1)
+        if (
+            before_fd.st_dev,
+            before_fd.st_ino,
+            before_fd.st_size,
+            before_fd.st_mtime_ns,
+        ) != (
+            after_fd.st_dev,
+            after_fd.st_ino,
+            after_fd.st_size,
+            after_fd.st_mtime_ns,
+        ):
+            raise SystemExit(1)
+        if (after_path.st_dev, after_path.st_ino) != (after_fd.st_dev, after_fd.st_ino):
+            raise SystemExit(1)
+    finally:
+        os.close(fd)
+finally:
+    os.close(dir_fd)
+PY
+}
+
+prepare_terminal_marker() {
+    local name=$1 content=$2 tmp_name tmp_path
+    [[ "$name" == DONE || "$name" == ROLLED_BACK ]] || return 1
+    tmp_name=.terminal-$name-$$
+    tmp_path=$BACKUP_DIR/$tmp_name
+    [[ ! -e "$tmp_path" && ! -L "$tmp_path" ]] || return 1
+    PREPARED_TERMINAL_NAME=$tmp_name
+    PREPARED_TERMINAL_CONTENT=$content
+    TERMINAL_MARKER_COMMITTED=0
+    printf '%s\n' "$content" > "$tmp_path" || return 1
+    chown root:root "$tmp_path" || return 1
+    chmod 600 "$tmp_path" || return 1
+    sync_path "$tmp_path" || return 1
+    sync_path "$BACKUP_DIR" || return 1
+    sync_path "$BACKUP_ROOT" || return 1
+    sync_path "$(dirname -- "$BACKUP_ROOT")" || return 1
+    marker_matches "$PREPARED_TERMINAL_NAME" "$PREPARED_TERMINAL_CONTENT" || return 1
+}
+
+commit_terminal_marker() {
+    local name=$1 final_path
+    [[ "$name" == DONE || "$name" == ROLLED_BACK ]] || return 1
+    [[ "$PREPARED_TERMINAL_NAME" == ".terminal-$name-$$" ]] || return 1
+    [[ -n "$PREPARED_TERMINAL_CONTENT" ]] || return 1
+    final_path=$BACKUP_DIR/$name
+    [[ ! -e "$final_path" && ! -L "$final_path" ]] || return 1
+    mv -T -- "$BACKUP_DIR/$PREPARED_TERMINAL_NAME" "$final_path" || return 1
+    TERMINAL_MARKER_COMMITTED=1
+    marker_matches "$name" "$PREPARED_TERMINAL_CONTENT" || return 1
+    sync_path "$final_path" || return 1
+    sync_path "$BACKUP_DIR" || return 1
+    sync_path "$BACKUP_ROOT" || return 1
+    sync_path "$(dirname -- "$BACKUP_ROOT")" || return 1
+    marker_matches "$name" "$PREPARED_TERMINAL_CONTENT" || return 1
+}
+
+done_marker_matches() {
+    local expected
+    [[ -n "${FINAL_INVOCATION:-}" && -n "${FINAL_STATUS_SHA:-}" && -n "${FINAL_STATUS_INODE:-}" ]] || return 1
+    expected="invocation=$FINAL_INVOCATION status_sha=$FINAL_STATUS_SHA status_inode=$FINAL_STATUS_INODE"
+    marker_matches DONE "$expected"
+}
+
+rollback() {
+    local original_rc=${1:-1} rollback_ok=1 isolation_ok=1 commit_sync_ok=1 terminal_sync_ok=1 rollback_status_sha rollback_status_inode rollback_marker expected_done
+    if (( ROLLBACK_RUNNING != 0 )); then
+        return
+    fi
+    trap '' INT TERM HUP
+    ROLLBACK_RUNNING=1
+    trap - ERR
+    set +e
+    expected_done="invocation=${FINAL_INVOCATION:-} status_sha=${FINAL_STATUS_SHA:-} status_inode=${FINAL_STATUS_INODE:-}"
+    if done_marker_matches || {
+        (( TERMINAL_MARKER_COMMITTED == 1 )) &&
+        [[ -n "${FINAL_INVOCATION:-}" && -n "${FINAL_STATUS_SHA:-}" && -n "${FINAL_STATUS_INODE:-}" ]] &&
+        [[ "$PREPARED_TERMINAL_NAME" == ".terminal-DONE-$$" && "$PREPARED_TERMINAL_CONTENT" == "$expected_done" ]]
+    }; then
+        marker_matches DONE "$expected_done" || commit_sync_ok=0
+        sync_path "$BACKUP_DIR/DONE" || commit_sync_ok=0
+        sync_path "$BACKUP_DIR" || commit_sync_ok=0
+        sync_path "$BACKUP_ROOT" || commit_sync_ok=0
+        sync_path "$(dirname -- "$BACKUP_ROOT")" || commit_sync_ok=0
+        if (( commit_sync_ok == 1 )); then
+            printf 'deployment reached its durable DONE commit before interruption; no rollback was performed; backup=%s\n' "$BACKUP_DIR" >&2
+            exit 0
+        fi
+        printf 'CRITICAL deployment reached a valid DONE commit but journal durability could not be reconfirmed; no rollback was performed; backup=%s\n' "$BACKUP_DIR" >&2
+        exit "$original_rc"
+    fi
+    if [[ "$PHASE" == LOCKED ]]; then
+        printf 'deployment preflight failed before any service or final-file mutation\n' >&2
+        exit "$original_rc"
+    fi
+    systemctl disable --now shuzijun-internal-health.timer >/dev/null 2>&1 || isolation_ok=0
+    systemctl stop shuzijun-internal-health.service >/dev/null 2>&1 || isolation_ok=0
+    [[ "$(systemctl is-active shuzijun-internal-health.timer 2>/dev/null)" == inactive ]] || isolation_ok=0
+    [[ "$(systemctl is-active shuzijun-internal-health.service 2>/dev/null)" == inactive ]] || isolation_ok=0
+    require_timer_disabled_link || isolation_ok=0
+    sync_timer_enable_state || isolation_ok=0
+    require_timer_disabled_link || isolation_ok=0
+    (( isolation_ok == 1 )) || rollback_ok=0
+    if (( isolation_ok == 1 )) && [[ "$PHASE" == COMMITTED || "$PHASE" == STATUS_MAY_CHANGE || "$PHASE" == ACCEPTED ]]; then
+        atomic_restore "$BACKUP_DIR/script.old" "$SCRIPT_TARGET" "$OLD_SCRIPT_SHA" 700 || rollback_ok=0
+        atomic_restore "$BACKUP_DIR/service.old" "$SERVICE_TARGET" "$OLD_SERVICE_SHA" 644 || rollback_ok=0
+        atomic_restore "$BACKUP_DIR/timer.old" "$TIMER_TARGET" "$OLD_TIMER_SHA" 644 || rollback_ok=0
+        require_dir "$STATUS_DIR" 700 || rollback_ok=0
+        require_safe_parent /var || rollback_ok=0
+        require_safe_parent /var/lib || rollback_ok=0
+        if (( rollback_ok == 1 )); then
+            if require_status && [[ "$(sha "$STATUS_FILE")" == "$OLD_STATUS_SHA" && "$(stat -c '%i' -- "$STATUS_FILE")" == "$OLD_STATUS_INODE" ]]; then
+                :
+            else
+                atomic_restore "$BACKUP_DIR/status.old" "$STATUS_FILE" "$OLD_STATUS_SHA" 600 || rollback_ok=0
+            fi
+        fi
+        if ! require_status || [[ "$(sha "$STATUS_FILE")" != "$OLD_STATUS_SHA" ]]; then
+            rollback_ok=0
+        fi
+    fi
+    if (( rollback_ok == 1 )); then
+        systemctl daemon-reload || rollback_ok=0
+        require_old_runtime_isolated || rollback_ok=0
+    fi
+    if (( rollback_ok == 1 )); then
+        systemctl enable shuzijun-internal-health.timer >/dev/null 2>&1 || rollback_ok=0
+        require_old_runtime_enabled_inactive || rollback_ok=0
+        sync_timer_enable_state || rollback_ok=0
+        require_old_runtime_enabled_inactive || rollback_ok=0
+    fi
+    if (( rollback_ok == 1 )); then
+        rollback_marker="original_rc=$original_rc runtime=restored timer=enabled+active old_script=$OLD_SCRIPT_SHA old_service=$OLD_SERVICE_SHA old_timer=$OLD_TIMER_SHA"
+        prepare_terminal_marker ROLLED_BACK "$rollback_marker" || rollback_ok=0
+    fi
+    if (( rollback_ok == 1 )); then
+        systemctl start shuzijun-internal-health.timer >/dev/null 2>&1 || rollback_ok=0
+        [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]] || rollback_ok=0
+        [[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]] || rollback_ok=0
+        require_timer_enabled_link || rollback_ok=0
+        settle_timer_schedule || rollback_ok=0
+        RESTORED_INVOCATION=$SETTLED_INVOCATION
+        RESTORED_TIMER_TRIGGER=$SETTLED_TIMER_TRIGGER
+    fi
+    if (( rollback_ok == 1 )); then
+        require_status || rollback_ok=0
+        sync_timer_enable_state || rollback_ok=0
+        require_old_runtime_active || rollback_ok=0
+    fi
+    if (( rollback_ok == 1 )); then
+        rollback_status_sha=$(sha "$STATUS_FILE") || rollback_ok=0
+        rollback_status_inode=$(stat -c '%i' -- "$STATUS_FILE") || rollback_ok=0
+        persist_status_snapshot "$rollback_status_sha" "$rollback_status_inode" || rollback_ok=0
+        require_old_runtime_active || rollback_ok=0
+    fi
+    if (( rollback_ok == 1 )); then
+        validate_timer_quiescent "$RESTORED_INVOCATION" "$RESTORED_TIMER_TRIGGER" 60000000 360000000 || rollback_ok=0
+    fi
+    if (( rollback_ok == 1 )); then
+        commit_terminal_marker ROLLED_BACK || rollback_ok=0
+    fi
+    if (( TERMINAL_MARKER_COMMITTED == 1 )); then
+        marker_matches ROLLED_BACK "$rollback_marker" || terminal_sync_ok=0
+        sync_path "$BACKUP_DIR/ROLLED_BACK" || terminal_sync_ok=0
+        sync_path "$BACKUP_DIR" || terminal_sync_ok=0
+        sync_path "$BACKUP_ROOT" || terminal_sync_ok=0
+        sync_path "$(dirname -- "$BACKUP_ROOT")" || terminal_sync_ok=0
+        marker_matches ROLLED_BACK "$rollback_marker" || terminal_sync_ok=0
+        if (( terminal_sync_ok == 1 )); then
+            printf 'deployment failed; verified runtime rollback completed; backup=%s\n' "$BACKUP_DIR" >&2
+        else
+            printf 'CRITICAL rollback commit is published and the verified old timer remains active, but journal durability could not be reconfirmed; backup=%s\n' "$BACKUP_DIR" >&2
+        fi
+        exit "$original_rc"
+    fi
+    systemctl disable --now shuzijun-internal-health.timer >/dev/null 2>&1 || true
+    systemctl stop shuzijun-internal-health.service >/dev/null 2>&1 || true
+    printf 'CRITICAL deployment and/or rollback failed before the rollback commit; timer disable attempted but final isolation state is unverified; backup=%s\n' "$BACKUP_DIR" >&2
+    exit "$original_rc"
+}
+
+on_error() {
+    local rc=$?
+    if (( BASHPID != ROOT_BASHPID )); then
+        trap - ERR
+        return "$rc"
+    fi
+    rollback "$rc"
+}
+
+on_signal() {
+    local rc=$1
+    if (( BASHPID != ROOT_BASHPID )); then
+        trap - INT TERM HUP
+        exit "$rc"
+    fi
+    trap '' INT TERM HUP
+    rollback "$rc"
+}
+
+trap 'on_error' ERR
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+trap 'on_signal 129' HUP
+
+# All preflight decisions are repeated while holding the deployment lock.
+require_stage
+require_old_state
+
+require_safe_parent /var
+require_safe_parent /var/backups
+if [[ -e "$BACKUP_ROOT" ]]; then
+    require_dir "$BACKUP_ROOT" 700
+else
+    install -d -o root -g root -m 700 "$BACKUP_ROOT"
+    sync_path "$BACKUP_ROOT"
+    sync_path "$(dirname -- "$BACKUP_ROOT")"
+fi
+require_dir "$BACKUP_ROOT" 700
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.8
+[[ ! -e "$BACKUP_DIR" ]]
+install -d -o root -g root -m 700 "$BACKUP_DIR"
+write_marker PREPARED "node=$NODE role=$ROLE release=$RELEASE_ID deployer_sha=$DEPLOYER_SHA timer_enabled=enabled timer_active=active old_script=$OLD_SCRIPT_SHA old_service=$OLD_SERVICE_SHA old_timer=$OLD_TIMER_SHA"
+PHASE=PREPARED
+
+systemctl disable --now shuzijun-internal-health.timer
+systemctl stop shuzijun-internal-health.service
+[[ "$(systemctl is-active shuzijun-internal-health.timer)" == inactive ]]
+[[ "$(systemctl is-active shuzijun-internal-health.service)" == inactive ]]
+require_timer_disabled_link
+sync_timer_enable_state
+require_timer_disabled_link
+
+# Freeze the now-stable old runtime and status bytes after timer isolation.
+require_frozen_files
+OLD_STATUS_SHA=$(sha "$STATUS_FILE")
+OLD_STATUS_INODE=$(stat -c '%i' -- "$STATUS_FILE")
+backup_one "$SCRIPT_TARGET" script.old "$OLD_SCRIPT_SHA" 700
+backup_one "$SERVICE_TARGET" service.old "$OLD_SERVICE_SHA" 644
+backup_one "$TIMER_TARGET" timer.old "$OLD_TIMER_SHA" 644
+backup_one "$STATUS_FILE" status.old "$OLD_STATUS_SHA" 600
+require_frozen_files
+require_file "$STATUS_FILE" 600 "$OLD_STATUS_SHA"
+[[ "$(stat -c '%i' -- "$STATUS_FILE")" == "$OLD_STATUS_INODE" ]]
+{
+    printf 'script\t%s\t%s\n' "$OLD_SCRIPT_SHA" "$(stat -c '%u:%g:%a:%h' "$SCRIPT_TARGET")"
+    printf 'service\t%s\t%s\n' "$OLD_SERVICE_SHA" "$(stat -c '%u:%g:%a:%h' "$SERVICE_TARGET")"
+    printf 'timer\t%s\t%s\n' "$OLD_TIMER_SHA" "$(stat -c '%u:%g:%a:%h' "$TIMER_TARGET")"
+    printf 'status\t%s\t%s\tinode=%s\n' "$OLD_STATUS_SHA" "$(stat -c '%u:%g:%a:%h' "$STATUS_FILE")" "$OLD_STATUS_INODE"
+} > "$BACKUP_DIR/manifest.tsv"
+chmod 600 "$BACKUP_DIR/manifest.tsv"
+sha256sum "$BACKUP_DIR/manifest.tsv" "$BACKUP_DIR/script.old" "$BACKUP_DIR/service.old" "$BACKUP_DIR/timer.old" "$BACKUP_DIR/status.old" > "$BACKUP_DIR/integrity.sha256"
+chmod 600 "$BACKUP_DIR/integrity.sha256"
+sync_path "$BACKUP_DIR/manifest.tsv"
+sync_path "$BACKUP_DIR/integrity.sha256"
+sync_path "$BACKUP_DIR"
+sync_path "$BACKUP_ROOT"
+(cd "$BACKUP_DIR" && sha256sum -c integrity.sha256)
+write_marker COMMITTED "old_status_sha=$OLD_STATUS_SHA old_status_inode=$OLD_STATUS_INODE"
+PHASE=COMMITTED
+
+harden_logs
+
+atomic_install "$STAGE/shuzijun-internal-health" "$SCRIPT_TARGET" 700 "$NEW_SCRIPT_SHA"
+atomic_install "$STAGE/shuzijun-internal-health.service" "$SERVICE_TARGET" 644 "$NEW_SERVICE_SHA"
+atomic_install "$STAGE/shuzijun-internal-health.timer" "$TIMER_TARGET" 644 "$NEW_TIMER_SHA"
+systemctl daemon-reload
+require_new_units
+[[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]]
+[[ "$(systemctl is-active shuzijun-internal-health.timer)" == inactive ]]
+require_timer_disabled_link
+
+write_marker STATUS_MAY_CHANGE "old_status_sha=$OLD_STATUS_SHA old_status_inode=$OLD_STATUS_INODE"
+PHASE=STATUS_MAY_CHANGE
+PREVIOUS_INVOCATION=$(unit_value shuzijun-internal-health.service InvocationID)
+systemctl reset-failed shuzijun-internal-health.service
+IFS=$'\t' read -r FIRST_START_NS FIRST_START_MONO < <(clock_pair)
+systemctl start shuzijun-internal-health.service
+wait_health_idle
+IFS=$'\t' read -r FIRST_END_NS FIRST_END_MONO < <(clock_pair)
+validate_last_invocation "$OLD_STATUS_INODE" "$OLD_STATUS_SHA" "$PREVIOUS_INVOCATION" "$FIRST_START_NS" "$FIRST_END_NS" "$FIRST_START_MONO" "$FIRST_END_MONO"
+FIRST_INVOCATION=$VALIDATED_INVOCATION
+FIRST_STATUS_SHA=$(sha "$STATUS_FILE")
+FIRST_STATUS_INODE=$(stat -c '%i' -- "$STATUS_FILE")
+
+[[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]]
+BEFORE_TIMER_TRIGGER=$(timer_usec LastTriggerUSecMonotonic)
+IFS=$'\t' read -r TIMER_START_NS TIMER_START_MONO < <(clock_pair)
+systemctl start shuzijun-internal-health.timer
+[[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]]
+[[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]]
+require_timer_disabled_link
+[[ "$(timer_usec NextElapseUSecMonotonic)" -gt 0 ]]
+settle_timer_schedule
+IFS=$'\t' read -r TIMER_END_NS TIMER_END_MONO < <(clock_pair)
+AFTER_INVOCATION=$SETTLED_INVOCATION
+AFTER_TIMER_TRIGGER=$SETTLED_TIMER_TRIGGER
+require_status
+AFTER_STATUS_SHA=$(sha "$STATUS_FILE")
+AFTER_STATUS_INODE=$(stat -c '%i' -- "$STATUS_FILE")
+if [[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" || "$AFTER_TIMER_TRIGGER" != "$BEFORE_TIMER_TRIGGER" || "$AFTER_STATUS_SHA" != "$FIRST_STATUS_SHA" || "$AFTER_STATUS_INODE" != "$FIRST_STATUS_INODE" ]]; then
+    [[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" && "$AFTER_TIMER_TRIGGER" != "$BEFORE_TIMER_TRIGGER" ]]
+    validate_last_invocation "$FIRST_STATUS_INODE" "$FIRST_STATUS_SHA" "$FIRST_INVOCATION" "$TIMER_START_NS" "$TIMER_END_NS" "$TIMER_START_MONO" "$TIMER_END_MONO"
+    [[ "$VALIDATED_INVOCATION" == "$AFTER_INVOCATION" ]]
+fi
+validate_timer_quiescent "$AFTER_INVOCATION" "$AFTER_TIMER_TRIGGER" 60000000 360000000
+persist_status_snapshot "$AFTER_STATUS_SHA" "$AFTER_STATUS_INODE"
+
+write_marker ACCEPTED "invocation=$AFTER_INVOCATION status_sha=$AFTER_STATUS_SHA status_inode=$AFTER_STATUS_INODE"
+PHASE=ACCEPTED
+IFS=$'\t' read -r ENABLE_START_NS ENABLE_START_MONO < <(clock_pair)
+systemctl enable shuzijun-internal-health.timer
+require_timer_enabled_link
+sync_timer_enable_state
+require_timer_enabled_link
+[[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]]
+[[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]]
+wait_health_idle
+IFS=$'\t' read -r ENABLE_END_NS ENABLE_END_MONO < <(clock_pair)
+FINAL_INVOCATION=$(unit_value shuzijun-internal-health.service InvocationID)
+FINAL_STATUS_SHA=$(sha "$STATUS_FILE")
+FINAL_STATUS_INODE=$(stat -c '%i' -- "$STATUS_FILE")
+FINAL_TIMER_TRIGGER=$(timer_usec LastTriggerUSecMonotonic)
+if [[ "$FINAL_INVOCATION" != "$AFTER_INVOCATION" || "$FINAL_STATUS_SHA" != "$AFTER_STATUS_SHA" || "$FINAL_STATUS_INODE" != "$AFTER_STATUS_INODE" || "$FINAL_TIMER_TRIGGER" != "$AFTER_TIMER_TRIGGER" ]]; then
+    validate_last_invocation "$AFTER_STATUS_INODE" "$AFTER_STATUS_SHA" "$AFTER_INVOCATION" "$ENABLE_START_NS" "$ENABLE_END_NS" "$ENABLE_START_MONO" "$ENABLE_END_MONO"
+    [[ "$VALIDATED_INVOCATION" == "$FINAL_INVOCATION" && "$FINAL_TIMER_TRIGGER" != "$AFTER_TIMER_TRIGGER" ]]
+    persist_status_snapshot "$FINAL_STATUS_SHA" "$FINAL_STATUS_INODE"
+    write_marker ACCEPTED "invocation=$FINAL_INVOCATION status_sha=$FINAL_STATUS_SHA status_inode=$FINAL_STATUS_INODE"
+fi
+validate_timer_quiescent "$FINAL_INVOCATION" "$FINAL_TIMER_TRIGGER" 60000000 360000000
+sync_timer_enable_state
+require_timer_enabled_link
+[[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]]
+[[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]]
+persist_status_snapshot "$FINAL_STATUS_SHA" "$FINAL_STATUS_INODE"
+DONE_CONTENT="invocation=$FINAL_INVOCATION status_sha=$FINAL_STATUS_SHA status_inode=$FINAL_STATUS_INODE"
+prepare_terminal_marker DONE "$DONE_CONTENT"
+require_new_units
+sync_timer_enable_state
+require_timer_enabled_link
+[[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]]
+[[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]]
+persist_status_snapshot "$FINAL_STATUS_SHA" "$FINAL_STATUS_INODE"
+validate_timer_quiescent "$FINAL_INVOCATION" "$FINAL_TIMER_TRIGGER" 60000000 360000000
+commit_terminal_marker DONE
+PHASE=DONE
+trap - ERR INT TERM HUP
+
+printf 'health-monitor-deploy release=%s node=%s status=degraded exit=2 backup=%s invocation=%s\n' "$RELEASE_ID" "$NODE" "$BACKUP_DIR" "$FINAL_INVOCATION"

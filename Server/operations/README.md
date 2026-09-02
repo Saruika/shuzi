@@ -1,5 +1,72 @@
 # Server operation fixes
 
+## Build 41.8 内部健康监控事务安装器
+
+`deploy-shuzijun-health-monitor` 只升级内部健康脚本及其 service/timer，
+不会运行同步、故障切换，也不会修改 Nginx、PHP-FPM、MySQL、DNS、CDN、
+WordPress 内容或媒体。生产执行顺序固定为备用节点 `backup standby` 在前，
+上海主节点 `primary authority` 在后；任一节点失败即停止。
+
+生产信任锚为：
+
+```text
+DEPLOYER_SHA256=9d603a7524af6d6c04ee4e2b7dd06883d3af4ad9c38ff55c5fddf07229be9021
+```
+
+先把 Git 标签 `v1.3.29-build41.8` 中的安装器以原子 rename 放到
+`/run/deploy-shuzijun-health-build41.8`，设为 `root:root 0700`、regular、
+non-link、nlink=1；三个 runtime 文件则分别放入仅含这三项的
+`/run/shuzijun-health-build41.8-backup` 和
+`/run/shuzijun-health-build41.8-primary`。不得直接执行仓库副本，也不得从
+`/private/tmp` 或可被非 root 写入的路径启动。
+
+Bash 会在读取脚本正文前处理调用环境中的 `BASH_ENV`，所以执行前校验和
+正式启动必须位于同一个空环境 root shell。备用节点使用以下完整命令；
+任何校验失败都不得继续：
+
+```bash
+sudo /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C /bin/bash --noprofile --norc -c '
+set -Eeuo pipefail
+DEPLOYER=/run/deploy-shuzijun-health-build41.8
+DEPLOYER_SHA256=9d603a7524af6d6c04ee4e2b7dd06883d3af4ad9c38ff55c5fddf07229be9021
+[[ ! -L "$DEPLOYER" && -f "$DEPLOYER" ]]
+[[ "$(/usr/bin/realpath -e -- "$DEPLOYER")" == "$DEPLOYER" ]]
+[[ "$(/usr/bin/stat -c "%F:%u:%g:%a:%h" -- "$DEPLOYER")" == "regular file:0:0:700:1" ]]
+[[ "$(/usr/bin/sha256sum -- "$DEPLOYER")" == "$DEPLOYER_SHA256  $DEPLOYER" ]]
+exec /bin/bash --noprofile --norc "$DEPLOYER" backup standby
+'
+```
+
+备用节点完成并通过上线后只读验收后，主节点使用同一段校验，将最后一行
+替换为：
+
+```bash
+exec /bin/bash --noprofile --norc "$DEPLOYER" primary authority
+```
+
+安装器会在专用 root-only 锁内重跑旧字节、角色、stage、systemd unit、
+DropInPaths、typed D-Bus Exec path/argv/flags、空环境与 root 执行上下文、
+NeedDaemonReload、timer Unit/Job、enable 链接及完整父目录信任检查；持久备份旧 runtime 和
+status 后才原子替换。显式 health invocation 必须精确返回 degraded/exit 2，
+并匹配节点固定 reason 集。timer 会在 disabled 状态启动；若启动或启用窗口
+内发生调度，则最后一次 InvocationID、原始 D-Bus wall/monotonic 微秒时间窗、
+status、角色、路由、业务哈希和 reason 集都必须重新通过。计时器下一次触发
+还必须连续两次稳定落在 60–360 秒后，才可写入 `DONE`。
+
+`/etc/systemd/system/timers.target.wants` 允许在 disabled 阶段被 systemd
+删除，但存在时必须是可信实目录；enabled 阶段必须存在 root 所有的绝对目标
+链接。链接目录、systemd 父目录、status 文件系统与事务 journal 均在终态前
+执行耐久性屏障并复验。历史上曾允许非 root 写入的日志不会仅凭 chmod 被
+“洗白”为可信数据；它会保持原样并继续让监控报告 degraded，直到未来由
+受信 writer 安全轮换。
+
+回滚必须先证明 timer/service 已隔离，再从同一 root-only 事务目录恢复固定
+旧哈希；恢复后的 enable 链接、timer 稳定性、status 和 `ROLLED_BACK` journal
+都必须持久复验。有效 `DONE` 已是提交点，之后到达的可捕获信号只重做 journal
+fsync，不会反向制造 `DONE + ROLLED_BACK` 的矛盾状态。SIGKILL/掉电恢复按
+事务目录中的 `PREPARED`、`COMMITTED`、`STATUS_MAY_CHANGE`、`ACCEPTED`、
+`DONE` 或 `ROLLED_BACK` marker 人工判定。
+
 ## Build 34 Nginx 路由事务安装器
 
 `install-build34-nginx-routing` 把两个审核过的安全 snippet、账号 API
