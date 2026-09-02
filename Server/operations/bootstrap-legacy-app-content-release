@@ -787,7 +787,12 @@ prepare_atomic_stage() {
     install -d -o root -g www-data -m 0755 "$STAGE_DIR/vendor"
     cp -R -- "$BUNDLE/vendor/." "$STAGE_DIR/vendor/"
     chown -R root:www-data "$STAGE_DIR/vendor"
-    find "$STAGE_DIR/vendor" -xdev -type d -exec chmod 0755 {} +
+    # GNU chmod preserves inherited setgid on directories for a plain numeric
+    # 0755 mode.  The root-only stage is deliberately setgid so children keep
+    # www-data as their group; clear all special bits explicitly before the
+    # exact 0755 vendor-tree contract is evaluated.
+    find "$STAGE_DIR/vendor" -xdev -type d \
+        -exec chmod a-s,a-t,u=rwx,g=rx,o=rx {} +
     find "$STAGE_DIR/vendor" -xdev -type f -exec chmod 0644 {} +
     install -o root -g www-data -m 0644 \
         "$BUNDLE/composer.json" "$STAGE_DIR/composer.json"

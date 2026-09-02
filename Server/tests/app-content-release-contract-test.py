@@ -472,6 +472,11 @@ def main() -> None:
         lines, "install_release_unit", "restore_code_backup"
     )
     vendor_install = line_number(lines, 'cp -R -- "$BUNDLE/vendor/."', install_start)
+    install_body = "\n".join(lines[install_start:install_end])
+    assert '-exec chmod a-s,a-t,u=rwx,g=rx,o=rx {} +' in install_body
+    assert '-exec chmod a-s,u=rwx,g=rx,o=rx {} +' not in install_body
+    assert '-exec chmod u=rwx,g=rx,o=rx {} +' not in install_body
+    assert '-exec chmod 0755 {} +' not in install_body
     composer_json_install = line_number(
         lines, '"$BUNDLE/composer.json" "$TARGET_DIR/composer.json"', install_start
     )

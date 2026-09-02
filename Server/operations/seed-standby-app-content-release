@@ -24,7 +24,7 @@ readonly BACKUP_ROOT=/var/backups/shuzijun-app-content
 readonly LOCK_PATH="$STAGING_ROOT"
 readonly AUTHORITY_LOCK_PATH="$SITE"
 readonly DEPLOYER=/usr/local/sbin/deploy-app-content-release
-readonly DEPLOYER_SHA256=5514d3af97cc9342eee35cd019c2b6656b1969a53280393b62c4dc189fbe326e
+readonly DEPLOYER_SHA256=5a1875fb609392f800887f587b0f4722c7493da065ebdd9fbad4dc051ae33296
 readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
 readonly VERIFY_SHA256=5c2f109000ae721cae772416a4c5c58fa579078f229443e8691c7be6cb7576cd
 readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
@@ -362,7 +362,8 @@ prepare_stage() {
     install -d -o root -g www-data -m 0755 "$STAGE_DIR/vendor"
     cp -R -- "$BUNDLE/vendor/." "$STAGE_DIR/vendor/"
     chown -R root:www-data "$STAGE_DIR/vendor"
-    find "$STAGE_DIR/vendor" -xdev -type d -exec chmod 0755 {} +
+    find "$STAGE_DIR/vendor" -xdev -type d \
+        -exec chmod a-s,a-t,u=rwx,g=rx,o=rx {} +
     find "$STAGE_DIR/vendor" -xdev -type f -exec chmod 0644 {} +
     for relative in shuzijun-app-content.php composer.json composer.lock release.sha256; do
         install -o root -g www-data -m 0644 "$BUNDLE/$relative" "$STAGE_DIR/$relative"

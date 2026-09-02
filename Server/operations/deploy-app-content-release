@@ -1298,7 +1298,8 @@ install_release_unit() {
     install -d -o root -g www-data -m 0755 "$TARGET_DIR/vendor"
     cp -R -- "$BUNDLE/vendor/." "$TARGET_DIR/vendor/"
     chown -R root:www-data "$TARGET_DIR/vendor"
-    find "$TARGET_DIR/vendor" -xdev -type d -exec chmod 0755 {} +
+    find "$TARGET_DIR/vendor" -xdev -type d \
+        -exec chmod a-s,a-t,u=rwx,g=rx,o=rx {} +
     find "$TARGET_DIR/vendor" -xdev -type f -exec chmod 0644 {} +
 
     install -o root -g www-data -m 0644 "$BUNDLE/composer.json" "$TARGET_DIR/composer.json"

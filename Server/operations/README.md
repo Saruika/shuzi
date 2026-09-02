@@ -351,7 +351,7 @@ JWT autoloader 及真实 `wp-load.php`，对 `/index.php?...` 和 `/?...`
 
 完成 1.5.8 bridge 后，普通版本升级使用目标版本自己的发布包。下面是
 Build 41 / 服务端 1.5.10 的已记录调用；独立信任值见
-[`../releases/v1.5.10-build41.4.md`](../releases/v1.5.10-build41.4.md)。SHA-256
+[`../releases/v1.5.10-build41.5.md`](../releases/v1.5.10-build41.5.md)。SHA-256
 不能替换成服务器现场重新计算后未经 Git 发布记录核对的值。备节点先用
 `standby` dry-run/apply，上海节点再用 `authority` dry-run/apply：
 

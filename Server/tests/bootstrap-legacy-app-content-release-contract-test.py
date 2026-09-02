@@ -1,7 +1,11 @@
 import hashlib
+import os
 from pathlib import Path
 import re
+import stat
 import subprocess
+import sys
+import tempfile
 
 
 BOOTSTRAP = Path("Server/operations/bootstrap-legacy-app-content-release")
@@ -56,6 +60,28 @@ def assert_fault_resume_model(publication_order: list[str]) -> None:
             pass
         else:
             raise AssertionError("an inconsistent support subset was accepted")
+
+
+def assert_vendor_mode_normalization() -> None:
+    """Prove the production command clears a setgid bit inherited by a child."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        vendor_directory = Path(temporary_directory) / "vendor"
+        vendor_directory.mkdir()
+        # Some developer filesystems filter directory special bits; Linux
+        # production retains 03000 here.  In both cases the command must end
+        # at the exact contract mode rather than relying on numeric chmod's
+        # special-bit preservation rules.
+        os.chmod(vendor_directory, 0o3755)
+        before = stat.S_IMODE(vendor_directory.stat().st_mode)
+        if sys.platform.startswith("linux"):
+            assert before == 0o3755
+        else:
+            assert before & 0o777 == 0o755
+        subprocess.run(
+            ["chmod", "a-s,a-t,u=rwx,g=rx,o=rx", str(vendor_directory)],
+            check=True,
+        )
+        assert stat.S_IMODE(vendor_directory.stat().st_mode) == 0o755
 
 
 def main() -> None:
@@ -255,10 +281,16 @@ def main() -> None:
     assert "all three intermediate states" in stage_prepare
     assert "every in-progress child inherit www-data" in stage_prepare
     assert '"$BUNDLE/vendor/." "$STAGE_DIR/vendor/"' in stage_prepare
+    assert '-exec chmod a-s,a-t,u=rwx,g=rx,o=rx {} +' in stage_prepare
+    assert '-exec chmod a-s,u=rwx,g=rx,o=rx {} +' not in stage_prepare
+    assert '-exec chmod u=rwx,g=rx,o=rx {} +' not in stage_prepare
+    assert '-exec chmod 0755 {} +' not in stage_prepare
+    assert "GNU chmod preserves inherited setgid" in stage_prepare
     assert '"$BUNDLE/composer.json" "$STAGE_DIR/composer.json"' in stage_prepare
     assert '"$BUNDLE/composer.lock" "$STAGE_DIR/composer.lock"' in stage_prepare
     assert "validate_complete_support_at" in stage_prepare
     assert 'sync -f "$STAGE_DIR"' in stage_prepare
+    assert_vendor_mode_normalization()
 
     publication = function_body(
         lines, "publish_one_support_entry", "install_support_unit"

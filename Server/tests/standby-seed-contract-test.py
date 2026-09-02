@@ -114,6 +114,11 @@ def main() -> None:
     assert "verify_fpm_isolated" in publish
     assert "vendor composer.lock composer.json shuzijun-app-content.php release.sha256" in publish
     assert 'mv -T -- "$STAGE_DIR/$relative" "$TARGET_DIR/$relative"' in publish
+    stage = body(text, "prepare_stage", "create_backup")
+    assert '-exec chmod a-s,a-t,u=rwx,g=rx,o=rx {} +' in stage
+    assert '-exec chmod a-s,u=rwx,g=rx,o=rx {} +' not in stage
+    assert '-exec chmod u=rwx,g=rx,o=rx {} +' not in stage
+    assert '-exec chmod 0755 {} +' not in stage
     complete = body(text, "validate_complete_release", "verify_jwt_as_worker")
     assert "sha256sum --strict --quiet --check release.sha256" in complete
     assert "installed vendor contains a symbolic link" in complete
