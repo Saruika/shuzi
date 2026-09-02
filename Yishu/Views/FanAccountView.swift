@@ -46,7 +46,7 @@ struct AppAccessGateView: View {
             owner: .fullScreenPresentation,
             onExit: { presentsAdminAccess = false }
         ) {
-            AdminAccessView()
+            AdminAccessView(onClose: { presentsAdminAccess = false })
                 .environmentObject(admin)
                 .environmentObject(store)
         }
@@ -190,7 +190,7 @@ struct FanAccountView: View {
                 owner: .fullScreenPresentation,
                 onExit: { presentsAdminAccess = false }
             ) {
-                AdminAccessView()
+                AdminAccessView(onClose: { presentsAdminAccess = false })
                     .environmentObject(admin)
                     .environmentObject(store)
             }

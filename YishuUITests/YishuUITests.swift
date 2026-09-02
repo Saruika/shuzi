@@ -1,5 +1,6 @@
 import UIKit
 import XCTest
+import Vision
 
 final class YishuUITests: XCTestCase {
     override func setUpWithError() throws {
@@ -8,6 +9,121 @@ final class YishuUITests: XCTestCase {
         // iteration. Keep the ordinary regression suite deterministic and
         // reserve cross-orientation coverage for that dedicated suite.
         XCUIDevice.shared.orientation = .portrait
+    }
+
+    func testForcedWindowLifecycleShieldCoversEntireWindow() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-skip-launch-poster-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing",
+        ]
+        app.launchEnvironment["YISHU_FORCE_SCREEN_PROTECTION_COVER"] = "1"
+        app.launch()
+
+        let window = app.windows.firstMatch
+        let shield = element("window-lifecycle-protection-shield", in: app)
+        XCTAssertTrue(window.waitForExistence(timeout: 12), "屏幕保护回归缺少应用窗口")
+        XCTAssertTrue(shield.waitForExistence(timeout: 12), "强制保护状态未安装 window 级遮罩")
+
+        XCTAssertLessThanOrEqual(abs(shield.frame.minX - window.frame.minX), 1)
+        XCTAssertLessThanOrEqual(abs(shield.frame.minY - window.frame.minY), 1)
+        XCTAssertLessThanOrEqual(abs(shield.frame.maxX - window.frame.maxX), 1)
+        XCTAssertLessThanOrEqual(abs(shield.frame.maxY - window.frame.maxY), 1)
+        XCTAssertFalse(tabButton("首页", in: app).isHittable, "保护遮罩显示时不应仍可操作底层导航")
+    }
+
+    func testProtectedStaticScreenshotArtifactAndTouchContinuity() throws {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-skip-launch-poster-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing",
+        ]
+        app.launch()
+
+        let home = tabButton("首页", in: app)
+        XCTAssertTrue(home.waitForExistence(timeout: 12), "安全画布开启后主导航不可见")
+        XCTAssertTrue(home.isHittable, "安全画布开启后主导航无法触控")
+
+        let protectedScreenshot = app.screenshot()
+        let screenshotText = try recognizedText(in: protectedScreenshot)
+        XCTAssertTrue(
+            screenshotText.contains("狐狸姐姐温馨提示"),
+            "截图没有显示品牌保护提示，OCR：\(screenshotText)"
+        )
+        XCTAssertTrue(
+            screenshotText.contains("影像内容已保护"),
+            "截图没有显示影像保护标题，OCR：\(screenshotText)"
+        )
+        XCTAssertFalse(
+            screenshotText.contains("镜头之内") || screenshotText.contains("查看作品"),
+            "截图泄露首页内容，OCR：\(screenshotText)"
+        )
+
+        let attachment = XCTAttachment(screenshot: protectedScreenshot)
+        attachment.name = "protected-static-screenshot"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+
+        let portfolio = tabButton("作品", in: app)
+        XCTAssertTrue(portfolio.isHittable, "安全画布开启后作品入口无法触控")
+        portfolio.tap()
+        XCTAssertTrue(
+            element("portfolio-heading", in: app).waitForExistence(timeout: 8),
+            "安全画布开启后页面切换失败"
+        )
+    }
+
+    func testProtectedAdministratorPresentationCanAlwaysClose() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-skip-launch-poster-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing",
+            "-open-about-for-visual-testing",
+        ]
+        app.launch()
+
+        let aboutHeading = element("about-heading", in: app)
+        XCTAssertTrue(aboutHeading.waitForExistence(timeout: 12), "保护开启后关于页没有出现")
+        let adminEntry = element("about-admin-entry", in: app)
+        scrollToElement(adminEntry, in: app)
+        XCTAssertTrue(adminEntry.isHittable, "保护开启后管理员入口不可点击")
+        adminEntry.tap()
+
+        let close = element("admin-close", in: app)
+        XCTAssertTrue(close.waitForExistence(timeout: 8), "管理员页缺少关闭按钮")
+        XCTAssertTrue(close.isHittable, "保护开启后管理员关闭按钮不可点击")
+        close.tap()
+
+        let dismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == 0"),
+            object: close
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [dismissed], timeout: 5),
+            .completed,
+            "保护开启后管理员全屏页无法关闭"
+        )
+        XCTAssertTrue(aboutHeading.waitForExistence(timeout: 5), "关闭管理员页后没有返回关于页")
+    }
+
+    private func recognizedText(in screenshot: XCUIScreenshot) throws -> String {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "en-US"]
+        request.usesLanguageCorrection = true
+
+        guard let cgImage = screenshot.image.cgImage else {
+            XCTFail("无法读取截图像素")
+            return ""
+        }
+
+        try VNImageRequestHandler(cgImage: cgImage).perform([request])
+        return (request.results ?? [])
+            .compactMap { $0.topCandidates(1).first?.string }
+            .joined(separator: " | ")
     }
 
     func testAppRequiresAdministratorApprovalBeforeShowingContent() {
@@ -504,6 +620,15 @@ final class YishuUITests: XCTestCase {
         XCTAssertTrue(close.waitForExistence(timeout: 5), "受保护图片查看器缺少关闭按钮")
         XCTAssertTrue(firstGalleryImage.waitForExistence(timeout: 5), "受保护图片查看器没有显示照片")
         XCTAssertTrue(close.isHittable, "受保护图片查看器关闭按钮不可点击")
+        let statusBarHidden = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: app.statusBars.firstMatch
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [statusBarHidden], timeout: 3),
+            .completed,
+            "受保护全屏图片查看器没有隐藏系统状态栏"
+        )
 
         XCUIDevice.shared.orientation = .landscapeLeft
         let landscapeWindow = XCTNSPredicateExpectation(

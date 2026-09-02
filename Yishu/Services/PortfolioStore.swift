@@ -6,6 +6,22 @@ enum ContentOrigin: Equatable {
     case network
 }
 
+/// Keeps the About page useful when an older or partially configured content
+/// manifest does not yet provide a dedicated portrait. Every candidate remains
+/// a remote URL, so this fallback does not reintroduce protected photo assets
+/// into the App bundle or persistent image storage.
+enum AboutPortraitSelectionPolicy {
+    static func select(
+        configuredURL: URL?,
+        heroImages: [URL],
+        portfolios: [Portfolio]
+    ) -> URL? {
+        configuredURL
+            ?? heroImages.first
+            ?? portfolios.lazy.compactMap(\.coverURL).first
+    }
+}
+
 /// Chooses one active launch poster per process launch. The order is derived
 /// only from server-owned fields, so it remains deterministic across devices;
 /// the persisted previous identifier prevents consecutive repetition without
@@ -45,7 +61,15 @@ final class PortfolioStore: ObservableObject {
     nonisolated private static let lastLaunchPosterIDKey = "cn.com.shuzijun.yishu.last-launch-poster-id"
     @Published private(set) var portfolios: [Portfolio] = Portfolio.fallback
     @Published private(set) var heroImages: [URL] = ContentCatalog.heroImages
-    @Published private(set) var aboutPortraitURL: URL? = ContentCatalog.aboutPortraitURL
+    /// The value explicitly published by an administrator. Keep it separate
+    /// from the effective display fallback so editing an unrelated field never
+    /// turns a temporary hero fallback into permanent About-page content.
+    @Published private(set) var configuredAboutPortraitURL: URL? = ContentCatalog.aboutPortraitURL
+    @Published private(set) var aboutPortraitURL: URL? = AboutPortraitSelectionPolicy.select(
+        configuredURL: ContentCatalog.aboutPortraitURL,
+        heroImages: ContentCatalog.heroImages,
+        portfolios: Portfolio.fallback
+    )
     @Published private(set) var launchPosters: [LaunchPosterContent] = ContentCatalog.launchPosters
     @Published private(set) var showreel: ShowreelContent? = ContentCatalog.showreel
     @Published private(set) var dramas: [DramaWork] = ContentCatalog.dramas
@@ -104,7 +128,12 @@ final class PortfolioStore: ObservableObject {
               !cache.portfolios.isEmpty else { return }
         portfolios = cache.portfolios
         heroImages = cache.heroImages ?? ContentCatalog.heroImages
-        aboutPortraitURL = cache.aboutPortraitURL ?? ContentCatalog.aboutPortraitURL
+        configuredAboutPortraitURL = cache.aboutPortraitURL ?? ContentCatalog.aboutPortraitURL
+        aboutPortraitURL = AboutPortraitSelectionPolicy.select(
+            configuredURL: configuredAboutPortraitURL,
+            heroImages: heroImages,
+            portfolios: portfolios
+        )
         launchPosters = cache.launchPosters ?? ContentCatalog.launchPosters
         showreel = allowVideo ? cache.showreel : nil
         dramas = allowVideo ? (cache.dramas ?? []) : []
@@ -145,7 +174,12 @@ final class PortfolioStore: ObservableObject {
               ContentSecurityPolicy.isTrusted(manifest) else { return }
         portfolios = manifest.portfolios
         heroImages = manifest.heroImages
-        aboutPortraitURL = manifest.aboutPortraitURL
+        configuredAboutPortraitURL = manifest.aboutPortraitURL
+        aboutPortraitURL = AboutPortraitSelectionPolicy.select(
+            configuredURL: configuredAboutPortraitURL,
+            heroImages: manifest.heroImages,
+            portfolios: manifest.portfolios
+        )
         launchPosters = manifest.launchPosters ?? launchPosters
         showreel = manifest.showreel
         dramas = manifest.dramas
@@ -155,7 +189,7 @@ final class PortfolioStore: ObservableObject {
         Self.persistCacheInBackground(
             portfolios: manifest.portfolios,
             heroImages: manifest.heroImages,
-            aboutPortraitURL: manifest.aboutPortraitURL,
+            aboutPortraitURL: configuredAboutPortraitURL,
             launchPosters: manifest.launchPosters ?? launchPosters,
             showreel: manifest.showreel,
             dramas: manifest.dramas,
@@ -182,7 +216,7 @@ final class PortfolioStore: ObservableObject {
         Self.persistCacheInBackground(
             portfolios: portfolios,
             heroImages: heroImages,
-            aboutPortraitURL: aboutPortraitURL,
+            aboutPortraitURL: configuredAboutPortraitURL,
             launchPosters: launchPosters,
             showreel: showreel,
             dramas: dramas,
@@ -195,7 +229,12 @@ final class PortfolioStore: ObservableObject {
         isRefreshing = false
         portfolios = Portfolio.fallback
         heroImages = ContentCatalog.heroImages
-        aboutPortraitURL = ContentCatalog.aboutPortraitURL
+        configuredAboutPortraitURL = ContentCatalog.aboutPortraitURL
+        aboutPortraitURL = AboutPortraitSelectionPolicy.select(
+            configuredURL: configuredAboutPortraitURL,
+            heroImages: ContentCatalog.heroImages,
+            portfolios: Portfolio.fallback
+        )
         launchPosters = ContentCatalog.launchPosters
         showreel = ContentCatalog.showreel
         dramas = ContentCatalog.dramas

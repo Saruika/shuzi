@@ -100,7 +100,6 @@ struct RootView: View {
             }
         }
         .tint(AppTheme.gold)
-        .protectedFromScreenCapture()
         .task { await restoreAccess() }
         .task(id: "\(fanAccount.profile?.status ?? "none"):\(fanAccount.profile?.requiresAccountSetup == true)") {
             await monitorApprovedAccess()
@@ -375,7 +374,18 @@ struct RootView: View {
         defer { isPreparingAuthorizedContent = false }
 
         enforceCurrentFanPermissionScope()
+#if DEBUG
+        if shouldBypassAccessGate {
+            // UI tests must never inherit a permission-scoped cache written by
+            // another test account. Start from the deterministic bundled
+            // catalog; production sessions still restore their protected cache.
+            portfolioStore.discardProtectedContent()
+        } else {
+            await portfolioStore.restoreCachedContent(allowVideo: canViewVideo)
+        }
+#else
         await portfolioStore.restoreCachedContent(allowVideo: canViewVideo)
+#endif
         enforceCurrentFanPermissionScope()
 #if DEBUG
         portfolioStore.configureMultiImageGalleryForVisualTestingIfNeeded()

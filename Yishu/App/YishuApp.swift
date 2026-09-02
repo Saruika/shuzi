@@ -43,13 +43,8 @@ struct YishuApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ZStack {
-                CaptureProtectionCover()
-                    .accessibilityHidden(true)
-
-                SecureCaptureSurface(owner: .appRoot) {
-                    appContent
-                }
+            SecureCaptureSurface(owner: .appRoot) {
+                appContent
             }
             .preferredColorScheme(.dark)
         }

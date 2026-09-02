@@ -395,6 +395,7 @@ struct PortfolioDetailView: View {
                     .environmentObject(store)
                     .environmentObject(favorites)
             }
+            .statusBarHidden()
         }
     }
 
@@ -582,7 +583,6 @@ struct GalleryViewer: View {
             }
         }
         .statusBarHidden()
-        .protectedFromScreenCapture()
         .onChange(of: accessibleImages.map(\.id)) { _, imageIDs in
             if !imageIDs.contains(selection), let firstID = imageIDs.first {
                 selection = firstID

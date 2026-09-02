@@ -6,6 +6,187 @@ import WeatherKit
 @testable import Yishu
 
 final class ContentAndAccessTests: XCTestCase {
+    func testScreenProtectionDoesNotCoverColdLaunchBeforeFirstActiveState() {
+        var state = ScreenProtectionPresentationState()
+
+        state.updateScene(isActive: false)
+
+        XCTAssertFalse(state.hasEnteredActiveState)
+        XCTAssertFalse(state.isPrivacyCoverVisible)
+        XCTAssertFalse(state.shouldShowProtectionCover)
+    }
+
+    func testScreenProtectionCoversInactiveSceneAfterProtectedContentWasVisible() {
+        var state = ScreenProtectionPresentationState()
+
+        state.updateScene(isActive: true)
+        state.updateScene(isActive: false)
+
+        XCTAssertTrue(state.hasEnteredActiveState)
+        XCTAssertTrue(state.isPrivacyCoverVisible)
+        XCTAssertTrue(state.shouldShowProtectionCover)
+
+        state.updateScene(isActive: true)
+
+        XCTAssertFalse(state.isPrivacyCoverVisible)
+        XCTAssertFalse(state.shouldShowProtectionCover)
+    }
+
+    func testScreenshotWarningExpiresWhileLifecycleCoverRemainsActive() {
+        var state = ScreenProtectionPresentationState()
+        state.updateScene(isActive: true)
+        let generation = state.beginScreenshotWarning()
+
+        state.updateScene(isActive: false)
+        state.expireScreenshotWarning(generation: generation)
+
+        XCTAssertFalse(state.isScreenshotWarningVisible)
+        XCTAssertTrue(state.isPrivacyCoverVisible)
+        XCTAssertTrue(state.shouldShowProtectionCover)
+    }
+
+    func testScreenshotWarningExpiresWhileCaptureCoverRemainsActive() {
+        var state = ScreenProtectionPresentationState()
+        let generation = state.beginScreenshotWarning()
+
+        XCTAssertTrue(state.updateCapture(active: true))
+        XCTAssertFalse(state.updateCapture(active: true), "重复状态不应重复触发开始录屏副作用")
+        state.expireScreenshotWarning(generation: generation)
+
+        XCTAssertFalse(state.isScreenshotWarningVisible)
+        XCTAssertTrue(state.isCaptureActive)
+        XCTAssertTrue(state.shouldShowProtectionCover)
+
+        XCTAssertFalse(state.updateCapture(active: false))
+        XCTAssertFalse(state.shouldShowProtectionCover)
+    }
+
+    func testOlderScreenshotWarningCannotExpireNewerWarning() {
+        var state = ScreenProtectionPresentationState()
+        let firstGeneration = state.beginScreenshotWarning()
+        let secondGeneration = state.beginScreenshotWarning()
+
+        state.expireScreenshotWarning(generation: firstGeneration)
+        XCTAssertTrue(state.isScreenshotWarningVisible)
+
+        state.expireScreenshotWarning(generation: secondGeneration)
+        XCTAssertFalse(state.isScreenshotWarningVisible)
+    }
+
+    func testCancellingScreenshotWarningInvalidatesPendingGeneration() {
+        var state = ScreenProtectionPresentationState()
+        let generation = state.beginScreenshotWarning()
+
+        state.cancelScreenshotWarning()
+        state.expireScreenshotWarning(generation: generation)
+
+        XCTAssertFalse(state.isScreenshotWarningVisible)
+        XCTAssertFalse(state.shouldShowProtectionCover)
+    }
+
+    func testWindowLifecycleShieldOnlyAppearsAfterFirstActiveState() {
+        var state = WindowLifecycleShieldState()
+
+        state.sceneWillDeactivate()
+        state.sceneDidEnterBackground()
+        XCTAssertFalse(state.isVisible)
+
+        state.sceneDidActivate()
+        XCTAssertTrue(state.hasEnteredActiveState)
+        XCTAssertFalse(state.isVisible)
+
+        state.sceneWillDeactivate()
+        XCTAssertTrue(state.isVisible)
+
+        state.sceneDidActivate()
+        XCTAssertFalse(state.isVisible)
+    }
+
+    func testSecureCanvasFallbackPolicyRetriesThenFailsClosed() {
+        XCTAssertEqual(
+            SecureCanvasFallbackPolicy.nextStep(
+                attempt: 1,
+                maximumAttempts: 3,
+                failure: .canvasMissing
+            ),
+            .retry
+        )
+        XCTAssertEqual(
+            SecureCanvasFallbackPolicy.nextStep(
+                attempt: 3,
+                maximumAttempts: 3,
+                failure: .canvasMissing
+            ),
+            .showPrivacyFallback(.canvasMissing)
+        )
+        XCTAssertEqual(
+            SecureCanvasFallbackPolicy.nextStep(
+                attempt: 1,
+                maximumAttempts: 3,
+                failure: nil
+            ),
+            .attachSecureCanvas
+        )
+    }
+
+    @MainActor
+    func testSecureContainerHostsProtectedContentOnlyInsideAttachedCanvas() {
+        var observedStates: [SecureCanvasInstallationState] = []
+        let container = SecureHostingContainerView(
+            rootView: AnyView(Text("protected-content")),
+            fallbackView: AnyView(Text("privacy-fallback")),
+            maximumProbeAttempts: 1,
+            secureCanvasResolver: { textField in
+                let canvas = UIView(frame: textField.bounds)
+                textField.addSubview(canvas)
+                return canvas
+            },
+            stateObserver: { observedStates.append($0) }
+        )
+
+        XCTAssertEqual(container.installationState, .secured)
+        XCTAssertTrue(container.hostsProtectedContent)
+        XCTAssertFalse(container.hostsVisiblePrivacyFallback)
+        XCTAssertEqual(observedStates.last, .secured)
+        XCTAssertFalse(container.isOpaque)
+        XCTAssertEqual(container.backgroundColor, .clear)
+    }
+
+    @MainActor
+    func testSecureContainerShowsVisiblePrivacyFallbackWhenCanvasIsMissing() {
+        var observedStates: [SecureCanvasInstallationState] = []
+        let container = SecureHostingContainerView(
+            rootView: AnyView(Text("protected-content")),
+            fallbackView: AnyView(Text("privacy-fallback")),
+            maximumProbeAttempts: 1,
+            secureCanvasResolver: { _ in nil },
+            stateObserver: { observedStates.append($0) }
+        )
+
+        XCTAssertEqual(container.installationState, .privacyFallback(.canvasMissing))
+        XCTAssertFalse(container.hostsProtectedContent)
+        XCTAssertTrue(container.hostsVisiblePrivacyFallback)
+        XCTAssertEqual(observedStates.last, .privacyFallback(.canvasMissing))
+
+        container.update(rootView: AnyView(Text("updated-protected-content")))
+        XCTAssertFalse(container.hostsProtectedContent)
+        XCTAssertTrue(container.hostsVisiblePrivacyFallback)
+    }
+
+    @MainActor
+    func testSecureContainerRejectsDetachedCanvas() {
+        let container = SecureHostingContainerView(
+            rootView: AnyView(Text("protected-content")),
+            fallbackView: AnyView(Text("privacy-fallback")),
+            maximumProbeAttempts: 1,
+            secureCanvasResolver: { _ in UIView() }
+        )
+
+        XCTAssertEqual(container.installationState, .privacyFallback(.canvasNotAttached))
+        XCTAssertFalse(container.hostsProtectedContent)
+        XCTAssertTrue(container.hostsVisiblePrivacyFallback)
+    }
+
     func testAboutSocialBrandIconsAreBundledAtDisplayResolution() throws {
         let requiredPixelEdge = Int(ceil(24 * UIScreen.main.scale))
         for assetName in [
@@ -372,6 +553,107 @@ final class ContentAndAccessTests: XCTestCase {
 
         XCTAssertTrue(ContentSecurityPolicy.isTrusted(trusted))
         XCTAssertFalse(ContentSecurityPolicy.isTrusted(untrusted))
+    }
+
+    func testAboutPortraitSelectionUsesConfiguredURLBeforeEveryFallback() {
+        let configured = URL(
+            string: "https://www.shuzijun.com.cn/wp-content/uploads/about-configured.jpg"
+        )!
+        let hero = URL(string: "https://img.shuzijun.com.cn/test/about-hero.jpg")!
+        let portfolio = makePortfolio(imageCount: 1)
+
+        XCTAssertEqual(
+            AboutPortraitSelectionPolicy.select(
+                configuredURL: configured,
+                heroImages: [hero],
+                portfolios: [portfolio]
+            ),
+            configured
+        )
+    }
+
+    func testAboutPortraitSelectionFallsBackToHeroThenPortfolioCover() {
+        let hero = URL(string: "https://img.shuzijun.com.cn/test/about-hero.jpg")!
+        let portfolio = makePortfolio(imageCount: 1)
+        let portfolioWithoutCover = Portfolio(
+            id: 2,
+            title: "无封面相册",
+            subtitle: "回归测试",
+            eyebrow: "TEST",
+            slug: "no-cover",
+            websiteURL: URL(
+                string: "https://www.shuzijun.com.cn/portfolio/no-cover/"
+            )!,
+            coverURL: nil,
+            images: []
+        )
+
+        XCTAssertEqual(
+            AboutPortraitSelectionPolicy.select(
+                configuredURL: nil,
+                heroImages: [hero],
+                portfolios: [portfolio]
+            ),
+            hero
+        )
+        XCTAssertEqual(
+            AboutPortraitSelectionPolicy.select(
+                configuredURL: nil,
+                heroImages: [],
+                portfolios: [portfolioWithoutCover, portfolio]
+            ),
+            portfolio.coverURL
+        )
+        XCTAssertNil(
+            AboutPortraitSelectionPolicy.select(
+                configuredURL: nil,
+                heroImages: [],
+                portfolios: []
+            )
+        )
+    }
+
+    @MainActor
+    func testAboutPortraitFallbackNeverBecomesAnImplicitAdministratorDraft() throws {
+        let manifest = makeManifest(aboutPortraitURL: nil)
+        let store = PortfolioStore()
+
+        store.applyPublishedManifest(manifest)
+
+        XCTAssertNil(store.configuredAboutPortraitURL)
+        XCTAssertEqual(store.aboutPortraitURL, manifest.heroImages.first)
+
+        let update = AppContentUpdate(
+            heroImages: manifest.heroImages,
+            aboutPortraitURL: store.configuredAboutPortraitURL,
+            launchPosters: try XCTUnwrap(manifest.launchPosters),
+            showreel: try XCTUnwrap(manifest.showreel),
+            dramas: manifest.dramas
+        )
+        let data = try JSONEncoder().encode(update)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+
+        XCTAssertNil(
+            object["aboutPortraitURL"],
+            "保存其他字段时必须省略未配置的关于页照片，不得写入展示用备用图"
+        )
+    }
+
+    func testAboutPortraitPartialUpdateEncodesNoUnrelatedContent() throws {
+        let portraitURL = URL(
+            string: "https://www.shuzijun.com.cn/wp-content/uploads/about-published.jpg"
+        )!
+        let data = try JSONEncoder().encode(
+            AboutPortraitUpdate(aboutPortraitURL: portraitURL)
+        )
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+
+        XCTAssertEqual(Set(object.keys), ["aboutPortraitURL"])
+        XCTAssertEqual(object["aboutPortraitURL"] as? String, portraitURL.absoluteString)
     }
 
     func testMissingAboutPortraitKeepsOlderManifestsCompatible() throws {

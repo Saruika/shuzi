@@ -90,6 +90,7 @@ struct FavoritesView: View {
                     .environmentObject(store)
                     .environmentObject(favorites)
             }
+            .statusBarHidden()
         }
         .confirmationDialog(
             "清除最近浏览记录？",

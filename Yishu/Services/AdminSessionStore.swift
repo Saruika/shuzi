@@ -370,6 +370,28 @@ final class AdminSessionStore: ObservableObject {
         return manifest
     }
 
+    /// Publishes the uploaded About portrait without resubmitting unrelated
+    /// administrator drafts. The server's existing content endpoint accepts a
+    /// partial body and returns the complete authoritative manifest.
+    func publishAboutPortrait(_ aboutPortraitURL: URL) async throws -> AppContentManifest {
+        guard ContentSecurityPolicy.isTrustedMediaURL(aboutPortraitURL) else {
+            throw AdminAPIError.invalidResponse
+        }
+        let body = try JSONEncoder().encode(
+            AboutPortraitUpdate(aboutPortraitURL: aboutPortraitURL)
+        )
+        let manifest: AppContentManifest = try await authorizedJSON(
+            path: "shuzijun/v1/app-content",
+            method: "POST",
+            body: body
+        )
+        guard ContentSecurityPolicy.isTrusted(manifest),
+              manifest.aboutPortraitURL == aboutPortraitURL else {
+            throw AdminAPIError.invalidResponse
+        }
+        return manifest
+    }
+
     func fetchContent() async throws -> AppContentManifest {
         let manifest: AppContentManifest = try await authorizedJSON(
             path: "shuzijun/v1/app-content",
@@ -686,12 +708,16 @@ private struct AdminSessionResponse: Decodable {
     let displayName: String
 }
 
-private struct AppContentUpdate: Encodable {
+struct AppContentUpdate: Encodable {
     let heroImages: [URL]
     let aboutPortraitURL: URL?
     let launchPosters: [LaunchPosterContent]
     let showreel: ShowreelContent
     let dramas: [DramaWork]
+}
+
+struct AboutPortraitUpdate: Encodable {
+    let aboutPortraitURL: URL
 }
 
 private struct GalleryUpdate: Encodable {

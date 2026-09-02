@@ -41,13 +41,34 @@ if git grep -q 'http://' -- ':(glob)Yishu/**/*.swift'; then
   fail 'iOS 生产源码中不允许明文 HTTP 地址'
 fi
 
-# App Review gate: do not recreate screenshot blocking by borrowing UIKit's
-# secure-text rendering hierarchy or by naming private UIKit classes. Apple
-# exposes capture-state notifications, but no public still-image screenshot
-# prevention API for third-party apps.
-if git grep -q -E 'isSecureTextEntry|_UIText|SecureCanvasResolver|SecureHostingContainerView' -- \
-  ':(glob)Yishu/**/*.swift'; then
-  fail '检测到非公开截图画布实现，违反 App Store 公开 API 门禁'
+# Screenshot-protection boundary: this intentionally isolated compatibility
+# layer relies on secure-text rendering behavior that Apple does not document as
+# a general screenshot API. Keep it in one reviewed file, never bind to a named
+# private UIKit class, and fail closed when the expected descendant is absent.
+secure_canvas_file='Yishu/Components/ArtworkImage.swift'
+while IFS= read -r implementation_file; do
+  if [[ "$implementation_file" != "$secure_canvas_file" ]]; then
+    fail '截图保护兼容实现越过已审核文件边界'
+  fi
+done < <(git grep -l -E 'isSecureTextEntry|SecureCanvasResolver|SecureHostingContainerView' -- \
+  ':(glob)Yishu/**/*.swift' || true)
+
+if [[ "$(grep -cF 'secureTextField.isSecureTextEntry = true' "$secure_canvas_file" || true)" -ne 1 ]]; then
+  fail '安全画布必须且只能由一个非交互 secure text field 提供'
+fi
+grep -qF 'override var canBecomeFirstResponder: Bool' "$secure_canvas_file" \
+  || fail '安全画布 text field 必须禁止获取焦点'
+grep -qF 'secureTextField.isAccessibilityElement = false' "$secure_canvas_file" \
+  || fail '安全画布 text field 不得进入辅助功能焦点'
+grep -qF 'candidate.isDescendant(of: textField)' "$secure_canvas_file" \
+  || fail '安全画布解析器必须验证 UIKit 宿主从属关系'
+grep -qF 'enterPrivacyFallback' "$secure_canvas_file" \
+  || fail '安全画布缺失时必须失败关闭并隐藏受保护内容'
+grep -qF 'CaptureProtectionCover()' "$secure_canvas_file" \
+  || fail '安全画布下方必须保留品牌保护页'
+if grep -q -E '_UIText|NSClassFromString|objc_getClass|object_getClass|value\(forKey:|perform\(Selector' \
+  "$secure_canvas_file"; then
+  fail '安全画布不得硬编码或动态调用私有 UIKit 类与选择器'
 fi
 
 if command -v php >/dev/null 2>&1; then

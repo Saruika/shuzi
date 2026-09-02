@@ -1,5 +1,6 @@
 import AVFoundation
 import ImageIO
+import OSLog
 import SwiftUI
 import UIKit
 
@@ -532,13 +533,59 @@ enum VideoAudioSession {
     }
 }
 
+struct ScreenProtectionPresentationState: Equatable {
+    private(set) var isCaptureActive = false
+    private(set) var hasEnteredActiveState = false
+    private(set) var isPrivacyCoverVisible = false
+    private(set) var isScreenshotWarningVisible = false
+    private(set) var screenshotWarningGeneration: UInt = 0
+
+    var shouldShowProtectionCover: Bool {
+        isCaptureActive || isPrivacyCoverVisible || isScreenshotWarningVisible
+    }
+
+    @discardableResult
+    mutating func updateCapture(active: Bool) -> Bool {
+        let didBeginCapture = active && !isCaptureActive
+        isCaptureActive = active
+        return didBeginCapture
+    }
+
+    mutating func updateScene(isActive: Bool) {
+        if isActive {
+            hasEnteredActiveState = true
+            isPrivacyCoverVisible = false
+        } else {
+            // Do not cover the initial inactive frame of a cold launch. No
+            // protected content has been visible before the first active state.
+            isPrivacyCoverVisible = hasEnteredActiveState
+        }
+    }
+
+    @discardableResult
+    mutating func beginScreenshotWarning() -> UInt {
+        screenshotWarningGeneration &+= 1
+        isScreenshotWarningVisible = true
+        return screenshotWarningGeneration
+    }
+
+    mutating func expireScreenshotWarning(generation: UInt) {
+        guard generation == screenshotWarningGeneration else { return }
+        isScreenshotWarningVisible = false
+    }
+
+    mutating func cancelScreenshotWarning() {
+        // Invalidate an already-resumed task as well as one that has not yet
+        // observed cooperative cancellation.
+        screenshotWarningGeneration &+= 1
+        isScreenshotWarningVisible = false
+    }
+}
+
 private struct ScreenCaptureProtectionModifier: ViewModifier {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isCaptureActive = false
-    @State private var hasEnteredActiveState = false
-    @State private var isPrivacyCoverVisible = false
-    @State private var isScreenshotWarningVisible = false
+    @State private var protectionState = ScreenProtectionPresentationState()
     @State private var screenshotWarningTask: Task<Void, Never>?
 
     func body(content: Content) -> some View {
@@ -579,6 +626,8 @@ private struct ScreenCaptureProtectionModifier: ViewModifier {
         }
         .onDisappear {
             screenshotWarningTask?.cancel()
+            screenshotWarningTask = nil
+            protectionState.cancelScreenshotWarning()
         }
     }
 
@@ -590,43 +639,39 @@ private struct ScreenCaptureProtectionModifier: ViewModifier {
     }
 
     private func applyCaptureState(_ captured: Bool) {
-        guard isCaptureActive != captured else { return }
-        isCaptureActive = captured
-        if captured {
+        guard protectionState.isCaptureActive != captured else { return }
+        if protectionState.updateCapture(active: captured) {
             Task { await ArtworkImagePrefetcher.purgeMemory() }
         }
     }
 
     private func updatePrivacyCover(for phase: ScenePhase) {
-        if phase == .active {
-            hasEnteredActiveState = true
-            isPrivacyCoverVisible = false
-        } else {
-            // A cold launch begins in `.inactive`. Covering that first frame was
-            // the source of the long black screen. Privacy covering is only
-            // needed after the app has already displayed protected content.
-            isPrivacyCoverVisible = hasEnteredActiveState
-        }
+        protectionState.updateScene(isActive: phase == .active)
     }
 
     private func showScreenshotWarning() {
         guard !disablesProtectionForVisualTesting else { return }
         screenshotWarningTask?.cancel()
+        let generation: UInt
         if reduceMotion {
-            isScreenshotWarningVisible = true
+            generation = protectionState.beginScreenshotWarning()
         } else {
-            withAnimation(.easeOut(duration: 0.12)) {
-                isScreenshotWarningVisible = true
+            generation = withAnimation(.easeOut(duration: 0.12)) {
+                protectionState.beginScreenshotWarning()
             }
         }
         screenshotWarningTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1.8))
-            guard !Task.isCancelled, scenePhase == .active, !isCaptureActive else { return }
+            do {
+                try await Task.sleep(for: .seconds(1.8))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
             if reduceMotion {
-                isScreenshotWarningVisible = false
+                protectionState.expireScreenshotWarning(generation: generation)
             } else {
                 withAnimation(.easeIn(duration: 0.2)) {
-                    isScreenshotWarningVisible = false
+                    protectionState.expireScreenshotWarning(generation: generation)
                 }
             }
         }
@@ -635,7 +680,7 @@ private struct ScreenCaptureProtectionModifier: ViewModifier {
     private var shouldShowProtectionCover: Bool {
         if ScreenProtectionTesting.forcesCover { return true }
         return !disablesProtectionForVisualTesting &&
-            (isCaptureActive || isPrivacyCoverVisible || isScreenshotWarningVisible)
+            protectionState.shouldShowProtectionCover
     }
 
     private var disablesProtectionForVisualTesting: Bool {
@@ -796,16 +841,190 @@ private final class SceneCaptureStateObserverView: UIView {
     }
 }
 
+struct WindowLifecycleShieldState: Equatable {
+    private(set) var hasEnteredActiveState = false
+    private(set) var isVisible = false
+
+    mutating func sceneDidActivate() {
+        hasEnteredActiveState = true
+        isVisible = false
+    }
+
+    mutating func sceneWillDeactivate() {
+        isVisible = hasEnteredActiveState
+    }
+
+    mutating func sceneDidEnterBackground() {
+        isVisible = hasEnteredActiveState
+    }
+
+    mutating func reset() {
+        self = WindowLifecycleShieldState()
+    }
+}
+
+private struct WindowLifecycleProtectionInstaller: UIViewRepresentable {
+    func makeUIView(context: Context) -> WindowLifecycleProtectionAttachmentView {
+        WindowLifecycleProtectionAttachmentView()
+    }
+
+    func updateUIView(_ view: WindowLifecycleProtectionAttachmentView, context: Context) {
+        view.refreshForcedState()
+    }
+
+    static func dismantleUIView(
+        _ view: WindowLifecycleProtectionAttachmentView,
+        coordinator: Void
+    ) {
+        view.detachFromProtectedWindow()
+    }
+}
+
+/// Installs a synchronous, scene-specific privacy shield directly above the
+/// app-owned window. SwiftUI's scene phase remains the source for the visible
+/// in-app protection page, while this small UIKit layer closes the timing gap
+/// before the system takes an App Switcher snapshot.
+@MainActor
+private final class WindowLifecycleProtectionAttachmentView: UIView {
+    private weak var protectedWindow: UIWindow?
+    private weak var observedScene: UIScene?
+    private let shieldView = UIView(frame: .zero)
+    private var lifecycleState = WindowLifecycleShieldState()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isUserInteractionEnabled = false
+
+        shieldView.backgroundColor = .black
+        shieldView.isOpaque = true
+        shieldView.isUserInteractionEnabled = true
+        shieldView.isAccessibilityElement = true
+        shieldView.accessibilityViewIsModal = true
+        shieldView.accessibilityIdentifier = "window-lifecycle-protection-shield"
+        shieldView.accessibilityLabel = "影像内容已保护"
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        attach(to: window)
+    }
+
+    func refreshForcedState() {
+        updateShieldVisibility()
+    }
+
+    func detachFromProtectedWindow() {
+        NotificationCenter.default.removeObserver(self)
+        shieldView.removeFromSuperview()
+        protectedWindow = nil
+        observedScene = nil
+        lifecycleState.reset()
+    }
+
+    private func attach(to window: UIWindow?) {
+        guard protectedWindow !== window else {
+            updateShieldVisibility()
+            return
+        }
+
+        detachFromProtectedWindow()
+        guard let window, let scene = window.windowScene else { return }
+        protectedWindow = window
+        observedScene = scene
+
+        if scene.activationState == .foregroundActive {
+            lifecycleState.sceneDidActivate()
+        }
+
+        let center = NotificationCenter.default
+        center.addObserver(
+            self,
+            selector: #selector(sceneWillDeactivate(_:)),
+            name: UIScene.willDeactivateNotification,
+            object: scene
+        )
+        center.addObserver(
+            self,
+            selector: #selector(sceneDidEnterBackground(_:)),
+            name: UIScene.didEnterBackgroundNotification,
+            object: scene
+        )
+        center.addObserver(
+            self,
+            selector: #selector(sceneDidActivate(_:)),
+            name: UIScene.didActivateNotification,
+            object: scene
+        )
+        center.addObserver(
+            self,
+            selector: #selector(sceneDidDisconnect(_:)),
+            name: UIScene.didDisconnectNotification,
+            object: scene
+        )
+        updateShieldVisibility()
+    }
+
+    @objc private func sceneWillDeactivate(_ notification: Notification) {
+        guard let scene = notification.object as? UIScene,
+              scene === observedScene else { return }
+        lifecycleState.sceneWillDeactivate()
+        updateShieldVisibility()
+    }
+
+    @objc private func sceneDidEnterBackground(_ notification: Notification) {
+        guard let scene = notification.object as? UIScene,
+              scene === observedScene else { return }
+        lifecycleState.sceneDidEnterBackground()
+        updateShieldVisibility()
+    }
+
+    @objc private func sceneDidActivate(_ notification: Notification) {
+        guard let scene = notification.object as? UIScene,
+              scene === observedScene else { return }
+        lifecycleState.sceneDidActivate()
+        updateShieldVisibility()
+    }
+
+    @objc private func sceneDidDisconnect(_ notification: Notification) {
+        guard let scene = notification.object as? UIScene,
+              scene === observedScene else { return }
+        detachFromProtectedWindow()
+    }
+
+    private func updateShieldVisibility() {
+        if lifecycleState.isVisible || ScreenProtectionTesting.forcesCover {
+            installShieldIfNeeded()
+        } else {
+            shieldView.removeFromSuperview()
+        }
+    }
+
+    private func installShieldIfNeeded() {
+        guard let window = protectedWindow else { return }
+        if shieldView.superview !== window {
+            shieldView.removeFromSuperview()
+            shieldView.frame = window.bounds
+            shieldView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            window.addSubview(shieldView)
+        }
+        window.bringSubviewToFront(shieldView)
+    }
+}
+
 enum SecureCaptureSurfaceOwner: String, Equatable {
     case appRoot = "app_root"
     case fullScreenPresentation = "full_screen_presentation"
 }
 
-/// Applies only App Store-supported capture-state and app-switcher protection.
-/// iOS does not expose a public API that can prevent an ordinary screenshot of
-/// still imagery. `owner` and `onExit` remain part of the call-site contract so
-/// independently presented hierarchies can share this wrapper without relying
-/// on UIKit's private secure-text rendering implementation.
+/// Installs one secure UIKit rendering surface for each independently composed
+/// hierarchy. A full-screen presentation owns a separate UIKit hierarchy, so
+/// it must explicitly request its own surface.
 struct SecureCaptureSurface<Content: View>: View {
     let owner: SecureCaptureSurfaceOwner
     let onExit: (() -> Void)?
@@ -821,11 +1040,545 @@ struct SecureCaptureSurface<Content: View>: View {
         self.content = content()
     }
 
+    @ViewBuilder
     var body: some View {
-        content
+        if ScreenProtectionTesting.isDisabled {
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ZStack {
+                // This ordinary layer is deliberately behind the secure
+                // canvas. Static screenshots omit the secure descendants and
+                // therefore reveal this branded privacy page instead of app
+                // content. It never receives input or accessibility focus.
+                CaptureProtectionCover()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+
+                ScreenshotProtectedContent(owner: owner, onExit: onExit) {
+                    content
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .privacySensitive()
+                        .protectedFromScreenCapture()
+                }
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .privacySensitive()
-            .protectedFromScreenCapture()
+            .background {
+                if owner == .appRoot {
+                    WindowLifecycleProtectionInstaller()
+                        .frame(width: 0, height: 0)
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+    }
+}
+
+struct ScreenshotProtectedContent: UIViewControllerRepresentable {
+    let owner: SecureCaptureSurfaceOwner
+    let content: AnyView
+    let fallback: AnyView
+
+    init<Content: View>(
+        owner: SecureCaptureSurfaceOwner,
+        onExit: (() -> Void)? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.owner = owner
+        self.content = AnyView(content())
+        fallback = AnyView(
+            ScreenProtectionUnavailableView(owner: owner, onExit: onExit)
+        )
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(owner: owner)
+    }
+
+    func makeUIViewController(context: Context) -> SecureHostingContainerController {
+        SecureHostingContainerController(
+            rootView: content,
+            fallbackView: fallback,
+            stateObserver: context.coordinator.didTransition(to:)
+        )
+    }
+
+    func updateUIViewController(
+        _ controller: SecureHostingContainerController,
+        context: Context
+    ) {
+        controller.update(rootView: content)
+    }
+
+    static func dismantleUIViewController(
+        _ controller: SecureHostingContainerController,
+        coordinator: Coordinator
+    ) {
+        controller.detachHostedContent()
+    }
+
+    final class Coordinator {
+        private let owner: SecureCaptureSurfaceOwner
+
+        init(owner: SecureCaptureSurfaceOwner) {
+            self.owner = owner
+        }
+
+        func didTransition(to state: SecureCanvasInstallationState) {
+            ScreenProtectionDiagnostics.record(state: state, owner: owner)
+        }
+    }
+}
+
+enum SecureCanvasFailureCode: Int, Equatable {
+    case canvasMissing = 1
+    case canvasNotAttached = 2
+}
+
+enum SecureCanvasInstallationState: Equatable {
+    case probing(attempt: Int)
+    case secured
+    case privacyFallback(SecureCanvasFailureCode)
+}
+
+enum SecureCanvasFallbackPolicy {
+    enum NextStep: Equatable {
+        case retry
+        case attachSecureCanvas
+        case showPrivacyFallback(SecureCanvasFailureCode)
+    }
+
+    static func nextStep(
+        attempt: Int,
+        maximumAttempts: Int,
+        failure: SecureCanvasFailureCode?
+    ) -> NextStep {
+        guard let failure else { return .attachSecureCanvas }
+        return attempt < max(1, maximumAttempts)
+            ? .retry
+            : .showPrivacyFallback(failure)
+    }
+}
+
+private enum SecureCanvasResolver {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "cn.com.shuzijun.yishu",
+        category: "ScreenProtection"
+    )
+
+    static func resolve(in textField: UITextField) -> UIView? {
+        textField.setNeedsLayout()
+        textField.layoutIfNeeded()
+
+        let layerDelegates = (textField.layer.sublayers ?? [])
+            .compactMap { $0.delegate as? UIView }
+        let descendants = allDescendants(of: textField)
+
+        let candidates = layerDelegates + descendants
+        let selected = candidates.first { candidate in
+            guard candidate !== textField,
+                  candidate.isDescendant(of: textField) else {
+                return false
+            }
+            // Avoid a hard-coded private UIKit class name. If the expected
+            // secure layout host is absent, the container fails closed.
+            return NSStringFromClass(type(of: candidate))
+                .localizedCaseInsensitiveContains("canvas")
+        }
+
+#if DEBUG
+        let hierarchy = descendants.map { view in
+            "\(NSStringFromClass(type(of: view))){super=\(view.superview.map { NSStringFromClass(type(of: $0)) } ?? "nil")}"
+        }.joined(separator: " > ")
+        let layerClasses = layerDelegates
+            .map { NSStringFromClass(type(of: $0)) }
+            .joined(separator: ",")
+        let selectedClass = selected.map { NSStringFromClass(type(of: $0)) } ?? "none"
+        logger.debug(
+            "Secure text hierarchy: descendants=\(hierarchy, privacy: .public) layerDelegates=\(layerClasses, privacy: .public) selected=\(selectedClass, privacy: .public)"
+        )
+#endif
+
+        return selected
+    }
+
+    private static func allDescendants(of view: UIView) -> [UIView] {
+        view.subviews.flatMap { [$0] + allDescendants(of: $0) }
+    }
+}
+
+@MainActor
+final class SecureHostingContainerController: UIViewController {
+    private let hostingController: UIHostingController<AnyView>
+    private let secureContainerView: SecureHostingContainerView
+    private var retriedAfterFirstLayout = false
+    private var retriedAfterAppearance = false
+    private var hasAttachedHostedContent = false
+
+    init(
+        rootView: AnyView,
+        fallbackView: AnyView,
+        maximumProbeAttempts: Int = 3,
+        secureCanvasResolver: @escaping SecureHostingContainerView.CanvasResolver = SecureCanvasResolver.resolve(in:),
+        stateObserver: @escaping (SecureCanvasInstallationState) -> Void = { _ in }
+    ) {
+        let hostingController = UIHostingController(rootView: fallbackView)
+        self.hostingController = hostingController
+        secureContainerView = SecureHostingContainerView(
+            rootView: rootView,
+            fallbackView: fallbackView,
+            hostingController: hostingController,
+            maximumProbeAttempts: maximumProbeAttempts,
+            secureCanvasResolver: secureCanvasResolver,
+            startsProbeImmediately: false,
+            stateObserver: stateObserver
+        )
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func loadView() {
+        addChild(hostingController)
+        view = secureContainerView
+        secureContainerView.prepareHostedViewForContainment()
+        hostingController.didMove(toParent: self)
+        hasAttachedHostedContent = true
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        guard !retriedAfterFirstLayout,
+              case .privacyFallback = secureContainerView.installationState else {
+            return
+        }
+        retriedAfterFirstLayout = true
+        secureContainerView.beginLifecycleProbeCycle()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !retriedAfterAppearance,
+              secureContainerView.installationState != .secured else {
+            return
+        }
+        retriedAfterAppearance = true
+        secureContainerView.beginLifecycleProbeCycle()
+    }
+
+    func update(rootView: AnyView) {
+        secureContainerView.update(rootView: rootView)
+    }
+
+    func detachHostedContent() {
+        guard hasAttachedHostedContent else { return }
+        hostingController.willMove(toParent: nil)
+        secureContainerView.detachHostedView()
+        hostingController.removeFromParent()
+        hasAttachedHostedContent = false
+    }
+}
+
+@MainActor
+final class SecureHostingContainerView: UIView {
+    typealias CanvasResolver = (UITextField) -> UIView?
+
+    private let secureTextField = NonFocusingSecureTextField(frame: .zero)
+    private let hostingController: UIHostingController<AnyView>
+    private let fallbackView: AnyView
+    private let secureCanvasResolver: CanvasResolver
+    private let maximumProbeAttempts: Int
+    private let stateObserver: (SecureCanvasInstallationState) -> Void
+    private var protectedRootView: AnyView
+    private var hostedViewConstraints: [NSLayoutConstraint] = []
+    private var probeAttempt = 0
+    private var probeGeneration = 0
+    private var hasPreparedHostedView = false
+    private var hasStartedForCurrentWindowAttachment = false
+
+    private(set) var installationState = SecureCanvasInstallationState.probing(attempt: 0)
+
+    var hostsProtectedContent: Bool {
+        installationState == .secured
+            && hostingController.view.superview !== self
+            && hostingController.view.superview != nil
+    }
+
+    var hostsVisiblePrivacyFallback: Bool {
+        if case .privacyFallback = installationState {
+            return hostingController.view.superview === self
+        }
+        return false
+    }
+
+    init(
+        rootView: AnyView,
+        fallbackView: AnyView = AnyView(ScreenProtectionUnavailableView(
+            owner: .appRoot,
+            onExit: nil
+        )),
+        maximumProbeAttempts: Int = 3,
+        secureCanvasResolver: @escaping CanvasResolver = SecureCanvasResolver.resolve(in:),
+        stateObserver: @escaping (SecureCanvasInstallationState) -> Void = { _ in }
+    ) {
+        let hostingController = UIHostingController(rootView: fallbackView)
+        self.protectedRootView = rootView
+        self.fallbackView = fallbackView
+        self.maximumProbeAttempts = max(1, maximumProbeAttempts)
+        self.secureCanvasResolver = secureCanvasResolver
+        self.stateObserver = stateObserver
+        self.hostingController = hostingController
+        super.init(frame: .zero)
+        configureContainer()
+        prepareHostedViewForContainment()
+        beginLifecycleProbeCycle()
+    }
+
+    init(
+        rootView: AnyView,
+        fallbackView: AnyView,
+        hostingController: UIHostingController<AnyView>,
+        maximumProbeAttempts: Int = 3,
+        secureCanvasResolver: @escaping CanvasResolver = SecureCanvasResolver.resolve(in:),
+        startsProbeImmediately: Bool,
+        stateObserver: @escaping (SecureCanvasInstallationState) -> Void = { _ in }
+    ) {
+        protectedRootView = rootView
+        self.fallbackView = fallbackView
+        self.maximumProbeAttempts = max(1, maximumProbeAttempts)
+        self.secureCanvasResolver = secureCanvasResolver
+        self.stateObserver = stateObserver
+        self.hostingController = hostingController
+        super.init(frame: .zero)
+
+        configureContainer()
+        if startsProbeImmediately {
+            prepareHostedViewForContainment()
+            beginLifecycleProbeCycle()
+        }
+    }
+
+    private func configureContainer() {
+        // Keep every non-secure layer transparent so a screenshot exposes the
+        // CaptureProtectionCover below this container, never a black rectangle.
+        backgroundColor = .clear
+        isOpaque = false
+        secureTextField.isSecureTextEntry = true
+        secureTextField.text = " "
+        secureTextField.textColor = .clear
+        secureTextField.tintColor = .clear
+        secureTextField.backgroundColor = .clear
+        secureTextField.isOpaque = false
+        secureTextField.borderStyle = .none
+        secureTextField.isAccessibilityElement = false
+        secureTextField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(secureTextField)
+        NSLayoutConstraint.activate([
+            secureTextField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            secureTextField.trailingAnchor.constraint(equalTo: trailingAnchor),
+            secureTextField.topAnchor.constraint(equalTo: topAnchor),
+            secureTextField.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func update(rootView: AnyView) {
+        protectedRootView = rootView
+        guard installationState == .secured else {
+            // Protected content is never assigned while the hosting view is
+            // attached to the ordinary view hierarchy.
+            hostingController.rootView = fallbackView
+            return
+        }
+        hostingController.rootView = rootView
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil else {
+            hasStartedForCurrentWindowAttachment = false
+            return
+        }
+        guard !hasStartedForCurrentWindowAttachment,
+              installationState != .secured else { return }
+        hasStartedForCurrentWindowAttachment = true
+        beginLifecycleProbeCycle()
+    }
+
+    func prepareHostedViewForContainment() {
+        guard !hasPreparedHostedView else { return }
+        hasPreparedHostedView = true
+        let hostedView = hostingController.view!
+        hostedView.backgroundColor = .clear
+        hostedView.isOpaque = false
+        hostedView.translatesAutoresizingMaskIntoConstraints = false
+        hostingController.rootView = fallbackView
+        placeHostedView(in: self)
+    }
+
+    func beginLifecycleProbeCycle() {
+        guard installationState != .secured else { return }
+        prepareHostedViewForContainment()
+        probeGeneration += 1
+        probeAttempt = 0
+        probeForSecureCanvas(generation: probeGeneration)
+    }
+
+    func detachHostedView() {
+        probeGeneration += 1
+        NSLayoutConstraint.deactivate(hostedViewConstraints)
+        hostedViewConstraints.removeAll()
+        hostingController.viewIfLoaded?.removeFromSuperview()
+        hasPreparedHostedView = false
+    }
+
+    private func probeForSecureCanvas(generation: Int) {
+        guard generation == probeGeneration,
+              installationState != .secured else { return }
+        probeAttempt += 1
+        transition(to: .probing(attempt: probeAttempt))
+
+        let secureCanvas = secureCanvasResolver(secureTextField)
+        let failure: SecureCanvasFailureCode?
+        if let secureCanvas {
+            failure = secureCanvas !== secureTextField
+                && secureCanvas.isDescendant(of: secureTextField)
+                ? nil
+                : .canvasNotAttached
+        } else {
+            failure = .canvasMissing
+        }
+
+        switch SecureCanvasFallbackPolicy.nextStep(
+            attempt: probeAttempt,
+            maximumAttempts: maximumProbeAttempts,
+            failure: failure
+        ) {
+        case .attachSecureCanvas:
+            guard let secureCanvas else {
+                enterPrivacyFallback(.canvasMissing)
+                return
+            }
+            hostingController.rootView = fallbackView
+            placeHostedView(in: secureCanvas)
+            hostingController.view.accessibilityViewIsModal = false
+            hostingController.rootView = protectedRootView
+            transition(to: .secured)
+
+        case .retry:
+            DispatchQueue.main.async { [weak self] in
+                self?.probeForSecureCanvas(generation: generation)
+            }
+
+        case .showPrivacyFallback(let code):
+            enterPrivacyFallback(code)
+        }
+    }
+
+    private func enterPrivacyFallback(_ code: SecureCanvasFailureCode) {
+        hostingController.rootView = fallbackView
+        placeHostedView(in: self)
+        hostingController.view.accessibilityViewIsModal = true
+        transition(to: .privacyFallback(code))
+    }
+
+    private func placeHostedView(in container: UIView) {
+        let hostedView = hostingController.view!
+        NSLayoutConstraint.deactivate(hostedViewConstraints)
+        hostedView.removeFromSuperview()
+        container.addSubview(hostedView)
+        hostedViewConstraints = [
+            hostedView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            hostedView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            hostedView.topAnchor.constraint(equalTo: container.topAnchor),
+            hostedView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ]
+        NSLayoutConstraint.activate(hostedViewConstraints)
+    }
+
+    private func transition(to state: SecureCanvasInstallationState) {
+        guard installationState != state else { return }
+        installationState = state
+        stateObserver(state)
+    }
+}
+
+private final class NonFocusingSecureTextField: UITextField {
+    override var canBecomeFirstResponder: Bool {
+        false
+    }
+}
+
+private struct ScreenProtectionUnavailableView: View {
+    let owner: SecureCaptureSurfaceOwner
+    let onExit: (() -> Void)?
+
+    var body: some View {
+        ZStack {
+            AppTheme.ink
+
+            VStack(spacing: 18) {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .font(.largeTitle.weight(.regular))
+                    .foregroundStyle(AppTheme.gold)
+
+                Text("安全显示暂不可用")
+                    .font(.system(.title2, design: .serif))
+                    .foregroundStyle(AppTheme.warmWhite)
+                    .accessibilityAddTraits(.isHeader)
+
+                Text("未能启用影像保护，受保护内容已隐藏。\n请关闭后重新打开此 APP。")
+                    .font(.body)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(6)
+                    .foregroundStyle(.white.opacity(0.66))
+
+                if owner == .fullScreenPresentation, let onExit {
+                    Button("关闭当前页面", action: onExit)
+                        .buttonStyle(.borderedProminent)
+                        .tint(AppTheme.gold)
+                        .foregroundStyle(AppTheme.ink)
+                        .frame(minHeight: 44)
+                        .padding(.top, 8)
+                }
+            }
+            .padding(32)
+        }
+        .ignoresSafeArea()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("screen-protection-unavailable")
+    }
+}
+
+private enum ScreenProtectionDiagnostics {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "cn.com.shuzijun.yishu",
+        category: "ScreenProtection"
+    )
+
+    static func record(
+        state: SecureCanvasInstallationState,
+        owner: SecureCaptureSurfaceOwner
+    ) {
+        switch state {
+        case .secured:
+            logger.info(
+                "Secure canvas installed: owner=\(owner.rawValue, privacy: .public)"
+            )
+        case .privacyFallback(let code):
+            logger.fault(
+                "Secure canvas unavailable; privacy fallback shown: owner=\(owner.rawValue, privacy: .public) code=\(code.rawValue, privacy: .public)"
+            )
+        case .probing:
+            break
+        }
     }
 }
 

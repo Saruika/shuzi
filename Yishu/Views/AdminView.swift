@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 /// dismissing the cover can reliably lock credentials and protected content.
 struct AdminAccessView: View {
     @EnvironmentObject private var admin: AdminSessionStore
-    @Environment(\.dismiss) private var dismiss
+    let onClose: () -> Void
     @State private var hasLockedOnEntry = false
 
     var body: some View {
@@ -17,7 +17,7 @@ struct AdminAccessView: View {
                     AdminView()
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
-                                Button("关闭") { dismiss() }
+                                Button("关闭", action: onClose)
                                     .frame(minWidth: 44, minHeight: 44)
                                     .accessibilityIdentifier("admin-close")
                             }
@@ -39,9 +39,6 @@ struct AdminAccessView: View {
             guard hasLockedOnEntry else { return }
             admin.lock()
         }
-        // A full-screen cover lives in a separate presentation hierarchy, so
-        // it must install its own capture shield instead of relying on RootView.
-        .protectedFromScreenCapture()
     }
 }
 
@@ -687,7 +684,7 @@ struct AdminView: View {
             }
             .disabled(isPublishing)
 
-            Text("建议使用 9:16 竖版人像。照片仅从受信任的云端地址按需加载，不存入 App 本地。")
+            Text("建议使用原始高清 2:3 竖版人像。照片仅从受信任的云端地址按需加载，不存入 App 本地。")
                 .font(.caption2)
                 .foregroundStyle(AppTheme.muted)
         }
@@ -953,7 +950,7 @@ struct AdminView: View {
 
     private func loadDrafts() {
         heroImageURLs = store.heroImages
-        aboutPortraitURL = store.aboutPortraitURL
+        aboutPortraitURL = store.configuredAboutPortraitURL
         launchPosterDrafts = store.launchPosters
         if let showreel = store.showreel {
             showreelDraft = showreel
@@ -1037,10 +1034,12 @@ struct AdminView: View {
     }
 
     private func uploadAboutPortrait(_ item: PhotosPickerItem) async {
-        await performOperation(success: "关于页人物图已替换，等待发布") { contentLoadID in
+        await performOperation(success: "关于页人物图已替换并发布") { contentLoadID in
             let media = try await uploadImage(item, prefix: "about-portrait")
             try ensureAdministratorOperationIsCurrent(contentLoadID)
-            aboutPortraitURL = media.sourceURL
+            let manifest = try await admin.publishAboutPortrait(media.sourceURL)
+            try applyAdministratorManifest(manifest, contentLoadID: contentLoadID)
+            aboutPortraitURL = manifest.aboutPortraitURL
         }
         selectedAboutPortrait = nil
     }

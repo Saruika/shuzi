@@ -14,6 +14,10 @@ struct AboutView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var presentsAdminAccess = false
+    // The managed About portrait is published as a 2:3 editorial image. Keep
+    // the visual canvas on the same ratio so a fitted image and its caption
+    // share one boundary instead of placing the caption in letterbox space.
+    private let portraitAspectRatio: CGFloat = 2 / 3
     private let portraitCaptionInset: CGFloat = 22
     private let singleColumnCaptionSafetyMargin: CGFloat = 12
 
@@ -65,7 +69,7 @@ struct AboutView: View {
                 owner: .fullScreenPresentation,
                 onExit: { presentsAdminAccess = false }
             ) {
-                AdminAccessView()
+                AdminAccessView(onClose: { presentsAdminAccess = false })
                     .environmentObject(admin)
                     .environmentObject(portfolioStore)
             }
@@ -90,7 +94,7 @@ struct AboutView: View {
     private func singleColumnCaptionBottomPadding(in scene: GeometryProxy) -> CGFloat {
         let minimumPadding = portraitCaptionInset + singleColumnCaptionSafetyMargin
         let portraitWidth = min(max(scene.size.width, 0), 720)
-        let portraitHeight = portraitWidth * 16 / 9
+        let portraitHeight = portraitWidth / portraitAspectRatio
         let visibleHeight = max(
             0,
             scene.size.height
@@ -172,7 +176,7 @@ struct AboutView: View {
             .padding(.top, portraitCaptionInset)
             .padding(.bottom, captionBottomPadding)
         }
-        .aspectRatio(9 / 16, contentMode: .fit)
+        .aspectRatio(portraitAspectRatio, contentMode: .fit)
     }
 
     private var biography: some View {
