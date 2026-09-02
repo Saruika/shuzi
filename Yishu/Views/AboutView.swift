@@ -1,13 +1,5 @@
 import SwiftUI
 
-private struct AboutScrollViewportHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 private enum AboutContactIcon {
     case system(String)
     case brandAsset(String)
@@ -22,8 +14,6 @@ struct AboutView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var presentsAdminAccess = false
-    @State private var scrollViewportHeight: CGFloat = 0
-
     private let portraitCaptionInset: CGFloat = 22
     private let singleColumnCaptionSafetyMargin: CGFloat = 12
 
@@ -63,22 +53,10 @@ struct AboutView: View {
                     .frame(maxWidth: .infinity, alignment: .top)
                 }
                 .scrollIndicators(.hidden)
-                .background {
-                    GeometryReader { viewport in
-                        Color.clear.preference(
-                            key: AboutScrollViewportHeightKey.self,
-                            value: viewport.size.height
-                        )
-                    }
-                }
                 .overlay(alignment: .bottom) {
                     visibleBottomTestProbe
                 }
                 .floatingTabBarScrollClearance()
-                .onPreferenceChange(AboutScrollViewportHeightKey.self) { height in
-                    guard height.isFinite, height > 0 else { return }
-                    scrollViewportHeight = height
-                }
             }
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -96,6 +74,7 @@ struct AboutView: View {
 
     private var usesTwoColumnLayout: Bool {
         !dynamicTypeSize.isAccessibilitySize
+            && dynamicTypeSize < .xxxLarge
             && (horizontalSizeClass == .regular || verticalSizeClass == .compact)
     }
 
@@ -110,11 +89,15 @@ struct AboutView: View {
 
     private func singleColumnCaptionBottomPadding(in scene: GeometryProxy) -> CGFloat {
         let minimumPadding = portraitCaptionInset + singleColumnCaptionSafetyMargin
-        guard scrollViewportHeight > 0 else { return minimumPadding }
-
         let portraitWidth = min(max(scene.size.width, 0), 720)
         let portraitHeight = portraitWidth * 16 / 9
-        let overflow = max(0, portraitHeight - scrollViewportHeight)
+        let visibleHeight = max(
+            0,
+            scene.size.height
+                - scene.safeAreaInsets.top
+                - scene.safeAreaInsets.bottom
+        )
+        let overflow = max(0, portraitHeight - visibleHeight)
         return minimumPadding + overflow
     }
 
@@ -161,7 +144,8 @@ struct AboutView: View {
                         .font(.largeTitle.weight(.light))
                         .foregroundStyle(AppTheme.gold.opacity(0.72))
                 }
-                    .accessibilityLabel("易姝形象照正在安全加载")
+                    .accessibilityLabel("易姝形象照")
+                    .accessibilityValue("正在安全加载")
                     .accessibilityIdentifier("about-portrait")
             }
             LinearGradient(colors: [.clear, AppTheme.ink], startPoint: .center, endPoint: .bottom)
