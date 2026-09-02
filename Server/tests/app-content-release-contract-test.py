@@ -219,6 +219,9 @@ def main() -> None:
         'run_composer --working-dir="$BUNDLE" audit'
     )
     assert candidate_probe_call < composer_validate_call < composer_audit_call
+    assert "--strict --no-check-all --no-check-publish" in preflight_body
+    assert "every other validation warning remains fatal" in preflight_body
+    assert '($packages[0]["version"] ?? "") !== "v7.1.0"' in preflight_body
     assert 'require $root . "/vendor/autoload.php"' not in preflight_body
 
     installed_autoload = function_body(

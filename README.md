@@ -76,6 +76,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/operations/README.md`](Server/operations/README.md)：线上运维修复记录。
 - [`Server/releases/v1.5.10-build41.md`](Server/releases/v1.5.10-build41.md)：Build 41 服务端发布清单与迁移桥独立信任记录。
 - [`Server/releases/v1.5.10-build41.2.md`](Server/releases/v1.5.10-build41.2.md)：保持发布包不变的 root-only staging 候选探针运维热修信任记录。
+- [`Server/releases/v1.5.10-build41.3.md`](Server/releases/v1.5.10-build41.3.md)：保持依赖锁定不变的 Composer 预检兼容热修信任记录。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

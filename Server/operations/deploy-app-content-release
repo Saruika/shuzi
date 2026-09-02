@@ -598,8 +598,14 @@ preflight_release() {
 
     probe_candidate_collaboration_release_fuse
 
+    # The release intentionally pins firebase/php-jwt exactly in composer.json
+    # and composer.lock. Composer reports that policy as a publish-style
+    # warning, so plain `validate --strict` would reject every reviewed bundle.
+    # Composer's narrow --no-check-all switch suppresses only unbound/overly
+    # strict constraint warnings; every other validation warning remains fatal.
+    # Then independently enforce the one-package v7.1.0 lock and manifest below.
     run_composer --working-dir="$BUNDLE" validate \
-        --strict --no-check-publish >/dev/null
+        --strict --no-check-all --no-check-publish >/dev/null
     run_composer --working-dir="$BUNDLE" audit \
         --locked --no-dev --format=summary >/dev/null
     run_composer --working-dir="$BUNDLE" check-platform-reqs \

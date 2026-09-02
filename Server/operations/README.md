@@ -332,7 +332,7 @@ JWT autoloader 及真实 `wp-load.php`，对 `/index.php?...` 和 `/?...`
 
 完成 1.5.8 bridge 后，普通版本升级使用目标版本自己的发布包。下面是
 Build 41 / 服务端 1.5.10 的已记录调用；独立信任值见
-[`../releases/v1.5.10-build41.2.md`](../releases/v1.5.10-build41.2.md)。SHA-256
+[`../releases/v1.5.10-build41.3.md`](../releases/v1.5.10-build41.3.md)。SHA-256
 不能替换成服务器现场重新计算后未经 Git 发布记录核对的值。备节点先用
 `standby` dry-run/apply，上海节点再用 `authority` dry-run/apply：
 
@@ -368,8 +368,12 @@ Composer 在清空凭据/代理环境、禁用插件/脚本与缓存后运行。
 
 预检会拒绝路径穿越、符号链接、硬链接、跨文件系统、非普通文件、发布单元外文件、密钥/数据库
 文件名、疑似长期凭据内容、PHP 备份残留和任何清单差异，然后执行 PHP 8.3
-语法检查、Composer 锁文件校验、漏洞审计、平台依赖检查、JWT autoload
+语法检查、Composer schema/锁文件校验、漏洞审计、平台依赖检查、JWT autoload
 静态检查、现有 Web 根目录安全校验、Nginx 配置检查及 FPM 状态检查。
+发布包有意在 `composer.json` 与 lock 中精确钉住 `firebase/php-jwt 7.1.0`；
+Composer 对未绑定/过严版本约束的 warning 通过精确的 `--no-check-all` 豁免；
+`--strict` 仍把其他 schema warning 视为失败。随后独立门禁继续要求唯一锁定包
+严格为 `v7.1.0`，并复验完整 manifest、平台依赖和漏洞公告。
 只读 `--bundle-preflight` 在完成 bundle/runtime 检查后、接触现有发布单元前
 退出，专供上面的 legacy bootstrap 复用；它不请求生产应用 origin，也不写
 Web 根目录、备份或服务状态。Composer 漏洞审计仍可能访问公开安全公告源。
