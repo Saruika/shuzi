@@ -48,6 +48,9 @@ def main() -> None:
         f"readonly AUTHORITY_VERIFY_SHA256={authority_verifier_sha256}",
         "readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security",
         f"readonly VERIFY_SHA256={webroot_verifier_sha256}",
+        "readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0",
+        "readonly TARGET_RELEASE_PHP_SHA256=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3",
+        "readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1",
     ):
         assert fixed_path in lines
     assert "LOCK_FILE=" not in text
@@ -143,21 +146,40 @@ def main() -> None:
         lines, "probe_candidate_collaboration_release_fuse", "preflight_release"
     )
     for probe_guard in (
+        'cat -- "$BUNDLE/shuzijun-app-content.php" |',
         "timeout --signal=KILL 20s runuser -u www-data -- env -i",
         '"$PHP_BIN" -n -d display_errors=0 -d log_errors=0',
-        'allow_url_fopen=0 -d "open_basedir=$BUNDLE"',
+        "allow_url_fopen=0 -d open_basedir=/nonexistent",
         "disable_functions=exec,passthru,shell_exec,system",
+        '$source = stream_get_contents(STDIN);',
+        '$sourceHash = hash("sha256", $source);',
+        '$legacyHash = $argv[1];',
+        '$targetHash = $argv[2];',
+        '$sentinel = $argv[3];',
+        '&& !hash_equals($targetHash, $sourceHash)',
+        'exit(25);',
+        'define("ABSPATH", "/nonexistent/");',
         'define("YISHU_ENABLE_COLLABORATION_PHASE1", true);',
-        'require $root . "/shuzijun-app-content.php";',
+        'eval("?>" . $source);',
         'if (!class_exists($class, false)) { exit(19); }',
         'method_exists($class, $gate)',
         '$class . "::COLLABORATION_PHASE1_RELEASE_FUSE"',
         'constant("YISHU_ENABLE_COLLABORATION_PHASE1") !== true',
-        'if (!$has_gate && !$has_fuse) { exit(0); }',
+        'if (!$has_gate && !$has_fuse) {',
+        'if (!hash_equals($legacyHash, $sourceHash)) { exit(24); }',
         'if (!$has_gate || !$has_fuse) { exit(21); }',
         'if (constant($fuse) !== false) { exit(22); }',
-        'exit($class::$gate() === false ? 0 : 23);',
+        'if ($class::$gate() !== false) { exit(23); }',
+        'fwrite(STDOUT, $sentinel . "\\n");',
+        'python3 -I -c',
+        'sys.stdin.buffer.read(len(expected) + 1)',
+        '"$COLLABORATION_FUSE_PROBE_SENTINEL" 8<&- 9<&- |',
         "candidate collaboration Phase 1 release fuse is not hard-disabled",
+        "candidate plugin source could not be read from the reviewed bundle",
+        "candidate plugin could not be evaluated by the isolated PHP probe",
+        "gate-free collaboration candidate is not the reviewed 1.5.8 bridge",
+        "candidate plugin exited before the isolated fuse probe completed",
+        "candidate plugin PHP is not in the reviewed release allowlist",
     ):
         assert probe_guard in collaboration_probe, (
             f"missing candidate collaboration fuse probe: {probe_guard}"
@@ -169,6 +191,7 @@ def main() -> None:
         "systemctl ",
         "create_code_backup",
         "install_release_unit",
+        'require $root . "/shuzijun-app-content.php";',
     ):
         assert forbidden_probe_effect not in collaboration_probe
 

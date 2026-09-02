@@ -332,7 +332,7 @@ JWT autoloader 及真实 `wp-load.php`，对 `/index.php?...` 和 `/?...`
 
 完成 1.5.8 bridge 后，普通版本升级使用目标版本自己的发布包。下面是
 Build 41 / 服务端 1.5.10 的已记录调用；独立信任值见
-[`../releases/v1.5.10-build41.md`](../releases/v1.5.10-build41.md)。SHA-256
+[`../releases/v1.5.10-build41.2.md`](../releases/v1.5.10-build41.2.md)。SHA-256
 不能替换成服务器现场重新计算后未经 Git 发布记录核对的值。备节点先用
 `standby` dry-run/apply，上海节点再用 `authority` dry-run/apply：
 
@@ -373,6 +373,16 @@ Composer 在清空凭据/代理环境、禁用插件/脚本与缓存后运行。
 只读 `--bundle-preflight` 在完成 bundle/runtime 检查后、接触现有发布单元前
 退出，专供上面的 legacy bootstrap 复用；它不请求生产应用 origin，也不写
 Web 根目录、备份或服务状态。Composer 漏洞审计仍可能访问公开安全公告源。
+候选协作熔断探针不会要求 PHP worker 穿越 `0700` 的 staging 根目录：root 只把
+已经通过 manifest 校验的插件入口通过标准输入送给降权、禁用常见文件流/socket/
+DNS/扩展网络出口且
+`open_basedir=/nonexistent` 的 PHP 进程。这样既保留 staging 的 root-only 边界，
+也能在与 PHP worker 相同的身份下验证内建熔断。整个探针只执行发布记录中精确
+审核的 1.5.8/1.5.10 入口哈希，未知入口在执行前失败关闭；无 gate/fuse 的兼容
+路径还必须是精确审核的 1.5.8 PHP 哈希。PHP 必须在全部断言后输出唯一成功哨兵，所以候选
+顶层提前 `exit(0)` 也不能跳过门禁。源码读取失败、加载失败、超时和熔断不安全
+会分别失败关闭。
+
 `--dry-run` 不创建锁/备份、不停止服务、不写入 Web 根目录，也不会发出可能
 触发访问日志、缓存、Cron 或角色元数据写入的 HTTP 请求。
 

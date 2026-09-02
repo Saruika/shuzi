@@ -19,7 +19,7 @@ define('YISHU_ENABLE_COLLABORATION_PHASE1', true);
 
 **上面只是供未来安全审计和发布探针识别的第二道门禁形式，当前版本严禁写入 `wp-config.php`。** 不得临时改为 option、filter、远程配置或直接 callback 来绕过硬关闭。
 
-`deploy-app-content-release --bundle-preflight` 会在接触现有 Webroot、发出 HTTP 探针、创建备份或改变 PHP-FPM 状态之前，用隔离 PHP 运行候选插件：探针主动把外部常量定义为严格 `true`，并要求 `collaboration_phase1_enabled()` 仍严格返回 `false`。普通发布、legacy bootstrap 与 standby seed 复用同一个 bundle preflight；候选熔断不满足时不得继续发布。
+`deploy-app-content-release --bundle-preflight` 会在接触现有 Webroot、发出 HTTP 探针、创建备份或改变 PHP-FPM 状态之前，用隔离 PHP 运行候选插件：root 从不可由 worker 遍历的 `0700` staging 边界读取已经通过 manifest 校验的入口，并仅通过标准输入交给 `www-data`、禁用常见文件流/socket/DNS/扩展网络出口且 `open_basedir=/nonexistent` 的 PHP 进程；不会为了探针放宽 staging 权限。探针主动把外部常量定义为严格 `true`，并要求 `collaboration_phase1_enabled()` 仍严格返回 `false`。整个探针只执行发布记录精确审核的 1.5.8/1.5.10 入口哈希，未知入口在 `eval` 前失败关闭；无 gate/fuse 的兼容路径还必须是精确审核的 1.5.8 PHP 哈希。全部断言完成后必须输出唯一成功哨兵，因此允许列表内候选顶层意外提前 `exit(0)` 也不能跳过后置门禁。源码读取失败、候选加载失败、超时和熔断不安全分别失败关闭。普通发布、legacy bootstrap 与 standby seed 复用同一个 bundle preflight；候选熔断不满足时不得继续发布。
 
 ## 允许开启前必须全部完成的门槛
 

@@ -79,9 +79,12 @@ def main() -> None:
         deployer, "preflight_release", "verify_installed_jwt_autoload"
     )
     assert 'define("YISHU_ENABLE_COLLABORATION_PHASE1", true);' in candidate_probe
-    assert 'if (!$has_gate && !$has_fuse) { exit(0); }' in candidate_probe
+    assert 'if (!$has_gate && !$has_fuse) {' in candidate_probe
+    assert 'if (!hash_equals($legacyHash, $sourceHash)) { exit(24); }' in candidate_probe
+    assert 'candidate plugin exited before the isolated fuse probe completed' in candidate_probe
     assert 'if (constant($fuse) !== false) { exit(22); }' in candidate_probe
-    assert 'exit($class::$gate() === false ? 0 : 23);' in candidate_probe
+    assert 'if ($class::$gate() !== false) { exit(23); }' in candidate_probe
+    assert 'fwrite(STDOUT, $sentinel . "\\n");' in candidate_probe
     assert "probe_candidate_collaboration_release_fuse" in deployer_preflight
     assert deployer_preflight.index(
         "probe_candidate_collaboration_release_fuse"

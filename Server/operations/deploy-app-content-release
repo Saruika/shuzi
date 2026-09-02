@@ -37,6 +37,9 @@ readonly DIRECT_VENDOR_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/vendo
 readonly MANIFEST_NAME=release.sha256
 readonly JWT_README=vendor/firebase/php-jwt/README.md
 readonly JWT_README_SHA256=8e2392c48204a21ad0d73068fb273b7ec1f79ccf13eab3fe6f256382f741dc39
+readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0
+readonly TARGET_RELEASE_PHP_SHA256=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
+readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1
 
 MODE=dry-run
 BUNDLE_INPUT=
@@ -487,23 +490,41 @@ run_composer() {
 }
 
 probe_candidate_collaboration_release_fuse() {
-    # Load the immutable candidate as the PHP worker in a no-network,
-    # no-write process. Defining the future external opt-in as strict true
-    # proves that a release carrying Phase 1 still has its internal fuse hard
-    # false. The pinned 1.5.8 bootstrap/seed bundle predates every Phase 1
-    # symbol, so an entirely absent gate is the only backward-compatible pass.
-    timeout --signal=KILL 20s runuser -u www-data -- env -i \
+    local pipeline_status=()
+
+    # The staging root is intentionally root:root 0700, so the PHP worker must
+    # not traverse it. Root streams the already manifest-verified candidate
+    # through stdin while PHP remains www-data with common stream, socket and
+    # DNS network entry points disabled and filesystem-confined. Exact source
+    # hashes below are the primary execution allowlist. This preserves
+    # the root-only release boundary instead of
+    # weakening it merely to make the probe readable. Defining the future
+    # external opt-in as strict true proves that a release carrying Phase 1
+    # still has its internal fuse hard false. The pinned 1.5.8 bootstrap/seed
+    # bundle predates every Phase 1 symbol, so an entirely absent gate is the
+    # only backward-compatible pass.
+    if cat -- "$BUNDLE/shuzijun-app-content.php" | \
+        timeout --signal=KILL 20s runuser -u www-data -- env -i \
         PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
         "$PHP_BIN" -n -d display_errors=0 -d log_errors=0 \
-        -d allow_url_fopen=0 -d "open_basedir=$BUNDLE" \
-        -d 'disable_functions=exec,passthru,shell_exec,system,proc_open,popen,putenv,mail,pcntl_exec,dl,link,symlink,rename,unlink,rmdir,mkdir,chmod,chown,chgrp,touch,copy,file_put_contents,fsockopen,pfsockopen,stream_socket_client' \
+        -d allow_url_fopen=0 -d open_basedir=/nonexistent \
+        -d 'disable_functions=exec,passthru,shell_exec,system,proc_open,popen,putenv,mail,pcntl_exec,dl,link,symlink,rename,unlink,rmdir,mkdir,chmod,chown,chgrp,touch,copy,file_put_contents,fsockopen,pfsockopen,stream_socket_client,stream_socket_server,stream_socket_sendto,stream_socket_recvfrom,stream_socket_accept,stream_socket_pair,stream_socket_shutdown,gethostbyname,gethostbynamel,gethostbyaddr,dns_check_record,checkdnsrr,dns_get_record,getmxrr,dns_get_mx,socket_create,socket_connect,socket_send,socket_sendto,socket_write,socket_create_listen,socket_create_pair,socket_import_stream,socket_addrinfo_lookup,socket_addrinfo_connect,socket_addrinfo_bind,curl_init,curl_exec,curl_multi_init,curl_multi_exec,curl_multi_add_handle,ftp_connect,ftp_ssl_connect' \
         -r '
-        $root = $argv[1];
-        define("ABSPATH", $root . "/");
+        $source = stream_get_contents(STDIN);
+        if (!is_string($source) || $source === "") { exit(18); }
+        $sourceHash = hash("sha256", $source);
+        $legacyHash = $argv[1];
+        $targetHash = $argv[2];
+        $sentinel = $argv[3];
+        if (!hash_equals($legacyHash, $sourceHash)
+            && !hash_equals($targetHash, $sourceHash)) {
+            exit(25);
+        }
+        define("ABSPATH", "/nonexistent/");
         define("YISHU_ENABLE_COLLABORATION_PHASE1", true);
         function add_action(...$arguments): void {}
         function add_filter(...$arguments): void {}
-        require $root . "/shuzijun-app-content.php";
+        eval("?>" . $source);
 
         $class = "Shuzijun_App_Content_API";
         $gate = "collaboration_phase1_enabled";
@@ -512,12 +533,55 @@ probe_candidate_collaboration_release_fuse() {
         $has_gate = method_exists($class, $gate);
         $has_fuse = defined($fuse);
         if (constant("YISHU_ENABLE_COLLABORATION_PHASE1") !== true) { exit(20); }
-        if (!$has_gate && !$has_fuse) { exit(0); }
+        if (!$has_gate && !$has_fuse) {
+            if (!hash_equals($legacyHash, $sourceHash)) { exit(24); }
+            fwrite(STDOUT, $sentinel . "\n");
+            exit(0);
+        }
         if (!$has_gate || !$has_fuse) { exit(21); }
         if (constant($fuse) !== false) { exit(22); }
-        exit($class::$gate() === false ? 0 : 23);
-    ' "$BUNDLE" \
-        || fail 'candidate collaboration Phase 1 release fuse is not hard-disabled'
+        if ($class::$gate() !== false) { exit(23); }
+        fwrite(STDOUT, $sentinel . "\n");
+        exit(0);
+    ' "$LEGACY_BRIDGE_PHP_SHA256" "$TARGET_RELEASE_PHP_SHA256" \
+        "$COLLABORATION_FUSE_PROBE_SENTINEL" 8<&- 9<&- | \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        python3 -I -c '
+import sys
+
+expected = (sys.argv[1] + "\n").encode("ascii")
+payload = sys.stdin.buffer.read(len(expected) + 1)
+raise SystemExit(0 if payload == expected else 1)
+' "$COLLABORATION_FUSE_PROBE_SENTINEL"
+    then
+        return 0
+    fi
+
+    pipeline_status=("${PIPESTATUS[@]}")
+    if [[ "${pipeline_status[0]:-1}" -ne 0 ]]; then
+        fail 'candidate plugin source could not be read from the reviewed bundle'
+        return 1
+    fi
+    case "${pipeline_status[1]:-1}" in
+        18) fail 'candidate plugin source was empty' ;;
+        19) fail 'candidate plugin did not define the expected API class' ;;
+        20) fail 'candidate plugin altered the external collaboration opt-in' ;;
+        21) fail 'candidate collaboration gate and release fuse are incomplete' ;;
+        22) fail 'candidate collaboration Phase 1 release fuse is not hard-disabled' ;;
+        23) fail 'candidate collaboration gate became enabled' ;;
+        24) fail 'gate-free collaboration candidate is not the reviewed 1.5.8 bridge' ;;
+        25) fail 'candidate plugin PHP is not in the reviewed release allowlist' ;;
+        124|137) fail 'candidate collaboration release fuse probe timed out' ;;
+        0)
+            if [[ "${pipeline_status[2]:-1}" -ne 0 ]]; then
+                fail 'candidate plugin exited before the isolated fuse probe completed'
+            else
+                fail 'candidate plugin produced an invalid fuse probe result'
+            fi
+            ;;
+        *) fail 'candidate plugin could not be evaluated by the isolated PHP probe' ;;
+    esac
+    return 1
 }
 
 preflight_release() {
@@ -1160,7 +1224,7 @@ elif [[ "$AUTHORITY_ROLE" != authority && "$AUTHORITY_ROLE" != standby ]]; then
     fail '--authority-role authority|standby is mandatory outside bundle preflight'
 fi
 
-for command_name in realpath stat find grep awk sha256sum flock nginx systemctl curl \
+for command_name in realpath stat find grep awk sha256sum flock nginx systemctl curl cat \
     install cp rm sort date mkdir chmod chown sleep tail env timeout runuser mktemp \
     python3 sync; do
     require_command "$command_name"
