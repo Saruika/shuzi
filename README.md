@@ -79,6 +79,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.5.10-build41.3.md`](Server/releases/v1.5.10-build41.3.md)：保持依赖锁定不变的 Composer 预检兼容热修信任记录。
 - [`Server/releases/v1.5.10-build41.4.md`](Server/releases/v1.5.10-build41.4.md)：保持发布包不变的 live manifest 原子发布与回滚热修信任记录。
 - [`Server/releases/v1.5.10-build41.5.md`](Server/releases/v1.5.10-build41.5.md)：保持发布包不变的 staging 特殊权限位归一化热修信任记录。
+- [`Server/releases/v1.5.10-build41.6.md`](Server/releases/v1.5.10-build41.6.md)：保持业务字节不变的 authority/standby 内部健康监控热修信任记录。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

@@ -457,6 +457,17 @@ FPM 停止而不是带着部分恢复的代码重新上线，并输出人工恢�
 dry-run，应用后再比较两边发布清单哈希。新加坡的完整 App API namespace
 仍应代理到上海；本发布器不会修改该路由、CDN 或 Nginx 配置。
 
+`shuzijun-internal-health` 每五分钟写入 root-only 私有健康快照。角色只由
+固定 `/etc/shuzijun/account-authority-role` marker 与钉住哈希的验证器
+确定，绝不从 failover timer 推断，也绝不在异常时默认 authority。Authority
+检查 CDN 与 sender/sync scheduler；standby 检查 receiver generation 与
+failover。每日同步日志的最大正常间隔为 26 小时，且日志必须 root 所有、
+单链接、不可被组或其他用户写入并包含对应完成标记。`degraded` 使用 exit 2，
+由 unit 的 `SuccessExitStatus=2` 接受为一次成功采样；`status.json` 中仍保留
+明确 reason codes。`critical` 继续 exit 1。该工具只读系统状态，不运行同步、
+ingest、服务启停或故障切换。独立信任值见
+[`../releases/v1.5.10-build41.6.md`](../releases/v1.5.10-build41.6.md)。
+
 `cdn-worker-loop-fix.patch` records the production fix for the CDN publication
 queue watcher. The worker previously touched and truncated an already-empty
 queue on every timer run; the systemd path unit observed its own worker change,

@@ -1,0 +1,20 @@
+[Unit]
+Description=Shuzijun private internal health snapshot
+After=nginx.service php8.3-fpm.service mysql.service network.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/shuzijun-internal-health
+SuccessExitStatus=2
+TimeoutStartSec=4min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/shuzijun-health
+StateDirectory=shuzijun-health
+StateDirectoryMode=0700
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077

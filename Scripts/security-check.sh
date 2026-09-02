@@ -68,6 +68,7 @@ python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py
 python3 Server/tests/bootstrap-legacy-app-content-release-contract-test.py
 python3 Server/tests/standby-seed-contract-test.py
+python3 Server/tests/internal-health-contract-test.py
 python3 Server/tests/webroot-verifier-trust-contract-test.py
 python3 Server/tests/sync-script-contract-test.py
 python3 Server/tests/sync-scheduler-contract-test.py

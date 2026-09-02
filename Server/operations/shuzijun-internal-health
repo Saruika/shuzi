@@ -1,0 +1,570 @@
+#!/usr/bin/env python3
+"""Write a private, role-aware health snapshot without changing service state."""
+
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import re
+import stat
+import subprocess
+import tempfile
+
+
+SITE = pathlib.Path("/var/www/html/shuzijun.com.cn")
+OUT_DIR = pathlib.Path("/var/lib/shuzijun-health")
+OUT_FILE = OUT_DIR / "status.json"
+ROLE_FILE = pathlib.Path("/etc/shuzijun/account-authority-role")
+ROLE_VERIFIER = pathlib.Path("/usr/local/sbin/verify-shuzijun-account-authority-role")
+ROLE_VERIFIER_SHA256 = "5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58"
+SYNC_MAX_AGE_HOURS = 26
+SNAPSHOT_MAX_AGE_HOURS = 36
+FAILOVER_MAX_AGE_HOURS = 0.5
+
+
+def command(args, timeout=15):
+    try:
+        result = subprocess.run(
+            args,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except Exception as error:
+        return 99, "", type(error).__name__
+
+
+def unit_state(name, verb="is-active"):
+    code, stdout, _ = command(["systemctl", verb, name], timeout=8)
+    return stdout or ("unknown" if code else "active")
+
+
+def unit_property(name, prop):
+    code, stdout, _ = command(
+        ["systemctl", "show", name, f"--property={prop}", "--value"],
+        timeout=8,
+    )
+    return stdout if code == 0 and stdout else "unknown"
+
+
+def sha256(path):
+    item = pathlib.Path(path)
+    if not item.is_file() or item.is_symlink():
+        return None
+    digest = hashlib.sha256()
+    with item.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def file_mtime(path):
+    item = pathlib.Path(path)
+    if not item.exists() or item.is_symlink():
+        return None
+    return datetime.datetime.fromtimestamp(
+        item.stat().st_mtime, datetime.timezone.utc
+    ).isoformat(timespec="seconds")
+
+
+def age_within(timestamp, max_age_hours, now_timestamp=None):
+    now_value = (
+        datetime.datetime.now(datetime.timezone.utc).timestamp()
+        if now_timestamp is None
+        else now_timestamp
+    )
+    age_hours = (now_value - timestamp) / 3600
+    return 0 <= age_hours <= max_age_hours
+
+
+def secure_regular_file(path):
+    item = pathlib.Path(path)
+    try:
+        metadata = item.lstat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == 0
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) & 0o022 == 0
+    )
+
+
+def verified_account_role():
+    details = {"role": None, "verified": False, "reason": None}
+    try:
+        raw_role = ROLE_FILE.read_bytes()
+    except OSError:
+        details["reason"] = "authority_role_unreadable"
+        return details
+    if raw_role not in (b"authority\n", b"standby\n"):
+        details["reason"] = "authority_role_invalid"
+        return details
+    role = raw_role[:-1].decode("ascii")
+    details["role"] = role
+    if not secure_regular_file(ROLE_VERIFIER):
+        details["reason"] = "authority_verifier_metadata_invalid"
+        return details
+    if stat.S_IMODE(ROLE_VERIFIER.stat().st_mode) != 0o755:
+        details["reason"] = "authority_verifier_mode_invalid"
+        return details
+    if sha256(ROLE_VERIFIER) != ROLE_VERIFIER_SHA256:
+        details["reason"] = "authority_verifier_hash_invalid"
+        return details
+    code, _, _ = command(
+        ["/usr/bin/python3", "-I", str(ROLE_VERIFIER), role], timeout=10
+    )
+    if code != 0:
+        details["reason"] = "authority_role_verification_failed"
+        return details
+    details["verified"] = True
+    return details
+
+
+def local_http(path, expected_status=200, marker="", json_code=""):
+    handle, temporary_name = tempfile.mkstemp(prefix="sj-health-", dir="/tmp")
+    os.close(handle)
+    temporary = pathlib.Path(temporary_name)
+    try:
+        args = [
+            "curl",
+            "-ksS",
+            "--max-time",
+            "12",
+            "--resolve",
+            "www.shuzijun.com.cn:443:127.0.0.1",
+            "-o",
+            temporary_name,
+            "-w",
+            "%{http_code} %{time_total}",
+            "https://www.shuzijun.com.cn" + path,
+        ]
+        command_code, stdout, stderr = command(args, timeout=15)
+        parts = stdout.split()
+        status_code = int(parts[0]) if parts and parts[0].isdigit() else 0
+        elapsed_ms = round(float(parts[1]) * 1000, 1) if len(parts) > 1 else None
+        body = temporary.read_bytes() if temporary.exists() else b""
+        marker_ok = marker.encode() in body if marker else True
+        json_code_ok = True
+        if json_code:
+            try:
+                payload = json.loads(body.decode("utf-8"))
+                json_code_ok = isinstance(payload, dict) and payload.get("code") == json_code
+            except Exception:
+                json_code_ok = False
+        return {
+            "ok": (
+                command_code == 0
+                and status_code == expected_status
+                and marker_ok
+                and json_code_ok
+            ),
+            "status": status_code,
+            "elapsed_ms": elapsed_ms,
+            "marker_ok": marker_ok,
+            "json_code_ok": json_code_ok,
+            "error": stderr[:120] if command_code else None,
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def log_summary(path, max_age_hours, success_markers, start_markers=()):
+    item = pathlib.Path(path)
+    trusted = secure_regular_file(item)
+    result = {
+        "path": str(item),
+        "present": item.exists(),
+        "trusted": trusted,
+        "mtime": file_mtime(item),
+        "recent": False,
+        "success_marker": False,
+        "generation": None,
+        "incomplete": False,
+        "recent_error": None,
+    }
+    if not trusted:
+        return result
+    try:
+        tail = item.read_text(encoding="utf-8", errors="replace")[-24000:]
+    except OSError:
+        return result
+    lowered = tail.lower()
+    latest_success = max((lowered.rfind(value.lower()) for value in success_markers), default=-1)
+    latest_start = max((lowered.rfind(value.lower()) for value in start_markers), default=-1)
+    result["success_marker"] = latest_success >= 0
+    if latest_success >= 0:
+        line_start = lowered.rfind("\n", 0, latest_success) + 1
+        line_end = lowered.find("\n", latest_success)
+        if line_end < 0:
+            line_end = len(lowered)
+        result["generation"] = success_generation(lowered[line_start:line_end])
+    result["incomplete"] = latest_start > latest_success
+    scan = lowered[latest_success + 1 :] if latest_success >= 0 else lowered
+    result["recent_error"] = any(
+        value in scan for value in ("traceback", "fatal", "permission denied", "failed")
+    )
+    result["recent"] = age_within(item.stat().st_mtime, max_age_hours)
+    return result
+
+
+def success_generation(line):
+    matches = re.findall(r"(?:^|\s)generation=(0|[1-9][0-9]{0,18})(?=\s|$)", line)
+    if len(matches) != 1:
+        return None
+    encoded = (matches[0] + "\n").encode("ascii")
+    return int(matches[0]) if valid_generation_bytes(encoded) else None
+
+
+def sanitized_failover():
+    path = pathlib.Path("/var/lib/shuzijun-failover/state.json")
+    result = {
+        "readable": False,
+        "trusted": secure_regular_file(path),
+        "mtime": file_mtime(path),
+        "recent": False,
+    }
+    if not result["trusted"]:
+        return result
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return result
+    normalized = validated_failover_payload(data)
+    if normalized is None:
+        result["readable"] = True
+        result["schema_valid"] = False
+        return result
+    result.update(
+        {
+            "readable": True,
+            "schema_valid": True,
+            "recent": age_within(path.stat().st_mtime, FAILOVER_MAX_AGE_HOURS),
+            **normalized,
+        }
+    )
+    return result
+
+
+def validated_failover_payload(data):
+    if not isinstance(data, dict) or data.get("mode") not in ("primary", "backup"):
+        return None
+    failures = data.get("consecutive_failures")
+    if isinstance(failures, bool) or not isinstance(failures, int) or failures < 0:
+        return None
+    checks = {}
+    for source, target in (
+        ("last_primary", "primary_ok"),
+        ("last_backup", "backup_ok"),
+        ("last_public_path", "public_path_ok"),
+    ):
+        value = data.get(source)
+        if not isinstance(value, dict) or not isinstance(value.get("ok"), bool):
+            return None
+        checks[target] = value["ok"]
+    return {
+        "mode": data["mode"],
+        "consecutive_failures": failures,
+        **checks,
+    }
+
+
+def generation_state(path):
+    item = pathlib.Path(path)
+    result = {
+        "present": item.exists(),
+        "trusted": secure_regular_file(item),
+        "valid": False,
+        "value": None,
+    }
+    if not result["trusted"] or stat.S_IMODE(item.stat().st_mode) != 0o600:
+        return result
+    try:
+        value = item.read_bytes()
+    except OSError:
+        return result
+    result["valid"] = valid_generation_bytes(value)
+    if result["valid"]:
+        result["value"] = int(value[:-1])
+    return result
+
+
+def valid_generation_bytes(value):
+    if re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", value) is None:
+        return False
+    return int(value[:-1]) < 2**63
+
+
+def log_ok(summary):
+    return (
+        summary.get("trusted") is True
+        and summary.get("recent") is True
+        and summary.get("success_marker") is True
+        and summary.get("incomplete") is False
+        and summary.get("recent_error") is False
+    )
+
+
+def sync_operation_reasons(role, operations, sync_log, generation, failover=None):
+    reasons = []
+    completed_generation = sync_log.get("generation")
+    if isinstance(completed_generation, bool) or not isinstance(completed_generation, int):
+        reasons.append("sync_log_generation_missing_or_invalid")
+    if role == "authority":
+        if (
+            operations.get("sync_timer_active") != "active"
+            or operations.get("sync_timer_enabled") != "enabled"
+        ):
+            reasons.append("sync_timer_missing_or_disabled")
+        if operations.get("sync_service_result") != "success":
+            reasons.append("sync_service_result_not_success")
+        if not generation.get("valid"):
+            reasons.append("authority_sync_generation_missing_or_invalid")
+        elif (
+            isinstance(completed_generation, int)
+            and not isinstance(completed_generation, bool)
+            and (
+                isinstance(generation.get("value"), bool)
+                or not isinstance(generation.get("value"), int)
+                or generation.get("value") < completed_generation
+            )
+        ):
+            reasons.append("authority_sync_generation_behind_completed_log")
+        if (
+            operations.get("failover_timer_active") == "active"
+            or operations.get("failover_timer_enabled") == "enabled"
+        ):
+            reasons.append("authority_forbidden_failover_timer_active")
+    elif role == "standby":
+        if (
+            operations.get("failover_timer_active") != "active"
+            or operations.get("failover_timer_enabled") != "enabled"
+        ):
+            reasons.append("standby_failover_timer_disabled")
+        if operations.get("failover_service_result") != "success":
+            reasons.append("standby_failover_service_result_not_success")
+        if (
+            operations.get("sync_timer_active") == "active"
+            or operations.get("sync_timer_enabled") == "enabled"
+        ):
+            reasons.append("standby_forbidden_sync_timer_active")
+        if (
+            operations.get("cdn_publish_timer_active") == "active"
+            or operations.get("cdn_publish_timer_enabled") == "enabled"
+        ):
+            reasons.append("standby_forbidden_cdn_timer_active")
+        failover = failover or {}
+        if failover.get("mode") != "primary":
+            reasons.append("standby_failover_mode_not_primary")
+        if not (
+            failover.get("readable") is True
+            and failover.get("schema_valid") is True
+            and failover.get("recent") is True
+            and failover.get("primary_ok") is True
+            and failover.get("backup_ok") is True
+            and failover.get("public_path_ok") is True
+            and failover.get("consecutive_failures") == 0
+        ):
+            reasons.append("standby_failover_state_unhealthy_or_stale")
+        if not generation.get("valid"):
+            reasons.append("standby_sync_generation_missing_or_invalid")
+        elif (
+            isinstance(completed_generation, int)
+            and not isinstance(completed_generation, bool)
+            and (
+                isinstance(generation.get("value"), bool)
+                or not isinstance(generation.get("value"), int)
+                or generation.get("value") != completed_generation
+            )
+        ):
+            reasons.append("standby_sync_generation_mismatch_applied_log")
+    if not log_ok(sync_log):
+        reasons.append("sync_last_success_untrusted_or_stale")
+    return reasons
+
+
+def classify_status(critical_reasons, operation_reasons):
+    if critical_reasons:
+        return "critical", 1
+    if operation_reasons:
+        return "degraded", 2
+    return "healthy", 0
+
+
+def authority_cdn_ok(operations):
+    return (
+        operations.get("cdn_publish_timer_active") == "active"
+        and operations.get("cdn_publish_timer_enabled") == "enabled"
+        and operations.get("cdn_publish_service_result") == "success"
+    )
+
+
+def main():
+    now = datetime.datetime.now(datetime.timezone.utc)
+    role_details = verified_account_role()
+    account_role = role_details["role"] if role_details["verified"] else None
+    legacy_role = {"authority": "primary", "standby": "backup"}.get(account_role, "unknown")
+    expected_account_status = 401 if account_role == "authority" else 503
+    expected_account_code = (
+        "fan_session_required"
+        if account_role == "authority"
+        else "yishu_account_authority_unavailable"
+    )
+
+    services = {name: unit_state(name) for name in ("nginx", "php8.3-fpm", "mysql")}
+    cache_probe = f"/?healthcheck=internal-{int(now.timestamp())}"
+    routes = {
+        "dynamic_home": local_http(cache_probe, marker="shuzijun-analytics"),
+        "wordpress_api": local_http("/wp-json/"),
+        "hls_master": local_http(
+            "/wp-content/uploads/showreel/hls-20260826a/master.m3u8", marker="#EXTM3U"
+        ),
+        "showreel_poster": local_http(
+            "/wp-content/uploads/showreel/yishu-showreel-poster.jpg"
+        ),
+    }
+    if account_role in ("authority", "standby"):
+        routes["account_api_query"] = local_http(
+            "/index.php?rest_route=/shuzijun/v1/app-content",
+            expected_status=expected_account_status,
+            json_code=expected_account_code,
+        )
+
+    snapshot = log_summary(
+        "/var/log/tencent-snapshot.log",
+        SNAPSHOT_MAX_AGE_HOURS,
+        ("created ",),
+    )
+    operations = {
+        "cdn_publish_timer_active": unit_state("shuzijun-cdn-publish.timer"),
+        "cdn_publish_timer_enabled": unit_state(
+            "shuzijun-cdn-publish.timer", "is-enabled"
+        ),
+        "cdn_publish_service_result": unit_property(
+            "shuzijun-cdn-publish.service", "Result"
+        ),
+        "sync_timer_active": unit_state("shuzijun-sync.timer"),
+        "sync_timer_enabled": unit_state("shuzijun-sync.timer", "is-enabled"),
+        "sync_service_result": unit_property("shuzijun-sync.service", "Result"),
+        "failover_timer_active": unit_state("shuzijun-failover.timer"),
+        "failover_timer_enabled": unit_state("shuzijun-failover.timer", "is-enabled"),
+        "failover_service_result": unit_property("shuzijun-failover.service", "Result"),
+        "snapshot_log": snapshot,
+    }
+
+    operation_reasons = []
+    if account_role == "authority":
+        sync_log = log_summary(
+            "/var/log/wp-sync.log",
+            SYNC_MAX_AGE_HOURS,
+            ("incremental sync completed",),
+            ("incremental sync started",),
+        )
+        issued_generation = generation_state(
+            "/var/lib/shuzijun-sync/highest-issued-generation"
+        )
+        operations.update(
+            {"sync_log": sync_log, "issued_generation": issued_generation}
+        )
+        operation_reasons.extend(
+            sync_operation_reasons(
+                account_role, operations, sync_log, issued_generation
+            )
+        )
+    elif account_role == "standby":
+        sync_log = log_summary(
+            "/var/log/shuzijun-sync-receiver.log",
+            SYNC_MAX_AGE_HOURS,
+            ("signed uploads/database sync applied", "incremental sync applied"),
+        )
+        failover = sanitized_failover()
+        accepted_generation = generation_state(
+            "/var/lib/shuzijun-sync/state/highest-accepted-generation"
+        )
+        operations.update(
+            {
+                "sync_log": sync_log,
+                "failover": failover,
+                "accepted_generation": accepted_generation,
+            }
+        )
+        operation_reasons.extend(
+            sync_operation_reasons(
+                account_role, operations, sync_log, accepted_generation, failover
+            )
+        )
+
+    if not log_ok(snapshot):
+        operation_reasons.append("snapshot_last_success_untrusted_or_stale")
+
+    critical_reasons = []
+    if not role_details["verified"]:
+        critical_reasons.append(role_details["reason"] or "authority_role_unverified")
+    if not all(value == "active" for value in services.values()):
+        critical_reasons.append("required_service_inactive")
+    if not routes or not all(value["ok"] for value in routes.values()):
+        critical_reasons.append("required_route_failed")
+    if account_role == "authority" and not authority_cdn_ok(operations):
+        critical_reasons.append("authority_cdn_timer_or_service_unhealthy")
+
+    status_name, exit_code = classify_status(critical_reasons, operation_reasons)
+    payload = {
+        "schema": 2,
+        "checked_at": now.isoformat(timespec="seconds"),
+        "role": legacy_role,
+        "account_authority_role": account_role,
+        "role_verified": role_details["verified"],
+        "status": status_name,
+        "critical_reasons": sorted(set(critical_reasons)),
+        "operation_reasons": sorted(set(operation_reasons)),
+        "services": services,
+        "routes": routes,
+        "operations": operations,
+        "hashes": {
+            "theme_index": sha256(SITE / "wp-content/themes/yishu-model/index.php"),
+            "theme_functions": sha256(SITE / "wp-content/themes/yishu-model/functions.php"),
+            "theme_footer": sha256(SITE / "wp-content/themes/yishu-model/footer.php"),
+            "operations_plugin": sha256(
+                SITE / "wp-content/mu-plugins/shuzijun-site-operations.php"
+            ),
+            "app_content_manifest": sha256(
+                SITE / "wp-content/mu-plugins/release.sha256"
+            ),
+            "app_content_plugin": sha256(
+                SITE / "wp-content/mu-plugins/shuzijun-app-content.php"
+            ),
+            "hls_master": sha256(
+                SITE / "wp-content/uploads/showreel/hls-20260826a/master.m3u8"
+            ),
+        },
+    }
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = OUT_FILE.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, OUT_FILE)
+    print(
+        json.dumps(
+            {
+                "status": status_name,
+                "role": legacy_role,
+                "account_authority_role": account_role,
+                "routes_ok": all(value["ok"] for value in routes.values()),
+                "services_ok": all(value == "active" for value in services.values()),
+                "critical_reasons": payload["critical_reasons"],
+                "operation_reasons": payload["operation_reasons"],
+            },
+            ensure_ascii=False,
+        )
+    )
+    raise SystemExit(exit_code)
+
+
+if __name__ == "__main__":
+    main()
