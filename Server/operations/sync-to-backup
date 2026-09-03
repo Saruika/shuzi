@@ -1,121 +1,956 @@
 #!/bin/bash
 set -euo pipefail
+umask 077
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 LC_ALL=C
 LANG=C
 export PATH LC_ALL LANG
-unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true
+unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME TMPDIR || true
 
 SITE=/var/www/html/shuzijun.com.cn
+SELF=/usr/local/sbin/sync-to-backup
 HOST=129.226.202.207
 TRANSPORT_USER=shuzijun-sync-transport
 KEY=/root/.ssh/shuzijun_sync_ed25519
-LOG=/var/log/wp-sync.log
-VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+SYNC_KNOWN_HOSTS=/etc/shuzijun/sync-known-hosts
+SYNC_KNOWN_HOSTS_SHA256=b48cc29b7506423ba402b954cb8c0fedc748706549ed704e84647b70a517d6f3
+LOG=/var/lib/shuzijun-logs/sync-authority.log
+VERIFY=/usr/local/sbin/verify-shuzijun-sync-source
 AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
 AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 REMOTE_RECEIVER=/usr/local/sbin/apply-shuzijun-sync
-REMOTE_RECEIVER_SHA256=1fcf996003f4320b025a23d20363c1bfb0e3533e79596b7af7bae0dc20e8858a
-SYNC_PROTOCOL=shuzijun-sync-receiver-v3-signed-uploads-only
+REMOTE_RECEIVER_SHA256=0a28c89ef1ac427f6ac72e5268cb5aa0ed28169493aab64d05dd687a40e67e03
+SYNC_PROTOCOL=shuzijun-sync-receiver-v4-transactional-uploads
 GENERATION_ROOT=/var/lib/shuzijun-sync
 GENERATION_STATE="$GENERATION_ROOT/highest-issued-generation"
+SITE_OPERATION_LOCK="$GENERATION_ROOT/site-operation.lock"
+SENDER_STAGING_ROOT="$GENERATION_ROOT/sender-staging"
+FPM_SERVICE=php8.3-fpm.service
+FPM_FREEZE_ROOT=/run/shuzijun-sync
+FPM_FREEZE_MARKER="$FPM_FREEZE_ROOT/primary-fpm-freeze.json"
+FPM_FREEZE_ARM_LIMIT_SECONDS=120
+FPM_FREEZE_LIMIT_SECONDS=180
 
-RSYNC_FILTERS=(
-    --exclude='cache/'
-    --exclude='debug.log'
-    --exclude='/mu-plugins/shuzijun-app-content.php'
-    --exclude='/mu-plugins/composer.json'
-    --exclude='/mu-plugins/composer.lock'
-    --exclude='/mu-plugins/vendor/'
-    --exclude='*.[pP][hH][pP]*'
-    --exclude='*.php?*'
-    --exclude='*.php.*'
-    --exclude='*.php_*'
-    --exclude='*.php-*'
-    --exclude='*.php~'
-    --exclude='*.bak*'
-    --exclude='*.backup*'
-    --exclude='*.old*'
-    --exclude='*.orig*'
-    --exclude='*.save*'
-    --exclude='*.swp*'
-    --exclude='*.tmp*'
-    --exclude='*.copy*'
-    --exclude='*.disabled*'
-    --exclude='*.corrupt*'
-    --exclude='*.fixbak*'
-    --exclude='*.before-*'
-    --exclude='*~'
-    --exclude='.env*'
-    --exclude='*.sql*'
-    --exclude='*.dump*'
-    --exclude='*.pem'
-    --exclude='*.key'
-    --exclude='*.p8'
-    --exclude='*.P8'
-    --exclude='*.p12'
-    --exclude='*.pfx'
-    --exclude='*.jks'
-    --exclude='*.zip'
-    --exclude='*.tar'
-    --exclude='*.tar.gz'
-    --exclude='*.tgz'
-    --exclude='*.7z'
-    --exclude='*.rar'
-    --include='/uploads/'
-    --include='/uploads/***'
-    --exclude='*'
-)
+service_property() {
+    /usr/bin/timeout --signal=TERM --kill-after=2s 5s \
+        /usr/bin/systemctl show --property="$2" --value "$1"
+}
+
+service_snapshot() {
+    /usr/bin/timeout --signal=TERM --kill-after=2s 5s \
+        /usr/bin/systemctl show \
+        --property=LoadState --property=ActiveState --property=SubState \
+        --property=Result --property=MainPID --property=Job "$1"
+}
+
+verify_primary_fpm_watchdog_active() {
+    local unit=$1 active_state sub_state result
+    [[ "$unit" =~ ^shuzijun-primary-fpm-recovery-[0-9a-f]{16}\.service$ ]] \
+        || return 1
+    active_state=$(service_property "$unit" ActiveState) || return 1
+    sub_state=$(service_property "$unit" SubState) || return 1
+    result=$(service_property "$unit" Result) || return 1
+    test "$active_state" = active || return 1
+    test "$sub_state" = running || return 1
+    test "$result" = success || return 1
+}
+
+verify_primary_fpm_active() {
+    local snapshot main_pid
+    snapshot=$(service_snapshot "$FPM_SERVICE") || return 1
+    test "$(grep -Fxc 'LoadState=loaded' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'ActiveState=active' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'SubState=running' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'Result=success' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'Job=' <<<"$snapshot")" -eq 1 || return 1
+    main_pid=$(sed -n 's/^MainPID=//p' <<<"$snapshot") || return 1
+    [[ "$main_pid" =~ ^[1-9][0-9]*$ && "$main_pid" -gt 1 ]] || return 1
+    /usr/bin/timeout --signal=TERM --kill-after=2s 5s \
+        /usr/bin/systemctl is-active --quiet "$FPM_SERVICE" || return 1
+}
+
+verify_primary_fpm_inactive() {
+    local snapshot is_active_status
+    snapshot=$(service_snapshot "$FPM_SERVICE") || return 1
+    test "$(grep -Fxc 'LoadState=loaded' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'ActiveState=inactive' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'SubState=dead' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'Result=success' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'MainPID=0' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'Job=' <<<"$snapshot")" -eq 1 || return 1
+    if /usr/bin/timeout --signal=TERM --kill-after=2s 5s \
+        /usr/bin/systemctl is-active --quiet "$FPM_SERVICE"; then
+        return 1
+    else
+        is_active_status=$?
+    fi
+    [[ "$is_active_status" -eq 3 ]] || return 1
+    # Close the snapshot/is-active race with a second exact state read. A
+    # timeout, unknown unit, failed unit or a late restart must not masquerade
+    # as the expected quiescent state.
+    snapshot=$(service_snapshot "$FPM_SERVICE") || return 1
+    test "$(grep -Fxc 'LoadState=loaded' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'ActiveState=inactive' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'SubState=dead' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'Result=success' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'MainPID=0' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'Job=' <<<"$snapshot")" -eq 1 || return 1
+}
+
+verify_primary_nginx_active() {
+    local snapshot main_pid
+    snapshot=$(service_snapshot nginx.service) || return 1
+    test "$(grep -Fxc 'LoadState=loaded' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'ActiveState=active' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'SubState=running' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'Result=success' <<<"$snapshot")" -eq 1 || return 1
+    test "$(grep -Fxc 'Job=' <<<"$snapshot")" -eq 1 || return 1
+    main_pid=$(sed -n 's/^MainPID=//p' <<<"$snapshot") || return 1
+    [[ "$main_pid" =~ ^[1-9][0-9]*$ && "$main_pid" -gt 1 ]] || return 1
+    /usr/bin/timeout --signal=TERM --kill-after=2s 5s \
+        /usr/bin/systemctl is-active --quiet nginx.service || return 1
+}
+
+primary_fpm_freeze_state() {
+    local mode=$1 expected_token=${2-} owner_pid=${3-}
+    local -a runner=(
+        /usr/bin/timeout --signal=TERM --kill-after=5s 55s
+        /usr/bin/env -i
+    )
+    if [[ "$mode" == watch ]]; then
+        # The independent watchdog intentionally lives for the full bounded
+        # freeze deadline and is capped by its transient systemd RuntimeMax.
+        runner=(/usr/bin/env -i)
+    fi
+    "${runner[@]}" PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$mode" "$FPM_FREEZE_ROOT" "$FPM_FREEZE_MARKER" \
+        "$FPM_SERVICE" "$expected_token" \
+        "$owner_pid" "$FPM_FREEZE_ARM_LIMIT_SECONDS" \
+        "$FPM_FREEZE_LIMIT_SECONDS" 9<<'PY'
+import json
+import os
+import re
+import secrets
+import stat
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+mode = sys.argv[1]
+root = Path(sys.argv[2])
+marker = Path(sys.argv[3])
+fpm_service = sys.argv[4]
+expected_token = sys.argv[5]
+owner_text = sys.argv[6]
+arm_limit_text = sys.argv[7]
+freeze_limit_text = sys.argv[8]
+if (root != Path("/run/shuzijun-sync")
+        or marker != root / "primary-fpm-freeze.json"
+        or fpm_service != "php8.3-fpm.service"
+        or mode not in {"create", "begin-frozen", "recover", "watch"}
+        or not re.fullmatch(r"[1-9][0-9]{0,9}", arm_limit_text)
+        or not re.fullmatch(r"[1-9][0-9]{0,9}", freeze_limit_text)):
+    raise SystemExit(1)
+arm_limit_seconds = int(arm_limit_text)
+freeze_limit_seconds = int(freeze_limit_text)
+if not 60 <= arm_limit_seconds <= 180 or not 90 <= freeze_limit_seconds <= 240:
+    raise SystemExit(1)
+main_claim = marker.with_name("primary-fpm-freeze.main-recovery.json")
+watchdog_claim = marker.with_name("primary-fpm-freeze.watchdog-recovery.json")
+allowed_names = {marker.name, main_claim.name, watchdog_claim.name}
+
+def allowed_state_name(name: str) -> bool:
+    return name in allowed_names or re.fullmatch(
+        r"\.primary-fpm-freeze\.(?:refresh\.[0-9a-f]{24}|create\.[0-9a-f]{32})",
+        name,
+    ) is not None
+
+def strict_root() -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    run_fd = os.open(root.parent, flags)
+    try:
+        metadata = os.fstat(run_fd)
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_gid != 0
+                or stat.S_IMODE(metadata.st_mode) & 0o022):
+            raise SystemExit(1)
+        root_fd = os.open(root.name, flags, dir_fd=run_fd)
+    finally:
+        os.close(run_fd)
+    metadata = os.fstat(root_fd)
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o700):
+        os.close(root_fd)
+        raise SystemExit(1)
+    return root_fd
+
+def process_start_ticks(pid: int) -> int:
+    payload = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    fields = payload.rsplit(") ", 1)
+    if len(fields) != 2:
+        raise ValueError("invalid process stat")
+    value = fields[1].split()[19]
+    if not re.fullmatch(r"[1-9][0-9]*", value):
+        raise ValueError("invalid process start time")
+    return int(value)
+
+def owner_is_alive(document: dict[str, object]) -> bool:
+    try:
+        return process_start_ticks(int(document["owner_pid"])) == int(
+            document["owner_start_ticks"]
+        )
+    except (FileNotFoundError, IndexError, KeyError, PermissionError, ValueError):
+        return False
+
+def is_ancestor_process(pid: int) -> bool:
+    current = os.getppid()
+    for _ in range(16):
+        if current == pid:
+            return True
+        try:
+            payload = Path(f"/proc/{current}/stat").read_text(encoding="ascii")
+            fields = payload.rsplit(") ", 1)
+            if len(fields) != 2:
+                return False
+            parent = fields[1].split()[1]
+            if not re.fullmatch(r"[0-9]+", parent):
+                return False
+            next_pid = int(parent)
+        except (FileNotFoundError, IndexError, PermissionError, ValueError):
+            return False
+        if next_pid <= 0 or next_pid == current:
+            return False
+        current = next_pid
+    return False
+
+def read_marker(root_fd: int, name: str, *, allow_missing: bool = False):
+    if not allowed_state_name(name):
+        raise SystemExit(1)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=root_fd)
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise SystemExit(1)
+    try:
+        metadata = os.fstat(descriptor)
+        named = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        payload = os.read(descriptor, 4097)
+        if os.read(descriptor, 1):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_size != len(payload)
+            or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+            or not payload.endswith(b"\n")):
+        raise SystemExit(1)
+    try:
+        document = json.loads(payload.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise SystemExit(1)
+    canonical = (
+        json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("ascii")
+    if canonical != payload or set(document) != {
+        "created_monotonic_ns", "deadline_monotonic_ns", "owner_pid",
+        "owner_start_ticks", "phase", "phase_started_monotonic_ns", "token",
+        "version",
+    }:
+        raise SystemExit(1)
+    if (document["version"] != 2
+            or document["phase"] not in {"armed", "frozen"}
+            or not isinstance(document["token"], str)
+            or not re.fullmatch(r"[0-9a-f]{64}", document["token"])
+            or type(document["owner_pid"]) is not int
+            or not 1 < document["owner_pid"] < 2**31
+            or type(document["owner_start_ticks"]) is not int
+            or document["owner_start_ticks"] < 1
+            or type(document["created_monotonic_ns"]) is not int
+            or type(document["phase_started_monotonic_ns"]) is not int
+            or type(document["deadline_monotonic_ns"]) is not int
+            or document["created_monotonic_ns"] < 1
+            or document["phase_started_monotonic_ns"] < document["created_monotonic_ns"]
+            or document["deadline_monotonic_ns"]
+                <= document["phase_started_monotonic_ns"]):
+        raise SystemExit(1)
+    expected_limit = (
+        arm_limit_seconds if document["phase"] == "armed" else freeze_limit_seconds
+    )
+    if (document["deadline_monotonic_ns"] - document["phase_started_monotonic_ns"]
+            != expected_limit * 1_000_000_000):
+        raise SystemExit(1)
+    return document
+
+def encoded_document(document: dict[str, object]) -> bytes:
+    return (
+        json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("ascii")
+
+def write_new_marker(root_fd: int, name: str, document: dict[str, object]) -> None:
+    if not allowed_state_name(name):
+        raise SystemExit(1)
+    payload = encoded_document(document)
+    flags = (
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(name, flags, 0o600, dir_fd=root_fd)
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise SystemExit(1)
+            view = view[written:]
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1 or metadata.st_size != len(payload)):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    os.fsync(root_fd)
+
+def rename_noreplace(root_fd: int, source: str, destination: str) -> None:
+    libc = __import__("ctypes").CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise SystemExit(1)
+    renameat2.argtypes = [
+        __import__("ctypes").c_int, __import__("ctypes").c_char_p,
+        __import__("ctypes").c_int, __import__("ctypes").c_char_p,
+        __import__("ctypes").c_uint,
+    ]
+    renameat2.restype = __import__("ctypes").c_int
+    if renameat2(
+        root_fd, os.fsencode(source), root_fd, os.fsencode(destination), 1
+    ) != 0:
+        error = __import__("ctypes").get_errno()
+        raise OSError(error, os.strerror(error))
+
+def cleanup_stale_temporaries(root_fd: int) -> None:
+    # Called only by a new sender after all durable marker/claim names were
+    # positively absent.  Exact root-owned temporary write prefixes can then
+    # be reclaimed after SIGKILL; unknown entries remain fail-closed.
+    root_meta = os.fstat(root_fd)
+    temporary = re.compile(
+        r"\.primary-fpm-freeze\.(?:refresh\.[0-9a-f]{24}|create\.[0-9a-f]{32})"
+    )
+    removed = False
+    for name in os.listdir(root_fd):
+        if name == "sync.lock":
+            # flock(1) owns this inode for the full sender run. Validate its
+            # fd/path identity but never lock, replace, truncate or unlink it.
+            descriptor = os.open(
+                name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+            try:
+                opened = os.fstat(descriptor)
+                named = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            finally:
+                os.close(descriptor)
+            if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0
+                    or opened.st_gid != 0 or stat.S_IMODE(opened.st_mode) != 0o600
+                    or opened.st_nlink != 1 or opened.st_size != 0
+                    or opened.st_dev != root_meta.st_dev
+                    or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+                raise RuntimeError("unsafe scheduler lock")
+            continue
+        if not name.startswith(".primary-fpm-freeze."):
+            raise RuntimeError("unknown primary freeze root entry")
+        if not temporary.fullmatch(name):
+            raise RuntimeError("unknown primary freeze state entry")
+        metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+                or metadata.st_size > 4096):
+            raise RuntimeError("unsafe primary freeze temporary")
+        os.unlink(name, dir_fd=root_fd)
+        removed = True
+    if removed:
+        os.fsync(root_fd)
+
+def publish_new_marker(
+    root_fd: int, name: str, document: dict[str, object]
+) -> None:
+    if name != marker.name:
+        raise SystemExit(1)
+    temporary = f".primary-fpm-freeze.create.{secrets.token_hex(16)}"
+    write_new_marker(root_fd, temporary, document)
+    try:
+        rename_noreplace(root_fd, temporary, name)
+        os.fsync(root_fd)
+        if read_marker(root_fd, name) != document:
+            raise SystemExit(1)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=root_fd)
+            os.fsync(root_fd)
+        except FileNotFoundError:
+            pass
+
+def service_snapshot(service: str) -> dict[str, str]:
+    result = subprocess.run(
+        [
+            "/usr/bin/systemctl", "show",
+            "--property=LoadState", "--property=ActiveState",
+            "--property=SubState", "--property=Result", "--property=MainPID",
+            "--property=Job",
+            service,
+        ],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        text=True, check=False, timeout=5,
+    )
+    if result.returncode != 0:
+        raise SystemExit(1)
+    values = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key in values:
+            raise SystemExit(1)
+        values[key] = value
+    if set(values) != {
+        "LoadState", "ActiveState", "SubState", "Result", "MainPID", "Job"
+    }:
+        raise SystemExit(1)
+    return values
+
+def service_is_healthy(service: str) -> bool:
+    values = service_snapshot(service)
+    main_pid = values["MainPID"]
+    return (
+        values["LoadState"] == "loaded"
+        and values["ActiveState"] == "active"
+        and values["SubState"] == "running"
+        and values["Result"] == "success"
+        and values["Job"] == ""
+        and re.fullmatch(r"[1-9][0-9]*", main_pid) is not None
+        and int(main_pid) > 1
+    )
+
+def service_is_inactive(service: str) -> bool:
+    values = service_snapshot(service)
+    return (
+        values["LoadState"] == "loaded"
+        and values["ActiveState"] == "inactive"
+        and values["SubState"] == "dead"
+        and values["Result"] == "success"
+        and values["MainPID"] == "0"
+        and values["Job"] == ""
+    )
+
+def claim_for_recovery(root_fd: int, actor: str, *, immediate: bool = False):
+    claim = main_claim if actor == "main" else watchdog_claim
+    other = watchdog_claim if actor == "main" else main_claim
+    existing_claim = read_marker(root_fd, claim.name, allow_missing=True)
+    if existing_claim is not None:
+        if actor != "watchdog" or (
+            expected_token and existing_claim["token"] != expected_token
+        ):
+            raise SystemExit(1)
+        return existing_claim
+    document = read_marker(root_fd, marker.name, allow_missing=True)
+    if document is not None:
+        if expected_token and document["token"] != expected_token:
+            raise SystemExit(1)
+        if actor == "watchdog" and not immediate and owner_is_alive(document) \
+                and time.monotonic_ns() < document["deadline_monotonic_ns"]:
+            return None
+        try:
+            os.rename(marker.name, claim.name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        except FileNotFoundError:
+            return None
+        os.fsync(root_fd)
+        claimed = read_marker(root_fd, claim.name)
+        if claimed != document:
+            raise SystemExit(1)
+        return claimed
+    if actor == "watchdog":
+        document = read_marker(root_fd, other.name, allow_missing=True)
+        if document is None:
+            return None
+        if expected_token and document["token"] != expected_token:
+            raise SystemExit(1)
+        if not immediate and owner_is_alive(document) \
+                and time.monotonic_ns() < document["deadline_monotonic_ns"]:
+            return None
+        try:
+            os.rename(other.name, claim.name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        except FileNotFoundError:
+            return None
+        os.fsync(root_fd)
+        claimed = read_marker(root_fd, claim.name)
+        if claimed != document:
+            raise SystemExit(1)
+        return claimed
+    raise SystemExit(1)
+
+def recover_claim(root_fd: int, claim: Path, document: dict[str, object]) -> None:
+    if expected_token and document["token"] != expected_token:
+        raise SystemExit(1)
+    # Always enqueue start, even when the current snapshot still says active.
+    # A timed-out `systemctl stop` client can leave a stop job running after the
+    # shell has entered cleanup; this replacement start job guarantees the
+    # final quiescent state is active rather than trusting that stale snapshot.
+    result = subprocess.run(
+        ["/usr/bin/systemctl", "start", "--no-block", fpm_service],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, check=False, timeout=5,
+    )
+    if result.returncode != 0:
+        raise SystemExit(1)
+    recovery_deadline = time.monotonic() + 35
+    while not service_is_healthy(fpm_service):
+        if time.monotonic() >= recovery_deadline:
+            raise SystemExit(1)
+        time.sleep(0.5)
+    if not service_is_healthy("nginx.service"):
+        raise SystemExit(1)
+    current = read_marker(root_fd, claim.name, allow_missing=True)
+    if current is None:
+        raise SystemExit(1)
+    if current != document:
+        raise SystemExit(1)
+    try:
+        os.unlink(claim.name, dir_fd=root_fd)
+    except FileNotFoundError:
+        raise SystemExit(1)
+    os.fsync(root_fd)
+
+def replace_marker(root_fd: int, before: dict[str, object], after: dict[str, object]) -> None:
+    temporary = f".primary-fpm-freeze.refresh.{secrets.token_hex(12)}"
+    write_new_marker(root_fd, temporary, after)
+    try:
+        libc = __import__("ctypes").CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise SystemExit(1)
+        renameat2.argtypes = [
+            __import__("ctypes").c_int, __import__("ctypes").c_char_p,
+            __import__("ctypes").c_int, __import__("ctypes").c_char_p,
+            __import__("ctypes").c_uint,
+        ]
+        renameat2.restype = __import__("ctypes").c_int
+        if renameat2(root_fd, os.fsencode(temporary), root_fd, os.fsencode(marker.name), 2) != 0:
+            raise SystemExit(1)
+        os.fsync(root_fd)
+        old = read_marker(root_fd, temporary)
+        if old != before:
+            raise SystemExit(1)
+        os.unlink(temporary, dir_fd=root_fd)
+        os.fsync(root_fd)
+        if read_marker(root_fd, marker.name) != after:
+            raise SystemExit(1)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=root_fd)
+            os.fsync(root_fd)
+        except FileNotFoundError:
+            pass
+
+def marker_operation(current_mode: str) -> None:
+    root_fd = strict_root()
+    try:
+        if current_mode == "create":
+            if expected_token or not re.fullmatch(r"[1-9][0-9]*", owner_text):
+                raise SystemExit(1)
+            for path in (marker, main_claim, watchdog_claim):
+                if read_marker(root_fd, path.name, allow_missing=True) is not None:
+                    raise SystemExit(1)
+            cleanup_stale_temporaries(root_fd)
+            owner_pid = int(owner_text)
+            if not is_ancestor_process(owner_pid):
+                raise SystemExit(1)
+            started = time.monotonic_ns()
+            document = {
+                "created_monotonic_ns": started,
+                "deadline_monotonic_ns": started + arm_limit_seconds * 1_000_000_000,
+                "owner_pid": owner_pid,
+                "owner_start_ticks": process_start_ticks(owner_pid),
+                "phase": "armed",
+                "phase_started_monotonic_ns": started,
+                "token": secrets.token_hex(32),
+                "version": 2,
+            }
+            if not service_is_healthy(fpm_service) or not service_is_healthy("nginx.service"):
+                raise SystemExit(1)
+            publish_new_marker(root_fd, marker.name, document)
+            print(document["token"])
+            return
+        if current_mode == "begin-frozen":
+            if (not re.fullmatch(r"[0-9a-f]{64}", expected_token) or owner_text
+                    or not service_is_inactive(fpm_service)
+                    or not service_is_healthy("nginx.service")):
+                raise SystemExit(1)
+            document = read_marker(root_fd, marker.name)
+            if document["token"] != expected_token or document["phase"] != "armed":
+                raise SystemExit(1)
+            started = time.monotonic_ns()
+            updated = dict(document)
+            updated["phase"] = "frozen"
+            updated["phase_started_monotonic_ns"] = started
+            updated["deadline_monotonic_ns"] = (
+                started + freeze_limit_seconds * 1_000_000_000
+            )
+            replace_marker(root_fd, document, updated)
+            return
+        if current_mode == "recover":
+            actor = "main" if expected_token else "watchdog"
+            document = claim_for_recovery(
+                root_fd, actor, immediate=not bool(expected_token)
+            )
+            if document is None:
+                if expected_token:
+                    raise SystemExit(1)
+                return
+            recover_claim(
+                root_fd,
+                main_claim if actor == "main" else watchdog_claim,
+                document,
+            )
+            return
+        raise SystemExit(1)
+    finally:
+        os.close(root_fd)
+
+if mode != "watch":
+    marker_operation(mode)
+    raise SystemExit(0)
+if not re.fullmatch(r"[0-9a-f]{64}", expected_token) or owner_text:
+    raise SystemExit(1)
+while True:
+    root_fd = strict_root()
+    try:
+        document = claim_for_recovery(root_fd, "watchdog")
+        if document is not None:
+            recover_claim(root_fd, watchdog_claim, document)
+            raise SystemExit(0)
+        if (read_marker(root_fd, marker.name, allow_missing=True) is None
+                and read_marker(root_fd, main_claim.name, allow_missing=True) is None
+                and read_marker(root_fd, watchdog_claim.name, allow_missing=True) is None):
+            raise SystemExit(0)
+    finally:
+        os.close(root_fd)
+    time.sleep(1)
+PY
+}
+
+if [[ $# -eq 1 && "$1" == --recover-primary-fpm-if-marked ]]; then
+    primary_fpm_freeze_state recover
+    exit 0
+fi
+if [[ $# -eq 2 && "$1" == --watch-primary-fpm ]]; then
+    primary_fpm_freeze_state watch "$2"
+    exit 0
+fi
+if [[ $# -ne 0 ]]; then
+    printf 'usage: sync-to-backup [--recover-primary-fpm-if-marked|--watch-primary-fpm TOKEN]\n' >&2
+    exit 2
+fi
 
 test "$SITE" = /var/www/html/shuzijun.com.cn
 test "$HOST" = 129.226.202.207
 test -x "$VERIFY"
 
+append_sync_authority_event() {
+    local event=$1 generation=${2-}
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$LOG" "$event" "$generation" 9<<'PY'
+import os
+import re
+import stat
+import sys
+import time
+from pathlib import Path
+
+EXPECTED_LOG = Path("/var/lib/shuzijun-logs/sync-authority.log")
+log = Path(sys.argv[1])
+event = sys.argv[2]
+generation = sys.argv[3]
+if log != EXPECTED_LOG or not log.is_absolute():
+    raise SystemExit(1)
+if event == "start":
+    if generation:
+        raise SystemExit(1)
+    message = f"[{time.strftime('%F %T')}] incremental sync started\n"
+elif event == "completion":
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", generation):
+        raise SystemExit(1)
+    value = int(generation)
+    if value >= 2**63:
+        raise SystemExit(1)
+    message = (
+        f"[{time.strftime('%F %T')}] incremental sync completed "
+        f"generation={generation}\n"
+    )
+else:
+    raise SystemExit(1)
+
+directory_flags = (
+    os.O_RDONLY
+    | getattr(os, "O_CLOEXEC", 0)
+    | getattr(os, "O_DIRECTORY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+directory = os.open("/", directory_flags)
+try:
+    # Every directory is root-owned and not writable by group/other.  The
+    # dedicated leaf is exactly 0700, so only root can reach the audit file.
+    metadata = os.fstat(directory)
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022):
+        raise SystemExit(1)
+    for index, component in enumerate(("var", "lib", "shuzijun-logs")):
+        child = os.open(component, directory_flags, dir_fd=directory)
+        os.close(directory)
+        directory = child
+        metadata = os.fstat(directory)
+        mode = stat.S_IMODE(metadata.st_mode)
+        if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_gid != 0 or mode & 0o022
+                or (index == 2 and mode != 0o700)):
+            raise SystemExit(1)
+
+    flags = (
+        os.O_WRONLY
+        | os.O_APPEND
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    created = False
+    try:
+        descriptor = os.open(log.name, flags, dir_fd=directory)
+    except FileNotFoundError:
+        descriptor = os.open(
+            log.name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory
+        )
+        created = True
+    try:
+        opened = os.fstat(descriptor)
+        named = os.stat(log.name, dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_uid != 0
+                or opened.st_gid != 0 or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)):
+            raise SystemExit(1)
+        payload = message.encode("ascii")
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise SystemExit(1)
+            view = view[written:]
+        os.fsync(descriptor)
+        if created:
+            os.fsync(directory)
+        completed = os.fstat(descriptor)
+        named = os.stat(log.name, dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(completed.st_mode) or completed.st_uid != 0
+                or completed.st_gid != 0
+                or stat.S_IMODE(completed.st_mode) != 0o600
+                or completed.st_nlink != 1
+                or (completed.st_dev, completed.st_ino) != (named.st_dev, named.st_ino)):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+finally:
+    os.close(directory)
+PY
+}
+
 verify_authority_role() {
     local expected_role=$1 verifier_fd_path=/proc/self/fd/7 verifier_sha256
     local authority_verify_parent authority_verify_parent_mode verifier_status=0
-    test -f "$AUTHORITY_VERIFY" && test -x "$AUTHORITY_VERIFY" && test ! -L "$AUTHORITY_VERIFY"
-    test "$(realpath -e -- "$AUTHORITY_VERIFY")" = "$AUTHORITY_VERIFY"
+    test -f "$AUTHORITY_VERIFY" && test -x "$AUTHORITY_VERIFY" \
+        && test ! -L "$AUTHORITY_VERIFY" || return 1
+    test "$(realpath -e -- "$AUTHORITY_VERIFY")" = "$AUTHORITY_VERIFY" || return 1
     for authority_verify_parent in /usr /usr/local /usr/local/sbin; do
-        test "$(realpath -e -- "$authority_verify_parent")" = "$authority_verify_parent"
-        test -d "$authority_verify_parent" && test ! -L "$authority_verify_parent"
-        test "$(stat -c '%u' "$authority_verify_parent")" = 0
-        authority_verify_parent_mode=$(stat -c '%a' "$authority_verify_parent")
-        (( (8#$authority_verify_parent_mode & 8#022) == 0 ))
+        test "$(realpath -e -- "$authority_verify_parent")" = "$authority_verify_parent" \
+            || return 1
+        test -d "$authority_verify_parent" && test ! -L "$authority_verify_parent" \
+            || return 1
+        test "$(stat -c '%u' "$authority_verify_parent")" = 0 || return 1
+        authority_verify_parent_mode=$(stat -c '%a' "$authority_verify_parent") || return 1
+        (( (8#$authority_verify_parent_mode & 8#022) == 0 )) || return 1
     done
-    exec 7<"$AUTHORITY_VERIFY"
-    test "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" = '0:0:1:755'
-    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }')
-    test "$verifier_sha256" = "$AUTHORITY_VERIFY_SHA256"
+    exec 7<"$AUTHORITY_VERIFY" || return 1
+    test "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" = '0:0:1:755' \
+        || { exec 7<&-; return 1; }
+    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }') \
+        || { exec 7<&-; return 1; }
+    test "$verifier_sha256" = "$AUTHORITY_VERIFY_SHA256" \
+        || { exec 7<&-; return 1; }
     if ! env -i PATH="$PATH" LC_ALL=C LANG=C \
-        /usr/bin/python3 -I "$verifier_fd_path" "$expected_role"; then
+        /usr/bin/python3 -I "$verifier_fd_path" "$expected_role" >/dev/null; then
         verifier_status=1
     fi
-    exec 7<&-
+    exec 7<&- || return 1
     return "$verifier_status"
 }
 
 validate_generation_state_root() {
     local parent
     for parent in /var /var/lib; do
-        test "$(realpath -e -- "$parent")" = "$parent"
-        test -d "$parent" && test ! -L "$parent"
-        test "$(stat -c '%u:%g:%a' "$parent")" = '0:0:755'
+        test "$(realpath -e -- "$parent")" = "$parent" || return 1
+        test -d "$parent" && test ! -L "$parent" || return 1
+        test "$(stat -c '%u:%g:%a' "$parent")" = '0:0:755' || return 1
     done
-    test "$(realpath -e -- "$GENERATION_ROOT")" = "$GENERATION_ROOT"
-    test -d "$GENERATION_ROOT" && test ! -L "$GENERATION_ROOT"
-    test "$(stat -c '%u:%g:%a' "$GENERATION_ROOT")" = '0:0:700'
+    test "$(realpath -e -- "$GENERATION_ROOT")" = "$GENERATION_ROOT" || return 1
+    test -d "$GENERATION_ROOT" && test ! -L "$GENERATION_ROOT" || return 1
+    test "$(stat -c '%u:%g:%a' "$GENERATION_ROOT")" = '0:0:700' || return 1
 }
 
-issue_generation() {
-    env -i PATH="$PATH" LC_ALL=C LANG=C \
-        /usr/bin/python3 -I - "$GENERATION_ROOT" "$GENERATION_STATE" <<'PY'
+enter_site_operation_lock_context() {
+    local expected_fd=${SHUZIJUN_SITE_OPERATION_LOCK_FD-}
+    local lock_fd_metadata lock_fd_identity lock_path_identity
+    local lock_fd_device lock_root_device locked_path_identity
+    if [[ "$expected_fd" != 8 ]]; then
+        [[ -z "$expected_fd" ]] || return 1
+        exec env -i PATH="$PATH" LC_ALL=C LANG=C \
+            /usr/bin/python3 -I /proc/self/fd/9 \
+            "$SELF" "$GENERATION_ROOT" "$SITE_OPERATION_LOCK" "$@" 9<<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+script = Path(sys.argv[1])
+root = Path(sys.argv[2])
+lock = Path(sys.argv[3])
+arguments = sys.argv[4:]
+root_meta = root.lstat()
+if (script != Path("/usr/local/sbin/sync-to-backup")
+        or root != Path("/var/lib/shuzijun-sync")
+        or lock != root / "site-operation.lock"
+        or root.resolve(strict=True) != root
+        or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700):
+    raise SystemExit(1)
+descriptor = os.open(lock, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    metadata = os.fstat(descriptor)
+    named = lock.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+            or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)):
+        raise RuntimeError("unsafe site operation lock")
+    if descriptor != 8:
+        os.dup2(descriptor, 8, inheritable=True)
+    else:
+        os.set_inheritable(8, True)
+finally:
+    if descriptor != 8:
+        os.close(descriptor)
+environment = {
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    "LC_ALL": "C",
+    "LANG": "C",
+    "SHUZIJUN_SITE_OPERATION_LOCK_FD": "8",
+}
+os.execve("/bin/bash", ["/bin/bash", str(script), *arguments], environment)
+PY
+    fi
+    lock_fd_metadata=$(stat -Lc '%u:%g:%h:%a' /proc/self/fd/8) || return 1
+    [[ "$lock_fd_metadata" == '0:0:1:600' ]] || return 1
+    lock_fd_identity=$(stat -Lc '%d:%i' /proc/self/fd/8) || return 1
+    lock_path_identity=$(stat -Lc '%d:%i' "$SITE_OPERATION_LOCK") || return 1
+    [[ "$lock_fd_identity" == "$lock_path_identity" ]] || return 1
+    lock_fd_device=$(stat -Lc '%d' /proc/self/fd/8) || return 1
+    lock_root_device=$(stat -Lc '%d' "$GENERATION_ROOT") || return 1
+    [[ "$lock_fd_device" == "$lock_root_device" ]] || return 1
+    flock -n 8 || return 1
+    locked_path_identity=$(stat -Lc '%d:%i' "$SITE_OPERATION_LOCK") || return 1
+    [[ "$lock_fd_identity" == "$locked_path_identity" ]] || return 1
+}
+
+clean_stale_generation_temporaries() {
+    /usr/bin/timeout --signal=TERM --kill-after=2s 10s \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I - "$GENERATION_ROOT" <<'PY'
 import os
 import re
 import stat
 import sys
-import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+root_meta = root.lstat()
+if (root != Path("/var/lib/shuzijun-sync")
+        or root.resolve(strict=True) != root
+        or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700):
+    raise SystemExit(1)
+managed = re.compile(r"\.highest-issued\.([0-9a-f]{32})")
+directory = os.open(
+    root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+)
+changed = False
+try:
+    for entry in root.iterdir():
+        if not entry.name.startswith(".highest-issued."):
+            continue
+        if managed.fullmatch(entry.name) is None:
+            raise RuntimeError("unknown generation temporary")
+        descriptor = os.open(
+            entry.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=directory,
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            payload = os.read(descriptor, 32)
+            if os.read(descriptor, 1):
+                raise RuntimeError("oversize generation temporary")
+            named = os.stat(entry.name, dir_fd=directory, follow_symlinks=False)
+        finally:
+            os.close(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != 0 or metadata.st_gid != 0
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+                or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+                or not re.fullmatch(rb"(?:[1-9][0-9]{0,18}\n?)?", payload)):
+            raise RuntimeError("unsafe generation temporary")
+        os.unlink(entry.name, dir_fd=directory)
+        changed = True
+    if changed:
+        os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
+issue_generation() {
+    /usr/bin/timeout --signal=TERM --kill-after=2s 10s \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I - "$GENERATION_ROOT" "$GENERATION_STATE" <<'PY'
+import os
+import re
+import secrets
+import stat
+import sys
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -126,24 +961,35 @@ if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
         or stat.S_IMODE(metadata.st_mode) != 0o700):
     raise SystemExit(1)
 flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+directory = os.open(
+    root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+)
+os.fsync(directory)
 descriptor = os.open(state_path, flags)
 try:
     state_metadata = os.fstat(descriptor)
     payload = os.read(descriptor, 32)
     if os.read(descriptor, 1):
         raise SystemExit(1)
+    named = state_path.lstat()
 finally:
     os.close(descriptor)
 if (not stat.S_ISREG(state_metadata.st_mode) or state_metadata.st_uid != 0
         or state_metadata.st_gid != 0 or stat.S_IMODE(state_metadata.st_mode) != 0o600
-        or state_metadata.st_nlink != 1 or not re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", payload)):
+        or state_metadata.st_nlink != 1 or state_metadata.st_dev != metadata.st_dev
+        or (state_metadata.st_dev, state_metadata.st_ino) != (named.st_dev, named.st_ino)
+        or not re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", payload)):
     raise SystemExit(1)
 generation = int(payload) + 1
 if generation >= 2**63:
     raise SystemExit(1)
 
-temp_descriptor, temp_name = tempfile.mkstemp(prefix=".highest-issued.", dir=root)
-temp_path = Path(temp_name)
+temp_path = root / f".highest-issued.{secrets.token_hex(16)}"
+temp_descriptor = os.open(
+    temp_path,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0o600,
+)
 try:
     os.fchmod(temp_descriptor, 0o600)
     encoded = f"{generation}\n".encode("ascii")
@@ -157,11 +1003,7 @@ try:
     os.close(temp_descriptor)
     temp_descriptor = -1
     os.replace(temp_path, state_path)
-    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    os.fsync(directory)
 finally:
     if temp_descriptor >= 0:
         os.close(temp_descriptor)
@@ -169,56 +1011,804 @@ finally:
         temp_path.unlink()
     except FileNotFoundError:
         pass
+    os.close(directory)
 print(generation)
 PY
 }
+
+audit_or_stage_uploads() {
+    local mode=$1 temporary_root=$2 database_logical_bytes=$3
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$mode" "$temporary_root" "$SITE/wp-content/uploads" \
+        "$database_logical_bytes" 9<<'PY'
+import hashlib
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+MAX_FILES = 100_000
+MAX_DIRECTORIES = 100_000
+MAX_FILE_BYTES = 8 * 1024 * 1024 * 1024
+MAX_BATCH_BYTES = 64 * 1024 * 1024 * 1024
+MAX_DATABASE_SQL_BYTES = 4 * 1024 * 1024 * 1024
+MAX_DATABASE_GZIP_BYTES = 8 * 1024 * 1024 * 1024
+MIN_DATABASE_BUDGET = 128 * 1024 * 1024
+MIN_FREE_RESERVE = 1024 * 1024 * 1024
+FORBIDDEN_UPLOAD_NAMES = {".htaccess", ".user.ini"}
+FORBIDDEN_UPLOAD_SUFFIXES = {
+    ".cgi", ".pl", ".py", ".rb", ".sh", ".bash", ".zsh", ".fish",
+    ".exe", ".com", ".bat", ".cmd", ".ps1", ".jar", ".war",
+}
+
+mode = sys.argv[1]
+root = Path(sys.argv[2])
+source = Path(sys.argv[3])
+logical_text = sys.argv[4]
+if mode not in {"preflight", "stage", "snapshot"}:
+    raise SystemExit(1)
+root_metadata = root.lstat()
+source_metadata = source.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_metadata.st_mode)
+        or root_metadata.st_uid != 0 or root_metadata.st_gid != 0
+        or stat.S_IMODE(root_metadata.st_mode) != 0o700
+        or source.resolve(strict=True) != source
+        or not stat.S_ISDIR(source_metadata.st_mode)):
+    raise SystemExit(1)
+if not re.fullmatch(r"(?:0|[1-9][0-9]{0,18})", logical_text):
+    raise SystemExit(1)
+logical_bytes = int(logical_text)
+if logical_bytes > MAX_DATABASE_SQL_BYTES:
+    raise SystemExit(1)
+
+database_budget = max(
+    MIN_DATABASE_BUDGET,
+    logical_bytes * 2 + 64 * 1024 * 1024,
+)
+database_budget = min(database_budget, MAX_DATABASE_GZIP_BYTES)
+file_count = 1
+directory_count = 0
+upload_bytes = 0
+total_size = 0
+target = root / "wp-content" / "uploads"
+snapshot = hashlib.sha256()
+if mode == "stage":
+    try:
+        target.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise SystemExit(1)
+    target.mkdir(mode=0o700, parents=True)
+
+source_device = source_metadata.st_dev
+def identity(value):
+    return (
+        stat.S_IFMT(value.st_mode),
+        value.st_dev,
+        value.st_ino,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+def snapshot_identity(value):
+    return (
+        value.st_mode,
+        value.st_uid,
+        value.st_gid,
+        value.st_dev,
+        value.st_ino,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+def include_snapshot(kind, relative, value):
+    encoded = relative.as_posix().encode("utf-8")
+    if not encoded or len(encoded) > 4096:
+        raise SystemExit(1)
+    snapshot.update(kind)
+    snapshot.update(len(encoded).to_bytes(8, "big"))
+    snapshot.update(encoded)
+    for field in snapshot_identity(value):
+        encoded_field = str(field).encode("ascii")
+        snapshot.update(len(encoded_field).to_bytes(8, "big"))
+        snapshot.update(encoded_field)
+
+for directory, directory_names, file_names, directory_fd in os.fwalk(
+    source, topdown=True, follow_symlinks=False
+):
+    directory_names.sort()
+    file_names.sort()
+    current_directory = os.fstat(directory_fd)
+    if (not stat.S_ISDIR(current_directory.st_mode)
+            or current_directory.st_dev != source_device):
+        raise SystemExit(1)
+    relative_directory = Path(directory).relative_to(source)
+    include_snapshot(b"D", relative_directory, current_directory)
+    directory_count += 1
+    if directory_count > MAX_DIRECTORIES:
+        raise SystemExit(1)
+    for child_name in directory_names:
+        child = os.stat(child_name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(child.st_mode) or child.st_dev != source_device:
+            raise SystemExit(1)
+    if mode == "stage":
+        destination_directory = target.joinpath(*relative_directory.parts)
+        destination_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        destination_metadata = destination_directory.lstat()
+        if (not stat.S_ISDIR(destination_metadata.st_mode)
+                or destination_metadata.st_uid != 0 or destination_metadata.st_gid != 0
+                or stat.S_IMODE(destination_metadata.st_mode) != 0o700
+                or destination_metadata.st_dev != root_metadata.st_dev):
+            raise SystemExit(1)
+    for name in file_names:
+        relative = relative_directory / name
+        encoded_relative = relative.as_posix().encode("utf-8")
+        if not encoded_relative or len(encoded_relative) > 4096:
+            raise SystemExit(1)
+        lowered = name.lower()
+        if (lowered in FORBIDDEN_UPLOAD_NAMES or ".php" in lowered
+                or ".phtml" in lowered or ".phar" in lowered
+                or any(lowered.endswith(suffix) for suffix in FORBIDDEN_UPLOAD_SUFFIXES)):
+            raise SystemExit(1)
+        entry = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if (not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1
+                or entry.st_dev != source_device
+                or entry.st_size < 0 or entry.st_size > MAX_FILE_BYTES):
+            raise SystemExit(1)
+        # O_NONBLOCK prevents an attacker-writable FIFO from hanging the
+        # sender if its type changes between the no-follow stat and open.
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+        try:
+            initial = os.fstat(descriptor)
+            if (not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1
+                    or initial.st_dev != source_device
+                    or initial.st_size < 0 or initial.st_size > MAX_FILE_BYTES
+                    or identity(initial) != identity(entry)):
+                raise SystemExit(1)
+            file_count += 1
+            upload_bytes += initial.st_size
+            if file_count > MAX_FILES or upload_bytes > MAX_BATCH_BYTES:
+                raise SystemExit(1)
+            if mode == "preflight":
+                continue
+            if mode == "snapshot":
+                final = os.fstat(descriptor)
+                if identity(final) != identity(initial):
+                    raise SystemExit(1)
+                include_snapshot(b"F", relative, final)
+                continue
+            if total_size + initial.st_size + database_budget > MAX_BATCH_BYTES:
+                raise SystemExit(1)
+            filesystem = os.statvfs(root)
+            if (filesystem.f_bavail * filesystem.f_frsize
+                    < initial.st_size + database_budget + MIN_FREE_RESERVE):
+                raise SystemExit(1)
+            destination = destination_directory / name
+            output = os.open(
+                destination,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                remaining = initial.st_size
+                while remaining:
+                    chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+                    if not chunk:
+                        raise SystemExit(1)
+                    filesystem = os.statvfs(root)
+                    if (filesystem.f_bavail * filesystem.f_frsize
+                            < len(chunk) + database_budget + MIN_FREE_RESERVE):
+                        raise SystemExit(1)
+                    view = memoryview(chunk)
+                    while view:
+                        written = os.write(output, view)
+                        if written <= 0:
+                            raise SystemExit(1)
+                        view = view[written:]
+                    remaining -= len(chunk)
+                if os.read(descriptor, 1):
+                    raise SystemExit(1)
+                os.fsync(output)
+                completed = os.fstat(output)
+                if (not stat.S_ISREG(completed.st_mode) or completed.st_uid != 0
+                        or completed.st_gid != 0 or stat.S_IMODE(completed.st_mode) != 0o600
+                        or completed.st_nlink != 1
+                        or completed.st_size != initial.st_size):
+                    raise SystemExit(1)
+            finally:
+                os.close(output)
+            final = os.fstat(descriptor)
+            if identity(final) != identity(initial):
+                raise SystemExit(1)
+            include_snapshot(b"F", relative, final)
+            total_size += initial.st_size
+        finally:
+            os.close(descriptor)
+
+filesystem = os.statvfs(root)
+if mode == "preflight":
+    if upload_bytes + database_budget > MAX_BATCH_BYTES:
+        raise SystemExit(1)
+    required_bytes = upload_bytes + database_budget + MIN_FREE_RESERVE
+    required_inodes = file_count + directory_count + 1024
+    if (filesystem.f_bavail * filesystem.f_frsize < required_bytes
+            or filesystem.f_favail < required_inodes):
+        raise SystemExit(1)
+elif mode == "stage":
+    if (filesystem.f_bavail * filesystem.f_frsize
+            < database_budget + MIN_FREE_RESERVE
+            or total_size + database_budget > MAX_BATCH_BYTES):
+        raise SystemExit(1)
+if mode in {"stage", "snapshot"}:
+    print(f"{upload_bytes}:{file_count}:{directory_count}:{snapshot.hexdigest()}")
+PY
+}
+
+bound_database_sql_stream() {
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 9<<'PY'
+import os
+
+MAX_DATABASE_SQL_BYTES = 4 * 1024 * 1024 * 1024
+total = 0
+while True:
+    chunk = os.read(0, 1024 * 1024)
+    if not chunk:
+        break
+    total += len(chunk)
+    if total > MAX_DATABASE_SQL_BYTES:
+        raise SystemExit(1)
+    view = memoryview(chunk)
+    while view:
+        written = os.write(1, view)
+        if written <= 0:
+            raise SystemExit(1)
+        view = view[written:]
+if total == 0:
+    raise SystemExit(1)
+PY
+}
+
+store_staged_database() {
+    local temporary_root=$1 staged_upload_bytes=$2
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$temporary_root" "$staged_upload_bytes" 9<<'PY'
+import ctypes
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+MAX_DATABASE_GZIP_BYTES = 8 * 1024 * 1024 * 1024
+MAX_BATCH_BYTES = 64 * 1024 * 1024 * 1024
+MIN_FREE_RESERVE = 1024 * 1024 * 1024
+root = Path(sys.argv[1])
+upload_text = sys.argv[2]
+if not re.fullmatch(r"(?:0|[1-9][0-9]{0,18})", upload_text):
+    raise SystemExit(1)
+upload_bytes = int(upload_text)
+if upload_bytes > MAX_BATCH_BYTES:
+    raise SystemExit(1)
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700):
+    raise SystemExit(1)
+destination = root / "shuzijun-sync.sql.gz"
+try:
+    destination.lstat()
+except FileNotFoundError:
+    pass
+else:
+    raise SystemExit(1)
+descriptor, temp_name = tempfile.mkstemp(prefix=".database-gzip.", dir=root)
+temp_path = Path(temp_name)
+total = 0
+try:
+    os.fchmod(descriptor, 0o600)
+    while True:
+        chunk = os.read(0, 1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if (total > MAX_DATABASE_GZIP_BYTES
+                or upload_bytes + total > MAX_BATCH_BYTES):
+            raise SystemExit(1)
+        filesystem = os.statvfs(root)
+        if filesystem.f_bavail * filesystem.f_frsize < len(chunk) + MIN_FREE_RESERVE:
+            raise SystemExit(1)
+        view = memoryview(chunk)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise SystemExit(1)
+            view = view[written:]
+    if total == 0:
+        raise SystemExit(1)
+    os.fsync(descriptor)
+    completed = os.fstat(descriptor)
+    if (not stat.S_ISREG(completed.st_mode) or completed.st_uid != 0
+            or completed.st_gid != 0 or stat.S_IMODE(completed.st_mode) != 0o600
+            or completed.st_nlink != 1 or completed.st_size != total):
+        raise SystemExit(1)
+    os.close(descriptor)
+    descriptor = -1
+    named = temp_path.lstat()
+    if (named.st_dev, named.st_ino) != (completed.st_dev, completed.st_ino):
+        raise SystemExit(1)
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise SystemExit(1)
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(temp_path), -100, os.fsencode(destination), 1) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        pass
+PY
+}
+
+manage_sender_staging() {
+    local action=$1 target=${2-} token=${3-}
+    /usr/bin/timeout --signal=TERM --kill-after=10s 30m \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$action" "$GENERATION_ROOT" "$SENDER_STAGING_ROOT" \
+        "$target" "$token" 9<<'PY'
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+from pathlib import Path
+
+action = sys.argv[1]
+generation_root = Path(sys.argv[2])
+staging_root = Path(sys.argv[3])
+target_text = sys.argv[4]
+token = sys.argv[5]
+if (action not in {"clean-stale", "allocate", "remove"}
+        or generation_root != Path("/var/lib/shuzijun-sync")
+        or staging_root != generation_root / "sender-staging"):
+    raise SystemExit(1)
+
+generation_meta = generation_root.lstat()
+staging_meta = staging_root.lstat()
+if (generation_root.resolve(strict=True) != generation_root
+        or not stat.S_ISDIR(generation_meta.st_mode)
+        or generation_meta.st_uid != 0 or generation_meta.st_gid != 0
+        or stat.S_IMODE(generation_meta.st_mode) != 0o700
+        or staging_root.resolve(strict=True) != staging_root
+        or not stat.S_ISDIR(staging_meta.st_mode)
+        or staging_meta.st_uid != 0 or staging_meta.st_gid != 0
+        or stat.S_IMODE(staging_meta.st_mode) != 0o700
+        or staging_meta.st_dev != generation_meta.st_dev
+        or not shutil.rmtree.avoids_symlink_attacks):
+    raise SystemExit(1)
+
+batch_pattern = re.compile(r"batch\.([0-9a-f]{32})")
+allocating_pattern = re.compile(r"\.allocating\.([0-9a-f]{32})")
+retiring_pattern = re.compile(r"\.retiring\.([0-9a-f]{32})")
+owner_name = ".sender-staging-owner.json"
+
+def identity(value):
+    return value.st_dev, value.st_ino
+
+def expected_owner(value):
+    return (
+        json.dumps(
+            {"token": value, "version": 1},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ) + "\n"
+    ).encode("ascii")
+
+def validate_tree(path, kind, value):
+    metadata = path.lstat()
+    if (not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o700
+            or metadata.st_dev != staging_meta.st_dev):
+        raise RuntimeError("unsafe sender staging tree")
+    entries = list(path.iterdir())
+    if kind == "allocating" and any(entry.name != owner_name for entry in entries):
+        raise RuntimeError("unsafe allocating tree")
+    owner = path / owner_name
+    try:
+        owner_meta = owner.lstat()
+    except FileNotFoundError:
+        if kind == "batch" or (kind == "allocating" and entries):
+            raise RuntimeError("missing sender staging owner")
+    else:
+        if (not stat.S_ISREG(owner_meta.st_mode) or owner_meta.st_uid != 0
+                or owner_meta.st_gid != 0 or stat.S_IMODE(owner_meta.st_mode) != 0o600
+                or owner_meta.st_nlink != 1 or owner_meta.st_dev != staging_meta.st_dev):
+            raise RuntimeError("unsafe sender staging owner")
+        payload = owner.read_bytes()
+        expected = expected_owner(value)
+        if (kind == "batch" and payload != expected) or (
+                kind in {"allocating", "retiring"} and not expected.startswith(payload)):
+            raise RuntimeError("invalid sender staging owner")
+    for _directory, directory_names, file_names, directory_fd in os.fwalk(
+        path, topdown=True, follow_symlinks=False
+    ):
+        current = os.fstat(directory_fd)
+        if (not stat.S_ISDIR(current.st_mode) or current.st_uid != 0
+                or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o700
+                or current.st_dev != staging_meta.st_dev):
+            raise RuntimeError("unsafe sender staging directory")
+        for name in directory_names:
+            child = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISDIR(child.st_mode) or child.st_uid != 0
+                    or child.st_gid != 0 or stat.S_IMODE(child.st_mode) != 0o700
+                    or child.st_dev != staging_meta.st_dev):
+                raise RuntimeError("unsafe sender staging child directory")
+        for name in file_names:
+            child = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(child.st_mode) or child.st_uid != 0
+                    or child.st_gid != 0 or stat.S_IMODE(child.st_mode) != 0o600
+                    or child.st_nlink != 1 or child.st_dev != staging_meta.st_dev):
+                raise RuntimeError("unsafe sender staging child file")
+    return identity(metadata)
+
+def remove_tree(path, kind, value):
+    expected_identity = validate_tree(path, kind, value)
+    if identity(path.lstat()) != expected_identity:
+        raise RuntimeError("sender staging identity changed")
+    if kind != "retiring":
+        retiring = staging_root / f".retiring.{value}"
+        try:
+            retiring.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("sender retiring collision")
+        os.rename(path, retiring)
+        os.fsync(staging_fd)
+        path = retiring
+        kind = "retiring"
+        validate_tree(path, kind, value)
+    shutil.rmtree(path)
+    os.fsync(staging_fd)
+
+staging_fd = os.open(
+    staging_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+)
+try:
+    if action == "clean-stale":
+        if target_text or token:
+            raise SystemExit(1)
+        stale = []
+        for entry in staging_root.iterdir():
+            match = batch_pattern.fullmatch(entry.name)
+            kind = "batch"
+            if match is None:
+                match = allocating_pattern.fullmatch(entry.name)
+                kind = "allocating"
+            if match is None:
+                match = retiring_pattern.fullmatch(entry.name)
+                kind = "retiring"
+            if match is None:
+                raise RuntimeError("unknown sender staging entry")
+            value = match.group(1)
+            validate_tree(entry, kind, value)
+            stale.append((entry, kind, value))
+        for entry, kind, value in stale:
+            remove_tree(entry, kind, value)
+    elif action == "allocate":
+        if (not re.fullmatch(r"[0-9a-f]{32}", token)
+                or Path(target_text) != staging_root / f"batch.{token}"):
+            raise SystemExit(1)
+        target = Path(target_text)
+        allocating = staging_root / f".allocating.{token}"
+        for candidate in (target, allocating):
+            try:
+                candidate.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise RuntimeError("sender staging collision")
+        os.mkdir(allocating, 0o700)
+        os.chown(allocating, 0, 0)
+        owner = allocating / owner_name
+        descriptor = os.open(
+            owner,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            os.fchmod(descriptor, 0o600)
+            payload = expected_owner(token)
+            view = memoryview(payload)
+            while view:
+                written = os.write(descriptor, view)
+                if written <= 0:
+                    raise RuntimeError("short sender owner write")
+                view = view[written:]
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        allocating_fd = os.open(
+            allocating, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+        )
+        try:
+            os.fsync(allocating_fd)
+        finally:
+            os.close(allocating_fd)
+        validate_tree(allocating, "allocating", token)
+        os.rename(allocating, target)
+        os.fsync(staging_fd)
+        validate_tree(target, "batch", token)
+    else:
+        if not re.fullmatch(r"[0-9a-f]{32}", token):
+            raise SystemExit(1)
+        target = Path(target_text)
+        if target == staging_root / f"batch.{token}":
+            kind = "batch"
+        elif target == staging_root / f".allocating.{token}":
+            kind = "allocating"
+        else:
+            raise SystemExit(1)
+        try:
+            target.lstat()
+        except FileNotFoundError:
+            raise SystemExit(0)
+        remove_tree(target, kind, token)
+finally:
+    os.close(staging_fd)
+PY
+}
+
+read_database_logical_bytes() {
+    local output
+    # This query runs while the global site-operation lock is held, so it must
+    # never inherit the outer eight-hour sync budget. Capture the status before
+    # accepting stdout: a client that prints a plausible value and then hangs
+    # or fails is not a successful size observation.
+    output=$(
+        /usr/bin/timeout --signal=TERM --kill-after=5s 30s \
+            /usr/bin/env -i PATH="$PATH" LC_ALL=C LANG=C \
+            /usr/bin/wp db query \
+            'SELECT COALESCE(SUM(data_length + index_length), 0) FROM information_schema.tables WHERE table_schema = DATABASE();' \
+            --skip-column-names --allow-root
+    ) || return 1
+    [[ "$output" =~ ^(0|[1-9][0-9]{0,18})$ ]] || return 1
+    # A rollback SQL stream is capped at 4 GiB. Reject a database that cannot
+    # be represented by that recovery bound before any media staging begins.
+    if (( ${#output} > 10 )) \
+        || { (( ${#output} == 10 )) && [[ "$output" > 4294967296 ]]; }; then
+        return 1
+    fi
+    printf '%s\n' "$output"
+}
+
+FPM_FREEZE_TOKEN=
+TMP=
+TMP_ALLOCATION=
+TMP_TOKEN=
+cleanup_sender() {
+    local status=$?
+    trap - EXIT INT TERM HUP
+    if [[ -n "$FPM_FREEZE_TOKEN" ]]; then
+        if primary_fpm_freeze_state recover "$FPM_FREEZE_TOKEN"; then
+            FPM_FREEZE_TOKEN=
+        else
+            printf 'sync sender: CRITICAL primary PHP-FPM recovery failed\n' >&2
+            status=1
+        fi
+    fi
+    if [[ -n "$TMP_TOKEN" ]]; then
+        if [[ "$TMP_TOKEN" =~ ^[0-9a-f]{32}$ ]]; then
+            manage_sender_staging remove "$TMP" "$TMP_TOKEN" || status=1
+            manage_sender_staging remove "$TMP_ALLOCATION" "$TMP_TOKEN" || status=1
+        else
+            printf 'sync sender: refusing unsafe temporary path cleanup\n' >&2
+            status=1
+        fi
+    fi
+    exit "$status"
+}
+
 test -f "$KEY" && test ! -L "$KEY"
 test "$(realpath -e -- "$KEY")" = "$KEY"
 test "$(stat -c '%u:%h' "$KEY")" = '0:1'
 key_mode=$(stat -c '%a' "$KEY")
 (( (8#$key_mode & 8#077) == 0 ))
+for known_hosts_parent in /etc /etc/shuzijun; do
+    test -d "$known_hosts_parent" && test ! -L "$known_hosts_parent"
+    test "$(realpath -e -- "$known_hosts_parent")" = "$known_hosts_parent"
+    test "$(stat -c '%u:%g:%a' "$known_hosts_parent")" = '0:0:755'
+done
+test -f "$SYNC_KNOWN_HOSTS" && test ! -L "$SYNC_KNOWN_HOSTS"
+test "$(realpath -e -- "$SYNC_KNOWN_HOSTS")" = "$SYNC_KNOWN_HOSTS"
+test "$(stat -c '%u:%g:%h:%a' "$SYNC_KNOWN_HOSTS")" = '0:0:1:600'
+test "$(sha256sum "$SYNC_KNOWN_HOSTS" | awk '{ print $1 }')" = "$SYNC_KNOWN_HOSTS_SHA256"
+test "$(wc -l < "$SYNC_KNOWN_HOSTS")" -eq 1
+grep -Fxq '129.226.202.207 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH/BHsxAKRunOi8GK2tlH20Th7mj9zyTxKUq1lLa5kw0' \
+    "$SYNC_KNOWN_HOSTS"
 
-# Prevent the sender from reading a release unit while the deployer is
-# replacing it, and prove this scheduler can run only on the authority node.
-exec 8<"$SITE"
-flock -n 8
-verify_authority_role authority
-
-SSH=(ssh -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ConnectTimeout=15 "$TRANSPORT_USER"@"$HOST")
-receiver_attestation=$("${SSH[@]}" \
-    "sudo $REMOTE_RECEIVER --attest")
-test "$receiver_attestation" = "$REMOTE_RECEIVER_SHA256  $REMOTE_RECEIVER"
-receiver_protocol=$("${SSH[@]}" "sudo $REMOTE_RECEIVER --protocol")
-test "$receiver_protocol" = "$SYNC_PROTOCOL"
+# Prevent the sender from reading a release unit while any coordinated site
+# operation is active. The lock lives under a root-only managed directory, so
+# an unprivileged local identity cannot indefinitely deny synchronization.
 validate_generation_state_root
-GENERATION=$(issue_generation)
-
-TMP=$(mktemp -d)
-trap 'rm -rf -- "$TMP"' EXIT
-exec >>"$LOG" 2>&1
-
-printf '[%s] incremental sync started\n' "$(date '+%F %T')"
+enter_site_operation_lock_context "$@"
+verify_authority_role authority
 "$VERIFY" "$SITE"
 
+SSH=(ssh -F /dev/null -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SYNC_KNOWN_HOSTS" \
+    -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
+    -o UpdateHostKeys=no -o ConnectTimeout=15 -o ServerAliveInterval=15 \
+    -o ServerAliveCountMax=2 -o TCPKeepAlive=yes "$TRANSPORT_USER"@"$HOST")
+
+receiver_control_query() {
+    local operation=$1
+    [[ "$operation" == --attest || "$operation" == --protocol ]] || return 1
+    /usr/bin/timeout --signal=TERM --kill-after=5s 45s \
+        "${SSH[@]}" "sudo $REMOTE_RECEIVER $operation"
+}
+
+receiver_attestation=$(receiver_control_query --attest) || exit 1
+test "$receiver_attestation" = "$REMOTE_RECEIVER_SHA256  $REMOTE_RECEIVER"
+receiver_protocol=$(receiver_control_query --protocol) || exit 1
+test "$receiver_protocol" = "$SYNC_PROTOCOL"
+
+# Install cleanup before the first sender temporary-tree mutation. Signal exits
+# therefore recover FPM and remove an already-recorded tree on every path.
+trap cleanup_sender EXIT
+trap 'exit 130' INT TERM HUP
+# SIGKILL during a prior monotonic-state publication can leave only this exact
+# root-owned tokenized temporary. Reclaim it before any new sender mutation;
+# malformed final state and unknown same-prefix entries remain fail-closed.
+clean_stale_generation_temporaries
+# SIGKILL can land after the atomic freeze marker is published but before its
+# token reaches this shell or a watchdog unit starts. Recover any exact durable
+# marker/claim before allocating new staging; malformed state stays fail-closed.
+primary_fpm_freeze_state recover
+verify_primary_fpm_active
+verify_primary_nginx_active
+manage_sender_staging clean-stale
+IFS= read -r TMP_TOKEN < /proc/sys/kernel/random/uuid
+TMP_TOKEN=${TMP_TOKEN//-/}
+[[ "$TMP_TOKEN" =~ ^[0-9a-f]{32}$ ]]
+TMP_ALLOCATION="$SENDER_STAGING_ROOT/.allocating.$TMP_TOKEN"
+TMP="$SENDER_STAGING_ROOT/batch.$TMP_TOKEN"
+manage_sender_staging allocate "$TMP" "$TMP_TOKEN"
+append_sync_authority_event start
+
 cd "$SITE"
-wp db export "$TMP/shuzijun-sync.sql" --add-drop-table --allow-root >/dev/null
-gzip -9 "$TMP/shuzijun-sync.sql"
-install -d -m 700 "$TMP/wp-content"
-rsync -a --delete --delete-excluded "${RSYNC_FILTERS[@]}" \
-    "$SITE/wp-content/" "$TMP/wp-content/"
+DATABASE_LOGICAL_BYTES=$(read_database_logical_bytes) || exit 1
+audit_or_stage_uploads preflight "$TMP" "$DATABASE_LOGICAL_BYTES"
+
+# Copy through fd-pinned, no-follow readers.  This pass enforces the limits on
+# the bytes actually staged and rejects a source inode that changes while read,
+# avoiding rsync's scan/copy aggregate-size race.
+STAGED_UPLOAD_SNAPSHOT=$(
+    audit_or_stage_uploads stage "$TMP" "$DATABASE_LOGICAL_BYTES"
+)
+if [[ ! "$STAGED_UPLOAD_SNAPSHOT" =~ ^(0|[1-9][0-9]{0,18}):(0|[1-9][0-9]{0,18}):(0|[1-9][0-9]{0,18}):[0-9a-f]{64}$ ]]; then
+    exit 1
+fi
+STAGED_UPLOAD_BYTES=${BASH_REMATCH[1]}
+
+# Freeze application writes only after every media byte is local.  Nginx stays
+# active throughout.  PHP-FPM is restarted and accepted as active/running
+# immediately after the bounded database stream, before hashing or transfer.
+verify_primary_nginx_active
+verify_primary_fpm_active
+FPM_FREEZE_TOKEN=$(primary_fpm_freeze_state create '' "$$")
+if [[ ! "$FPM_FREEZE_TOKEN" =~ ^[0-9a-f]{64}$ ]]; then
+    exit 1
+fi
+FPM_WATCHDOG_UNIT="shuzijun-primary-fpm-recovery-${FPM_FREEZE_TOKEN:0:16}.service"
+/usr/bin/timeout --signal=TERM --kill-after=2s 10s \
+    /usr/bin/systemd-run --quiet --collect --unit="$FPM_WATCHDOG_UNIT" \
+    --description='Recover Shuzijun primary PHP-FPM after bounded sync freeze' \
+    --service-type=exec \
+    --property=User=root --property=Group=root --property=UMask=0077 \
+    --property=RuntimeMaxSec=7min --property=TimeoutStopSec=30s \
+    --property=Restart=on-failure --property=RestartSec=1s \
+    --property=StartLimitIntervalSec=10min --property=StartLimitBurst=5 \
+    --property=KillMode=control-group --property=NoNewPrivileges=true \
+    --property=PrivateTmp=true --property=PrivateDevices=true \
+    --property=ProtectSystem=strict --property=ProtectHome=true \
+    --property=ReadWritePaths=/run/shuzijun-sync \
+    --property=ProtectHostname=true --property=ProtectClock=true \
+    --property=ProtectKernelTunables=true --property=ProtectKernelModules=true \
+    --property=ProtectKernelLogs=true --property=ProtectControlGroups=true \
+    --property=RestrictSUIDSGID=true --property=LockPersonality=true \
+    --property=RestrictRealtime=true --property=RestrictAddressFamilies=AF_UNIX \
+    --property=CapabilityBoundingSet= --property=AmbientCapabilities= \
+    --property=SystemCallArchitectures=native \
+    /usr/local/sbin/sync-to-backup --watch-primary-fpm "$FPM_FREEZE_TOKEN"
+verify_primary_fpm_watchdog_active "$FPM_WATCHDOG_UNIT"
+/usr/bin/timeout --signal=TERM --kill-after=5s 15s \
+    /usr/bin/systemctl stop "$FPM_SERVICE"
+primary_fpm_freeze_state begin-frozen "$FPM_FREEZE_TOKEN"
+verify_primary_fpm_inactive
+verify_primary_nginx_active
+FROZEN_UPLOAD_SNAPSHOT=$(
+    /usr/bin/timeout --signal=TERM --kill-after=5s 20s \
+        /usr/bin/env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /bin/bash --noprofile --norc -o pipefail -c \
+        "$(declare -f audit_or_stage_uploads); \
+SITE=\"\$1\"; audit_or_stage_uploads snapshot \"\$2\" \"\$3\"" \
+        frozen-upload-snapshot "$SITE" "$TMP" "$DATABASE_LOGICAL_BYTES"
+)
+test "$FROZEN_UPLOAD_SNAPSHOT" = "$STAGED_UPLOAD_SNAPSHOT"
+
+# No plaintext SQL file is created.  Any pipeline failure reaches the EXIT
+# recovery trap; an independent transient systemd service is the SIGKILL-safe
+# external watchdog. It owns a root-only marker with a monotonic hard deadline.
+# The complete export/compress/store pipeline has its own short hard deadline,
+# so the outer eight-hour transfer timeout can never become an eight-hour FPM
+# outage. timeout's nonzero/TERM/KILL outcomes all return through cleanup_sender.
+/usr/bin/timeout --signal=TERM --kill-after=10s 90s \
+    /usr/bin/env -i PATH="$PATH" LC_ALL=C LANG=C \
+    /bin/bash --noprofile --norc -o pipefail -c \
+    "$(declare -f bound_database_sql_stream); \
+$(declare -f store_staged_database); \
+cd \"\$1\" || exit 1; wp db export - --add-drop-table --allow-root --quiet \
+| bound_database_sql_stream | gzip -9 \
+| store_staged_database \"\$2\" \"\$3\"" \
+    frozen-database-export "$SITE" "$TMP" "$STAGED_UPLOAD_BYTES"
+
+primary_fpm_freeze_state recover "$FPM_FREEZE_TOKEN"
+FPM_FREEZE_TOKEN=
+
+# Staging can take hours on a large site. Re-attest the exact receiver and
+# protocol immediately before consuming the next monotonic generation.
+receiver_attestation=$(receiver_control_query --attest) || exit 1
+test "$receiver_attestation" = "$REMOTE_RECEIVER_SHA256  $REMOTE_RECEIVER"
+receiver_protocol=$(receiver_control_query --protocol) || exit 1
+test "$receiver_protocol" = "$SYNC_PROTOCOL"
+GENERATION=$(issue_generation)
 env -i PATH="$PATH" LC_ALL=C LANG=C /usr/bin/python3 -I - \
     "$TMP" "$GENERATION" <<'PY'
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve(strict=True)
 generation = int(sys.argv[2])
-if str(generation) != sys.argv[2] or generation < 1 or generation >= 2**63:
+token_match = re.fullmatch(r"batch\.([0-9a-f]{32})", root.name)
+if (str(generation) != sys.argv[2] or generation < 1 or generation >= 2**63
+        or token_match is None):
     raise SystemExit(1)
+token = token_match.group(1)
 max_files = 100_000
 max_file_bytes = 8 * 1024 * 1024 * 1024
 max_batch_bytes = 64 * 1024 * 1024 * 1024
@@ -236,6 +1826,20 @@ for directory, directory_names, file_names in os.walk(root, followlinks=False):
         metadata = path.lstat()
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
             raise SystemExit(1)
+        if relative == ".sender-staging-owner.json":
+            expected_owner = (
+                json.dumps(
+                    {"token": token, "version": 1},
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ) + "\n"
+            ).encode("ascii")
+            if (metadata.st_uid != 0 or metadata.st_gid != 0
+                    or stat.S_IMODE(metadata.st_mode) != 0o600
+                    or path.read_bytes() != expected_owner):
+                raise SystemExit(1)
+            continue
         if relative != "shuzijun-sync.sql.gz" and not relative.startswith("wp-content/uploads/"):
             raise SystemExit(1)
         if relative.startswith("wp-content/uploads/"):
@@ -274,9 +1878,10 @@ PY
 ssh-keygen -Y sign -q -f "$KEY" -n shuzijun-sync \
     "$TMP/shuzijun-sync-manifest.json"
 
-env -i PATH="$PATH" LC_ALL=C LANG=C \
-    /usr/bin/python3 -I - "$TMP" <<'PY' \
-    | "${SSH[@]}" "sudo $REMOTE_RECEIVER --ingest"
+INGEST_RECEIPT=$(
+    if ! env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I - "$TMP" <<'PY' \
+        | "${SSH[@]}" "sudo $REMOTE_RECEIVER --ingest"; then
 import hashlib
 import json
 import os
@@ -342,5 +1947,15 @@ for item in document["files"]:
     if digest.hexdigest() != expected_digest:
         raise SystemExit(1)
 PY
+        exit 1
+    fi
+    # Command substitution removes trailing newlines.  A non-newline sentinel
+    # preserves the receiver's exact stdout bytes for a fail-closed comparison.
+    printf '\036'
+)
+printf -v EXPECTED_INGEST_RECEIPT \
+    'sync-applied generation=%s receiver-sha256=%s protocol=%s cache=flushed signed=true uploads-only=true\n\036' \
+    "$GENERATION" "$REMOTE_RECEIVER_SHA256" "$SYNC_PROTOCOL"
+test "$INGEST_RECEIPT" = "$EXPECTED_INGEST_RECEIPT"
 
-printf '[%s] incremental sync completed generation=%s\n' "$(date '+%F %T')" "$GENERATION"
+append_sync_authority_event completion "$GENERATION"

@@ -1,0 +1,57 @@
+#!/bin/bash
+set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true
+
+VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
+VERIFY_SHA256=7e7a95a1cc7bb05aa6810a9d644950ddedb0274ce247499d5828a9180dcae7f2
+VERIFY_FD=/proc/self/fd/9
+
+test -f "$VERIFY" && test -x "$VERIFY" && test ! -L "$VERIFY"
+test "$(realpath -e -- "$VERIFY")" = "$VERIFY"
+for parent in /usr /usr/local /usr/local/sbin; do
+    test -d "$parent" && test ! -L "$parent"
+    test "$(realpath -e -- "$parent")" = "$parent"
+    test "$(stat -c '%u:%g' "$parent")" = 0:0
+    mode=$(stat -c '%a' "$parent")
+    (( (8#$mode & 8#022) == 0 ))
+done
+
+# The sender needs every filesystem and parsed-Nginx contract from the reviewed
+# verifier but cannot retain the capabilities required by this Nginx build's
+# live `nginx -t`.  Open and pin the exact reviewed verifier inode, then remove
+# only its final live command.  A separate short-lived preflight unit performs
+# the complete verifier immediately before the capability-free sync service.
+exec 9<"$VERIFY"
+test "$(stat -Lc '%u:%g:%h:%a' "$VERIFY_FD")" = 0:0:1:755
+test "$(sha256sum "$VERIFY_FD" | awk '{print $1}')" = "$VERIFY_SHA256"
+
+env -i PATH="$PATH" LC_ALL=C LANG=C \
+    /usr/bin/python3 -I /proc/self/fd/8 "$VERIFY_FD" 8<<'PY' \
+    | /bin/bash --noprofile --norc -s -- "$@"
+import os
+import sys
+
+path = sys.argv[1]
+with open(path, "rb", buffering=0) as stream:
+    source = stream.read()
+
+needle = (
+    b"nginx -t >/dev/null\n\n"
+    b"printf 'webroot-security: passed\\n'\n"
+)
+replacement = b"printf 'webroot-security: static contract passed\\n'\n"
+if source.count(needle) != 1:
+    raise SystemExit("reviewed verifier live-check boundary is not exact")
+transformed = source.replace(needle, replacement)
+view = memoryview(transformed)
+while view:
+    written = os.write(1, view)
+    if written <= 0:
+        raise SystemExit(1)
+    view = view[written:]
+PY

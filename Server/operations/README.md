@@ -573,13 +573,19 @@ queue on every timer run; the systemd path unit observed its own worker change,
 retrigged immediately, and eventually hit the start limit. The fixed worker
 changes the queue only when it is created or actually contains URLs.
 
-`sync-to-backup` and `apply-shuzijun-sync` form one pinned v3 protocol. The
-sender first proves its local marker is `authority`, attests the remote receiver
-against the exact SHA-256 compiled into the sender, and requires the exact
-`shuzijun-sync-receiver-v3-signed-uploads-only` protocol response before it
-issues a generation or creates an export. Install and attest the receiver first;
-an older receiver is not backward compatible and must never be invoked as a
-fallback.
+`sync-to-backup` and `apply-shuzijun-sync` form one pinned v4 transactional
+uploads protocol. After
+taking the site lock, the sender first proves its local marker is `authority`
+and runs the exact-hash-pinned static Web-root contract. Only then does it
+attest the remote receiver against the exact SHA-256 compiled into the sender
+and require the exact
+`shuzijun-sync-receiver-v4-transactional-uploads` protocol response before it
+creates an export. Before consuming a generation, it enforces the database,
+file-count, directory-count, per-file, aggregate and temporary-disk budgets,
+streams the database into bounded gzip without a plaintext SQL file, copies the
+uploads through no-follow file descriptors, and re-attests the receiver and
+protocol. Install and attest the receiver first; an older receiver is not
+backward compatible and must never be invoked as a fallback.
 
 The batch contains only a database gzip and `wp-content/uploads/`. A canonical
 JSON v2 manifest lists every allowed path, byte size, SHA-256 and a strictly
@@ -600,10 +606,15 @@ issuing a newer batch, never by deleting or reducing either generation file.
 
 Any extra path, code/theme/plugin/config file, executable upload, symlink,
 hard-linked sender file, non-canonical manifest, oversize batch, digest mismatch,
-trailing byte or missing database is rejected. The sender's staging rsync
-independently excludes pure/mixed-case PHP and ends with an uploads-only include
-followed by a catch-all exclude; the receiver's rsync has fixed uploads-only
-source and destination roots, so its `--delete` cannot reach code or config.
+trailing byte or missing database is rejected. The sender does not use rsync:
+its bounded copier opens every source file relative to the scanned directory fd
+with `O_NOFOLLOW`, checks stable inode/size/mtime/ctime before and after the
+copy, and applies the actual aggregate limit to the bytes staged. Files that
+appear after an already-enumerated directory are outside that signed snapshot;
+they cannot bypass the bound because only staged, hashed bytes enter the
+manifest. The receiver stages the complete uploads generation outside the Web
+root and publishes it through a same-filesystem atomic directory exchange; it
+never uses a delete-capable copy command against code or configuration paths.
 `verify-webroot-security` separately rejects PHP, PHTML, PHAR, script and
 per-directory config payloads already present in uploads, so
 whole-site sync cannot become a second code-release path; only
@@ -611,15 +622,57 @@ whole-site sync cannot become a second code-release path; only
 
 The receiver acquires the shared site-directory lock and proves `standby`
 before protocol negotiation, before reading a batch and again immediately
-before restart. It requires both local query-form REST routes to return
-503/`yishu_account_authority_unavailable` before any root claim, backup or
-database/media write. After importing it flushes the persistent cache, reloads
-Nginx, restarts FPM and repeats both standby probes. A failed post-sync probe
-must both stop and persistently mask `php8.3-fpm`, then prove exact
-`masked`/`inactive`/`dead` state; failure to prove isolation is a critical manual
-incident rather than a swallowed cleanup error. Pre-sync database/config backups
-are root-only and fsynced; the App release unit and all other code remain
-`root:www-data` and non-writable.
+before runtime activation. It requires FPM to begin in the exact
+`enabled`/`loaded`/`active`/`running` state with no socket trigger, and both local
+query-form REST routes to return 503/`yishu_account_authority_unavailable`
+before any root claim, backup or database/media write. Once the signed database
+has been bounded and the generation accepted, the receiver persistently masks
+and stops `php8.3-fpm` and proves exact `masked`/`inactive`/`dead` state before
+creating the backup or touching live uploads/database. This persistent guard
+survives SIGKILL throughout the mutation phase. EXIT and INT/TERM/HUP paths
+re-apply and re-verify it after any unsuccessful apply. Only after the offline
+Web-root, role, Nginx and database checks pass does the receiver start and enable
+the separately supervised `shuzijun-sync-fpm-guard.service`, then unmask/start
+FPM, require its exact original enabled/running policy, and repeat both standby
+probes. The guard holds an independent root-only flock lease and treats the
+absence of a durable post-probe commit as a command to mask/stop FPM. Its
+`Type=notify` readiness is ordered before FPM and enabling it installs a
+`RequiredBy=php8.3-fpm.service` dependency. A boot/dependency start without a
+commit never reports READY and fails, while an in-flight receiver reports READY
+only after the independent watcher is armed. Thus SIGKILL, receiver-cgroup
+termination or a reboot in the activation window cannot turn an uncommitted
+apply into a serving standby. Each watcher invocation has a two-minute runtime ceiling.
+Its fixed `ExecStopPost` independently masks/stops and verifies FPM whenever
+that ceiling, TERM or a forced guard kill occurs without a commit, so safety
+does not depend on `Requires` propagating a later service exit. After a
+successful commit the short-lived guard finishes `inactive/dead` with
+`Result=success`; every future FPM start pulls it in again through the installed
+`RequiredBy` edge and must pass its `Type=notify` readiness gate. Exact
+persistent isolation exits 77 and is excluded from restart because retrying it
+adds no safety. The unit counts every activation (successful, failed, automatic
+or manual) against three starts per ten-minute window. This both bounds genuine
+failure retries and deliberately makes a fourth rapid FPM restart fail closed.
+After inspecting the journal, proving there is no receiver/claim in flight and
+verifying the durable commit plus exact FPM state, an operator may run
+`systemctl reset-failed shuzijun-sync-fpm-guard.service`; never reset it during
+an apply. A failed runtime probe re-isolates FPM; failure to prove isolation is a
+critical manual incident rather than a swallowed cleanup error. Pre-sync
+database/config backups are root-only and fsynced; the App release unit and all
+other code remain `root:www-data` and non-writable.
+
+The receiver runs `sync -f /etc/systemd/system` after publishing and verifying
+the persistent FPM mask, and again after enabling/verifying the guard's
+`RequiredBy` edge but before starting the watcher or removing that mask. This
+orders both sides of the hard-reset boundary: an uncommitted reboot sees either
+the durable mask or the durable startup guard, never merely an in-memory edge.
+
+The receiver validates the guard's pinned unit bytes, root metadata, fragment,
+drop-in absence, daemon-reload state, `Type`, `NotifyAccess`,
+`RemainAfterExit`, `RuntimeMaxUSec`, restart/start-limit policy, `Before`
+ordering and enabled-state before
+it reads an ingest stream and again immediately before accepting the generation. Activation
+repeats that validation after `systemctl enable`; at that point runtime
+`RequiredBy` must include PHP-FPM before the watcher may report READY.
 
 SSH is not a general standby login. The sender connects only as the dedicated,
 password-locked `shuzijun-sync-transport` account with pinned host-key checking.
@@ -633,18 +686,55 @@ any broad `NOPASSWD: ALL`; otherwise the transport boundary is not installed.
 Shanghai primary. The timer runs once per day at 03:30 Asia/Shanghai with up
 to ten minutes of jitter; `Persistent=true` catches one missed run after a
 reboot without creating a high-frequency database/config backup stream. The
-oneshot service has a 45-minute deadline, uses low CPU/I/O priority and first
-requires MySQL, Nginx and PHP-FPM to be active. It must run as root because the
-sender reads the root-only pinned SSH key, invokes the root-owned verifier and
-exports WordPress through WP-CLI. Its systemd sandbox removes all capabilities,
-makes the system and primary Web root read-only, keeps `/root` read-only, gives
-it a private temporary directory, and permits writes only below `/run` and
-`/var/log` plus the root-only generation state below `/var/lib/shuzijun-sync` on
-the primary. The only remote write path remains the reviewed receiver reached
-through pinned SSH host-key verification.
+sender service has an eight-hour deadline, uses low CPU/I/O priority and
+explicitly fails when
+MySQL, Nginx, PHP-FPM, the sender, either verifier, the SSH key or generation
+state is unavailable. These gates are `ExecStartPre`, not systemd `Condition*`,
+so a missing dependency is recorded as a failed run rather than a successful
+skip. It must run as root because the sender reads the root-only pinned SSH key,
+invokes the root-owned static verifier and exports WordPress through WP-CLI.
+Its systemd sandbox removes all capabilities, makes the system and primary Web
+root read-only, keeps `/root` read-only, gives it a private temporary directory,
+and permits writes only below `/run` and `/var/log` plus the root-only generation
+state below `/var/lib/shuzijun-sync` on the primary. The only remote write path
+remains the reviewed receiver reached through pinned SSH host-key verification.
 
-Every scheduled or manual sender invocation must take
-`/run/shuzijun-sync.lock`. Before a two-node release, stop the timer first and
+Every start of the sender service requires and is ordered after the separate
+`shuzijun-sync-preflight.service`. That short-lived unit runs only
+`/usr/sbin/nginx -t -q` in a private network namespace. It cannot see `/root`,
+the sync generation state or `/var/backups`; the system is read-only and only
+`/var/log/nginx` is writable. `CAP_DAC_OVERRIDE` and `CAP_NET_BIND_SERVICE` are
+bounded to this Nginx-only preflight and never reach the eight-hour sender, its
+WP-CLI/SSH/Python children or the remote transport. The sender's static wrapper
+opens and hashes the exact reviewed full verifier, replaces exactly its final
+live `nginx -t` boundary, and executes all remaining filesystem and parsed-
+Nginx contracts without capabilities. A missing or duplicate replacement
+boundary fails before any transformed verifier command runs.
+
+The eight-hour deadline is deliberate: the reviewed v4 transactional protocol
+still sends the complete signed uploads payload. The accepted generation 6
+baseline contains 943 media files and 209,133,527 bytes. Early live samples fit approximately
+8.6 seconds of per-file verification/durable-write overhead plus a roughly
+360 KB/s data segment, which initially projected about 2.4 hours before the
+final apply and smoke checks. The continuing live TCP evidence instead showed
+about 31.5% retransmitted bytes, a congestion window of two segments and only
+about 13 KB/s cumulatively acknowledged. The eight-hour bound covers that
+measured lossy-path envelope plus apply and smoke time while retaining a finite
+failure deadline. The daily schedule cannot
+overlap because the service lock is exclusive. A failed run does not reuse a consumed generation.
+Failure before the receiver's anti-replay acceptance leaves its counter
+unchanged; failure after acceptance deliberately leaves that counter advanced
+even when no apply-completion log exists. Never roll it back or reuse the number:
+retry only with the sender's next strictly increasing generation. If hardened
+generation 7 is accepted but does not complete, this release's four-way `=7`
+timer gate cannot be met; keep the timer disabled and establish a newly reviewed
+next-generation gate. Signed delta transfer remains a future protocol change
+and is not part of this v4 transactional-activation recovery.
+
+Every scheduled or manual sync must start `shuzijun-sync.service`; never invoke
+`sync-to-backup` directly, even behind an operator-created `flock`, because that
+would bypass the required Nginx preflight. The service itself takes
+`/run/shuzijun-sync/sync.lock`. Before a two-node release, stop the timer first and
 do not interrupt a receiver/sender that is already applying a database dump:
 
 ```bash
@@ -656,23 +746,132 @@ fi
 ```
 
 After both nodes pass their release manifests and smoke tests, install the
-current receiver on Singapore first. Then install the sender and versioned
-units on Shanghai, validate the units, perform one foreground locked sync, and
-only then enable the persistent timer:
+hardened full verifier, its hash-pinned consumers, the activation-guard unit and
+the current receiver on Singapore first. Then install the same verifier chain,
+the static verifier, known-hosts, sender and versioned units on Shanghai.
+Validate every installed byte/unit, run hardened foreground generation 7, and
+only after issued/accepted/completion-log evidence all equal 7 enable the
+persistent timer:
+
+When a candidate bundle is transferred from macOS with `tar`, set
+`COPYFILE_DISABLE=1` at archive creation and require the staging directory to
+contain exactly the reviewed filenames. Any `._*` AppleDouble entry is an
+unexpected file and must fail closed; never delete or ignore it merely to make
+the candidate pass. Establish the exact-path cleanup trap before validating the
+candidate file list so a rejected preflight cannot leave stale `/run` input for
+the next attempt.
 
 ```bash
+# This initializer creates exactly `0\n` only when a generation file is absent.
+# An existing inode is opened read-only with O_NOFOLLOW and must already satisfy
+# the root:root, 0600, nlink=1 and canonical integer contract. It is never reset.
+initialize_generation_state() {
+  env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C \
+    /usr/bin/python3 -I - "$1" <<'PY'
+import os
+import re
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+state_path = Path(sys.argv[1])
+allowed = {
+    Path("/var/lib/shuzijun-sync/highest-issued-generation"),
+    Path("/var/lib/shuzijun-sync/state/highest-accepted-generation"),
+}
+if state_path not in allowed:
+    raise SystemExit(1)
+parent = state_path.parent
+metadata = parent.lstat()
+if (parent.resolve(strict=True) != parent or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700):
+    raise SystemExit(1)
+
+read_flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+
+def validate_existing():
+    descriptor = os.open(state_path, read_flags)
+    try:
+        current = os.fstat(descriptor)
+        payload = os.read(descriptor, 32)
+        if os.read(descriptor, 1):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    if (not stat.S_ISREG(current.st_mode) or current.st_uid != 0
+            or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_nlink != 1
+            or not re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", payload)):
+        raise SystemExit(1)
+
+try:
+    validate_existing()
+except FileNotFoundError:
+    descriptor, temp_name = tempfile.mkstemp(prefix=".generation-init.", dir=parent)
+    temp_path = Path(temp_name)
+    published = False
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(b"0\n")
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise SystemExit(1)
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        try:
+            os.link(temp_path, state_path, follow_symlinks=False)
+        except FileExistsError:
+            pass
+        else:
+            published = True
+        temp_path.unlink()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+    validate_existing()
+    if published:
+        directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+if list(parent.glob(".generation-init.*")):
+    # A stale candidate indicates an interrupted/manual initializer and must be
+    # reviewed rather than silently deleted by installation instructions.
+    raise SystemExit(1)
+PY
+}
+
 # Singapore standby, first:
 install -d -o root -g root -m 0700 /var/lib/shuzijun-sync
 install -d -o root -g root -m 0700 \
   /var/lib/shuzijun-sync/incoming \
   /var/lib/shuzijun-sync/state
-install -o root -g root -m 0600 /dev/null \
+initialize_generation_state \
   /var/lib/shuzijun-sync/state/highest-accepted-generation
-printf '0\n' > /var/lib/shuzijun-sync/state/highest-accepted-generation
+install -d -o root -g root -m 0755 /etc/shuzijun
 # Each line is: shuzijun-sync <reviewed public key corresponding to the
 # primary's /root/.ssh/shuzijun_sync_ed25519>. Never place a private key here.
 install -o root -g root -m 0644 <reviewed-allowed-signers-file> \
   /etc/shuzijun/sync-signers
+install -o root -g root -m 0755 Server/operations/verify-webroot-security \
+  /usr/local/sbin/verify-shuzijun-webroot-security
+install -o root -g root -m 0755 Server/operations/deploy-app-content-release \
+  /usr/local/sbin/deploy-app-content-release
+install -o root -g root -m 0755 Server/operations/seed-standby-app-content-release \
+  /usr/local/sbin/seed-standby-app-content-release
+install -o root -g root -m 0644 Server/operations/shuzijun-sync-fpm-guard.service \
+  /etc/systemd/system/shuzijun-sync-fpm-guard.service
 install -o root -g root -m 0755 Server/operations/apply-shuzijun-sync \
   /usr/local/sbin/apply-shuzijun-sync
 install -o root -g root -m 0755 Server/operations/shuzijun-sync-ssh-gate \
@@ -697,6 +896,20 @@ install -o root -g root -m 0644 \
 sshd -t
 sshd -T -C user=shuzijun-sync-transport,host=localhost,addr=127.0.0.1 \
   | grep -Fx 'forcecommand /usr/local/sbin/shuzijun-sync-ssh-gate'
+systemd-analyze verify /etc/systemd/system/shuzijun-sync-fpm-guard.service
+systemctl daemon-reload
+test "$(systemctl is-enabled shuzijun-sync-fpm-guard.service)" = disabled
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p NeedDaemonReload --value)" = no
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p Type --value)" = notify
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p NotifyAccess --value)" = all
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p RemainAfterExit --value)" = no
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p RuntimeMaxUSec --value)" = 2min
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p Restart --value)" = on-failure
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p RestartUSec --value)" = 1s
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p StartLimitIntervalUSec --value)" = 10min
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p StartLimitBurst --value)" = 3
+systemctl show shuzijun-sync-fpm-guard.service -p Before --value \
+  | tr ' ' '\n' | grep -Fx php8.3-fpm.service
 systemctl reload ssh
 sha256sum /usr/local/sbin/apply-shuzijun-sync
 sudo /usr/local/sbin/apply-shuzijun-sync --protocol
@@ -704,24 +917,127 @@ sudo /usr/local/sbin/apply-shuzijun-sync --protocol
 # Compare the printed SHA-256 and protocol with REMOTE_RECEIVER_SHA256 and
 # SYNC_PROTOCOL in the reviewed sender source, then install Shanghai second:
 install -d -o root -g root -m 0700 /var/lib/shuzijun-sync
-install -o root -g root -m 0600 /dev/null \
+install -d -o root -g root -m 0755 /etc/shuzijun
+initialize_generation_state \
   /var/lib/shuzijun-sync/highest-issued-generation
-printf '0\n' > /var/lib/shuzijun-sync/highest-issued-generation
+install -o root -g root -m 0755 Server/operations/verify-webroot-security \
+  /usr/local/sbin/verify-shuzijun-webroot-security
+install -o root -g root -m 0755 Server/operations/deploy-app-content-release \
+  /usr/local/sbin/deploy-app-content-release
+install -o root -g root -m 0755 Server/operations/bootstrap-legacy-app-content-release \
+  /usr/local/sbin/bootstrap-legacy-app-content-release
+install -o root -g root -m 0600 \
+  Server/operations/shuzijun-sync-known-hosts \
+  /etc/shuzijun/sync-known-hosts
+test "$(sha256sum /etc/shuzijun/sync-known-hosts | awk '{ print $1 }')" = \
+  b48cc29b7506423ba402b954cb8c0fedc748706549ed704e84647b70a517d6f3
+install -o root -g root -m 0755 Server/operations/verify-shuzijun-sync-source \
+  /usr/local/sbin/verify-shuzijun-sync-source
 install -o root -g root -m 0755 Server/operations/sync-to-backup \
   /usr/local/sbin/sync-to-backup
+install -o root -g root -m 0644 Server/operations/shuzijun-sync-preflight.service \
+  /etc/systemd/system/shuzijun-sync-preflight.service
 install -o root -g root -m 0644 Server/operations/shuzijun-sync.service \
   /etc/systemd/system/shuzijun-sync.service
 install -o root -g root -m 0644 Server/operations/shuzijun-sync.timer \
   /etc/systemd/system/shuzijun-sync.timer
-systemd-analyze verify /etc/systemd/system/shuzijun-sync.service \
+systemd-analyze verify /etc/systemd/system/shuzijun-sync-preflight.service \
+  /etc/systemd/system/shuzijun-sync.service \
   /etc/systemd/system/shuzijun-sync.timer
 systemctl daemon-reload
-/usr/bin/flock -n /run/shuzijun-sync.lock \
-  /usr/local/sbin/sync-to-backup
-systemctl enable --now shuzijun-sync.timer
+systemctl start shuzijun-sync.service
+systemctl show shuzijun-sync-preflight.service \
+  -p ExecMainStatus -p Result -p CapabilityBoundingSet -p PrivateNetwork
+systemctl show shuzijun-sync.service \
+  -p ExecMainStatus -p Result -p CapabilityBoundingSet
+journalctl -u shuzijun-sync-preflight.service \
+  -u shuzijun-sync.service --since '-1 hour' --no-pager
+# STOP: do not create or enable the timer until every generation-7 assertion
+# below succeeds. On Shanghai:
+test "$(cat /var/lib/shuzijun-sync/highest-issued-generation)" = 7
+tail -n 1 /var/log/wp-sync.log | grep -Eq 'incremental sync completed generation=7$'
+# On Singapore, in a separate operator shell:
+test "$(cat /var/lib/shuzijun-sync/state/highest-accepted-generation)" = 7
+tail -n 1 /var/log/shuzijun-sync-receiver.log \
+  | grep -Eq 'signed uploads/database sync applied; generation=7 backup='
+test "$(systemctl is-enabled shuzijun-sync-fpm-guard.service)" = enabled
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p ActiveState --value)" = inactive
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p SubState --value)" = dead
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p Result --value)" = success
+test "$(systemctl show shuzijun-sync-fpm-guard.service -p ExecMainStatus --value)" = 0
+systemctl show shuzijun-sync-fpm-guard.service -p RequiredBy --value \
+  | tr ' ' '\n' | grep -Fx php8.3-fpm.service
+test -z "$(find /var/lib/shuzijun-sync/incoming -mindepth 1 -maxdepth 1 -print -quit)"
+# Return to Shanghai only after recording those exact Singapore results. Both
+# nodes must have no sender/receiver process or job. Then initialize
+# Persistent=true without an immediate catch-up run. This block deliberately
+# fails if a stamp already exists; review an existing stamp instead of replacing it.
+env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C LANG=C \
+  /usr/bin/python3 -I - <<'PY'
+import os
+import stat
+from pathlib import Path
+
+root = Path("/var/lib/systemd/timers")
+stamp = root / "stamp-shuzijun-sync.timer"
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) & 0o022):
+    raise SystemExit(1)
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW
+descriptor = os.open(stamp, flags, 0o644)
+try:
+    os.fchmod(descriptor, 0o644)
+    current = os.fstat(descriptor)
+    if (not stat.S_ISREG(current.st_mode) or current.st_uid != 0
+            or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o644
+            or current.st_nlink != 1 or current.st_size != 0):
+        raise SystemExit(1)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+systemctl enable shuzijun-sync.timer
+systemctl start shuzijun-sync.timer
 systemctl is-enabled --quiet shuzijun-sync.timer
 systemctl is-active --quiet shuzijun-sync.timer
+! systemctl is-active --quiet shuzijun-sync.service
+systemctl show shuzijun-sync.timer \
+  -p ActiveState -p SubState -p LastTriggerUSec -p NextElapseUSecRealtime
 ```
+
+Before these production steps, exercise the guard on a disposable Linux clone,
+never on either serving node. The fixture must prove four state transitions:
+boot-like/no-lease with no commit does not report READY, leaves the guard
+failed with exit 77, prevents or masks FPM and does not restart; the prior
+durable commit permits FPM and leaves the guard inactive/dead with success;
+releasing an in-flight lease by both TERM and SIGKILL without a commit
+automatically reaches exact masked/inactive/dead/masked FPM; a deliberately
+SIGSTOP-hung receiver crosses the two-minute runtime ceiling and `ExecStopPost`
+reaches that same exact isolation even though the lease remains held; and a
+post-probe commit leaves the guard inactive/dead with success while FPM remains
+enabled/loaded/active/running. The timeout case must also prove the nested
+`systemctl mask --now`/stop transaction does not deadlock and completes within
+`TimeoutStopSec=1min`. Also force the isolation command to fail and prove the
+unit permits at most three starts per ten-minute window; separately prove a
+fourth rapid successful/manual activation also fails closed until a reviewed
+`reset-failed`. Record the
+systemd journal and exact `systemctl show` properties for the generation-7
+release evidence.
+
+Because `Persistent=true` catches missed calendar runs, never replace this
+first-install sequence with `systemctl enable --now`: with no prior stamp it can
+immediately issue an unplanned generation after the foreground acceptance.
+Read the timer twice and require `active/waiting`, an inactive sender, unchanged
+generation counters and a `NextElapseUSecRealtime` in the next 03:30--03:41
+Asia/Shanghai window. If an unexpected generation starts, stop only the timer;
+do not interrupt a sender or receiver that has entered transfer or apply.
 
 The two `0\n` initializations are one-time setup on fresh state only. The
 generation files are part of the security boundary: never reset, delete,
@@ -731,8 +1047,78 @@ the timer stopped and advance the primary state under change control to a value
 strictly above the accepted state before generating a new signed batch. Gaps are
 expected after failed exports or applies and must not be reused.
 
-Never install the timer on Singapore and never call `sync-to-backup` directly
-without `flock`. If the foreground sync or its post-sync standby smoke fails,
+The fixed full/static Web-root verifier chain checks the live source tree for
+regular files with link count greater than one, including under uploads, before
+the sender stages anything. This check must remain on the source: rsync copies
+a hard-linked source inode into an ordinary nlink=1 staging inode and therefore
+cannot prove after staging that the source was safe.
+
+The signed database member is never expanded with an unbounded `gunzip` shell
+redirection. The receiver streams exactly one CRC-valid gzip member into a
+root-only temporary inode, rejects trailing or concatenated data, caps the SQL
+at 4 GiB, checks the 1 GiB free-space reserve before every write, and publishes
+the completed `shuzijun-sync.sql` with an atomic no-replace hard link. This
+preflight completes before the accepted-generation counter advances and before
+uploads or the database are applied.
+
+The sender applies the same fail-closed envelope before it issues a generation:
+at most 100,000 payload files and 100,000 upload directories, 8 GiB per staged
+file, 64 GiB for the signed batch, and 4 GiB for the uncompressed database
+stream. It budgets the logical database before export, caps the gzip at 8 GiB,
+and preserves at least 1 GiB plus the estimated candidate footprint on its
+private temporary filesystem. The raw database is piped through the 4 GiB
+limiter into gzip and a root-only atomic writer, so no uncompressed SQL file is
+created. Uploads are copied with no-follow/nonblocking descriptors and per-read
+reserve checks; a FIFO, socket, device, link, oversize file, or source inode that
+changes while copied rejects the whole candidate. Only after these checks and
+a fresh receiver attestation does the sender atomically advance
+`highest-issued-generation` and sign the manifest.
+
+Managed rollback archives are retained as exactly seven completed
+`/var/backups/shuzijun-sync-v1-YYYYMMDD-HHMMSS` directories. Retention considers only
+root:root 0700 directories on the `/var/backups` filesystem containing exactly
+the three root:root 0600, nlink=1 regular files `wordpress.sql.gz`,
+`wp-config.php`, and `backup.sha256`. Before final publication and again before
+any retention deletion, the manifest must be exactly two ASCII lines in fixed
+`wordpress.sql.gz`, `wp-config.php` order using GNU SHA-256's two-space format,
+and both freshly calculated hashes must match. Any malformed or tampered
+lookalike fails closed and is never removed. Stale receiver-owned hidden
+candidates are also name-, type-,
+owner-, mode- and device-checked before fd-safe removal. An interrupted hidden
+candidate may additionally contain only a `.wordpress-sql-gz.<random>` regular
+temporary file satisfying the same root:root 0600, nlink=1 and same-device
+contract; this exception never applies to a completed backup. Any other hidden
+child fails closed and is not removed. Before creating the
+next archive, the receiver budgets twice the current logical database size plus
+64 MiB (at least 128 MiB), preserves a 1 GiB disk reserve while streaming, and
+caps the compressed archive at 8 GiB. The archive is built under a hidden
+root-only directory and renamed into the retained namespace only after all
+three files and their hashes are durable. The receiver fsyncs that publication
+before revalidating every managed restore point. It atomically renames each
+oldest excess entry to the dedicated hidden `.shuzijun-sync-v1-*.retiring`
+namespace, fsyncs the parent, and only then removes it. A kill during removal
+therefore leaves seven completed restore points plus a strict partial tombstone;
+the next prepare validates its root-owned same-device directory and remaining
+regular-file subset before retrying fd-safe cleanup. A failed export, manifest
+validation or publication leaves the previous seven backups untouched; a crash
+after publication can leave seven or more completed backups, and the next run
+safely reconciles the excess without treating a partial deletion as a corrupt
+completed backup.
+The newly published backup is never selected for deletion, even if the wall
+clock moved backwards. Historical `pre-sync-*` directories
+belong to the legacy receiver: the v1 retention scanner does not inspect,
+modify, remove or reject them. Their bytes still reduce `statvfs` free space and
+therefore remain covered by the same pre-export and per-write disk gate.
+
+The sender never consults user or system SSH configuration and never reads
+default known-hosts databases. `/etc/shuzijun/sync-known-hosts` is the exact
+root:root 0600, single-line ED25519 pin shipped with this release; its fixed
+SHA-256 is checked before every connection, while `-F /dev/null`, explicit user
+and global known-hosts paths, strict host-key checking and an ED25519-only host
+key algorithm make the transport decision reproducible.
+
+Never install the timer on Singapore and never call `sync-to-backup` directly.
+If the foreground service sync or its post-sync standby smoke fails,
 leave both the sync timer and `shuzijun-failover.timer` stopped. A timer run
 that finds the lock busy fails visibly and does not start a second transfer;
 operators finish a release with the explicit foreground sync above, so a

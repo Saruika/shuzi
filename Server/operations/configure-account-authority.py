@@ -18,11 +18,14 @@ from pathlib import Path
 
 ROLE_PATH = Path("/etc/shuzijun/account-authority-role")
 ROLE_ROOT = ROLE_PATH.parent
-SITE_LOCK = Path("/var/www/html/shuzijun.com.cn")
+OPERATION_LOCK_ROOT = Path("/var/lib/shuzijun-sync")
+OPERATION_LOCK = OPERATION_LOCK_ROOT / "site-operation.lock"
 VERIFIER = Path("/usr/local/sbin/verify-shuzijun-account-authority-role")
 VERIFIER_SHA256 = "5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58"
 BACKUP_ROOT = Path("/var/backups/shuzijun-account-authority")
 PAYLOADS = {"authority": b"authority\n", "standby": b"standby\n"}
+ROOT_UID = 0
+ROOT_GID = 0
 
 
 class ConfigurationError(RuntimeError):
@@ -45,8 +48,8 @@ def _safe_path(
     if not correct_type or path.is_symlink() or resolved != path:
         raise ConfigurationError(f"fixed path is not canonical: {path}")
     if (
-        metadata.st_uid != 0
-        or (require_root_group and metadata.st_gid != 0)
+        metadata.st_uid != ROOT_UID
+        or (require_root_group and metadata.st_gid != ROOT_GID)
         or metadata.st_mode & 0o022
     ):
         raise ConfigurationError(
@@ -273,16 +276,135 @@ def _record_commit(path: Path, target_role: str) -> None:
     _fsync_directory(BACKUP_ROOT)
 
 
-def _acquire_site_lock() -> int:
+def _validate_operation_lock_root() -> os.stat_result:
+    metadata = _safe_path(OPERATION_LOCK_ROOT, directory=True)
+    if stat.S_IMODE(metadata.st_mode) != 0o700:
+        raise ConfigurationError("site-operation lock root mode must be exactly 0700")
+    return metadata
+
+
+def _validate_operation_lock_fd(
+    descriptor: int, root_metadata: os.stat_result
+) -> os.stat_result:
     try:
-        lock_fd = os.open(SITE_LOCK, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+        metadata = os.fstat(descriptor)
+        named = OPERATION_LOCK.lstat()
+        resolved = OPERATION_LOCK.resolve(strict=True)
     except OSError as error:
-        raise ConfigurationError(f"cannot open fixed authority lock: {error.strerror}") from error
+        raise ConfigurationError(
+            f"cannot validate site-operation lock inode: {error.strerror}"
+        ) from error
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != ROOT_UID
+        or metadata.st_gid != ROOT_GID
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or metadata.st_size != 0
+        or metadata.st_dev != root_metadata.st_dev
+        or not stat.S_ISREG(named.st_mode)
+        or (named.st_dev, named.st_ino) != (metadata.st_dev, metadata.st_ino)
+        or OPERATION_LOCK.is_symlink()
+        or resolved != OPERATION_LOCK
+    ):
+        raise ConfigurationError("site-operation lock file or opened inode is unsafe")
+    return metadata
+
+
+def _create_operation_lock(root_descriptor: int, root_metadata: os.stat_result) -> None:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return lock_fd
+        descriptor = os.open(
+            OPERATION_LOCK.name, flags, 0o600, dir_fd=root_descriptor
+        )
+    except FileExistsError:
+        return
+    except OSError as error:
+        raise ConfigurationError(
+            f"cannot create site-operation lock: {error.strerror}"
+        ) from error
+    try:
+        os.fchown(descriptor, ROOT_UID, ROOT_GID)
+        os.fchmod(descriptor, 0o600)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != ROOT_UID
+            or metadata.st_gid != ROOT_GID
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+            or metadata.st_size != 0
+            or metadata.st_dev != root_metadata.st_dev
+        ):
+            raise ConfigurationError("new site-operation lock metadata is unsafe")
+        os.fsync(descriptor)
+        os.fsync(root_descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _acquire_operation_lock(*, create: bool) -> tuple[int, int | None]:
+    root_metadata = _validate_operation_lock_root()
+    root_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        root_descriptor = os.open(OPERATION_LOCK_ROOT, root_flags)
+    except OSError as error:
+        raise ConfigurationError(
+            f"cannot open site-operation lock root: {error.strerror}"
+        ) from error
+    lock_descriptor: int | None = None
+    try:
+        opened_root = os.fstat(root_descriptor)
+        named_root = OPERATION_LOCK_ROOT.lstat()
+        if (
+            not stat.S_ISDIR(opened_root.st_mode)
+            or (opened_root.st_dev, opened_root.st_ino)
+            != (named_root.st_dev, named_root.st_ino)
+            or opened_root.st_uid != ROOT_UID
+            or opened_root.st_gid != ROOT_GID
+            or stat.S_IMODE(opened_root.st_mode) != 0o700
+        ):
+            raise ConfigurationError("opened site-operation lock root changed")
+        fcntl.flock(root_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            OPERATION_LOCK.lstat()
+        except FileNotFoundError:
+            if create:
+                _create_operation_lock(root_descriptor, root_metadata)
+            else:
+                return root_descriptor, None
+        lock_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            lock_descriptor = os.open(
+                OPERATION_LOCK.name, lock_flags, dir_fd=root_descriptor
+            )
+        except OSError as error:
+            raise ConfigurationError(
+                f"cannot safely open site-operation lock: {error.strerror}"
+            ) from error
+        _validate_operation_lock_fd(lock_descriptor, root_metadata)
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _validate_operation_lock_fd(lock_descriptor, root_metadata)
+        return root_descriptor, lock_descriptor
     except BaseException:
-        os.close(lock_fd)
+        if lock_descriptor is not None:
+            os.close(lock_descriptor)
+        os.close(root_descriptor)
         raise
 
 
@@ -292,13 +414,8 @@ def _apply(
     backup_dir: Path,
     lock_fd: int,
 ) -> None:
-    lock_metadata = os.fstat(lock_fd)
-    site_metadata = SITE_LOCK.stat()
-    if (lock_metadata.st_dev, lock_metadata.st_ino) != (
-        site_metadata.st_dev,
-        site_metadata.st_ino,
-    ):
-        raise ConfigurationError("authority transaction does not hold the fixed site descriptor")
+    root_metadata = _validate_operation_lock_root()
+    _validate_operation_lock_fd(lock_fd, root_metadata)
     latest, _ = _read_current()
     if latest != current:
         raise ConfigurationError("authority marker changed after preflight")
@@ -358,8 +475,8 @@ def main(argv: list[str]) -> int:
             Path("/etc"),
             ROLE_ROOT,
             Path("/var"),
-            Path("/var/www"),
-            Path("/var/www/html"),
+            Path("/var/lib"),
+            OPERATION_LOCK_ROOT,
             Path("/usr"),
             Path("/usr/local"),
             Path("/usr/local/sbin"),
@@ -372,16 +489,15 @@ def main(argv: list[str]) -> int:
                 raise ConfigurationError(
                     f"fixed marker parent mode must be exactly 0755: {marker_parent}"
                 )
-        # The site is commonly root:www-data; only root ownership and the
-        # absence of group/other write access are security-significant here.
-        _safe_path(SITE_LOCK, directory=True, require_root_group=False)
+        if stat.S_IMODE(OPERATION_LOCK_ROOT.stat().st_mode) != 0o700:
+            raise ConfigurationError("site-operation lock root mode must be exactly 0700")
         _safe_path(VERIFIER, directory=False)
         if not os.access(VERIFIER, os.X_OK):
             raise ConfigurationError("fixed authority verifier is not executable")
         descriptor = _open_reviewed_verifier()
         os.close(descriptor)
         _validate_backup_dir(args.backup_dir)
-        lock_fd = _acquire_site_lock()
+        root_lock_fd, lock_fd = _acquire_operation_lock(create=args.apply)
         try:
             current, _ = _read_current()
             _validate_expected(current, args.expected_current_sha256)
@@ -390,6 +506,8 @@ def main(argv: list[str]) -> int:
             _require_writers_drained()
             deferred_signals: list[int] = []
             if args.apply:
+                if lock_fd is None:
+                    raise ConfigurationError("apply requires the persistent site-operation lock")
                 handled_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
                 previous_handlers = {item: signal.getsignal(item) for item in handled_signals}
 
@@ -404,7 +522,9 @@ def main(argv: list[str]) -> int:
                     for item, handler in previous_handlers.items():
                         signal.signal(item, handler)
         finally:
-            os.close(lock_fd)
+            if lock_fd is not None:
+                os.close(lock_fd)
+            os.close(root_lock_fd)
         print(
             f"account-authority-config: {'applied' if args.apply else 'dry-run passed'} "
             f"role={args.role} candidate-sha256={_sha256(PAYLOADS[args.role])}" \

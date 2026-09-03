@@ -168,6 +168,13 @@ if [[ -d "$uploads_root" ]] && find "$uploads_root" -xdev -type f \
     exit 1
 fi
 
+# The sender must reject hard links in the live source tree itself.  rsync
+# stages ordinary file copies and would otherwise reduce a hostile source inode
+# with st_nlink > 1 to a harmless-looking staging inode with st_nlink == 1.
+reject_checker_find_match \
+    'hard-linked regular file remains in document root' \
+    "$site_root" -xdev -type f -links +1 || exit 1
+
 if find "$site_root" -xdev -type l -print -quit | grep -q .; then
     printf 'webroot-security: symbolic link remains in document root\n' >&2
     exit 1

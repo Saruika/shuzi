@@ -105,7 +105,8 @@ def main() -> None:
         "readonly STAGING_ROOT=/var/lib/shuzijun-app-content/releases",
         "readonly BACKUP_ROOT=/var/backups/shuzijun-app-content",
         'readonly LOCK_PATH="$STAGING_ROOT"',
-        'readonly AUTHORITY_LOCK_PATH="$SITE"',
+        "readonly AUTHORITY_LOCK_ROOT=/var/lib/shuzijun-sync",
+        'readonly AUTHORITY_LOCK_PATH="$AUTHORITY_LOCK_ROOT/site-operation.lock"',
         "readonly DEPLOYER=/usr/local/sbin/deploy-app-content-release",
         "readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security",
         "readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role",
@@ -160,11 +161,8 @@ def main() -> None:
         '[[ "$AUTHORITY_ROLE" == authority ]]',
         root_check,
     )
-    authority_lock_open = line_number(
-        lines, 'exec 8<"$AUTHORITY_LOCK_PATH"', root_check
-    )
-    authority_lock_take = line_number(lines, "flock -n 8", authority_lock_open)
-    early_role_gate = line_number(lines, "verify_authority_role", authority_lock_take)
+    authority_lock_acquire = line_number(lines, "acquire_authority_lock", root_check)
+    early_role_gate = line_number(lines, "verify_authority_role", authority_lock_acquire)
     delegated_preflight = line_number(
         lines,
         '--manifest-sha256 "$EXPECTED_MANIFEST_SHA256" --bundle-preflight',
@@ -173,10 +171,44 @@ def main() -> None:
     lock_open = line_number(lines, 'exec 9<"$LOCK_PATH"', delegated_preflight)
     lock_take = line_number(lines, "flock -n 9", lock_open)
     locked_validation = line_number(lines, "validate_locked_bundle", lock_take)
-    assert root_check < authority_only < authority_lock_open < authority_lock_take < early_role_gate
+    assert root_check < authority_only < authority_lock_acquire < early_role_gate
     assert early_role_gate < delegated_preflight < lock_open < lock_take < locked_validation
     assert 'exec 9<>"$LOCK_PATH"' not in text
     assert 'exec 8<>"$AUTHORITY_LOCK_PATH"' not in text
+    assert 'exec 10<"$AUTHORITY_LOCK_ROOT"' in text
+    assert 'readonly AUTHORITY_LOCK_PATH="$SITE"' not in text
+    assert 'exec 8<"$SITE"' not in text
+
+    lock_root = function_body(
+        lines, "validate_authority_lock_root", "create_authority_lock_if_requested"
+    )
+    assert "/var/lib/shuzijun-sync" in lock_root
+    assert "0:0:700" in lock_root
+    lock_path = function_body(
+        lines, "validate_authority_lock_path", "validate_authority_lock_root"
+    )
+    assert "0:0:1:600:0" in lock_path
+    assert "crosses a filesystem boundary" in lock_path
+    lock_create = function_body(
+        lines, "create_authority_lock_if_requested", "acquire_authority_lock"
+    )
+    for guard in (
+        "os.O_EXCL",
+        "os.O_NOFOLLOW",
+        "metadata.st_nlink != 1",
+        "metadata.st_size != 0",
+        "os.fsync(descriptor)",
+        "os.fsync(root_fd)",
+    ):
+        assert guard in lock_create
+    lock_acquire = function_body(
+        lines, "acquire_authority_lock", "validate_authority_verifier"
+    )
+    assert 'flock -n 10' in lock_acquire
+    assert 'flock -n 8' in lock_acquire
+    assert lock_acquire.count("validate_authority_lock_path") == 2
+    assert "site-operation lock inode changed after acquisition" in lock_acquire
+    assert 'rm ' not in lock_acquire and 'unlink' not in lock_acquire
 
     locked_bundle = function_body(lines, "validate_locked_bundle", "resolve_php")
     for boundary in (

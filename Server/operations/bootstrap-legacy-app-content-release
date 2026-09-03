@@ -30,10 +30,11 @@ readonly LIVE_PHP="$TARGET_DIR/shuzijun-app-content.php"
 readonly STAGING_ROOT=/var/lib/shuzijun-app-content/releases
 readonly BACKUP_ROOT=/var/backups/shuzijun-app-content
 readonly LOCK_PATH="$STAGING_ROOT"
-readonly AUTHORITY_LOCK_PATH="$SITE"
+readonly AUTHORITY_LOCK_ROOT=/var/lib/shuzijun-sync
+readonly AUTHORITY_LOCK_PATH="$AUTHORITY_LOCK_ROOT/site-operation.lock"
 readonly DEPLOYER=/usr/local/sbin/deploy-app-content-release
 readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
-readonly VERIFY_SHA256=5c2f109000ae721cae772416a4c5c58fa579078f229443e8691c7be6cb7576cd
+readonly VERIFY_SHA256=7e7a95a1cc7bb05aa6810a9d644950ddedb0274ce247499d5828a9180dcae7f2
 readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
 readonly AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 readonly FPM_SERVICE=php8.3-fpm
@@ -166,13 +167,117 @@ validate_staging_lock_path() {
 }
 
 validate_authority_lock_path() {
-    [[ "$AUTHORITY_LOCK_PATH" == /var/www/html/shuzijun.com.cn \
-        && -d "$AUTHORITY_LOCK_PATH" && ! -L "$AUTHORITY_LOCK_PATH" \
+    local lock_device root_device
+    [[ "$AUTHORITY_LOCK_PATH" == "$AUTHORITY_LOCK_ROOT/site-operation.lock" \
+        && -e "$AUTHORITY_LOCK_PATH" && ! -L "$AUTHORITY_LOCK_PATH" \
+        && -f "$AUTHORITY_LOCK_PATH" \
         && "$(realpath -e -- "$AUTHORITY_LOCK_PATH")" == "$AUTHORITY_LOCK_PATH" \
-        && "$(stat -c '%u' "$AUTHORITY_LOCK_PATH")" == 0 ]] \
-        || { fail 'account-authority lock path is unsafe'; return 1; }
-    reject_find_match 'account-authority lock path is writable by a non-root identity' \
-        "$AUTHORITY_LOCK_PATH" -maxdepth 0 -perm /022 || return 1
+        && "$(stat -c '%u:%g:%h:%a:%s' "$AUTHORITY_LOCK_PATH")" == '0:0:1:600:0' ]] \
+        || { fail 'site-operation lock file is unsafe'; return 1; }
+    root_device=$(stat -c '%d' "$AUTHORITY_LOCK_ROOT") || return 1
+    lock_device=$(stat -c '%d' "$AUTHORITY_LOCK_PATH") || return 1
+    [[ "$lock_device" == "$root_device" ]] \
+        || { fail 'site-operation lock crosses a filesystem boundary'; return 1; }
+}
+
+validate_authority_lock_root() {
+    local parent
+    [[ "$AUTHORITY_LOCK_ROOT" == /var/lib/shuzijun-sync ]] \
+        || { fail 'site-operation lock root is not fixed'; return 1; }
+    for parent in /var /var/lib; do
+        [[ -d "$parent" && ! -L "$parent" \
+            && "$(realpath -e -- "$parent")" == "$parent" \
+            && "$(stat -c '%u:%g:%a' "$parent")" == '0:0:755' ]] \
+            || { fail 'site-operation lock parent is unsafe'; return 1; }
+    done
+    [[ -d "$AUTHORITY_LOCK_ROOT" && ! -L "$AUTHORITY_LOCK_ROOT" \
+        && "$(realpath -e -- "$AUTHORITY_LOCK_ROOT")" == "$AUTHORITY_LOCK_ROOT" \
+        && "$(stat -c '%u:%g:%a' "$AUTHORITY_LOCK_ROOT")" == '0:0:700' ]] \
+        || { fail 'site-operation lock root is unsafe'; return 1; }
+}
+
+create_authority_lock_if_requested() {
+    local create=$1
+    [[ "$create" == 0 || "$create" == 1 ]] || return 1
+    if [[ -e "$AUTHORITY_LOCK_PATH" || -L "$AUTHORITY_LOCK_PATH" ]]; then
+        return 0
+    fi
+    [[ "$create" == 1 ]] || return 0
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/11 \
+        "$AUTHORITY_LOCK_ROOT" "$AUTHORITY_LOCK_PATH" 11<<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+path = Path(sys.argv[2])
+root_meta = root.lstat()
+if (root != Path("/var/lib/shuzijun-sync")
+        or path != root / "site-operation.lock"
+        or root.resolve(strict=True) != root
+        or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700):
+    raise SystemExit(1)
+root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    try:
+        descriptor = os.open(
+            path.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=root_fd,
+        )
+    except FileExistsError:
+        raise SystemExit(0)
+    try:
+        os.fchown(descriptor, 0, 0)
+        os.fchmod(descriptor, 0o600)
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1 or metadata.st_size != 0
+                or metadata.st_dev != root_meta.st_dev):
+            raise RuntimeError("unsafe created lock")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.fsync(root_fd)
+finally:
+    os.close(root_fd)
+PY
+}
+
+acquire_authority_lock() {
+    local create=0 fd_identity named_identity
+    [[ "$MODE" == apply ]] && create=1
+    validate_authority_lock_root || return 1
+    exec 10<"$AUTHORITY_LOCK_ROOT" \
+        || { fail 'site-operation lock root cannot be opened'; return 1; }
+    fd_identity=$(stat -Lc '%d:%i:%u:%g:%a' /proc/self/fd/10) || return 1
+    named_identity=$(stat -c '%d:%i:%u:%g:%a' "$AUTHORITY_LOCK_ROOT") || return 1
+    [[ "$fd_identity" == "$named_identity" ]] \
+        || { fail 'opened site-operation lock root changed'; return 1; }
+    flock -n 10 || { fail 'site-operation lock initialization is in progress'; return 1; }
+    create_authority_lock_if_requested "$create" || return 1
+    if [[ ! -e "$AUTHORITY_LOCK_PATH" && ! -L "$AUTHORITY_LOCK_PATH" ]]; then
+        [[ "$create" == 0 ]] || { fail 'site-operation lock was not created'; return 1; }
+        return 0
+    fi
+    validate_authority_lock_path || return 1
+    exec 8<"$AUTHORITY_LOCK_PATH" \
+        || { fail 'site-operation lock cannot be opened'; return 1; }
+    fd_identity=$(stat -Lc '%d:%i:%u:%g:%h:%a:%s' /proc/self/fd/8) || return 1
+    named_identity=$(stat -c '%d:%i:%u:%g:%h:%a:%s' "$AUTHORITY_LOCK_PATH") || return 1
+    [[ "$fd_identity" == "$named_identity" ]] \
+        || { fail 'opened site-operation lock inode changed'; return 1; }
+    flock -n 8 || { fail 'another site operation is in progress'; return 1; }
+    validate_authority_lock_path || return 1
+    [[ "$(stat -Lc '%d:%i' /proc/self/fd/8)" \
+        == "$(stat -c '%d:%i' "$AUTHORITY_LOCK_PATH")" ]] \
+        || { fail 'site-operation lock inode changed after acquisition'; return 1; }
 }
 
 validate_authority_verifier() {
@@ -972,13 +1077,11 @@ validate_digest "$EXPECTED_MANIFEST_SHA256" 'expected manifest SHA256'
 validate_digest "$EXPECTED_LEGACY_PHP_SHA256" 'expected legacy PHP SHA256'
 
 for command_name in realpath stat find grep awk sha256sum flock nginx systemctl curl \
-    install cp mv rm date mkdir chmod chown sleep tail env timeout runuser id sync; do
+    install cp mv rm date mkdir chmod chown sleep tail env timeout runuser id sync python3; do
     require_command "$command_name"
 done
 
-validate_authority_lock_path
-exec 8<"$AUTHORITY_LOCK_PATH"
-flock -n 8 || fail 'account-authority configuration change is in progress'
+acquire_authority_lock
 verify_authority_role
 
 validate_tool_path "$DEPLOYER" 'release deployer'

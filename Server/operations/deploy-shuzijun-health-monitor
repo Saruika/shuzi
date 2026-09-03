@@ -11,6 +11,14 @@ unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true
 SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health
 SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service
 TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer
+PRIVATE_LOG_CONFIG_TARGET=/etc/tmpfiles.d/shuzijun-private-logs.conf
+SNAPSHOT_CRON_TARGET=/etc/cron.d/tencent-daily-snapshot
+PRIVATE_LOG_DIR=/var/lib/shuzijun-logs
+AUTHORITY_LOG=$PRIVATE_LOG_DIR/sync-authority.log
+STANDBY_LOG=$PRIVATE_LOG_DIR/sync-standby.log
+SNAPSHOT_LOG=$PRIVATE_LOG_DIR/snapshot.log
+SNAPSHOT_EXECUTION_LOCK=/run/tencent-snapshot.lock
+OLD_SNAPSHOT_CRON_LINE='31 3 * * * flock -xn /run/tencent-snapshot.lock -c /usr/local/sbin/tencent-daily-snapshot >>/var/log/tencent-snapshot.log 2>&1'
 WANTS_DIR=/etc/systemd/system/timers.target.wants
 WANTS_LINK=$WANTS_DIR/shuzijun-internal-health.timer
 SERVICE_OBJECT_PATH=/org/freedesktop/systemd1/unit/shuzijun_2dinternal_2dhealth_2eservice
@@ -23,16 +31,18 @@ LOCK_FILE=$LOCK_DIR/deploy.lock
 ROLE_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
 ROLE_VERIFY_SHA=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 
-NEW_SCRIPT_SHA=c7630bdc54dc7d869c16cf0ba6856f341668a74689724c532a9058711837e945
-NEW_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc
+NEW_SCRIPT_SHA=34961aa2c05d8c326c5a244a373dd5fadbaf89c4bfffab0898d8f379bd50d0a1
+NEW_SERVICE_SHA=ebd20b9de5e145cec7f2a2ef3a036202449187f69686aad2dd5a3ca6202b765b
 NEW_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e
-OLD_SCRIPT_SHA=71698f025ff467f837e8b7430b4188d05576d2010f9c4f181eea1e56625ca390
-OLD_SERVICE_SHA=db95b5410561ce9e0cca235b7faf09e16d4a954c3c593565681cca49221c9537
-OLD_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6
+NEW_PRIVATE_LOG_CONFIG_SHA=ba11676ee8c5d65faf72ae63bf7d80247860c73f33532e07e11371faff6c6f9f
+NEW_SNAPSHOT_CRON_SHA=3b9cd2994249180176c9220f617fc8ccf3f782322fd63943f0a3fddbd290ffe3
+OLD_SCRIPT_SHA=c7630bdc54dc7d869c16cf0ba6856f341668a74689724c532a9058711837e945
+OLD_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc
+OLD_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e
 APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
 APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
-RELEASE_ID=build41.13
-DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.13
+RELEASE_ID=build42.1
+DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.1
 
 [[ $# -eq 2 ]] || { printf 'usage: %s <primary|backup> <authority|standby>\n' "$DEPLOYER_PATH" >&2; exit 2; }
 NODE=${1:-}
@@ -41,7 +51,7 @@ case "$NODE:$ROLE" in
     primary:authority|backup:standby) ;;
     *) printf 'invalid node/role\n' >&2; exit 2 ;;
 esac
-STAGE=/run/shuzijun-health-build41.13-$NODE
+STAGE=/run/shuzijun-health-build42.1-$NODE
 
 [[ $EUID -eq 0 ]] || { printf 'root required\n' >&2; exit 1; }
 [[ "$0" == "$DEPLOYER_PATH" ]] || { printf 'fixed deployer path required\n' >&2; exit 1; }
@@ -109,6 +119,56 @@ finally:
 PY
 )
 [[ "$DEPLOYER_SHA" =~ ^[0-9a-f]{64}$ ]]
+
+require_snapshot_execution_lock_file() {
+    local metadata mode
+    [[ ! -L "$SNAPSHOT_EXECUTION_LOCK" && -f "$SNAPSHOT_EXECUTION_LOCK" ]] || {
+        printf 'unsafe snapshot execution lock\n' >&2
+        return 1
+    }
+    [[ "$(realpath -e -- "$SNAPSHOT_EXECUTION_LOCK")" == "$SNAPSHOT_EXECUTION_LOCK" ]] || return 1
+    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$SNAPSHOT_EXECUTION_LOCK") || return 1
+    [[ "${metadata%%:*}" == 'regular file' ]] || return 1
+    [[ "$metadata" == regular\ file:0:0:*:1 ]] || return 1
+    mode=${metadata%:*}
+    mode=${mode##*:}
+    [[ "$mode" == 600 || "$mode" == 644 ]] || {
+        printf 'snapshot execution lock metadata mismatch: %s\n' "$metadata" >&2
+        return 1
+    }
+}
+
+acquire_snapshot_execution_lock() {
+    local existed=0 path_identity descriptor_identity
+    if [[ -e "$SNAPSHOT_EXECUTION_LOCK" || -L "$SNAPSHOT_EXECUTION_LOCK" ]]; then
+        require_snapshot_execution_lock_file || return 1
+        existed=1
+    fi
+    exec 8>>"$SNAPSHOT_EXECUTION_LOCK"
+    if ! /usr/bin/flock -n 8; then
+        printf 'snapshot execution lock busy\n' >&2
+        return 1
+    fi
+    if (( existed == 0 )); then
+        chown root:root "$SNAPSHOT_EXECUTION_LOCK" || return 1
+        chmod 600 "$SNAPSHOT_EXECUTION_LOCK" || return 1
+        sync -f "$SNAPSHOT_EXECUTION_LOCK" || return 1
+        sync -f /run || return 1
+    fi
+    require_snapshot_execution_lock_file || return 1
+    path_identity=$(stat -c '%d:%i' -- "$SNAPSHOT_EXECUTION_LOCK") || return 1
+    descriptor_identity=$(stat -Lc '%d:%i' -- "/proc/$ROOT_BASHPID/fd/8") || return 1
+    [[ "$path_identity" == "$descriptor_identity" ]] || {
+        printf 'snapshot execution lock path changed\n' >&2
+        return 1
+    }
+}
+
+# Hold the same lock used by both the legacy and migrated cron commands for the
+# full transaction. A busy snapshot therefore rejects the deployment before
+# any service, crontab, private-log or backup-journal mutation.
+acquire_snapshot_execution_lock
+
 if [[ -e "$LOCK_DIR" ]]; then
     [[ ! -L "$LOCK_DIR" && -d "$LOCK_DIR" ]]
     [[ "$(realpath -e "$LOCK_DIR")" == "$LOCK_DIR" ]]
@@ -135,7 +195,17 @@ PHASE=LOCKED
 BACKUP_DIR=
 OLD_STATUS_SHA=
 OLD_STATUS_INODE=
+ROOT_CRONTAB_STATE=
+ROOT_CRONTAB_SHA=
+OLD_PRIVATE_LOG_CONFIG_STATE=
+OLD_PRIVATE_LOG_CONFIG_SHA=
+OLD_SNAPSHOT_CRON_STATE=
+OLD_SNAPSHOT_CRON_SHA=
+OLD_PRIVATE_LOG_STATE=
+OLD_STARGATE_SHA=
+CRONTAB_CHECK_SERIAL=0
 VALIDATED_INVOCATION=
+VALIDATED_EXIT_STATUS=
 SETTLED_INVOCATION=
 SETTLED_TIMER_TRIGGER=
 PREPARED_TERMINAL_NAME=
@@ -402,11 +472,13 @@ require_stage() {
     require_dir "$STAGE" 700 || return 1
     local listing expected
     listing=$(find "$STAGE" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort) || return 1
-    expected=$'shuzijun-internal-health\nshuzijun-internal-health.service\nshuzijun-internal-health.timer'
+    expected=$'shuzijun-internal-health\nshuzijun-internal-health.service\nshuzijun-internal-health.timer\nshuzijun-private-logs.conf\ntencent-daily-snapshot.cron'
     [[ "$listing" == "$expected" ]] || { printf 'stage contains unexpected entries\n' >&2; return 1; }
     require_file "$STAGE/shuzijun-internal-health" 700 "$NEW_SCRIPT_SHA" || return 1
     require_file "$STAGE/shuzijun-internal-health.service" 644 "$NEW_SERVICE_SHA" || return 1
     require_file "$STAGE/shuzijun-internal-health.timer" 644 "$NEW_TIMER_SHA" || return 1
+    require_file "$STAGE/shuzijun-private-logs.conf" 644 "$NEW_PRIVATE_LOG_CONFIG_SHA" || return 1
+    require_file "$STAGE/tencent-daily-snapshot.cron" 644 "$NEW_SNAPSHOT_CRON_SHA" || return 1
     /usr/bin/python3 -I -c 'import pathlib,sys; compile(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"), sys.argv[1], "exec")' "$STAGE/shuzijun-internal-health" || return 1
     systemd-analyze verify "$STAGE/shuzijun-internal-health.service" "$STAGE/shuzijun-internal-health.timer" || return 1
 }
@@ -459,7 +531,7 @@ atomic_install() {
     local source=$1 target=$2 mode=$3 expected_sha=$4 parent base tmp
     parent=$(dirname -- "$target") || return 1
     base=$(basename -- "$target") || return 1
-    tmp=$parent/.$base.build41.13.$$
+    tmp=$parent/.$base.build42.1.$$
     [[ ! -e "$tmp" ]] || return 1
     install -o root -g root -m "$mode" -- "$source" "$tmp" || return 1
     require_file "$tmp" "$mode" "$expected_sha" || return 1
@@ -481,6 +553,325 @@ atomic_restore() {
     mv -T -- "$tmp" "$target" || return 1
     sync_path "$parent" || return 1
     require_file "$target" "$mode" "$expected_sha" || return 1
+}
+
+require_private_log_file() {
+    local path=$1 metadata
+    [[ ! -L "$path" && -f "$path" ]] || { printf 'unsafe private log: %s\n' "$path" >&2; return 1; }
+    [[ "$(realpath -e -- "$path")" == "$path" ]] || { printf 'non-canonical private log: %s\n' "$path" >&2; return 1; }
+    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$path") || return 1
+    [[ "$metadata" == 'regular file:0:0:600:1' ]] || { printf 'private log metadata mismatch: %s %s\n' "$path" "$metadata" >&2; return 1; }
+}
+
+require_private_logs() {
+    require_safe_parent / || return 1
+    require_safe_parent /var || return 1
+    require_safe_parent /var/lib || return 1
+    require_dir "$PRIVATE_LOG_DIR" 700 || return 1
+    require_private_log_file "$AUTHORITY_LOG" || return 1
+    require_private_log_file "$STANDBY_LOG" || return 1
+    require_private_log_file "$SNAPSHOT_LOG" || return 1
+}
+
+record_private_log_state() {
+    if [[ -e "$PRIVATE_LOG_DIR" || -L "$PRIVATE_LOG_DIR" ]]; then
+        require_private_logs || return 1
+        OLD_PRIVATE_LOG_STATE=present
+    else
+        for path in "$AUTHORITY_LOG" "$STANDBY_LOG" "$SNAPSHOT_LOG"; do
+            [[ ! -e "$path" && ! -L "$path" ]] || return 1
+        done
+        OLD_PRIVATE_LOG_STATE=absent
+    fi
+}
+
+create_private_logs() {
+    require_file "$PRIVATE_LOG_CONFIG_TARGET" 644 "$NEW_PRIVATE_LOG_CONFIG_SHA" || return 1
+    /usr/bin/systemd-tmpfiles --create "$PRIVATE_LOG_CONFIG_TARGET" || return 1
+    require_private_logs || return 1
+    sync_path "$AUTHORITY_LOG" || return 1
+    sync_path "$STANDBY_LOG" || return 1
+    sync_path "$SNAPSHOT_LOG" || return 1
+    sync_path "$PRIVATE_LOG_DIR" || return 1
+    sync_path /var/lib || return 1
+    require_private_logs || return 1
+}
+
+record_optional_asset() {
+    local target=$1 backup_name=$2 state_name=$3 sha_name=$4 current_sha
+    if [[ -e "$target" || -L "$target" ]]; then
+        [[ ! -L "$target" && -f "$target" ]] || return 1
+        [[ "$(realpath -e -- "$target")" == "$target" ]] || return 1
+        [[ "$(stat -c '%F:%u:%g:%a:%h' -- "$target")" == 'regular file:0:0:644:1' ]] || return 1
+        current_sha=$(sha "$target") || return 1
+        [[ "$current_sha" =~ ^[0-9a-f]{64}$ ]] || return 1
+        backup_one "$target" "$backup_name" "$current_sha" 644 || return 1
+        printf -v "$state_name" '%s' present
+        printf -v "$sha_name" '%s' "$current_sha"
+    else
+        printf -v "$state_name" '%s' absent
+        printf -v "$sha_name" '%s' absent
+    fi
+}
+
+require_optional_asset_state() {
+    local target=$1 state=$2 expected_sha=$3
+    case "$state" in
+        present) require_file "$target" 644 "$expected_sha" || return 1 ;;
+        absent) [[ ! -e "$target" && ! -L "$target" ]] || return 1 ;;
+        *) return 1 ;;
+    esac
+}
+
+safe_remove_exact() {
+    local target=$1 expected_sha=$2 parent
+    parent=$(dirname -- "$target") || return 1
+    require_file "$target" 644 "$expected_sha" || return 1
+    rm -f -- "$target" || return 1
+    [[ ! -e "$target" && ! -L "$target" ]] || return 1
+    sync_path "$parent" || return 1
+}
+
+restore_optional_asset() {
+    local target=$1 backup_name=$2 old_state=$3 old_sha=$4 new_sha=$5
+    case "$old_state" in
+        present)
+            atomic_restore "$BACKUP_DIR/$backup_name" "$target" "$old_sha" 644 || return 1
+            ;;
+        absent)
+            if [[ -e "$target" || -L "$target" ]]; then
+                safe_remove_exact "$target" "$new_sha" || return 1
+            fi
+            [[ ! -e "$target" && ! -L "$target" ]] || return 1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+capture_root_crontab() {
+    local destination=$1 temporary error_file rc state errexit_was_set=0
+    temporary=$destination.tmp.$$
+    error_file=$destination.stderr.$$
+    [[ ! -e "$destination" && ! -L "$destination" && ! -e "$temporary" && ! -L "$temporary" ]] || return 1
+    [[ $- == *e* ]] && errexit_was_set=1
+    set +e
+    /usr/bin/crontab -l >"$temporary" 2>"$error_file"
+    rc=$?
+    if (( errexit_was_set == 1 )); then
+        set -e
+    else
+        set +e
+    fi
+    if (( rc == 0 )); then
+        [[ ! -s "$error_file" ]] || { rm -f -- "$temporary" "$error_file"; return 1; }
+        state=present
+    elif (( rc == 1 )) && grep -qFx 'no crontab for root' "$error_file"; then
+        [[ ! -s "$temporary" ]] || { rm -f -- "$temporary" "$error_file"; return 1; }
+        state=absent
+    else
+        rm -f -- "$temporary" "$error_file"
+        return 1
+    fi
+    rm -f -- "$error_file" || return 1
+    chown root:root "$temporary" || return 1
+    chmod 600 "$temporary" || return 1
+    sync_path "$temporary" || return 1
+    mv -T -- "$temporary" "$destination" || return 1
+    sync_path "$(dirname -- "$destination")" || return 1
+    CAPTURED_CRONTAB_STATE=$state
+    CAPTURED_CRONTAB_SHA=$(sha "$destination") || return 1
+    require_file "$destination" 600 "$CAPTURED_CRONTAB_SHA" || return 1
+}
+
+transform_root_crontab() {
+    local source=$1 destination=$2
+    REMOVED_SNAPSHOT_LINES=$(/usr/bin/python3 -I - "$source" "$destination" "$OLD_SNAPSHOT_CRON_LINE" <<'PY'
+import os
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2])
+expected = sys.argv[3].encode("utf-8")
+data = source.read_bytes()
+kept = []
+removed = 0
+for line in data.splitlines(keepends=True):
+    content = line[:-1] if line.endswith(b"\n") else line
+    if content == expected:
+        removed += 1
+    else:
+        kept.append(line)
+if removed not in (0, 1):
+    raise SystemExit("legacy snapshot producer multiplicity mismatch")
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+fd = os.open(destination, flags, 0o600)
+try:
+    payload = b"".join(kept)
+    view = memoryview(payload)
+    while view:
+        count = os.write(fd, view)
+        if count <= 0:
+            raise SystemExit("short crontab write")
+        view = view[count:]
+    os.fsync(fd)
+finally:
+    os.close(fd)
+print(removed)
+PY
+    ) || return 1
+    [[ "$REMOVED_SNAPSHOT_LINES" == 0 || "$REMOVED_SNAPSHOT_LINES" == 1 ]] || return 1
+    chown root:root "$destination" || return 1
+    chmod 600 "$destination" || return 1
+    TRANSFORMED_CRONTAB_SHA=$(sha "$destination") || return 1
+    require_file "$destination" 600 "$TRANSFORMED_CRONTAB_SHA" || return 1
+}
+
+stargate_digest() {
+    /usr/bin/python3 -I - "$1" "$NODE" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+lines = [line for line in pathlib.Path(sys.argv[1]).read_bytes().splitlines(keepends=True) if b"stargate" in line.lower()]
+if sys.argv[2] == "primary" and not lines:
+    raise SystemExit("primary stargate producer missing")
+print(hashlib.sha256(b"".join(lines)).hexdigest())
+PY
+}
+
+snapshot_producer_count() {
+    local root_crontab=$1
+    require_safe_parent /etc || return 1
+    require_safe_parent /etc/cron.d || return 1
+    /usr/bin/python3 -I - "$root_crontab" <<'PY'
+import os
+import pathlib
+import stat
+import sys
+
+needle = b"/usr/local/sbin/tencent-daily-snapshot"
+paths = [pathlib.Path(sys.argv[1])]
+system_crontab = pathlib.Path("/etc/crontab")
+if os.path.lexists(system_crontab):
+    paths.append(system_crontab)
+cron_directory = pathlib.Path("/etc/cron.d")
+for entry in sorted(cron_directory.iterdir()):
+    if entry.name.startswith("."):
+        continue
+    paths.append(entry)
+
+count = 0
+for path in paths:
+    before_path = path.lstat()
+    if not stat.S_ISREG(before_path.st_mode):
+        raise SystemExit(f"unsafe cron entry: {path}")
+    if path != paths[0] and (
+        before_path.st_uid != 0
+        or before_path.st_gid != 0
+        or before_path.st_nlink != 1
+        or stat.S_IMODE(before_path.st_mode) & 0o022
+    ):
+        raise SystemExit(f"unsafe cron metadata: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        before_fd = os.fstat(fd)
+        if (before_path.st_dev, before_path.st_ino) != (before_fd.st_dev, before_fd.st_ino):
+            raise SystemExit(f"cron path changed: {path}")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after_fd = os.fstat(fd)
+        if (before_fd.st_dev, before_fd.st_ino, before_fd.st_size, before_fd.st_mtime_ns, before_fd.st_ctime_ns) != (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns, after_fd.st_ctime_ns):
+            raise SystemExit(f"cron entry changed: {path}")
+    finally:
+        os.close(fd)
+    for line in b"".join(chunks).splitlines():
+        stripped = line.lstrip()
+        if stripped and not stripped.startswith(b"#") and needle in stripped:
+            count += 1
+print(count)
+PY
+}
+
+require_snapshot_producer_count() {
+    local root_crontab=$1 expected=$2 actual
+    actual=$(snapshot_producer_count "$root_crontab") || return 1
+    [[ "$actual" == "$expected" ]] || { printf 'snapshot producer count mismatch: expected=%s actual=%s\n' "$expected" "$actual" >&2; return 1; }
+}
+
+verify_current_snapshot_state() {
+    local verification
+    CRONTAB_CHECK_SERIAL=$((CRONTAB_CHECK_SERIAL + 1))
+    verification=$BACKUP_DIR/root-crontab.verify.$CRONTAB_CHECK_SERIAL
+    capture_root_crontab "$verification" || return 1
+    [[ "$(stargate_digest "$verification")" == "$OLD_STARGATE_SHA" ]] || return 1
+    require_snapshot_producer_count "$verification" 1 || return 1
+    require_file "$SNAPSHOT_CRON_TARGET" 644 "$NEW_SNAPSHOT_CRON_SHA" || return 1
+}
+
+require_new_support_assets() {
+    require_file "$PRIVATE_LOG_CONFIG_TARGET" 644 "$NEW_PRIVATE_LOG_CONFIG_SHA" || return 1
+    require_private_logs || return 1
+    verify_current_snapshot_state || return 1
+}
+
+install_migrated_root_crontab() {
+    local transformed=$1 verification=$BACKUP_DIR/root-crontab.after
+    if [[ -s "$transformed" ]]; then
+        /usr/bin/crontab "$transformed" || return 1
+        EXPECTED_CRONTAB_STATE=present
+    else
+        /usr/bin/crontab -r || return 1
+        EXPECTED_CRONTAB_STATE=absent
+    fi
+    sync || return 1
+    capture_root_crontab "$verification" || return 1
+    [[ "$CAPTURED_CRONTAB_STATE" == "$EXPECTED_CRONTAB_STATE" ]] || return 1
+    [[ "$CAPTURED_CRONTAB_SHA" == "$TRANSFORMED_CRONTAB_SHA" ]] || return 1
+    [[ "$(stargate_digest "$verification")" == "$OLD_STARGATE_SHA" ]] || return 1
+    require_snapshot_producer_count "$verification" 1 || return 1
+}
+
+restore_root_crontab() {
+    local verification=$BACKUP_DIR/root-crontab.rollback
+    case "$ROOT_CRONTAB_STATE" in
+        present) /usr/bin/crontab "$BACKUP_DIR/root-crontab.old" || return 1 ;;
+        absent) /usr/bin/crontab -r >/dev/null 2>&1 || true ;;
+        *) return 1 ;;
+    esac
+    sync || return 1
+    capture_root_crontab "$verification" || return 1
+    [[ "$CAPTURED_CRONTAB_STATE" == "$ROOT_CRONTAB_STATE" ]] || return 1
+    [[ "$CAPTURED_CRONTAB_SHA" == "$ROOT_CRONTAB_SHA" ]] || return 1
+    [[ "$(stargate_digest "$verification")" == "$OLD_STARGATE_SHA" ]] || return 1
+}
+
+restore_private_log_state() {
+    case "$OLD_PRIVATE_LOG_STATE" in
+        present) require_private_logs || return 1 ;;
+        absent)
+            if [[ -e "$PRIVATE_LOG_DIR" || -L "$PRIVATE_LOG_DIR" ]]; then
+                require_dir "$PRIVATE_LOG_DIR" 700 || return 1
+                for path in "$AUTHORITY_LOG" "$STANDBY_LOG" "$SNAPSHOT_LOG"; do
+                    if [[ -e "$path" || -L "$path" ]]; then
+                        require_private_log_file "$path" || return 1
+                        [[ ! -s "$path" ]] || return 1
+                        rm -f -- "$path" || return 1
+                    fi
+                done
+                sync_path "$PRIVATE_LOG_DIR" || return 1
+                rmdir -- "$PRIVATE_LOG_DIR" || return 1
+                sync_path /var/lib || return 1
+            fi
+            [[ ! -e "$PRIVATE_LOG_DIR" && ! -L "$PRIVATE_LOG_DIR" ]] || return 1
+            ;;
+        *) return 1 ;;
+    esac
 }
 
 wait_health_idle() {
@@ -608,8 +999,8 @@ classify_timer_activation_evidence() {
 }
 
 validate_status() {
-    local previous_inode=$1 previous_sha=$2 start_ns=$3 end_ns=$4
-    /usr/bin/python3 -I - "$STATUS_FILE" "$ROLE" "$previous_inode" "$previous_sha" "$start_ns" "$end_ns" "$APP_MANIFEST_SHA" "$APP_PLUGIN_SHA" <<'PY'
+    local previous_inode=$1 previous_sha=$2 start_ns=$3 end_ns=$4 expected_exit=$5
+    /usr/bin/python3 -I - "$STATUS_FILE" "$ROLE" "$previous_inode" "$previous_sha" "$start_ns" "$end_ns" "$expected_exit" "$APP_MANIFEST_SHA" "$APP_PLUGIN_SHA" <<'PY'
 import datetime
 import hashlib
 import json
@@ -624,8 +1015,9 @@ old_inode = int(sys.argv[3])
 old_sha = sys.argv[4]
 start_ns = int(sys.argv[5])
 end_ns = int(sys.argv[6])
-manifest_sha = sys.argv[7]
-plugin_sha = sys.argv[8]
+expected_exit = int(sys.argv[7])
+manifest_sha = sys.argv[8]
+plugin_sha = sys.argv[9]
 
 flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 fd = os.open(path, flags)
@@ -664,38 +1056,106 @@ if checked.tzinfo is None:
 checked_ns = int(checked.timestamp()) * 1_000_000_000
 if not (checked_ns < end_ns and checked_ns + 1_000_000_000 > start_ns):
     raise SystemExit("checked_at outside invocation window")
-expected = {
-    "authority": (
-        "primary",
-        [
-            "authority_sync_generation_missing_or_invalid",
-            "snapshot_last_success_untrusted_or_stale",
-            "sync_last_success_untrusted_or_stale",
-            "sync_log_generation_missing_or_invalid",
-            "sync_timer_missing_or_disabled",
-        ],
-    ),
-    "standby": (
-        "backup",
-        [
-            "snapshot_last_success_untrusted_or_stale",
-            "standby_failover_state_unhealthy_or_stale",
-            "standby_failover_timer_disabled",
-            "standby_sync_generation_missing_or_invalid",
-            "sync_last_success_untrusted_or_stale",
-            "sync_log_generation_missing_or_invalid",
-        ],
-    ),
+common_reasons = {
+    "snapshot_last_success_untrusted_or_stale",
+    "sync_last_success_untrusted_or_stale",
+    "sync_log_generation_missing_or_invalid",
 }
-legacy_role, reasons = expected[role]
-if payload.get("schema") != 2 or payload.get("role_verified") is not True:
+allowed_reasons = {
+    "authority": common_reasons
+    | {
+        "authority_sync_generation_missing_or_invalid",
+        "authority_sync_generation_behind_completed_log",
+        "authority_forbidden_failover_timer_active",
+        "sync_timer_missing_or_disabled",
+        "sync_service_result_not_success",
+    },
+    "standby": common_reasons
+    | {
+        "standby_failover_timer_disabled",
+        "standby_failover_service_result_not_success",
+        "standby_forbidden_sync_timer_active",
+        "standby_forbidden_cdn_timer_active",
+        "standby_failover_mode_not_primary",
+        "standby_failover_state_unhealthy_or_stale",
+        "standby_sync_generation_missing_or_invalid",
+        "standby_sync_commit_generation_missing_or_invalid",
+        "standby_sync_generation_mismatch_applied_log",
+        "standby_sync_generation_mismatch_commit",
+    },
+}
+legacy_role = {"authority": "primary", "standby": "backup"}[role]
+if payload.get("schema") != 3 or payload.get("role_verified") is not True:
     raise SystemExit("status schema or role verification mismatch")
 if payload.get("account_authority_role") != role or payload.get("role") != legacy_role:
     raise SystemExit("status role mismatch")
-if payload.get("status") != "degraded" or payload.get("critical_reasons") != []:
+if payload.get("critical_reasons") != []:
     raise SystemExit("status classification mismatch")
-if payload.get("operation_reasons") != reasons:
-    raise SystemExit("status reasons mismatch")
+reasons = payload.get("operation_reasons")
+if not isinstance(reasons, list) or reasons != sorted(set(reasons)):
+    raise SystemExit("status reasons are not canonical")
+if not set(reasons) <= allowed_reasons[role]:
+    raise SystemExit("status contains an unknown operation reason")
+expected_status = "degraded" if reasons else "healthy"
+if payload.get("status") != expected_status:
+    raise SystemExit("status/reason classification mismatch")
+expected_status_exit = 2 if reasons else 0
+if expected_exit != expected_status_exit:
+    raise SystemExit("process exit/status classification mismatch")
+operations = payload.get("operations")
+if not isinstance(operations, dict):
+    raise SystemExit("operations payload missing")
+expected_sync_log = {
+    "authority": "/var/lib/shuzijun-logs/sync-authority.log",
+    "standby": "/var/lib/shuzijun-logs/sync-standby.log",
+}[role]
+for summary, expected_path in (
+    (operations.get("snapshot_log"), "/var/lib/shuzijun-logs/snapshot.log"),
+    (operations.get("sync_log"), expected_sync_log),
+):
+    if not isinstance(summary, dict):
+        raise SystemExit("private log summary missing")
+    if summary.get("path") != expected_path:
+        raise SystemExit("private log path mismatch")
+    if summary.get("present") is not True or summary.get("trusted") is not True:
+        raise SystemExit("private log is not trusted")
+    if summary.get("parent_trusted") is not True:
+        raise SystemExit("private log parent is not trusted")
+if role == "standby":
+    accepted = operations.get("accepted_generation")
+    committed = operations.get("committed_generation")
+    if not isinstance(accepted, dict) or not isinstance(committed, dict):
+        raise SystemExit("standby generation state missing")
+    accepted_valid = accepted.get("valid") is True
+    committed_valid = committed.get("valid") is True
+    if accepted_valid and (
+        accepted.get("trusted") is not True
+        or isinstance(accepted.get("value"), bool)
+        or not isinstance(accepted.get("value"), int)
+        or not 0 <= accepted.get("value") < 2**63
+    ):
+        raise SystemExit("accepted generation is not a trusted integer")
+    if committed_valid and (
+        committed.get("trusted") is not True
+        or isinstance(committed.get("value"), bool)
+        or not isinstance(committed.get("value"), int)
+        or not 0 <= committed.get("value") < 2**63
+    ):
+        raise SystemExit("committed generation is not a trusted integer")
+    expected_generation_reasons = set()
+    if not accepted_valid:
+        expected_generation_reasons.add("standby_sync_generation_missing_or_invalid")
+    if not committed_valid:
+        expected_generation_reasons.add("standby_sync_commit_generation_missing_or_invalid")
+    if accepted_valid and committed_valid and accepted.get("value") != committed.get("value"):
+        expected_generation_reasons.add("standby_sync_generation_mismatch_commit")
+    actual_generation_reasons = set(reasons) & {
+        "standby_sync_generation_missing_or_invalid",
+        "standby_sync_commit_generation_missing_or_invalid",
+        "standby_sync_generation_mismatch_commit",
+    }
+    if actual_generation_reasons != expected_generation_reasons:
+        raise SystemExit("standby accepted/committed reason mismatch")
 if payload.get("hashes", {}).get("app_content_manifest") != manifest_sha:
     raise SystemExit("app manifest hash mismatch")
 if payload.get("hashes", {}).get("app_content_plugin") != plugin_sha:
@@ -717,7 +1177,7 @@ validate_last_invocation() {
     main_status=$(unit_value shuzijun-internal-health.service ExecMainStatus) || return 1
     active=$(unit_value shuzijun-internal-health.service ActiveState) || return 1
     sub=$(unit_value shuzijun-internal-health.service SubState) || return 1
-    [[ "$result" == success && "$main_status" == 2 && "$active" == inactive && "$sub" == dead ]] || return 1
+    [[ "$result" == success && ( "$main_status" == 0 || "$main_status" == 2 ) && "$active" == inactive && "$sub" == dead ]] || return 1
     start_wall=$(service_usec ExecMainStartTimestamp) || return 1
     exit_wall=$(service_usec ExecMainExitTimestamp) || return 1
     start_mono=$(service_usec ExecMainStartTimestampMonotonic) || return 1
@@ -730,8 +1190,9 @@ validate_last_invocation() {
     [[ "$outer_start_mono" =~ ^[0-9]+$ && "$outer_end_mono" =~ ^[0-9]+$ && "$outer_end_mono" -ge "$outer_start_mono" ]] || return 1
     (( start_wall * 1000 >= start_ns && exit_wall * 1000 <= end_ns )) || return 1
     (( start_mono * 1000 >= outer_start_mono && exit_mono * 1000 <= outer_end_mono )) || return 1
-    validate_status "$previous_inode" "$previous_sha" "$((start_wall * 1000))" "$((exit_wall * 1000))" >/dev/null || return 1
+    validate_status "$previous_inode" "$previous_sha" "$((start_wall * 1000))" "$((exit_wall * 1000))" "$main_status" >/dev/null || return 1
     VALIDATED_INVOCATION=$invocation
+    VALIDATED_EXIT_STATUS=$main_status
 }
 
 require_new_units() {
@@ -740,6 +1201,7 @@ require_new_units() {
     require_file "$SCRIPT_TARGET" 700 "$NEW_SCRIPT_SHA" || return 1
     require_file "$SERVICE_TARGET" 644 "$NEW_SERVICE_SHA" || return 1
     require_file "$TIMER_TARGET" 644 "$NEW_TIMER_SHA" || return 1
+    require_new_support_assets || return 1
     systemd-analyze verify "$SERVICE_TARGET" "$TIMER_TARGET" || return 1
     [[ "$(unit_value shuzijun-internal-health.service FragmentPath)" == "$SERVICE_TARGET" ]] || return 1
     [[ "$(unit_value shuzijun-internal-health.timer FragmentPath)" == "$TIMER_TARGET" ]] || return 1
@@ -922,6 +1384,11 @@ rollback() {
     require_timer_disabled_link || isolation_ok=0
     (( isolation_ok == 1 )) || rollback_ok=0
     if (( isolation_ok == 1 )) && [[ "$PHASE" == COMMITTED || "$PHASE" == STATUS_MAY_CHANGE || "$PHASE" == ACCEPTED ]]; then
+        restore_root_crontab || rollback_ok=0
+        restore_optional_asset "$SNAPSHOT_CRON_TARGET" snapshot-cron.old "$OLD_SNAPSHOT_CRON_STATE" "$OLD_SNAPSHOT_CRON_SHA" "$NEW_SNAPSHOT_CRON_SHA" || rollback_ok=0
+        require_snapshot_producer_count "$BACKUP_DIR/root-crontab.rollback" 1 || rollback_ok=0
+        restore_optional_asset "$PRIVATE_LOG_CONFIG_TARGET" private-logs-conf.old "$OLD_PRIVATE_LOG_CONFIG_STATE" "$OLD_PRIVATE_LOG_CONFIG_SHA" "$NEW_PRIVATE_LOG_CONFIG_SHA" || rollback_ok=0
+        restore_private_log_state || rollback_ok=0
         atomic_restore "$BACKUP_DIR/script.old" "$SCRIPT_TARGET" "$OLD_SCRIPT_SHA" 700 || rollback_ok=0
         atomic_restore "$BACKUP_DIR/service.old" "$SERVICE_TARGET" "$OLD_SERVICE_SHA" 644 || rollback_ok=0
         atomic_restore "$BACKUP_DIR/timer.old" "$TIMER_TARGET" "$OLD_TIMER_SHA" 644 || rollback_ok=0
@@ -1033,6 +1500,9 @@ require_old_state_stable
 
 require_safe_parent /var
 require_safe_parent /var/backups
+require_safe_parent /etc
+require_safe_parent /etc/cron.d
+require_safe_parent /etc/tmpfiles.d
 if [[ -e "$BACKUP_ROOT" ]]; then
     require_dir "$BACKUP_ROOT" 700
 else
@@ -1042,7 +1512,7 @@ else
 fi
 require_dir "$BACKUP_ROOT" 700
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build41.13
+BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build42.1
 [[ ! -e "$BACKUP_DIR" ]]
 install -d -o root -g root -m 700 "$BACKUP_DIR"
 write_marker PREPARED "node=$NODE role=$ROLE release=$RELEASE_ID deployer_sha=$DEPLOYER_SHA timer_enabled=enabled timer_active=active old_script=$OLD_SCRIPT_SHA old_service=$OLD_SERVICE_SHA old_timer=$OLD_TIMER_SHA"
@@ -1065,17 +1535,49 @@ backup_one "$SCRIPT_TARGET" script.old "$OLD_SCRIPT_SHA" 700
 backup_one "$SERVICE_TARGET" service.old "$OLD_SERVICE_SHA" 644
 backup_one "$TIMER_TARGET" timer.old "$OLD_TIMER_SHA" 644
 backup_one "$STATUS_FILE" status.old "$OLD_STATUS_SHA" 600
+capture_root_crontab "$BACKUP_DIR/root-crontab.old"
+ROOT_CRONTAB_STATE=$CAPTURED_CRONTAB_STATE
+ROOT_CRONTAB_SHA=$CAPTURED_CRONTAB_SHA
+OLD_STARGATE_SHA=$(stargate_digest "$BACKUP_DIR/root-crontab.old")
+require_snapshot_producer_count "$BACKUP_DIR/root-crontab.old" 1
+transform_root_crontab "$BACKUP_DIR/root-crontab.old" "$BACKUP_DIR/root-crontab.migrated"
+[[ "$REMOVED_SNAPSHOT_LINES" == 1 ]]
+record_optional_asset "$PRIVATE_LOG_CONFIG_TARGET" private-logs-conf.old OLD_PRIVATE_LOG_CONFIG_STATE OLD_PRIVATE_LOG_CONFIG_SHA
+record_optional_asset "$SNAPSHOT_CRON_TARGET" snapshot-cron.old OLD_SNAPSHOT_CRON_STATE OLD_SNAPSHOT_CRON_SHA
+record_private_log_state
 require_frozen_files
 require_file "$STATUS_FILE" 600 "$OLD_STATUS_SHA"
 [[ "$(stat -c '%i' -- "$STATUS_FILE")" == "$OLD_STATUS_INODE" ]]
+require_optional_asset_state "$PRIVATE_LOG_CONFIG_TARGET" "$OLD_PRIVATE_LOG_CONFIG_STATE" "$OLD_PRIVATE_LOG_CONFIG_SHA"
+require_optional_asset_state "$SNAPSHOT_CRON_TARGET" "$OLD_SNAPSHOT_CRON_STATE" "$OLD_SNAPSHOT_CRON_SHA"
+[[ "$(stargate_digest "$BACKUP_DIR/root-crontab.old")" == "$OLD_STARGATE_SHA" ]]
 {
     printf 'script\t%s\t%s\n' "$OLD_SCRIPT_SHA" "$(stat -c '%u:%g:%a:%h' "$SCRIPT_TARGET")"
     printf 'service\t%s\t%s\n' "$OLD_SERVICE_SHA" "$(stat -c '%u:%g:%a:%h' "$SERVICE_TARGET")"
     printf 'timer\t%s\t%s\n' "$OLD_TIMER_SHA" "$(stat -c '%u:%g:%a:%h' "$TIMER_TARGET")"
     printf 'status\t%s\t%s\tinode=%s\n' "$OLD_STATUS_SHA" "$(stat -c '%u:%g:%a:%h' "$STATUS_FILE")" "$OLD_STATUS_INODE"
+    printf 'root-crontab\t%s\tstate=%s\tstargate_sha=%s\n' "$ROOT_CRONTAB_SHA" "$ROOT_CRONTAB_STATE" "$OLD_STARGATE_SHA"
+    printf 'private-log-config\t%s\tstate=%s\n' "$OLD_PRIVATE_LOG_CONFIG_SHA" "$OLD_PRIVATE_LOG_CONFIG_STATE"
+    printf 'snapshot-cron\t%s\tstate=%s\n' "$OLD_SNAPSHOT_CRON_SHA" "$OLD_SNAPSHOT_CRON_STATE"
+    printf 'private-log-directory\tstate=%s\n' "$OLD_PRIVATE_LOG_STATE"
 } > "$BACKUP_DIR/manifest.tsv"
 chmod 600 "$BACKUP_DIR/manifest.tsv"
-sha256sum "$BACKUP_DIR/manifest.tsv" "$BACKUP_DIR/script.old" "$BACKUP_DIR/service.old" "$BACKUP_DIR/timer.old" "$BACKUP_DIR/status.old" > "$BACKUP_DIR/integrity.sha256"
+INTEGRITY_FILES=(
+    "$BACKUP_DIR/manifest.tsv"
+    "$BACKUP_DIR/script.old"
+    "$BACKUP_DIR/service.old"
+    "$BACKUP_DIR/timer.old"
+    "$BACKUP_DIR/status.old"
+    "$BACKUP_DIR/root-crontab.old"
+    "$BACKUP_DIR/root-crontab.migrated"
+)
+if [[ "$OLD_PRIVATE_LOG_CONFIG_STATE" == present ]]; then
+    INTEGRITY_FILES+=("$BACKUP_DIR/private-logs-conf.old")
+fi
+if [[ "$OLD_SNAPSHOT_CRON_STATE" == present ]]; then
+    INTEGRITY_FILES+=("$BACKUP_DIR/snapshot-cron.old")
+fi
+sha256sum "${INTEGRITY_FILES[@]}" > "$BACKUP_DIR/integrity.sha256"
 chmod 600 "$BACKUP_DIR/integrity.sha256"
 sync_path "$BACKUP_DIR/manifest.tsv"
 sync_path "$BACKUP_DIR/integrity.sha256"
@@ -1088,6 +1590,16 @@ PHASE=COMMITTED
 atomic_install "$STAGE/shuzijun-internal-health" "$SCRIPT_TARGET" 700 "$NEW_SCRIPT_SHA"
 atomic_install "$STAGE/shuzijun-internal-health.service" "$SERVICE_TARGET" 644 "$NEW_SERVICE_SHA"
 atomic_install "$STAGE/shuzijun-internal-health.timer" "$TIMER_TARGET" 644 "$NEW_TIMER_SHA"
+atomic_install "$STAGE/shuzijun-private-logs.conf" "$PRIVATE_LOG_CONFIG_TARGET" 644 "$NEW_PRIVATE_LOG_CONFIG_SHA"
+create_private_logs
+capture_root_crontab "$BACKUP_DIR/root-crontab.before-mutation"
+[[ "$CAPTURED_CRONTAB_STATE" == "$ROOT_CRONTAB_STATE" ]]
+[[ "$CAPTURED_CRONTAB_SHA" == "$ROOT_CRONTAB_SHA" ]]
+[[ "$(stargate_digest "$BACKUP_DIR/root-crontab.before-mutation")" == "$OLD_STARGATE_SHA" ]]
+require_snapshot_producer_count "$BACKUP_DIR/root-crontab.before-mutation" 1
+atomic_install "$STAGE/tencent-daily-snapshot.cron" "$SNAPSHOT_CRON_TARGET" 644 "$NEW_SNAPSHOT_CRON_SHA"
+install_migrated_root_crontab "$BACKUP_DIR/root-crontab.migrated"
+require_new_support_assets
 systemctl daemon-reload
 require_new_units
 [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]]
@@ -1168,6 +1680,13 @@ require_timer_enabled_link
 [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]]
 [[ "$(systemctl is-active shuzijun-internal-health.timer)" == active ]]
 persist_status_snapshot "$FINAL_STATUS_SHA" "$FINAL_STATUS_INODE"
+[[ "$VALIDATED_INVOCATION" == "$FINAL_INVOCATION" ]]
+FINAL_EXIT_STATUS=$VALIDATED_EXIT_STATUS
+case "$FINAL_EXIT_STATUS" in
+    0) FINAL_HEALTH_STATUS=healthy ;;
+    2) FINAL_HEALTH_STATUS=degraded ;;
+    *) exit 1 ;;
+esac
 DONE_CONTENT="invocation=$FINAL_INVOCATION status_sha=$FINAL_STATUS_SHA status_inode=$FINAL_STATUS_INODE"
 prepare_terminal_marker DONE "$DONE_CONTENT"
 require_new_units
@@ -1181,4 +1700,4 @@ commit_terminal_marker DONE
 PHASE=DONE
 trap - ERR INT TERM HUP
 
-printf 'health-monitor-deploy release=%s node=%s status=degraded exit=2 backup=%s invocation=%s\n' "$RELEASE_ID" "$NODE" "$BACKUP_DIR" "$FINAL_INVOCATION"
+printf 'health-monitor-deploy release=%s node=%s status=%s exit=%s backup=%s invocation=%s\n' "$RELEASE_ID" "$NODE" "$FINAL_HEALTH_STATUS" "$FINAL_EXIT_STATUS" "$BACKUP_DIR" "$FINAL_INVOCATION"

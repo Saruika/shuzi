@@ -1,0 +1,4 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CRON_TZ=Asia/Shanghai
+31 3 * * * root umask 077; flock -xn /run/tencent-snapshot.lock -c /usr/local/sbin/tencent-daily-snapshot >>/var/lib/shuzijun-logs/snapshot.log 2>&1

@@ -87,6 +87,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.5.10-build41.11.md`](Server/releases/v1.5.10-build41.11.md)：timer 重启排程、oneshot 取证固定与回滚重排程修复。
 - [`Server/releases/v1.5.10-build41.12.md`](Server/releases/v1.5.10-build41.12.md)：systemd 回收未加载 service 后的隔离归一化修复。
 - [`Server/releases/v1.5.10-build41.13.md`](Server/releases/v1.5.10-build41.13.md)：共享日志父链信任修复与零日志变更部署。
+- [`Server/releases/v1.3.30-build42.1.md`](Server/releases/v1.3.30-build42.1.md)：上海到新加坡签名同步、最小 capability 预检、系统安全更新与腾讯云告警记录。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
@@ -200,7 +201,7 @@ Build 42 在录屏、投屏和切后台的公开保护之外，按产品方明�
 - 主备发布器新增强制 `authority` / `standby` 角色验收，严格核对 HTTP 状态、JSON 错误码、安全响应头和响应体上限；发布回滚保持相同失败关闭边界。
 - 新增仅供新加坡旧版单文件节点使用的事务化 standby 首次种子工具：只在角色固定为 `standby`、PHP-FPM 持久屏蔽且写入者排空时安装完整发布单元，失败会恢复经审核的 1.5.7 单文件状态并继续隔离流量。
 - Web 根目录巡检与 Nginx 语义检查器建立固定路径、root 所有权、精确权限、SHA-256 与打开后文件描述符执行的完整信任链，链接替换、可写副本或字节漂移都会在执行前失败。
-- 新增版本化、加固的每日主备同步 systemd service/timer，所有自动与人工同步共用 `/run/shuzijun-sync.lock`，并由安全合同测试验证安装顺序与恢复条件。
+- 新增版本化、加固的每日主备同步 systemd service/timer，所有自动与人工同步共用 `/run/shuzijun-sync/sync.lock`，并由安全合同测试验证安装顺序与恢复条件。
 
 ## v1.3.23
 

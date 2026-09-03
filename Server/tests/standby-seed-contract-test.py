@@ -34,12 +34,39 @@ def main() -> None:
     assert 'sha256sum "$verifier_fd_path"' in text
     assert '/bin/bash /proc/self/fd/6 "$SITE"' in text
     assert '"$VERIFY" "$SITE"' not in text
-    assert "readonly AUTHORITY_LOCK_PATH=\"$SITE\"" in text
+    assert "readonly AUTHORITY_LOCK_ROOT=/var/lib/shuzijun-sync" in text
+    assert 'readonly AUTHORITY_LOCK_PATH="$AUTHORITY_LOCK_ROOT/site-operation.lock"' in text
     assert "readonly LOCK_PATH=\"$STAGING_ROOT\"" in text
     assert 'exec 8<"$AUTHORITY_LOCK_PATH"' in text
     assert 'exec 9<"$LOCK_PATH"' in text
     assert 'exec 8<>"$AUTHORITY_LOCK_PATH"' not in text
     assert 'exec 9<>"$LOCK_PATH"' not in text
+    assert 'exec 10<"$AUTHORITY_LOCK_ROOT"' in text
+    assert 'readonly AUTHORITY_LOCK_PATH="$SITE"' not in text
+    assert 'exec 8<"$SITE"' not in text
+
+    lock_root = body(text, "validate_authority_lock_root", "validate_authority_lock_path")
+    assert "/var/lib/shuzijun-sync" in lock_root
+    assert "0:0:700" in lock_root
+    lock_path = body(text, "validate_authority_lock_path", "create_authority_lock_if_requested")
+    assert "0:0:1:600:0" in lock_path
+    assert "crosses a filesystem boundary" in lock_path
+    lock_create = body(text, "create_authority_lock_if_requested", "acquire_authority_lock")
+    for guard in (
+        "os.O_EXCL",
+        "os.O_NOFOLLOW",
+        "metadata.st_nlink != 1",
+        "metadata.st_size != 0",
+        "os.fsync(descriptor)",
+        "os.fsync(root_fd)",
+    ):
+        assert guard in lock_create
+    lock_acquire = body(text, "acquire_authority_lock", "validate_digest")
+    assert 'flock -n 10' in lock_acquire
+    assert 'flock -n 8' in lock_acquire
+    assert lock_acquire.count("validate_authority_lock_path") == 2
+    assert "site-operation lock inode changed after acquisition" in lock_acquire
+    assert 'rm ' not in lock_acquire and 'unlink' not in lock_acquire
 
     parser = text[text.index("while [[ $# -gt 0 ]]"):]
     for option in (
@@ -66,7 +93,7 @@ def main() -> None:
     assert "systemctl enable" not in text
 
     preflight = text.index('"$DEPLOYER" --bundle "$BUNDLE_INPUT"')
-    authority = text.index("verify_standby_role", text.index("exec 8<"))
+    authority = text.index("verify_standby_role", text.index("acquire_authority_lock\n"))
     fpm_first = text.index("verify_fpm_isolated", text.index("validate_tool \"$DEPLOYER\""))
     write_first = text.index("create_backup\nprepare_stage")
     plan_check = text.index('[[ "$APPROVED_PLAN_SHA256" == "$PLAN_SHA256" ]]')

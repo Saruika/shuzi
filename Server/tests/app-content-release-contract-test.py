@@ -128,7 +128,8 @@ def main() -> None:
         "readonly STAGING_ROOT=/var/lib/shuzijun-app-content/releases",
         "readonly BACKUP_ROOT=/var/backups/shuzijun-app-content",
         'readonly LOCK_PATH="$STAGING_ROOT"',
-        'readonly AUTHORITY_LOCK_PATH="$SITE"',
+        "readonly AUTHORITY_LOCK_ROOT=/var/lib/shuzijun-sync",
+        'readonly AUTHORITY_LOCK_PATH="$AUTHORITY_LOCK_ROOT/site-operation.lock"',
         "readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role",
         f"readonly AUTHORITY_VERIFY_SHA256={authority_verifier_sha256}",
         "readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security",
@@ -152,26 +153,62 @@ def main() -> None:
     assert "LOCK_FILE=" not in text
     assert 'exec 9<"$LOCK_PATH"' in lines
     assert 'exec 9<>"$LOCK_PATH"' not in lines
-    assert any(line.strip() == 'exec 8<"$AUTHORITY_LOCK_PATH"' for line in lines)
-    assert not any(line.strip() == 'exec 8<>"$AUTHORITY_LOCK_PATH"' for line in lines)
+    assert 'exec 8<"$AUTHORITY_LOCK_PATH"' in text
+    assert 'exec 8<>"$AUTHORITY_LOCK_PATH"' not in text
+    assert 'exec 10<"$AUTHORITY_LOCK_ROOT"' in text
+
+    lock_root = function_body(
+        lines, "validate_authority_lock_root", "validate_authority_lock_path"
+    )
+    for guard in (
+        "/var/lib/shuzijun-sync",
+        "0:0:700",
+        "site-operation lock parent is unsafe",
+    ):
+        assert guard in lock_root
+    lock_path = function_body(
+        lines, "validate_authority_lock_path", "create_authority_lock_if_requested"
+    )
+    for guard in (
+        "site-operation.lock",
+        "%u:%g:%h:%a:%s",
+        "0:0:1:600:0",
+        "crosses a filesystem boundary",
+    ):
+        assert guard in lock_path
+    lock_create = function_body(
+        lines, "create_authority_lock_if_requested", "acquire_authority_lock"
+    )
+    for guard in (
+        "os.O_EXCL",
+        "os.O_NOFOLLOW",
+        "os.fchown(descriptor, 0, 0)",
+        "metadata.st_nlink != 1",
+        "metadata.st_size != 0",
+        "os.fsync(descriptor)",
+        "os.fsync(root_fd)",
+    ):
+        assert guard in lock_create
+    lock_acquire = function_body(lines, "acquire_authority_lock", "verify_authority_role")
+    assert 'flock -n 10' in lock_acquire
+    assert 'flock -n 8' in lock_acquire
+    assert lock_acquire.count("validate_authority_lock_path") == 2
+    assert "/proc/self/fd/8" in lock_acquire
+    assert "site-operation lock inode changed after acquisition" in lock_acquire
+    assert 'rm ' not in lock_acquire and 'unlink' not in lock_acquire
+    assert 'readonly AUTHORITY_LOCK_PATH="$SITE"' not in text
+    assert 'exec 8<"$SITE"' not in text
 
     root_check = line_number(lines, '[[ "$EUID" -eq 0 ]]')
-    authority_lock_validation = line_number(
-        lines, "validate_authority_lock_path", root_check + 1
-    )
-    authority_lock_open = line_number(
-        lines, 'exec 8<"$AUTHORITY_LOCK_PATH"', authority_lock_validation + 1
-    )
-    authority_lock_take = line_number(lines, "flock -n 8", authority_lock_open + 1)
+    authority_lock_acquire = line_number(lines, "acquire_authority_lock", root_check + 1)
     early_authority_check = line_number(
-        lines, "verify_authority_role", authority_lock_take + 1
+        lines, "verify_authority_role", authority_lock_acquire + 1
     )
     lock_validation = line_number(lines, "validate_staging_lock_path", early_authority_check + 1)
     lock_open = line_number(lines, 'exec 9<"$LOCK_PATH"', lock_validation + 1)
     lock_take = line_number(lines, "flock -n 9", lock_open + 1)
     fixed_validation = line_number(lines, "validate_fixed_paths", lock_take + 1)
-    assert root_check < authority_lock_validation < authority_lock_open
-    assert authority_lock_open < authority_lock_take < early_authority_check
+    assert root_check < authority_lock_acquire < early_authority_check
     assert early_authority_check < lock_validation < lock_open < lock_take < fixed_validation
 
     find_guard = function_body(lines, "reject_find_match", "is_outside_site")
@@ -650,7 +687,7 @@ def main() -> None:
         "VERIFY_SHA256",
     ):
         assert webroot_guard in webroot_verifier
-    run_webroot = function_body(lines, "run_webroot_verifier", "validate_authority_lock_path")
+    run_webroot = function_body(lines, "run_webroot_verifier", "validate_authority_lock_root")
     assert '/bin/bash /proc/self/fd/6 "$SITE"' in run_webroot
     assert '"$VERIFY" "$SITE"' not in text
 

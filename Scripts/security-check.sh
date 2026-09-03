@@ -84,6 +84,7 @@ fi
 
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/entitlement-verifier/app.py").read_text(encoding="utf-8"))'
 python3 -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8")) for path in pathlib.Path("Server/operations").glob("*.py")]'
+python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/operations/deploy-shuzijun-sync-release").read_text(encoding="utf-8"))'
 python3 Server/tests/app-content-release-contract-test.py
 python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py
@@ -94,6 +95,7 @@ python3 Server/tests/health-monitor-deployer-contract-test.py
 python3 Server/tests/webroot-verifier-trust-contract-test.py
 python3 Server/tests/sync-script-contract-test.py
 python3 Server/tests/sync-scheduler-contract-test.py
+python3 Server/tests/sync-release-deployer-contract-test.py
 python3 Server/tests/nginx-server-block-contract-test.py
 python3 Server/tests/install-build34-nginx-routing-contract-test.py
 python3 Server/tests/nginx-sensitive-routing-smoke-contract-test.py
@@ -110,6 +112,22 @@ if command -v visudo >/dev/null 2>&1; then
 fi
 bash -n Server/tests/fan-api-smoke.sh
 bash -n Server/tests/nginx-sensitive-routing-smoke.sh
+
+grep -qFx 'd /var/lib/shuzijun-logs 0700 root root -' \
+  Server/operations/shuzijun-private-logs.conf
+grep -qFx 'f /var/lib/shuzijun-logs/sync-authority.log 0600 root root -' \
+  Server/operations/shuzijun-private-logs.conf
+grep -qFx 'f /var/lib/shuzijun-logs/sync-standby.log 0600 root root -' \
+  Server/operations/shuzijun-private-logs.conf
+grep -qFx 'f /var/lib/shuzijun-logs/snapshot.log 0600 root root -' \
+  Server/operations/shuzijun-private-logs.conf
+grep -qFx 'CRON_TZ=Asia/Shanghai' Server/operations/tencent-daily-snapshot.cron
+grep -qFx '31 3 * * * root umask 077; flock -xn /run/tencent-snapshot.lock -c /usr/local/sbin/tencent-daily-snapshot >>/var/lib/shuzijun-logs/snapshot.log 2>&1' \
+  Server/operations/tencent-daily-snapshot.cron
+if grep -qE '/var/log/(wp-sync|shuzijun-sync-receiver|tencent-snapshot)\.log' \
+  Server/operations/shuzijun-internal-health; then
+  fail '内部健康监控不得信任共享 /var/log 同步或快照日志'
+fi
 
 grep -qF 'wp-config\.php' Server/nginx/shuzijun-sensitive-files-deny.conf
 grep -qF '\.php[^/]+$' Server/nginx/shuzijun-sensitive-files-deny.conf
@@ -141,13 +159,16 @@ if grep -R -I -q -F "$legacy_authority_constant" Server Scripts; then
 fi
 grep -qF -- '--authority-role authority' Server/operations/README.md
 grep -qF -- '--authority-role standby' Server/operations/README.md
-grep -qFx 'ExecStart=/usr/bin/flock -n /run/shuzijun-sync.lock /usr/local/sbin/sync-to-backup' \
+grep -qFx 'ExecStart=/usr/bin/flock -n /run/shuzijun-sync/sync.lock /usr/local/sbin/sync-to-backup' \
   Server/operations/shuzijun-sync.service
 grep -qFx 'Persistent=true' Server/operations/shuzijun-sync.timer
 grep -qFx '    ForceCommand /usr/local/sbin/shuzijun-sync-ssh-gate' \
   Server/operations/shuzijun-sync-transport.sshd
-grep -qFx 'shuzijun-sync-transport ALL=(root:root) NOPASSWD: SHUZIJUN_SYNC_RECEIVER' \
+grep -qFx 'shuzijun-sync-transport ALL=(root:root) NOPASSWD: /usr/local/sbin/apply-shuzijun-sync --attest, /usr/local/sbin/apply-shuzijun-sync --protocol, /usr/local/sbin/apply-shuzijun-sync --ingest' \
   Server/operations/shuzijun-sync-transport.sudoers
+if grep -qF 'Cmnd_Alias' Server/operations/shuzijun-sync-transport.sudoers; then
+  fail '同步 sudoers 不得使用在重复 includedir 环境中会冲突的别名'
+fi
 if grep -qF 'NOPASSWD: ALL' Server/operations/shuzijun-sync-transport.sudoers; then
   fail '同步传输账号不得拥有通配 sudo 权限'
 fi

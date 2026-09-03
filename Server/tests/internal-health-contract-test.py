@@ -27,9 +27,11 @@ def main() -> None:
     assert "unit_state('shuzijun-failover.timer', 'is-enabled') == 'enabled'" not in source
     assert 'legacy_role = {"authority": "primary", "standby": "backup"}' in source
     assert "SYNC_MAX_AGE_HOURS = 26" in source
-    assert '"/var/log/wp-sync.log"' in source
-    assert '"/var/log/shuzijun-sync-receiver.log"' in source
-    assert '"/var/log/shuzijun-sync-launch.log"' not in source
+    assert 'PRIVATE_LOG_DIR = pathlib.Path("/var/lib/shuzijun-logs")' in source
+    assert 'PRIVATE_LOG_DIR / "sync-authority.log"' in source
+    assert 'PRIVATE_LOG_DIR / "sync-standby.log"' in source
+    assert 'PRIVATE_LOG_DIR / "snapshot.log"' in source
+    assert '"/var/log/' not in source
     assert "sync_timer_missing_or_disabled" in source
     assert 'operations.get("sync_service_result") != "success"' in source
     assert "sync_service_result_not_success" in source
@@ -42,19 +44,27 @@ def main() -> None:
     assert "standby_forbidden_cdn_timer_active" in source
     assert "authority_cdn_timer_or_service_unhealthy" in source
     assert "standby_sync_generation_missing_or_invalid" in source
+    assert "standby_sync_commit_generation_missing_or_invalid" in source
+    assert "standby_sync_generation_mismatch_commit" in source
     assert "authority_sync_generation_missing_or_invalid" in source
     assert "sync_log_generation_missing_or_invalid" in source
     assert "authority_sync_generation_behind_completed_log" in source
     assert "standby_sync_generation_mismatch_applied_log" in source
     assert '"/var/lib/shuzijun-sync/highest-issued-generation"' in source
     assert '"/var/lib/shuzijun-sync/state/highest-accepted-generation"' in source
+    assert '"/var/lib/shuzijun-sync/state/fpm-activation-guard.committed"' in source
     assert 'rb"(?:0|[1-9][0-9]{0,18})\\n"' in source
     assert "int(value[:-1]) < 2**63" in source
     assert "stat.S_IMODE(metadata.st_mode) & 0o022 == 0" in source
+    assert "stat.S_IMODE(metadata.st_mode) == 0o600" in source
+    assert "stat.S_IMODE(metadata.st_mode) == 0o700" in source
     assert "def secure_root_directory_chain(path):" in source
     assert "if not secure_root_directory_chain(item.parent):" in source
     stable_log_source = source[
         source.index("def stable_log_tail(") : source.index("def success_generation(")
+    ]
+    stable_generation_source = source[
+        source.index("def stable_generation_state(") : source.index("def valid_generation_bytes(")
     ]
     log_summary_source = source[
         source.index("def log_summary(") : source.index("def success_generation(")
@@ -81,8 +91,24 @@ def main() -> None:
         "secure_root_directory_chain(item.parent)",
     ):
         assert stable_read_guard in stable_log_source
+    for stable_generation_guard in (
+        "O_DIRECTORY",
+        "O_NOFOLLOW",
+        "O_NONBLOCK",
+        "os.pread",
+        "secure_private_regular_file_metadata",
+        "metadata.st_nlink",
+        "metadata.st_mtime_ns",
+        "metadata.st_ctime_ns",
+        "after_path",
+        "secure_root_directory_chain(item.parent)",
+    ):
+        assert stable_generation_guard in stable_generation_source
+    assert "item.exists()" not in stable_generation_source
+    assert "item.read_bytes()" not in stable_generation_source
     assert "incremental sync completed" in source
     assert "signed uploads/database sync applied" in source
+    assert "snapshot already exists today; skip" in source
     for forbidden in (
         '"sync-to-backup"',
         '"--ingest"',
@@ -94,6 +120,7 @@ def main() -> None:
 
     classify = namespace["classify_status"]
     valid_generation = namespace["valid_generation_bytes"]
+    valid_generation_state = namespace["valid_generation_state"]
     success_generation = namespace["success_generation"]
     valid_failover = namespace["validated_failover_payload"]
     age_within = namespace["age_within"]
@@ -103,6 +130,11 @@ def main() -> None:
     secure_directory = namespace["secure_root_directory"]
     secure_directory_metadata = namespace["secure_root_directory_metadata"]
     secure_file_metadata = namespace["secure_regular_file_metadata"]
+    secure_private_file_metadata = namespace["secure_private_regular_file_metadata"]
+    secure_private_log_directory_metadata = namespace[
+        "secure_private_log_directory_metadata"
+    ]
+    generation_state = namespace["generation_state"]
     stable_log_tail = namespace["stable_log_tail"]
     log_summary = namespace["log_summary"]
     safe_directory = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
@@ -131,6 +163,29 @@ def main() -> None:
         SimpleNamespace(st_mode=stat.S_IFREG | 0o602, st_uid=0, st_nlink=1),
     ):
         assert not secure_file_metadata(unsafe_file)
+    private_directory = SimpleNamespace(
+        st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=0
+    )
+    assert secure_private_log_directory_metadata(private_directory)
+    for unsafe_private_directory in (
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o750, st_uid=0, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=1, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=1),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o700, st_uid=0, st_gid=0),
+    ):
+        assert not secure_private_log_directory_metadata(unsafe_private_directory)
+    private_file = SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=1
+    )
+    assert secure_private_file_metadata(private_file)
+    for unsafe_private_file in (
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o640, st_uid=0, st_gid=0, st_nlink=1),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=1, st_gid=0, st_nlink=1),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=1, st_nlink=1),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=2),
+        SimpleNamespace(st_mode=stat.S_IFLNK | 0o600, st_uid=0, st_gid=0, st_nlink=1),
+    ):
+        assert not secure_private_file_metadata(unsafe_private_file)
     assert secure_directory_chain("/")
     assert not secure_directory_chain("/tmp")
     with mock.patch.object(Path, "resolve", side_effect=RuntimeError("symlink loop")):
@@ -166,9 +221,10 @@ def main() -> None:
         with mock.patch.dict(
             globals_map,
             {
+                "PRIVATE_LOG_DIR": forged_log.parent,
                 "secure_root_directory_chain": lambda _path: True,
-                "secure_root_directory_metadata": lambda _metadata: True,
-                "secure_regular_file_metadata": lambda _metadata: True,
+                "secure_private_log_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
             },
         ):
             trusted_summary = log_summary(str(forged_log), 36, ("created ",))
@@ -178,6 +234,28 @@ def main() -> None:
         assert trusted_summary["success_marker"] is True
         assert trusted_summary["generation"] == 42
 
+        forged_log.write_text(
+            "[2026-09-03] snapshot already exists today; skip\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(
+            globals_map,
+            {
+                "PRIVATE_LOG_DIR": forged_log.parent,
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_private_log_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
+            },
+        ):
+            skipped_snapshot = log_summary(
+                str(forged_log),
+                36,
+                ("created ", "snapshot already exists today; skip"),
+            )
+        assert skipped_snapshot["trusted"] is True
+        assert skipped_snapshot["success_marker"] is True
+        assert skipped_snapshot["recent_error"] is False
+
         forged_log.write_bytes(
             b"created success generation=7\n" + b"x" * 30000
         )
@@ -185,8 +263,8 @@ def main() -> None:
             globals_map,
             {
                 "secure_root_directory_chain": lambda _path: True,
-                "secure_root_directory_metadata": lambda _metadata: True,
-                "secure_regular_file_metadata": lambda _metadata: True,
+                "secure_private_log_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
             },
         ):
             tail_trusted, tail_present, tail, tail_mtime = stable_log_tail(forged_log)
@@ -209,8 +287,8 @@ def main() -> None:
             globals_map,
             {
                 "secure_root_directory_chain": lambda _path: True,
-                "secure_root_directory_metadata": lambda _metadata: True,
-                "secure_regular_file_metadata": lambda _metadata: True,
+                "secure_private_log_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
             },
         ), mock.patch.object(os, "close", side_effect=close_then_report_error):
             close_trusted, close_present, close_tail, close_mtime = stable_log_tail(
@@ -237,9 +315,10 @@ def main() -> None:
         with mock.patch.dict(
             globals_map,
             {
+                "PRIVATE_LOG_DIR": forged_log.parent,
                 "secure_root_directory_chain": lambda _path: True,
-                "secure_root_directory_metadata": lambda _metadata: True,
-                "secure_regular_file_metadata": lambda _metadata: True,
+                "secure_private_log_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
             },
         ), mock.patch.object(os, "stat", side_effect=rotate_after_read):
             rotated_summary = log_summary(str(forged_log), 36, ("created ",))
@@ -250,6 +329,36 @@ def main() -> None:
         assert rotated_summary["mtime"] is None
         assert rotated_summary["success_marker"] is False
         assert rotated_summary["generation"] is None
+    with tempfile.TemporaryDirectory(prefix="sj-generation-state-") as temporary:
+        state_path = Path(temporary) / "generation"
+        state_path.write_bytes(b"42\n")
+        generation_globals = generation_state.__globals__
+        with mock.patch.dict(
+            generation_globals,
+            {
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_root_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
+            },
+        ):
+            state = generation_state(state_path)
+        assert state == {"present": True, "trusted": True, "valid": True, "value": 42}
+        state_path.write_bytes(b"01\n")
+        with mock.patch.dict(
+            generation_globals,
+            {
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_root_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
+            },
+        ):
+            invalid_state = generation_state(state_path)
+        assert invalid_state == {
+            "present": True,
+            "trusted": True,
+            "valid": False,
+            "value": None,
+        }
     assert classify([], []) == ("healthy", 0)
     assert classify([], ["sync_timer_missing_or_disabled"]) == ("degraded", 2)
     assert classify(["authority_role_unverified"], []) == ("critical", 1)
@@ -267,6 +376,19 @@ def main() -> None:
     assert valid_generation(b"0\n")
     assert valid_generation(b"42\n")
     assert valid_generation(b"9223372036854775807\n")
+    assert valid_generation_state(
+        {"trusted": True, "valid": True, "value": 9223372036854775807}
+    )
+    for invalid_state in (
+        None,
+        {},
+        {"trusted": False, "valid": True, "value": 42},
+        {"trusted": True, "valid": False, "value": 42},
+        {"trusted": True, "valid": True, "value": True},
+        {"trusted": True, "valid": True, "value": -1},
+        {"trusted": True, "valid": True, "value": 2**63},
+    ):
+        assert not valid_generation_state(invalid_state)
     assert success_generation("[time] completed generation=42") == 42
     assert success_generation("[time] completed generation=0 backup=/safe") == 0
     assert success_generation("[time] completed") is None
@@ -331,33 +453,33 @@ def main() -> None:
         "failover_timer_enabled": "disabled",
     }
     assert sync_reasons(
-        "authority", authority_operations, good_log, {"valid": True, "value": 42}
+        "authority", authority_operations, good_log, {"trusted": True, "valid": True, "value": 42}
     ) == []
     assert sync_reasons(
-        "authority", authority_operations, good_log, {"valid": True, "value": 43}
+        "authority", authority_operations, good_log, {"trusted": True, "valid": True, "value": 43}
     ) == []
     assert "authority_sync_generation_behind_completed_log" in sync_reasons(
-        "authority", authority_operations, good_log, {"valid": True, "value": 41}
+        "authority", authority_operations, good_log, {"trusted": True, "valid": True, "value": 41}
     )
     assert "sync_log_generation_missing_or_invalid" in sync_reasons(
         "authority",
         authority_operations,
         dict(good_log, generation=None),
-        {"valid": True, "value": 42},
+        {"trusted": True, "valid": True, "value": 42},
     )
     for bad_result in ("exit-code", "signal", "timeout", "unknown"):
         operations = dict(authority_operations, sync_service_result=bad_result)
         assert "sync_service_result_not_success" in sync_reasons(
-            "authority", operations, good_log, {"valid": True, "value": 42}
+            "authority", operations, good_log, {"trusted": True, "valid": True, "value": 42}
         )
     assert "authority_sync_generation_missing_or_invalid" in sync_reasons(
-        "authority", authority_operations, good_log, {"valid": False, "value": None}
+        "authority", authority_operations, good_log, {"trusted": False, "valid": False, "value": None}
     )
     assert "sync_last_success_untrusted_or_stale" in sync_reasons(
         "authority",
         authority_operations,
         dict(good_log, recent=False),
-        {"valid": True, "value": 42},
+        {"trusted": True, "valid": True, "value": 42},
     )
 
     standby_operations = {
@@ -383,31 +505,51 @@ def main() -> None:
         "standby",
         standby_operations,
         good_log,
-        {"valid": True, "value": 42},
+        {"trusted": True, "valid": True, "value": 42},
         good_failover,
+        {"trusted": True, "valid": True, "value": 42},
     ) == []
     for mismatched_value in (0, 41, 43):
         assert "standby_sync_generation_mismatch_applied_log" in sync_reasons(
             "standby",
             standby_operations,
             good_log,
-            {"valid": True, "value": mismatched_value},
+            {"trusted": True, "valid": True, "value": mismatched_value},
             good_failover,
+            {"trusted": True, "valid": True, "value": mismatched_value},
         )
+    assert "standby_sync_generation_mismatch_commit" in sync_reasons(
+        "standby",
+        standby_operations,
+        good_log,
+        {"trusted": True, "valid": True, "value": 42},
+        good_failover,
+        {"trusted": True, "valid": True, "value": 43},
+    )
+    assert "standby_sync_commit_generation_missing_or_invalid" in sync_reasons(
+        "standby",
+        standby_operations,
+        good_log,
+        {"trusted": True, "valid": True, "value": 42},
+        good_failover,
+        {"trusted": False, "valid": False, "value": None},
+    )
     switched_failover = dict(good_failover, mode="backup")
     assert "standby_failover_mode_not_primary" in sync_reasons(
         "standby",
         standby_operations,
         good_log,
-        {"valid": True, "value": 42},
+        {"trusted": True, "valid": True, "value": 42},
         switched_failover,
+        {"trusted": True, "valid": True, "value": 42},
     )
     assert "standby_failover_timer_disabled" in sync_reasons(
         "standby",
         dict(standby_operations, failover_timer_enabled="disabled"),
         good_log,
-        {"valid": True, "value": 42},
+        {"trusted": True, "valid": True, "value": 42},
         good_failover,
+        {"trusted": True, "valid": True, "value": 42},
     )
     for bad_result in ("exit-code", "signal", "timeout", "unknown"):
         operations = dict(standby_operations, failover_service_result=bad_result)
@@ -415,8 +557,9 @@ def main() -> None:
             "standby",
             operations,
             good_log,
-            {"valid": True, "value": 42},
+            {"trusted": True, "valid": True, "value": 42},
             good_failover,
+            {"trusted": True, "valid": True, "value": 42},
         )
 
     assert "Type=oneshot" in service
@@ -426,6 +569,18 @@ def main() -> None:
     assert "ProtectSystem=strict" in service
     assert "ProtectHome=true" in service
     assert "ReadWritePaths=/var/lib/shuzijun-health" in service
+    read_only_directives = [
+        line for line in service.splitlines() if line.startswith("ReadOnlyPaths=")
+    ]
+    assert read_only_directives == [
+        "ReadOnlyPaths=/var/lib/shuzijun-logs -/var/lib/shuzijun-sync"
+    ]
+    # Health-first deployment must still start before the optional sync state root
+    # exists, while the deployer-created private-log root remains mandatory.
+    assert read_only_directives[0].split("=", 1)[1].split() == [
+        "/var/lib/shuzijun-logs",
+        "-/var/lib/shuzijun-sync",
+    ]
     assert "StateDirectory=shuzijun-health" in service
     assert "StateDirectoryMode=0700" in service
     assert "OnActiveSec=2min" in timer

@@ -1,0 +1,2334 @@
+#!/usr/bin/python3 -I
+"""Fail-closed, two-node transaction installer for the Shuzijun sync release.
+
+This file is intentionally installed root:root 0700 at the fixed /run path.
+Candidate bytes live below a fixed, root-only /run stage.  The standby must be
+committed first; its deterministic receipt is then copied by the operator into
+the primary stage.  Every coupled asset is bound to the independently frozen
+generation-6 candidate below.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import datetime as _datetime
+import fcntl
+import hashlib
+import json
+import os
+import re
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Iterable
+
+
+RELEASE_ID = "shuzijun-sync-v4-generation6"
+DEPLOYER_PATH = Path("/run/deploy-shuzijun-sync-release")
+STAGE_ROOT = Path("/run/shuzijun-sync-release")
+STAGES = {
+    "backup": STAGE_ROOT / "backup",
+    "primary": STAGE_ROOT / "primary",
+}
+SITE = Path("/var/www/html/shuzijun.com.cn")
+LIVE_UPLOADS = SITE / "wp-content/uploads"
+BACKUP_ROOT = Path("/var/backups/shuzijun-sync-release")
+ROLE_VERIFY = Path("/usr/local/sbin/verify-shuzijun-account-authority-role")
+ROLE_VERIFY_SHA256 = "5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58"
+ROLE_VERIFY_PARENT_PATHS = (Path("/"), Path("/usr"), Path("/usr/local"), Path("/usr/local/sbin"))
+
+# Frozen coupled candidate.  Both --dry-run and --apply independently rehash
+# every staged byte before any backup or live mutation.
+RECEIVER_SHA256 = "0a28c89ef1ac427f6ac72e5268cb5aa0ed28169493aab64d05dd687a40e67e03"
+SENDER_SHA256 = "a4e05f87426689673d5b741a88efcd6c8e35f856ab57f5b3ba78f56a004b4356"
+
+FPM_GUARD_SHA256 = "8d5b40388450c112c1f0ee84456ee960ae6a204323e8137ea0ec4f1c7a1d620e"
+SUDOERS_SHA256 = "7359fb403d227ffefe03e835deb73a03e5cfc720f70563be449a85d92267045e"
+FULL_VERIFY_SHA256 = "7e7a95a1cc7bb05aa6810a9d644950ddedb0274ce247499d5828a9180dcae7f2"
+SOURCE_VERIFY_SHA256 = "b5e3cdde9b4cdf0ab7acee66fab991bbb3815419bfb0bf97f0283e7cbcfa04af"
+KNOWN_HOSTS_SHA256 = "b48cc29b7506423ba402b954cb8c0fedc748706549ed704e84647b70a517d6f3"
+PREFLIGHT_SERVICE_SHA256 = "7e072f70b44f8d466e163ec91d7af8a2fc316698fd9257edc29647395ee17146"
+SYNC_SERVICE_SHA256 = "943419bf84ad35f6f9ac857cf626e1c44f68a09c85d0bf56cc0cdc79c8b0e8b2"
+EXPECTED_PROTOCOL = "shuzijun-sync-receiver-v4-transactional-uploads"
+BOOTSTRAP_GENERATION = 6
+
+SYSTEMCTL = Path("/usr/bin/systemctl")
+SYSTEMD_ANALYZE = Path("/usr/bin/systemd-analyze")
+VISUDO = Path("/usr/sbin/visudo")
+PYTHON = Path("/usr/bin/python3")
+SSH = Path("/usr/bin/ssh")
+SSH_KEY = Path("/root/.ssh/shuzijun_sync_ed25519")
+SSH_KEY_PARENT_PATHS = (Path("/root"), Path("/root/.ssh"))
+REMOTE_HOST = "129.226.202.207"
+REMOTE_USER = "shuzijun-sync-transport"
+REMOTE_RECEIVER = "/usr/local/sbin/apply-shuzijun-sync"
+
+SYNC_ROOT = Path("/var/lib/shuzijun-sync")
+OPERATION_LOCK = SYNC_ROOT / "site-operation.lock"
+SENDER_STAGING_ROOT = SYNC_ROOT / "sender-staging"
+HIGHEST_ISSUED_GENERATION = SYNC_ROOT / "highest-issued-generation"
+INCOMING_ROOT = SYNC_ROOT / "incoming"
+STATE_ROOT = SYNC_ROOT / "state"
+ACCEPTED_GENERATION = STATE_ROOT / "highest-accepted-generation"
+UPLOADS_RELEASE_ROOT = SYNC_ROOT / "uploads-releases"
+ACTIVE_UPLOADS_GENERATION = STATE_ROOT / "active-uploads-generation"
+UPLOADS_TRANSACTION = STATE_ROOT / "uploads-transaction.json"
+FPM_GUARD_LEASE = STATE_ROOT / "fpm-activation-guard.lease"
+FPM_GUARD_ARMED = STATE_ROOT / "fpm-activation-guard-v4.armed"
+FPM_GUARD_COMMIT = STATE_ROOT / "fpm-activation-guard-v4.committed"
+ACTIVE_RELEASE_RECORD = STATE_ROOT / "active-release-v4.json"
+ACTIVE_RELEASE_CONTRACT = "shuzijun-active-release-v4-bootstrap-root-live-inode"
+
+SYNC_TIMER = "shuzijun-sync.timer"
+SYNC_SERVICE = "shuzijun-sync.service"
+PREFLIGHT_SERVICE = "shuzijun-sync-preflight.service"
+FPM_GUARD_SERVICE = "shuzijun-sync-fpm-guard.service"
+FPM_SERVICE = "php8.3-fpm.service"
+NGINX_SERVICE = "nginx.service"
+MYSQL_SERVICE = "mysql.service"
+PRIMARY_FPM_FREEZE_ROOT = Path("/run/shuzijun-sync")
+PRIMARY_FPM_FREEZE_MARKER = PRIMARY_FPM_FREEZE_ROOT / "primary-fpm-freeze.json"
+PRIMARY_RECOVERY_UNIT_GLOB = "shuzijun-primary-fpm-recovery-*.service"
+TIMER_OBSERVATION_PATHS = (
+    Path("/etc/systemd/system/shuzijun-sync.timer"),
+    Path("/etc/systemd/system/timers.target.wants/shuzijun-sync.timer"),
+    Path("/run/systemd/system/timers.target.wants/shuzijun-sync.timer"),
+    Path("/var/lib/systemd/timers/stamp-shuzijun-sync.timer"),
+)
+GUARD_ENABLEMENT_PATHS = (
+    Path("/etc/systemd/system/php8.3-fpm.service.requires/shuzijun-sync-fpm-guard.service"),
+    Path("/run/systemd/system/php8.3-fpm.service.requires/shuzijun-sync-fpm-guard.service"),
+)
+GUARD_ENABLEMENT_DIR = Path("/etc/systemd/system/php8.3-fpm.service.requires")
+GUARD_ENABLEMENT_LINK = GUARD_ENABLEMENT_DIR / "shuzijun-sync-fpm-guard.service"
+GUARD_UNIT_TARGET = Path("/etc/systemd/system/shuzijun-sync-fpm-guard.service")
+COMMAND_TIMEOUT_SECONDS = 120
+COMMAND_TERMINATION_GRACE_SECONDS = 2
+
+ROOT_UID = 0
+ROOT_GID = 0
+WEB_UID = 33
+WEB_GID = 33
+SYMLINK_MODE = 0o777
+SAFE_ENV = {
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    "LC_ALL": "C",
+    "LANG": "C",
+}
+
+
+class DeploymentError(RuntimeError):
+    pass
+
+
+class ReleaseBlocked(DeploymentError):
+    pass
+
+
+class CommandInterrupted(Exception):
+    def __init__(self, signum: int):
+        super().__init__(f"signal {signum}")
+        self.signum = signum
+
+
+@dataclasses.dataclass(frozen=True)
+class Asset:
+    source_name: str
+    target: Path
+    mode: int
+    digest: str
+
+
+@dataclasses.dataclass(frozen=True)
+class BootstrapState:
+    activation_nonce: str
+    release_id: str
+    active_release_payload: bytes
+    trusted_postimages: dict[Path, tuple[bytes, int]]
+
+
+def _asset_sets() -> dict[str, tuple[Asset, ...]]:
+    return {
+        "backup": (
+            Asset("verify-webroot-security", Path("/usr/local/sbin/verify-shuzijun-webroot-security"), 0o755, FULL_VERIFY_SHA256),
+            Asset("shuzijun-sync-fpm-guard.service", Path("/etc/systemd/system/shuzijun-sync-fpm-guard.service"), 0o644, FPM_GUARD_SHA256),
+            Asset("shuzijun-sync-transport.sudoers", Path("/etc/sudoers.d/shuzijun-sync-transport"), 0o440, SUDOERS_SHA256),
+            Asset("apply-shuzijun-sync", Path("/usr/local/sbin/apply-shuzijun-sync"), 0o755, RECEIVER_SHA256),
+        ),
+        "primary": (
+            Asset("verify-webroot-security", Path("/usr/local/sbin/verify-shuzijun-webroot-security"), 0o755, FULL_VERIFY_SHA256),
+            Asset("verify-shuzijun-sync-source", Path("/usr/local/sbin/verify-shuzijun-sync-source"), 0o755, SOURCE_VERIFY_SHA256),
+            Asset("shuzijun-sync-known-hosts", Path("/etc/shuzijun/sync-known-hosts"), 0o600, KNOWN_HOSTS_SHA256),
+            Asset("shuzijun-sync-preflight.service", Path("/etc/systemd/system/shuzijun-sync-preflight.service"), 0o644, PREFLIGHT_SERVICE_SHA256),
+            Asset("shuzijun-sync.service", Path("/etc/systemd/system/shuzijun-sync.service"), 0o644, SYNC_SERVICE_SHA256),
+            Asset("sync-to-backup", Path("/usr/local/sbin/sync-to-backup"), 0o755, SENDER_SHA256),
+        ),
+    }
+
+
+ASSETS = _asset_sets()
+
+
+def asset_named(node: str, source_name: str) -> Asset:
+    matches = [asset for asset in ASSETS[node] if asset.source_name == source_name]
+    if len(matches) != 1:
+        fail(f"asset mapping is not unique: {node}/{source_name}")
+    return matches[0]
+
+# Explicit parent lists are intentionally patchable by the offline contract
+# fixture; production values remain closed and absolute.
+STAGE_PARENT_PATHS = (Path("/"), Path("/run"), STAGE_ROOT)
+TARGET_PARENT_PATHS = (
+    Path("/"), Path("/usr"), Path("/usr/local"), Path("/usr/local/sbin"),
+    Path("/etc"), Path("/etc/systemd"), Path("/etc/systemd/system"),
+    Path("/etc/sudoers.d"), Path("/etc/shuzijun"),
+    Path("/var"), Path("/var/lib"), Path("/var/backups"),
+    Path("/var/www"), Path("/var/www/html"),
+)
+
+
+def fail(message: str) -> None:
+    raise DeploymentError(message)
+
+
+def sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def canonical_json(document: object) -> bytes:
+    return (json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+
+
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def lstat_or_none(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except FileNotFoundError:
+        return None
+
+
+def validate_directory(path: Path, mode: int | None = None, *, exact_owner: bool = True) -> os.stat_result:
+    metadata = path.lstat()
+    if path.resolve(strict=True) != path or not stat.S_ISDIR(metadata.st_mode):
+        fail(f"unsafe directory: {path}")
+    if exact_owner and (metadata.st_uid, metadata.st_gid) != (ROOT_UID, ROOT_GID):
+        fail(f"directory is not root-owned: {path}")
+    actual_mode = stat.S_IMODE(metadata.st_mode)
+    if mode is not None and actual_mode != mode:
+        fail(f"directory mode mismatch: {path}")
+    if mode is None and actual_mode & 0o022:
+        fail(f"directory is writable by a non-root identity: {path}")
+    return metadata
+
+
+def validate_parent_paths(paths: Iterable[Path]) -> None:
+    for path in paths:
+        validate_directory(path)
+
+
+def validate_site_directory() -> None:
+    metadata = SITE.lstat()
+    if (SITE.resolve(strict=True) != SITE
+            or not stat.S_ISDIR(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (ROOT_UID, WEB_GID)
+            or stat.S_IMODE(metadata.st_mode) != 0o755):
+        fail("site directory must be canonical root:www-data 0755")
+
+
+def validate_live_uploads_directory() -> os.stat_result:
+    metadata = LIVE_UPLOADS.lstat()
+    if (
+        LIVE_UPLOADS.resolve(strict=True) != LIVE_UPLOADS
+        or not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (WEB_UID, WEB_GID)
+        or stat.S_IMODE(metadata.st_mode) != 0o755
+        or metadata.st_ino < 1
+    ):
+        fail("live uploads directory must be canonical www-data:www-data 0755")
+    return metadata
+
+
+def read_regular(path: Path, mode: int, expected_digest: str | None = None, *, device: int | None = None) -> tuple[bytes, os.stat_result]:
+    before_path = path.lstat()
+    # Reject FIFOs, devices, sockets and links before open(2).  O_NOFOLLOW only
+    # protects the symlink case; opening an attacker-supplied FIFO read-only
+    # could otherwise block the deployer before its bounded command runner is
+    # involved.
+    if (not stat.S_ISREG(before_path.st_mode)
+            or (before_path.st_uid, before_path.st_gid) != (ROOT_UID, ROOT_GID)
+            or stat.S_IMODE(before_path.st_mode) != mode
+            or before_path.st_nlink != 1
+            or (device is not None and before_path.st_dev != device)):
+        fail(f"unsafe regular file metadata: {path}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before_fd = os.fstat(descriptor)
+        if (not stat.S_ISREG(before_fd.st_mode)
+                or (before_fd.st_uid, before_fd.st_gid) != (ROOT_UID, ROOT_GID)
+                or stat.S_IMODE(before_fd.st_mode) != mode
+                or before_fd.st_nlink != 1
+                or (device is not None and before_fd.st_dev != device)
+                or (before_path.st_dev, before_path.st_ino) != (before_fd.st_dev, before_fd.st_ino)):
+            fail(f"unsafe regular file metadata: {path}")
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            chunks.append(chunk)
+        after_fd = os.fstat(descriptor)
+        after_path = path.lstat()
+        identity_before = (before_fd.st_dev, before_fd.st_ino, before_fd.st_size, before_fd.st_mtime_ns, before_fd.st_ctime_ns)
+        identity_after = (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns, after_fd.st_ctime_ns)
+        if identity_before != identity_after or (after_path.st_dev, after_path.st_ino) != (after_fd.st_dev, after_fd.st_ino):
+            fail(f"file changed while it was read: {path}")
+        actual_digest = digest.hexdigest()
+        if expected_digest is not None and actual_digest != expected_digest:
+            fail(f"SHA-256 mismatch: {path}")
+        return b"".join(chunks), after_fd
+    finally:
+        os.close(descriptor)
+
+
+def validate_absent(path: Path) -> None:
+    if lstat_or_none(path) is not None:
+        fail(f"path must be absent: {path}")
+
+
+def validate_guard_enablement_link() -> os.stat_result:
+    metadata = GUARD_ENABLEMENT_LINK.lstat()
+    if (not stat.S_ISLNK(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (ROOT_UID, ROOT_GID)
+            or stat.S_IMODE(metadata.st_mode) != SYMLINK_MODE
+            or metadata.st_nlink != 1
+            or os.readlink(GUARD_ENABLEMENT_LINK) != str(GUARD_UNIT_TARGET)
+            or GUARD_ENABLEMENT_LINK.resolve(strict=True) != GUARD_UNIT_TARGET):
+        fail("FPM guard enablement link is not exact")
+    return metadata
+
+
+def atomic_restore_symlink(path: Path, target: str) -> None:
+    validate_directory(path.parent)
+    temporary = path.parent / f".sync-release-link.{os.getpid()}.{os.urandom(8).hex()}"
+    try:
+        os.symlink(target, temporary)
+        os.replace(temporary, path)
+        fsync_directory(path.parent)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def atomic_write_bytes(path: Path, payload: bytes, mode: int, *, replace: bool = True) -> None:
+    validate_directory(path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".sync-release.", dir=path.parent)
+    temporary = Path(temporary_name)
+    published = False
+    try:
+        os.fchmod(descriptor, mode)
+        os.fchown(descriptor, ROOT_UID, ROOT_GID)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                fail("short atomic write")
+            view = view[written:]
+        os.fsync(descriptor)
+        current = os.fstat(descriptor)
+        if (not stat.S_ISREG(current.st_mode)
+                or (current.st_uid, current.st_gid) != (ROOT_UID, ROOT_GID)
+                or stat.S_IMODE(current.st_mode) != mode
+                or current.st_nlink != 1
+                or current.st_size != len(payload)):
+            fail(f"unsafe temporary file for {path}")
+        os.close(descriptor)
+        descriptor = -1
+        if replace:
+            os.replace(temporary, path)
+        else:
+            os.link(temporary, path, follow_symlinks=False)
+            temporary.unlink()
+        published = True
+        fsync_directory(path.parent)
+        read_regular(path, mode, sha256_bytes(payload))
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not published:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def ensure_directory(path: Path, mode: int) -> bool:
+    existing = lstat_or_none(path)
+    if existing is not None:
+        validate_directory(path, mode)
+        return False
+    validate_directory(path.parent)
+    os.mkdir(path, mode)
+    os.chown(path, ROOT_UID, ROOT_GID)
+    os.chmod(path, mode)
+    fsync_directory(path)
+    fsync_directory(path.parent)
+    validate_directory(path, mode)
+    return True
+
+
+def create_empty_regular_exclusive(path: Path, mode: int) -> None:
+    parent_metadata = validate_directory(path.parent)
+    parent_descriptor = os.open(
+        path.parent,
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+    )
+    descriptor = -1
+    try:
+        opened_parent = os.fstat(parent_descriptor)
+        named_parent = path.parent.lstat()
+        if (
+            (opened_parent.st_dev, opened_parent.st_ino)
+            != (named_parent.st_dev, named_parent.st_ino)
+            or opened_parent.st_dev != parent_metadata.st_dev
+        ):
+            fail(f"parent inode changed before exclusive create: {path.parent}")
+        descriptor = os.open(
+            path.name,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            mode,
+            dir_fd=parent_descriptor,
+        )
+        os.fchown(descriptor, ROOT_UID, ROOT_GID)
+        os.fchmod(descriptor, mode)
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (ROOT_UID, ROOT_GID)
+            or stat.S_IMODE(metadata.st_mode) != mode
+            or metadata.st_nlink != 1
+            or metadata.st_size != 0
+            or metadata.st_dev != opened_parent.st_dev
+        ):
+            fail(f"exclusive file has unsafe metadata: {path}")
+        os.fsync(descriptor)
+        os.fsync(parent_descriptor)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_descriptor)
+
+
+def validate_operation_lock_path() -> tuple[os.stat_result, os.stat_result]:
+    root_metadata = validate_directory(SYNC_ROOT, 0o700)
+    path_metadata = OPERATION_LOCK.lstat()
+    if (
+        not stat.S_ISREG(path_metadata.st_mode)
+        or (path_metadata.st_uid, path_metadata.st_gid) != (ROOT_UID, ROOT_GID)
+        or stat.S_IMODE(path_metadata.st_mode) != 0o600
+        or path_metadata.st_nlink != 1
+        or path_metadata.st_size != 0
+        or path_metadata.st_dev != root_metadata.st_dev
+        or OPERATION_LOCK.resolve(strict=True) != OPERATION_LOCK
+    ):
+        fail("site-operation lock path is unsafe")
+    return root_metadata, path_metadata
+
+
+def validate_operation_lock_file(
+    descriptor: int | None = None,
+) -> os.stat_result:
+    root_metadata, path_metadata = validate_operation_lock_path()
+    local_descriptor = descriptor
+    close_local = False
+    if local_descriptor is None:
+        local_descriptor = os.open(
+            OPERATION_LOCK,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        close_local = True
+    try:
+        metadata = os.fstat(local_descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (ROOT_UID, ROOT_GID)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+            or metadata.st_size != 0
+            or metadata.st_dev != root_metadata.st_dev
+            or (path_metadata.st_dev, path_metadata.st_ino)
+            != (metadata.st_dev, metadata.st_ino)
+        ):
+            fail("site-operation lock file or opened inode is unsafe")
+        return metadata
+    finally:
+        if close_local:
+            os.close(local_descriptor)
+
+
+def validate_sender_staging_if_present() -> None:
+    metadata = lstat_or_none(SENDER_STAGING_ROOT)
+    if metadata is not None:
+        checked = validate_directory(SENDER_STAGING_ROOT, 0o700)
+        if checked.st_dev != validate_directory(SYNC_ROOT, 0o700).st_dev:
+            fail("sender staging crosses a filesystem boundary")
+
+
+def validate_sync_subdirectory(path: Path) -> os.stat_result:
+    root_metadata = validate_directory(SYNC_ROOT, 0o700)
+    metadata = validate_directory(path, 0o700)
+    if metadata.st_dev != root_metadata.st_dev:
+        fail(f"sync subdirectory crosses a filesystem boundary: {path}")
+    return metadata
+
+
+def validate_primary_generation_state() -> None:
+    root_metadata = validate_directory(SYNC_ROOT, 0o700)
+    payload, _ = read_regular(
+        HIGHEST_ISSUED_GENERATION, 0o600, device=root_metadata.st_dev
+    )
+    # This release deliberately does not initialize or advance the primary
+    # anti-replay counter.  Only the already-audited generation-6 authority
+    # state may be upgraded; a fresh/mismatched primary needs the separate
+    # two-node disaster-recovery procedure so this installer cannot silently
+    # reuse a generation already accepted by the standby.
+    if payload != b"6\n":
+        fail("highest-issued-generation is not exactly 6")
+    managed = re.compile(r"\.highest-issued\.[0-9a-f]{32}")
+    for entry in SYNC_ROOT.iterdir():
+        if not entry.name.startswith(".highest-issued."):
+            continue
+        if managed.fullmatch(entry.name) is None:
+            fail(f"unknown highest-issued temporary: {entry.name}")
+        temporary, _ = read_regular(entry, 0o600, device=root_metadata.st_dev)
+        if re.fullmatch(rb"(?:[1-9][0-9]{0,18}\n?)?", temporary) is None:
+            fail(f"unsafe highest-issued temporary: {entry.name}")
+
+
+def validate_root_owned_tree(root: Path, *, device: int) -> None:
+    metadata = validate_directory(root, 0o700)
+    if metadata.st_dev != device:
+        fail(f"managed tree crosses a filesystem boundary: {root}")
+    for _directory, directory_names, file_names, directory_fd in os.fwalk(
+        root, topdown=True, follow_symlinks=False
+    ):
+        current = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_uid, current.st_gid) != (ROOT_UID, ROOT_GID)
+            or stat.S_IMODE(current.st_mode) != 0o700
+            or current.st_dev != device
+        ):
+            fail(f"unsafe managed directory below {root}")
+        for name in directory_names:
+            child = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(child.st_mode)
+                or (child.st_uid, child.st_gid) != (ROOT_UID, ROOT_GID)
+                or stat.S_IMODE(child.st_mode) != 0o700
+                or child.st_dev != device
+            ):
+                fail(f"unsafe managed child directory below {root}")
+        for name in file_names:
+            child = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(child.st_mode)
+                or (child.st_uid, child.st_gid) != (ROOT_UID, ROOT_GID)
+                or stat.S_IMODE(child.st_mode) != 0o600
+                or child.st_nlink != 1
+                or child.st_dev != device
+            ):
+                fail(f"unsafe managed child file below {root}")
+
+
+def validate_sender_staging_inventory() -> None:
+    root_metadata = validate_directory(SYNC_ROOT, 0o700)
+    validate_sync_subdirectory(SENDER_STAGING_ROOT)
+    patterns = {
+        "batch": re.compile(r"batch\.([0-9a-f]{32})"),
+        "allocating": re.compile(r"\.allocating\.([0-9a-f]{32})"),
+        "retiring": re.compile(r"\.retiring\.([0-9a-f]{32})"),
+    }
+    seen_tokens: set[str] = set()
+    owner_name = ".sender-staging-owner.json"
+    for entry in SENDER_STAGING_ROOT.iterdir():
+        kind = ""
+        match: re.Match[str] | None = None
+        for candidate_kind, pattern in patterns.items():
+            candidate = pattern.fullmatch(entry.name)
+            if candidate is not None:
+                kind, match = candidate_kind, candidate
+                break
+        if match is None:
+            fail(f"unknown sender staging entry: {entry.name}")
+        token = match.group(1)
+        if token in seen_tokens:
+            fail(f"ambiguous sender staging token: {token}")
+        seen_tokens.add(token)
+        validate_root_owned_tree(entry, device=root_metadata.st_dev)
+        entries = list(entry.iterdir())
+        if kind == "allocating" and any(item.name != owner_name for item in entries):
+            fail(f"unsafe allocating sender staging prefix: {entry.name}")
+        owner = entry / owner_name
+        owner_metadata = lstat_or_none(owner)
+        if owner_metadata is None:
+            if kind == "batch" or (kind == "allocating" and entries):
+                fail(f"sender staging owner is missing: {entry.name}")
+            continue
+        if owner_metadata.st_size > 96:
+            fail(f"sender staging owner is oversized: {entry.name}")
+        owner_payload, _ = read_regular(
+            owner, 0o600, device=root_metadata.st_dev
+        )
+        expected = canonical_json({"token": token, "version": 1})
+        if (
+            (kind == "batch" and owner_payload != expected)
+            or (
+                kind in {"allocating", "retiring"}
+                and not expected.startswith(owner_payload)
+            )
+        ):
+            fail(f"sender staging owner is invalid: {entry.name}")
+
+
+def validate_incoming_inventory() -> None:
+    root_metadata = validate_directory(SYNC_ROOT, 0o700)
+    incoming_metadata = validate_sync_subdirectory(INCOMING_ROOT)
+    for entry in INCOMING_ROOT.iterdir():
+        if re.fullmatch(r"batch\.[A-Za-z0-9]+", entry.name) is None:
+            fail(f"unknown incoming claim: {entry.name}")
+        validate_root_owned_tree(entry, device=incoming_metadata.st_dev)
+    if incoming_metadata.st_dev != root_metadata.st_dev:
+        fail("incoming claims cross a filesystem boundary")
+
+
+def validate_sync_root_inventory(node: str, *, complete: bool) -> None:
+    root_metadata = lstat_or_none(SYNC_ROOT)
+    if root_metadata is None:
+        if node == "primary" or complete:
+            fail(f"{node} sync root is missing")
+        return
+    checked_root = validate_directory(SYNC_ROOT, 0o700)
+    names = {entry.name for entry in SYNC_ROOT.iterdir()}
+    if node == "primary":
+        fixed = {"site-operation.lock", "highest-issued-generation", "sender-staging"}
+        unknown = {
+            name for name in names
+            if name not in fixed
+            and re.fullmatch(r"\.highest-issued\.[0-9a-f]{32}", name) is None
+        }
+        if unknown:
+            fail("unknown primary sync-root inventory: " + ",".join(sorted(unknown)))
+        validate_primary_generation_state()
+        if "sender-staging" in names:
+            validate_sender_staging_inventory()
+        elif complete:
+            fail("primary sender staging is missing")
+    else:
+        fixed = {"site-operation.lock", "incoming", "state", "uploads-releases"}
+        unknown = names - fixed
+        if unknown:
+            fail("unknown standby sync-root inventory: " + ",".join(sorted(unknown)))
+        if "incoming" in names:
+            validate_incoming_inventory()
+            if complete and any(INCOMING_ROOT.iterdir()):
+                fail("standby incoming claims were not recovered")
+        if "state" in names:
+            validate_sync_subdirectory(STATE_ROOT)
+            receiver_temporaries = validate_receiver_state_inventory()
+            if complete and receiver_temporaries:
+                fail("standby receiver temporaries were not recovered")
+        if "uploads-releases" in names:
+            validate_sync_subdirectory(UPLOADS_RELEASE_ROOT)
+            if any(UPLOADS_RELEASE_ROOT.iterdir()):
+                fail("bootstrap uploads release root is not empty")
+        if complete and not fixed.issubset(names):
+            fail("standby sync-root inventory is incomplete")
+    if "site-operation.lock" in names:
+        validate_operation_lock_path()
+    elif complete:
+        fail(f"{node} site-operation lock is missing")
+    if checked_root.st_dev < 1:
+        fail("sync-root device identity is invalid")
+
+
+def ensure_release_frozen() -> None:
+    for label, digest in (
+        ("receiver", RECEIVER_SHA256),
+        ("sender", SENDER_SHA256),
+        ("FPM guard", FPM_GUARD_SHA256),
+        ("sudoers transport", SUDOERS_SHA256),
+        ("full verifier", FULL_VERIFY_SHA256),
+        ("source verifier", SOURCE_VERIFY_SHA256),
+        ("known-hosts", KNOWN_HOSTS_SHA256),
+        ("preflight service", PREFLIGHT_SERVICE_SHA256),
+        ("sync service", SYNC_SERVICE_SHA256),
+        ("role verifier", ROLE_VERIFY_SHA256),
+    ):
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise ReleaseBlocked(f"BLOCKED: {label} SHA-256 is not frozen")
+    if ACTIVE_RELEASE_CONTRACT != "shuzijun-active-release-v4-bootstrap-root-live-inode":
+        raise ReleaseBlocked("BLOCKED: active-release-v4 contract is not frozen")
+
+
+def validate_self() -> None:
+    if Path(sys.argv[0]) != DEPLOYER_PATH:
+        fail("fixed deployer path required")
+    validate_parent_paths((Path("/"), Path("/run")))
+    read_regular(DEPLOYER_PATH, 0o700)
+
+
+def standby_receipt_bytes(
+    bootstrap_state: BootstrapState,
+    backup_manifest_sha256: str,
+) -> bytes:
+    active_release = json.loads(bootstrap_state.active_release_payload.decode("ascii"))
+    return canonical_json({
+        "activation_nonce": bootstrap_state.activation_nonce,
+        "active_release": active_release,
+        "active_release_sha256": sha256_bytes(
+            bootstrap_state.active_release_payload
+        ),
+        "backup_manifest_sha256": backup_manifest_sha256,
+        "full_verifier_sha256": FULL_VERIFY_SHA256,
+        "fpm_guard_sha256": FPM_GUARD_SHA256,
+        "generation": BOOTSTRAP_GENERATION,
+        "protocol": EXPECTED_PROTOCOL,
+        "receiver_sha256": RECEIVER_SHA256,
+        "release": RELEASE_ID,
+        "release_id": bootstrap_state.release_id,
+        "role": "standby",
+        "status": "committed",
+        "sudoers_sha256": SUDOERS_SHA256,
+        "version": 2,
+    })
+
+
+def validate_standby_receipt(payload: bytes) -> dict[str, object]:
+    if len(payload) > 4096:
+        fail("standby-first receipt is oversized")
+    try:
+        document = json.loads(payload.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DeploymentError("standby-first receipt is invalid JSON") from error
+    exact_keys = {
+        "activation_nonce",
+        "active_release",
+        "active_release_sha256",
+        "backup_manifest_sha256",
+        "full_verifier_sha256",
+        "fpm_guard_sha256",
+        "generation",
+        "protocol",
+        "receiver_sha256",
+        "release",
+        "release_id",
+        "role",
+        "status",
+        "sudoers_sha256",
+        "version",
+    }
+    if (
+        not isinstance(document, dict)
+        or set(document) != exact_keys
+        or canonical_json(document) != payload
+    ):
+        fail("standby-first receipt is not canonical")
+    fixed = {
+        "full_verifier_sha256": FULL_VERIFY_SHA256,
+        "fpm_guard_sha256": FPM_GUARD_SHA256,
+        "generation": BOOTSTRAP_GENERATION,
+        "protocol": EXPECTED_PROTOCOL,
+        "receiver_sha256": RECEIVER_SHA256,
+        "release": RELEASE_ID,
+        "role": "standby",
+        "status": "committed",
+        "sudoers_sha256": SUDOERS_SHA256,
+        "version": 2,
+    }
+    if any(document.get(key) != value for key, value in fixed.items()):
+        fail("standby-first receipt fixed evidence mismatch")
+    for key in (
+        "activation_nonce",
+        "active_release_sha256",
+        "backup_manifest_sha256",
+        "release_id",
+    ):
+        value = document.get(key)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            fail(f"standby-first receipt digest is invalid: {key}")
+    active_release = document.get("active_release")
+    if not isinstance(active_release, dict):
+        fail("standby-first receipt lacks active release evidence")
+    active_payload = canonical_json(active_release)
+    if sha256_bytes(active_payload) != document["active_release_sha256"]:
+        fail("standby-first active release digest mismatch")
+    active_keys = {
+        "evidence_sha256", "generation", "release_id",
+        "uploads_dev", "uploads_ino", "version",
+    }
+    if set(active_release) != active_keys:
+        fail("standby-first active release keys mismatch")
+    for key in ("generation", "uploads_dev", "uploads_ino", "version"):
+        value = active_release.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            fail(f"standby-first active release integer is invalid: {key}")
+    evidence = active_release.get("evidence_sha256")
+    release_id = active_release.get("release_id")
+    uploads_dev = active_release["uploads_dev"]
+    uploads_ino = active_release["uploads_ino"]
+    if (
+        active_release["version"] != 4
+        or active_release["generation"] != BOOTSTRAP_GENERATION
+        or uploads_dev < 1
+        or uploads_ino < 1
+        or not isinstance(evidence, str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence) is None
+        or evidence
+        != bootstrap_evidence_sha256(
+            BOOTSTRAP_GENERATION, uploads_dev, uploads_ino
+        )
+        or not isinstance(release_id, str)
+        or release_id != document["release_id"]
+        or release_id
+        != active_release_identifier(
+            BOOTSTRAP_GENERATION, evidence, uploads_dev, uploads_ino
+        )
+    ):
+        fail("standby-first active release relationship mismatch")
+    return document
+
+
+def expected_stage_names(node: str) -> set[str]:
+    names = {asset.source_name for asset in ASSETS[node]}
+    if node == "primary":
+        names.add("standby-first.receipt")
+    return names
+
+
+def validate_stage(node: str) -> dict[str, tuple[bytes, os.stat_result]]:
+    validate_parent_paths(STAGE_PARENT_PATHS)
+    stage = STAGES[node]
+    stage_meta = validate_directory(stage, 0o700)
+    actual_names = {entry.name for entry in stage.iterdir()}
+    expected_names = expected_stage_names(node)
+    if actual_names != expected_names:
+        fail(f"candidate allowlist mismatch for {node}")
+    snapshots: dict[str, tuple[bytes, os.stat_result]] = {}
+    for asset in ASSETS[node]:
+        snapshots[asset.source_name] = read_regular(stage / asset.source_name, asset.mode, asset.digest, device=stage_meta.st_dev)
+    if node == "primary":
+        receipt, metadata = read_regular(
+            stage / "standby-first.receipt", 0o600, device=stage_meta.st_dev
+        )
+        validate_standby_receipt(receipt)
+        snapshots["standby-first.receipt"] = (receipt, metadata)
+    return snapshots
+
+
+def validate_role(node: str, role: str) -> None:
+    expected = {"backup": "standby", "primary": "authority"}
+    if expected.get(node) != role:
+        fail("invalid node/authority-role pair")
+    validate_parent_paths(ROLE_VERIFY_PARENT_PATHS)
+    read_regular(ROLE_VERIFY, 0o755, ROLE_VERIFY_SHA256)
+    run_command([str(PYTHON), "-I", str(ROLE_VERIFY), role])
+
+
+def terminate_process_group(
+    process: subprocess.Popen[str],
+) -> tuple[str, str]:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        return process.communicate(timeout=COMMAND_TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return process.communicate()
+
+
+def run_command(argv: list[str], *, accepted: set[int] | None = None) -> subprocess.CompletedProcess[str]:
+    handled_signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous_handlers = {item: signal.getsignal(item) for item in handled_signals}
+
+    def interrupt(signum: int, _frame: object) -> None:
+        raise CommandInterrupted(signum)
+
+    process: subprocess.Popen[str] | None = None
+    try:
+        for item in handled_signals:
+            signal.signal(item, interrupt)
+        process = subprocess.Popen(
+            argv,
+            env=SAFE_ENV,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=COMMAND_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as timeout_error:
+            # Every external command gets a private process group.  Terminating
+            # only the direct child can otherwise leave ssh/systemctl helpers
+            # (or their descendants) running after the transaction has failed.
+            stdout, stderr = terminate_process_group(process)
+            detail = (stderr or "").strip() or (stdout or "").strip()
+            suffix = f": {detail}" if detail else ""
+            raise DeploymentError(
+                f"command timed out: {argv[0]}{suffix}"
+            ) from timeout_error
+        except CommandInterrupted as interruption:
+            terminate_process_group(process)
+            raise DeploymentError(
+                f"command interrupted by signal {interruption.signum}: {argv[0]}"
+            ) from interruption
+        except BaseException:
+            if process is not None:
+                terminate_process_group(process)
+            raise
+    finally:
+        for item, handler in previous_handlers.items():
+            signal.signal(item, handler)
+    completed = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+    allowed = {0} if accepted is None else accepted
+    if completed.returncode not in allowed:
+        detail = completed.stderr.strip() or completed.stdout.strip() or f"exit {completed.returncode}"
+        fail(f"command failed: {argv[0]}: {detail}")
+    return completed
+
+
+def unit_property(unit: str, property_name: str) -> str:
+    return run_command([
+        str(SYSTEMCTL), "show", unit,
+        f"--property={property_name}", "--value",
+    ]).stdout.strip()
+
+
+def unit_state(unit: str) -> dict[str, object]:
+    enabled = run_command(
+        [str(SYSTEMCTL), "is-enabled", unit], accepted={0, 1, 3, 4}
+    )
+    active = run_command(
+        [str(SYSTEMCTL), "is-active", unit], accepted={0, 3, 4}
+    )
+    return {
+        "active_output": active.stdout,
+        "active_status": active.returncode,
+        "active_state": unit_property(unit, "ActiveState"),
+        "enabled_output": enabled.stdout,
+        "enabled_status": enabled.returncode,
+        "job": unit_property(unit, "Job"),
+        "load_state": unit_property(unit, "LoadState"),
+        "result": unit_property(unit, "Result"),
+        "sub_state": unit_property(unit, "SubState"),
+    }
+
+
+def classify_inactive_unit(state: dict[str, object], unit: str) -> str:
+    common = (
+        state["active_state"] == "inactive"
+        and state["sub_state"] == "dead"
+        and state["result"] == "success"
+        and state["job"] == ""
+        and state["active_output"] == "inactive\n"
+    )
+    if not common:
+        fail(f"unit has an active, failed or queued state: {unit}")
+    if state["load_state"] == "not-found":
+        if (
+            state["active_status"] != 4
+            or state["enabled_status"] != 4
+            or state["enabled_output"] != "not-found\n"
+        ):
+            fail(f"unit not-found state is ambiguous: {unit}")
+        return "not-found"
+    if state["load_state"] == "loaded":
+        if state["active_status"] != 3:
+            fail(f"loaded inactive unit returned an unexpected status: {unit}")
+        enabled_pair = (state["enabled_status"], state["enabled_output"])
+        if enabled_pair not in {
+            (0, "enabled\n"),
+            (1, "disabled\n"),
+            (0, "static\n"),
+        }:
+            fail(f"loaded unit enablement state is ambiguous: {unit}")
+        return "loaded"
+    fail(f"unit load state is ambiguous: {unit}")
+
+
+def require_unit_inactive(unit: str) -> dict[str, object]:
+    state = unit_state(unit)
+    classify_inactive_unit(state, unit)
+    return state
+
+
+def require_unit_active_healthy(unit: str) -> None:
+    state = unit_state(unit)
+    if (state["load_state"] != "loaded"
+            or state["active_state"] != "active"
+            or state["sub_state"] != "running"
+            or state["result"] != "success"
+            or state["job"] != ""
+            or state["active_status"] != 0
+            or state["active_output"] != "active\n"):
+        fail(f"required runtime unit is not loaded/active/running/success: {unit}")
+    main_pid = unit_property(unit, "MainPID")
+    if not main_pid.isdecimal() or int(main_pid) <= 1:
+        fail(f"required runtime unit has no trusted MainPID: {unit}")
+
+
+def require_primary_recovery_clear() -> None:
+    freeze_root = lstat_or_none(PRIMARY_FPM_FREEZE_ROOT)
+    if freeze_root is not None:
+        validate_directory(PRIMARY_FPM_FREEZE_ROOT, 0o700)
+    validate_absent(PRIMARY_FPM_FREEZE_MARKER)
+    recovery = run_command([
+        str(SYSTEMCTL), "list-units", PRIMARY_RECOVERY_UNIT_GLOB,
+        "--all", "--no-legend", "--no-pager", "--plain",
+    ])
+    if recovery.stdout.strip():
+        fail("primary FPM recovery watchdog is still loaded/active/failed")
+    recovery_jobs = run_command([
+        str(SYSTEMCTL), "list-jobs", PRIMARY_RECOVERY_UNIT_GLOB,
+        "--no-legend", "--no-pager", "--plain",
+    ])
+    if recovery_jobs.stdout.strip():
+        fail("primary FPM recovery watchdog still has a queued job")
+    for unit in (FPM_SERVICE, NGINX_SERVICE, MYSQL_SERVICE):
+        require_unit_active_healthy(unit)
+
+
+def require_timer_disabled_inactive() -> None:
+    state = unit_state(SYNC_TIMER)
+    classification = classify_inactive_unit(state, SYNC_TIMER)
+    if classification == "loaded" and (
+        state["enabled_status"], state["enabled_output"]
+    ) != (1, "disabled\n"):
+        fail("sync timer must remain disabled")
+    for link in TIMER_OBSERVATION_PATHS[1:3]:
+        validate_absent(link)
+
+
+def validate_ssh_private_key() -> None:
+    validate_parent_paths(SSH_KEY_PARENT_PATHS)
+    read_regular(SSH_KEY, 0o600)
+
+
+def remote_receiver_command(known_hosts: Path, remote_command: str) -> list[str]:
+    return [
+        str(SSH),
+        "-F", "/dev/null",
+        "-i", str(SSH_KEY),
+        "-o", "IdentitiesOnly=yes",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={known_hosts}",
+        "-o", "GlobalKnownHostsFile=/dev/null",
+        "-o", "HostKeyAlgorithms=ssh-ed25519",
+        "-o", "ConnectTimeout=15",
+        f"{REMOTE_USER}@{REMOTE_HOST}",
+        remote_command,
+    ]
+
+
+def verify_remote_receiver_live() -> None:
+    validate_ssh_private_key()
+    known_hosts = STAGES["primary"] / "shuzijun-sync-known-hosts"
+    read_regular(known_hosts, 0o600, KNOWN_HOSTS_SHA256)
+    attest = run_command(remote_receiver_command(
+        known_hosts, f"sudo {REMOTE_RECEIVER} --attest"
+    )).stdout
+    if attest != f"{RECEIVER_SHA256}  {REMOTE_RECEIVER}\n":
+        fail("standby live receiver attestation mismatch")
+    protocol = run_command(remote_receiver_command(
+        known_hosts, f"sudo {REMOTE_RECEIVER} --protocol"
+    )).stdout
+    if protocol != EXPECTED_PROTOCOL + "\n":
+        fail("standby live receiver protocol mismatch")
+
+
+def observation(path: Path) -> dict[str, object]:
+    metadata = lstat_or_none(path)
+    if metadata is None:
+        return {"kind": "absent"}
+    base: dict[str, object] = {
+        "dev": metadata.st_dev,
+        "gid": metadata.st_gid,
+        "ino": metadata.st_ino,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "nlink": metadata.st_nlink,
+        "uid": metadata.st_uid,
+    }
+    if stat.S_ISREG(metadata.st_mode):
+        payload, checked = read_regular(path, stat.S_IMODE(metadata.st_mode))
+        base.update(kind="file", sha256=sha256_bytes(payload), size=checked.st_size)
+    elif stat.S_ISLNK(metadata.st_mode):
+        base.update(kind="symlink", target=os.readlink(path))
+    elif stat.S_ISDIR(metadata.st_mode):
+        base.update(kind="directory")
+    else:
+        base.update(kind="other", type=stat.S_IFMT(metadata.st_mode))
+    return base
+
+
+def timer_snapshot() -> dict[str, dict[str, object]]:
+    return {str(path): observation(path) for path in TIMER_OBSERVATION_PATHS}
+
+
+def runtime_snapshot(node: str) -> dict[str, object]:
+    units = [SYNC_TIMER]
+    paths = list(TIMER_OBSERVATION_PATHS)
+    if node == "backup":
+        units.append(FPM_GUARD_SERVICE)
+        paths.extend(GUARD_ENABLEMENT_PATHS)
+    else:
+        units.extend((SYNC_SERVICE, PREFLIGHT_SERVICE, FPM_SERVICE, NGINX_SERVICE, MYSQL_SERVICE))
+    return {
+        "paths": {str(path): observation(path) for path in paths},
+        "units": {unit: unit_state(unit) for unit in units},
+    }
+
+
+def validate_guard_enabled() -> None:
+    validate_directory(GUARD_ENABLEMENT_DIR, 0o755)
+    validate_guard_enablement_link()
+    enabled = run_command([str(SYSTEMCTL), "is-enabled", FPM_GUARD_SERVICE], accepted={0})
+    if enabled.stdout.strip() != "enabled":
+        fail("FPM guard did not become enabled")
+    required_by = run_command([
+        str(SYSTEMCTL), "show", FPM_GUARD_SERVICE,
+        "--property=RequiredBy", "--value",
+    ]).stdout.split()
+    if "php8.3-fpm.service" not in required_by:
+        fail("FPM guard dependency graph is missing php8.3-fpm.service")
+    state = unit_state(FPM_GUARD_SERVICE)
+    if classify_inactive_unit(state, FPM_GUARD_SERVICE) != "loaded":
+        fail("enabled FPM guard is not loaded")
+    if (state["enabled_status"], state["enabled_output"]) != (0, "enabled\n"):
+        fail("FPM guard enablement state is not exact")
+
+
+def require_primary_runtime_transition(
+    before: dict[str, object], current: dict[str, object]
+) -> None:
+    for path in TIMER_OBSERVATION_PATHS:
+        if current["paths"].get(str(path)) != before["paths"].get(str(path)):
+            fail("sync timer filesystem state changed during primary deployment")
+    if current["units"][SYNC_TIMER] != before["units"][SYNC_TIMER]:
+        fail("sync timer runtime state changed during primary deployment")
+    for unit in (FPM_SERVICE, NGINX_SERVICE, MYSQL_SERVICE):
+        if current["units"][unit] != before["units"][unit]:
+            fail(f"core runtime state changed during primary deployment: {unit}")
+        require_unit_active_healthy(unit)
+    for unit in (SYNC_SERVICE, PREFLIGHT_SERVICE):
+        before_state = before["units"][unit]
+        current_state = current["units"][unit]
+        classify_inactive_unit(before_state, unit)
+        if classify_inactive_unit(current_state, unit) != "loaded":
+            fail(f"installed primary unit is not loaded: {unit}")
+        if (current_state["enabled_status"], current_state["enabled_output"]) not in {
+            (1, "disabled\n"),
+            (0, "static\n"),
+        }:
+            fail(f"primary unit unexpectedly became enabled: {unit}")
+
+
+def validate_runtime_transition(node: str, before: dict[str, object]) -> None:
+    current = runtime_snapshot(node)
+    if node == "primary":
+        require_primary_runtime_transition(before, current)
+        return
+    if any(
+        current["paths"].get(str(path)) != before["paths"].get(str(path))
+        for path in TIMER_OBSERVATION_PATHS
+    ):
+        fail("sync timer filesystem state changed during standby deployment")
+    if current["units"][SYNC_TIMER] != before["units"][SYNC_TIMER]:
+        fail("sync timer runtime state changed during standby deployment")
+    validate_guard_enabled()
+
+
+def runtime_is_safe_for_rollback(node: str, before: dict[str, object]) -> bool:
+    current = runtime_snapshot(node)
+    try:
+        for path in TIMER_OBSERVATION_PATHS:
+            if current["paths"].get(str(path)) != before["paths"].get(str(path)):
+                return False
+        if current["units"][SYNC_TIMER] != before["units"][SYNC_TIMER]:
+            return False
+        if node == "primary":
+            require_primary_recovery_clear()
+            for unit in (FPM_SERVICE, NGINX_SERVICE, MYSQL_SERVICE):
+                if current["units"][unit] != before["units"][unit]:
+                    return False
+                require_unit_active_healthy(unit)
+            for unit in (SYNC_SERVICE, PREFLIGHT_SERVICE):
+                classify_inactive_unit(before["units"][unit], unit)
+                if classify_inactive_unit(current["units"][unit], unit) != "loaded":
+                    return False
+                if (
+                    current["units"][unit]["enabled_status"],
+                    current["units"][unit]["enabled_output"],
+                ) not in {(1, "disabled\n"), (0, "static\n")}:
+                    return False
+            return True
+        classify_inactive_unit(
+            current["units"][FPM_GUARD_SERVICE], FPM_GUARD_SERVICE
+        )
+        for path in GUARD_ENABLEMENT_PATHS:
+            current_path = current["paths"].get(str(path))
+            before_path = before["paths"].get(str(path))
+            if current_path == before_path:
+                continue
+            if path != GUARD_ENABLEMENT_LINK:
+                return False
+            validate_guard_enablement_link()
+    except (DeploymentError, OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def preflight(node: str) -> None:
+    validate_parent_paths(TARGET_PARENT_PATHS)
+    validate_site_directory()
+    validate_sync_root_inventory(node, complete=False)
+    require_unit_inactive(FPM_GUARD_SERVICE if node == "backup" else SYNC_SERVICE)
+    require_timer_disabled_inactive()
+    if node == "primary":
+        require_unit_inactive(PREFLIGHT_SERVICE)
+        require_primary_recovery_clear()
+        run_command([str(SYSTEMD_ANALYZE), "verify", str(STAGES[node] / "shuzijun-sync-preflight.service"), str(STAGES[node] / "shuzijun-sync.service")])
+        run_command([str(STAGES[node] / "verify-webroot-security"), str(SITE)])
+        verify_remote_receiver_live()
+    else:
+        run_command([str(VISUDO), "-cf", str(STAGES[node] / "shuzijun-sync-transport.sudoers")])
+        run_command([str(SYSTEMD_ANALYZE), "verify", str(STAGES[node] / "shuzijun-sync-fpm-guard.service")])
+        run_command([str(STAGES[node] / "verify-webroot-security"), str(SITE)])
+
+
+def state_target_paths() -> tuple[Path, ...]:
+    return (
+        SYNC_ROOT, INCOMING_ROOT, STATE_ROOT, ACCEPTED_GENERATION,
+        UPLOADS_RELEASE_ROOT, ACTIVE_UPLOADS_GENERATION, UPLOADS_TRANSACTION,
+        FPM_GUARD_LEASE, FPM_GUARD_ARMED, FPM_GUARD_COMMIT,
+        ACTIVE_RELEASE_RECORD,
+    )
+
+
+def require_bootstrap_precondition() -> None:
+    sync_metadata = lstat_or_none(SYNC_ROOT)
+    if sync_metadata is not None:
+        validate_directory(SYNC_ROOT, 0o700)
+    for directory in (INCOMING_ROOT, STATE_ROOT):
+        if lstat_or_none(directory) is not None:
+            validate_sync_subdirectory(directory)
+    state_device = (
+        validate_sync_subdirectory(STATE_ROOT).st_dev
+        if lstat_or_none(STATE_ROOT) is not None
+        else None
+    )
+    accepted_exists = lstat_or_none(ACCEPTED_GENERATION) is not None
+    if accepted_exists:
+        payload, _ = read_regular(
+            ACCEPTED_GENERATION, 0o600, sha256_bytes(b"6\n"),
+            device=state_device,
+        )
+        if payload != b"6\n":
+            fail("existing highest-accepted-generation is not exactly 6")
+    validate_absent(UPLOADS_TRANSACTION)
+    validate_absent(FPM_GUARD_ARMED)
+
+    release_exists = lstat_or_none(UPLOADS_RELEASE_ROOT) is not None
+    if release_exists:
+        validate_sync_subdirectory(UPLOADS_RELEASE_ROOT)
+        if any(UPLOADS_RELEASE_ROOT.iterdir()):
+            fail("bootstrap uploads release root is not empty")
+
+    active_exists = lstat_or_none(ACTIVE_UPLOADS_GENERATION) is not None
+    if active_exists:
+        payload, _ = read_regular(
+            ACTIVE_UPLOADS_GENERATION, 0o600, sha256_bytes(b"6\n"),
+            device=state_device,
+        )
+        if payload != b"6\n":
+            fail("existing active uploads generation is not exactly 6")
+
+    lease_exists = lstat_or_none(FPM_GUARD_LEASE) is not None
+    if lease_exists:
+        payload, _ = read_regular(
+            FPM_GUARD_LEASE, 0o600, sha256_bytes(b""), device=state_device
+        )
+        if payload != b"":
+            fail("existing FPM guard lease is not empty")
+
+    expected_release_id: str | None = None
+    commit_exists = lstat_or_none(FPM_GUARD_COMMIT) is not None
+    if commit_exists:
+        commit_payload, _ = read_regular(
+            FPM_GUARD_COMMIT, 0o600, device=state_device
+        )
+        match = re.fullmatch(
+            rb"6 ([0-9a-f]{64}) ([0-9a-f]{64})\n", commit_payload
+        )
+        if match is None:
+            fail("existing bootstrap v4 commit is not canonical")
+        live = validate_live_uploads_directory()
+        evidence = bootstrap_evidence_sha256(
+            BOOTSTRAP_GENERATION, live.st_dev, live.st_ino
+        )
+        expected_release_id = active_release_identifier(
+            BOOTSTRAP_GENERATION, evidence, live.st_dev, live.st_ino
+        )
+        if match.group(1).decode("ascii") != expected_release_id:
+            fail("existing bootstrap v4 commit release identity mismatch")
+
+    active_release_exists = lstat_or_none(ACTIVE_RELEASE_RECORD) is not None
+    if active_release_exists:
+        if expected_release_id is None:
+            fail("active-release-v4 exists without a committed release")
+        validate_active_release_record(expected_release_id)
+
+    # Receiver bootstrap publications are strictly ordered and fsync-backed:
+    # accepted -> empty release root -> active generation -> empty lease ->
+    # v4 commit -> active-release-v4.  Any exact prefix is a recoverable
+    # SIGKILL boundary; any gap cannot be produced by the reviewed publisher.
+    prefix = (
+        accepted_exists,
+        release_exists,
+        active_exists,
+        lease_exists,
+        commit_exists,
+        active_release_exists,
+    )
+    if any(prefix[index] and not prefix[index - 1] for index in range(1, len(prefix))):
+        fail("bootstrap state is not a valid durable publication prefix")
+    validate_receiver_state_inventory()
+
+
+def validate_receiver_state_inventory() -> tuple[Path, ...]:
+    if lstat_or_none(STATE_ROOT) is None:
+        return ()
+    root_metadata = validate_directory(STATE_ROOT, 0o700)
+    fixed = {
+        ACCEPTED_GENERATION.name,
+        ACTIVE_UPLOADS_GENERATION.name,
+        UPLOADS_TRANSACTION.name,
+        FPM_GUARD_LEASE.name,
+        FPM_GUARD_ARMED.name,
+        FPM_GUARD_COMMIT.name,
+        ACTIVE_RELEASE_RECORD.name,
+    }
+    managed_limits = {
+        ".highest-accepted.": 32,
+        ".uploads-transaction.": 32 * 1024,
+        ".active-generation.": 32,
+        ".active-release-v4.": 1024,
+        ".bootstrap-fpm-commit.": 192,
+    }
+    managed_pattern = re.compile(
+        r"(" + "|".join(re.escape(value) for value in managed_limits) + r")"
+        r"([0-9a-f]{32})"
+    )
+    rollback_pattern = re.compile(r"\.rollback-database\.[1-9][0-9]{0,18}")
+    guard_pattern = re.compile(r"\.fpm-guard-marker\.[0-9a-f]{32}")
+    cleaned_by_receiver: list[Path] = []
+    for entry in STATE_ROOT.iterdir():
+        if entry.name in fixed:
+            continue
+        managed = managed_pattern.fullmatch(entry.name)
+        rollback = rollback_pattern.fullmatch(entry.name)
+        guard = guard_pattern.fullmatch(entry.name)
+        if managed is None and rollback is None and guard is None:
+            fail(f"unknown receiver state inventory entry: {entry.name}")
+        metadata = entry.lstat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (ROOT_UID, ROOT_GID)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+            or metadata.st_dev != root_metadata.st_dev
+        ):
+            fail(f"unsafe receiver state inventory entry: {entry.name}")
+        if managed is not None:
+            payload, _ = read_regular(entry, 0o600, device=root_metadata.st_dev)
+            if len(payload) > managed_limits[managed.group(1)]:
+                fail(f"oversized receiver state temporary: {entry.name}")
+            cleaned_by_receiver.append(entry)
+        elif guard is not None:
+            payload, _ = read_regular(entry, 0o600, device=root_metadata.st_dev)
+            if len(payload) > 192:
+                fail(f"oversized FPM guard temporary: {entry.name}")
+        elif rollback is not None and metadata.st_size > 4 * 1024 * 1024 * 1024:
+            fail(f"oversized rollback database temporary: {entry.name}")
+    return tuple(sorted(cleaned_by_receiver, key=lambda path: path.name))
+
+
+def collect_recoverable_bootstrap_postimages() -> dict[Path, tuple[bytes, int]]:
+    """Capture only a fully validated receiver publication prefix for rollback."""
+    require_bootstrap_precondition()
+    state_device = validate_sync_subdirectory(STATE_ROOT).st_dev
+    trusted: dict[Path, tuple[bytes, int]] = {}
+    for path in (
+        ACCEPTED_GENERATION,
+        ACTIVE_UPLOADS_GENERATION,
+        FPM_GUARD_LEASE,
+        FPM_GUARD_COMMIT,
+        ACTIVE_RELEASE_RECORD,
+    ):
+        if lstat_or_none(path) is not None:
+            payload, _ = read_regular(path, 0o600, device=state_device)
+            trusted[path] = (payload, 0o600)
+    return trusted
+
+
+def record_original(path: Path, expected_mode: int | None, index: int, backup_dir: Path | None = None) -> tuple[dict[str, object], bytes | None]:
+    metadata = lstat_or_none(path)
+    if metadata is None:
+        return ({"kind": "absent", "path": str(path)}, None)
+    if stat.S_ISDIR(metadata.st_mode):
+        directory_targets = {
+            SYNC_ROOT,
+            INCOMING_ROOT,
+            STATE_ROOT,
+            UPLOADS_RELEASE_ROOT,
+            GUARD_ENABLEMENT_DIR,
+        }
+        if expected_mode is None or path not in directory_targets:
+            fail(f"unexpected directory target: {path}")
+        checked = validate_directory(path, expected_mode)
+        return ({
+            "children": sorted(entry.name for entry in path.iterdir()),
+            "dev": checked.st_dev,
+            "gid": ROOT_GID,
+            "ino": checked.st_ino,
+            "kind": "directory",
+            "mode": expected_mode,
+            "path": str(path),
+            "uid": ROOT_UID,
+        }, None)
+    if path == GUARD_ENABLEMENT_LINK and stat.S_ISLNK(metadata.st_mode):
+        checked = validate_guard_enablement_link()
+        return ({
+            "gid": checked.st_gid,
+            "kind": "symlink",
+            "link_target": os.readlink(path),
+            "mode": stat.S_IMODE(checked.st_mode),
+            "path": str(path),
+            "uid": checked.st_uid,
+        }, None)
+    if not stat.S_ISREG(metadata.st_mode) or expected_mode is None:
+        fail(f"unsafe existing target: {path}")
+    payload, checked = read_regular(path, expected_mode)
+    record = {
+        "backup_name": f"original-{index:03d}.bin",
+        "gid": checked.st_gid,
+        "kind": "file",
+        "mode": expected_mode,
+        "path": str(path),
+        "sha256": sha256_bytes(payload),
+        "size": len(payload),
+        "uid": checked.st_uid,
+    }
+    return record, payload
+
+
+def all_target_specs(node: str) -> list[tuple[Path, int | None]]:
+    specs: list[tuple[Path, int | None]] = []
+    if node == "backup":
+        specs.extend((path, 0o700 if path in (SYNC_ROOT, INCOMING_ROOT, STATE_ROOT, UPLOADS_RELEASE_ROOT) else 0o600) for path in state_target_paths())
+        specs.extend((path, 0o600) for path in validate_receiver_state_inventory())
+    specs.extend((asset.target, asset.mode) for asset in ASSETS[node])
+    if node == "backup":
+        # Reverse-order rollback must remove the RequiredBy link before an
+        # originally absent guard unit target, otherwise exact symlink
+        # validation would dereference a target that rollback already removed.
+        specs.extend(((GUARD_ENABLEMENT_DIR, 0o755), (GUARD_ENABLEMENT_LINK, SYMLINK_MODE)))
+    return specs
+
+
+def create_backup(node: str) -> tuple[Path, list[dict[str, object]]]:
+    validate_directory(BACKUP_ROOT.parent)
+    ensure_directory(BACKUP_ROOT, 0o700)
+    stamp = _datetime.datetime.now(_datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = BACKUP_ROOT / f"{stamp}-{node}-{os.getpid()}"
+    os.mkdir(backup_dir, 0o700)
+    os.chown(backup_dir, ROOT_UID, ROOT_GID)
+    os.chmod(backup_dir, 0o700)
+    fsync_directory(backup_dir)
+    fsync_directory(BACKUP_ROOT)
+    records: list[dict[str, object]] = []
+    blobs: list[str] = []
+    for index, (path, expected_mode) in enumerate(all_target_specs(node)):
+        record, payload = record_original(path, expected_mode, index)
+        records.append(record)
+        if payload is not None:
+            name = str(record["backup_name"])
+            atomic_write_bytes(backup_dir / name, payload, 0o600, replace=False)
+            blobs.append(name)
+    manifest = canonical_json({"node": node, "records": records, "release": RELEASE_ID, "version": 1})
+    atomic_write_bytes(backup_dir / "backup-originals.json", manifest, 0o600, replace=False)
+    integrity_names = sorted(blobs + ["backup-originals.json"])
+    integrity = b"".join(
+        f"{sha256_bytes(read_regular(backup_dir / name, 0o600)[0])}  {name}\n".encode("ascii")
+        for name in integrity_names
+    )
+    atomic_write_bytes(backup_dir / "backup-integrity.sha256", integrity, 0o600, replace=False)
+    fsync_directory(backup_dir)
+    verify_backup(backup_dir, records, node)
+    return backup_dir, records
+
+
+def verify_backup(backup_dir: Path, records: list[dict[str, object]], expected_node: str) -> None:
+    validate_directory(backup_dir, 0o700)
+    manifest_payload, _ = read_regular(backup_dir / "backup-originals.json", 0o600)
+    document = json.loads(manifest_payload.decode("ascii"))
+    if document != {"node": expected_node, "records": records, "release": RELEASE_ID, "version": 1}:
+        fail("backup manifest mismatch")
+    integrity, _ = read_regular(backup_dir / "backup-integrity.sha256", 0o600)
+    lines = integrity.decode("ascii").splitlines()
+    expected_names = sorted([str(record["backup_name"]) for record in records if record["kind"] == "file"] + ["backup-originals.json"])
+    if len(lines) != len(expected_names):
+        fail("backup integrity entry count mismatch")
+    for line, name in zip(lines, expected_names):
+        expected_line = f"{sha256_bytes(read_regular(backup_dir / name, 0o600)[0])}  {name}"
+        if line != expected_line:
+            fail("backup integrity mismatch")
+
+
+def atomic_replace_from_input(asset: Asset, stage: Path) -> None:
+    payload, _ = read_regular(stage / asset.source_name, asset.mode, asset.digest, device=validate_directory(stage, 0o700).st_dev)
+    atomic_write_bytes(asset.target, payload, asset.mode)
+
+
+def verify_installed_assets(node: str) -> None:
+    for asset in ASSETS[node]:
+        read_regular(asset.target, asset.mode, asset.digest)
+
+
+def initialize_accepted_generation(
+    trusted_postimages: dict[Path, tuple[bytes, int]],
+) -> None:
+    existing = lstat_or_none(ACCEPTED_GENERATION)
+    if existing is None:
+        atomic_write_bytes(ACCEPTED_GENERATION, b"6\n", 0o600, replace=False)
+        trusted_postimages[ACCEPTED_GENERATION] = (b"6\n", 0o600)
+    else:
+        payload, _ = read_regular(ACCEPTED_GENERATION, 0o600, sha256_bytes(b"6\n"))
+        if payload != b"6\n":
+            fail("refusing to overwrite existing highest-accepted-generation")
+
+
+def bootstrap_evidence_sha256(
+    generation: int, uploads_dev: int, uploads_ino: int
+) -> str:
+    return sha256_bytes(
+        f"bootstrap-root-v4\0{generation}\0{uploads_dev}\0{uploads_ino}".encode(
+            "ascii"
+        )
+    )
+
+
+def active_release_identifier(
+    generation: int,
+    evidence_sha256: str,
+    uploads_dev: int,
+    uploads_ino: int,
+) -> str:
+    return sha256_bytes(
+        (
+            f"release-v4\0{generation}\0{evidence_sha256}\0"
+            f"{uploads_dev}\0{uploads_ino}"
+        ).encode("ascii")
+    )
+
+
+def validate_active_release_record(expected_release_id: str) -> bytes:
+    payload, _ = read_regular(
+        ACTIVE_RELEASE_RECORD,
+        0o600,
+        device=validate_sync_subdirectory(STATE_ROOT).st_dev,
+    )
+    if len(payload) > 1024:
+        fail("active-release-v4 record is oversized")
+    try:
+        document = json.loads(payload.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DeploymentError("active-release-v4 record is invalid JSON") from error
+    exact_keys = {
+        "evidence_sha256",
+        "generation",
+        "release_id",
+        "uploads_dev",
+        "uploads_ino",
+        "version",
+    }
+    if (
+        not isinstance(document, dict)
+        or set(document) != exact_keys
+        or canonical_json(document) != payload
+    ):
+        fail("active-release-v4 record is not canonical")
+    for key in ("generation", "uploads_dev", "uploads_ino", "version"):
+        value = document.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            fail(f"active-release-v4 integer field is invalid: {key}")
+    if document["version"] != 4 or document["generation"] != BOOTSTRAP_GENERATION:
+        fail("active-release-v4 version or generation mismatch")
+    live_metadata = validate_live_uploads_directory()
+    if (
+        document["uploads_dev"] != live_metadata.st_dev
+        or document["uploads_ino"] != live_metadata.st_ino
+        or document["uploads_dev"] < 1
+        or document["uploads_ino"] < 1
+    ):
+        fail("active-release-v4 live uploads identity mismatch")
+    evidence = document.get("evidence_sha256")
+    release_id = document.get("release_id")
+    if (
+        not isinstance(evidence, str)
+        or re.fullmatch(r"[0-9a-f]{64}", evidence) is None
+        or evidence
+        != bootstrap_evidence_sha256(
+            BOOTSTRAP_GENERATION, live_metadata.st_dev, live_metadata.st_ino
+        )
+        or not isinstance(release_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", release_id) is None
+        or release_id
+        != active_release_identifier(
+            BOOTSTRAP_GENERATION,
+            evidence,
+            live_metadata.st_dev,
+            live_metadata.st_ino,
+        )
+        or release_id != expected_release_id
+    ):
+        fail("active-release-v4 cryptographic identity mismatch")
+    return payload
+
+
+def validate_bootstrap_result() -> BootstrapState:
+    trusted: dict[Path, tuple[bytes, int]] = {}
+    state_device = validate_sync_subdirectory(STATE_ROOT).st_dev
+    validate_sync_subdirectory(UPLOADS_RELEASE_ROOT)
+    if any(UPLOADS_RELEASE_ROOT.iterdir()):
+        fail("bootstrap uploads release root is not empty")
+    for path, payload in (
+        (ACCEPTED_GENERATION, b"6\n"),
+        (ACTIVE_UPLOADS_GENERATION, b"6\n"),
+        (FPM_GUARD_LEASE, b""),
+    ):
+        actual, _ = read_regular(
+            path, 0o600, sha256_bytes(payload), device=state_device
+        )
+        if actual != payload:
+            fail(f"bootstrap state mismatch: {path}")
+        trusted[path] = (payload, 0o600)
+    commit_payload, _ = read_regular(
+        FPM_GUARD_COMMIT, 0o600, device=state_device
+    )
+    match = re.fullmatch(rb"6 ([0-9a-f]{64}) ([0-9a-f]{64})\n", commit_payload)
+    if match is None:
+        fail("bootstrap v4 commit payload is not canonical")
+    trusted[FPM_GUARD_COMMIT] = (commit_payload, 0o600)
+    validate_absent(FPM_GUARD_ARMED)
+    validate_absent(UPLOADS_TRANSACTION)
+    # The frozen contract binds canonical JSON, generation, bootstrap evidence,
+    # release identity and the live uploads inode/device.  The activation nonce
+    # remains the independent, single-attempt value in the v4 commit marker.
+    if ACTIVE_RELEASE_CONTRACT != "shuzijun-active-release-v4-bootstrap-root-live-inode":
+        raise ReleaseBlocked("BLOCKED: active-release-v4 validator is not frozen")
+    release_id = match.group(1).decode("ascii")
+    active_release_payload = validate_active_release_record(release_id)
+    trusted[ACTIVE_RELEASE_RECORD] = (active_release_payload, 0o600)
+    return BootstrapState(
+        match.group(2).decode("ascii"),
+        release_id,
+        active_release_payload,
+        trusted,
+    )
+
+
+def unlink_exact_file(path: Path) -> None:
+    metadata = lstat_or_none(path)
+    if metadata is None:
+        return
+    if (not stat.S_ISREG(metadata.st_mode)
+            or (metadata.st_uid, metadata.st_gid) != (ROOT_UID, ROOT_GID)
+            or metadata.st_nlink != 1):
+        fail(f"refusing unsafe rollback unlink: {path}")
+    path.unlink()
+    fsync_directory(path.parent)
+
+
+def regular_matches(path: Path, payload: bytes, mode: int) -> bool:
+    try:
+        current, _ = read_regular(path, mode, sha256_bytes(payload))
+    except (DeploymentError, OSError):
+        return False
+    return current == payload
+
+
+def assert_rollback_current_safe(
+    node: str,
+    record: dict[str, object],
+    backup_dir: Path,
+    trusted_postimages: dict[Path, tuple[bytes, int]],
+    *,
+    directory_must_be_empty: bool,
+) -> None:
+    """Refuse to erase an unrelated concurrent post-image during rollback."""
+    path = Path(str(record["path"]))
+    current = lstat_or_none(path)
+    if current is None:
+        return
+
+    if record["kind"] == "directory":
+        checked = validate_directory(path, int(record["mode"]))
+        if (checked.st_dev, checked.st_ino) != (int(record["dev"]), int(record["ino"])):
+            fail(f"original directory inode changed before rollback: {path}")
+        names = {entry.name for entry in path.iterdir()}
+        original_names = set(record.get("children", []))
+        allowed_transaction_names = {
+            SYNC_ROOT: {
+                "incoming",
+                "sender-staging",
+                "site-operation.lock",
+                "state",
+                "uploads-releases",
+            },
+            INCOMING_ROOT: set(),
+            STATE_ROOT: {
+                "highest-accepted-generation",
+                "active-uploads-generation",
+                "uploads-transaction.json",
+                "fpm-activation-guard.lease",
+                "fpm-activation-guard-v4.armed",
+                "fpm-activation-guard-v4.committed",
+                "active-release-v4.json",
+            },
+            UPLOADS_RELEASE_ROOT: set(),
+            GUARD_ENABLEMENT_DIR: {GUARD_ENABLEMENT_LINK.name},
+        }.get(path, set())
+        if not names.issubset(original_names | allowed_transaction_names):
+            fail(f"original directory gained an unknown child: {path}")
+        if directory_must_be_empty and names != original_names:
+            fail(f"original directory children were not restored exactly: {path}")
+        return
+
+    if record["kind"] == "symlink":
+        validate_guard_enablement_link()
+        if os.readlink(path) != str(record["link_target"]):
+            fail("original guard enablement link changed before rollback")
+        return
+
+    if record["kind"] == "file":
+        original, _ = read_regular(
+            backup_dir / str(record["backup_name"]),
+            0o600,
+            str(record["sha256"]),
+        )
+        if regular_matches(path, original, int(record["mode"])):
+            return
+
+    for asset in ASSETS[node]:
+        if asset.target == path:
+            candidate, _ = read_regular(STAGES[node] / asset.source_name, asset.mode, asset.digest)
+            if regular_matches(path, candidate, asset.mode):
+                return
+            fail(f"asset target has an unknown concurrent post-image: {path}")
+
+    trusted_state = trusted_postimages.get(path)
+    if trusted_state is not None:
+        payload, mode = trusted_state
+        if regular_matches(path, payload, mode):
+            return
+        fail(f"state target differs from its observed transaction post-image: {path}")
+
+    exact_state_files = {
+        ACCEPTED_GENERATION: (b"6\n", 0o600),
+        ACTIVE_UPLOADS_GENERATION: (b"6\n", 0o600),
+        FPM_GUARD_LEASE: (b"", 0o600),
+    }
+    if path in exact_state_files:
+        payload, mode = exact_state_files[path]
+        if regular_matches(path, payload, mode):
+            return
+        fail(f"state target has an unknown concurrent post-image: {path}")
+    if path in (
+        UPLOADS_TRANSACTION,
+        FPM_GUARD_ARMED,
+        FPM_GUARD_COMMIT,
+        ACTIVE_RELEASE_RECORD,
+    ):
+        fail(f"unexpected transaction state appeared before rollback: {path}")
+    if path in (SYNC_ROOT, INCOMING_ROOT, STATE_ROOT, UPLOADS_RELEASE_ROOT):
+        validate_directory(path, 0o700)
+        names = {entry.name for entry in path.iterdir()}
+        allowed_children = {
+            SYNC_ROOT: {
+                "incoming",
+                "sender-staging",
+                "site-operation.lock",
+                "state",
+                "uploads-releases",
+            },
+            INCOMING_ROOT: set(),
+            STATE_ROOT: {
+                "highest-accepted-generation",
+                "active-uploads-generation",
+                "fpm-activation-guard.lease",
+                "fpm-activation-guard-v4.committed",
+                "active-release-v4.json",
+            },
+            UPLOADS_RELEASE_ROOT: set(),
+        }[path]
+        if not names.issubset(allowed_children):
+            fail(f"created directory has an unknown child during rollback: {path}")
+        # Reverse-order rollback removes every exact child before its parent.
+        if directory_must_be_empty and names:
+            fail(f"created directory is not empty during rollback: {path}")
+        return
+    if path == GUARD_ENABLEMENT_LINK:
+        validate_guard_enablement_link()
+        return
+    if path == GUARD_ENABLEMENT_DIR:
+        validate_directory(path, 0o755)
+        names = {entry.name for entry in path.iterdir()}
+        if not names.issubset({GUARD_ENABLEMENT_LINK.name}):
+            fail("created FPM requires directory has an unknown child")
+        if directory_must_be_empty and names:
+            fail("created FPM requires directory is not empty")
+        return
+    fail(f"rollback target has an unknown post-image: {path}")
+
+
+def restore_originals(
+    backup_dir: Path,
+    records: list[dict[str, object]],
+    node: str,
+    trusted_postimages: dict[Path, tuple[bytes, int]],
+) -> None:
+    verify_backup(backup_dir, records, node)
+    # Validate the complete rollback set before the first restoring write.  A
+    # concurrent/unknown image therefore produces a rollback-failed marker but
+    # is never overwritten merely because another target was still trusted.
+    for record in reversed(records):
+        assert_rollback_current_safe(
+            node,
+            record,
+            backup_dir,
+            trusted_postimages,
+            directory_must_be_empty=False,
+        )
+    errors: list[str] = []
+    for record in reversed(records):
+        path = Path(str(record["path"]))
+        try:
+            assert_rollback_current_safe(
+                node,
+                record,
+                backup_dir,
+                trusted_postimages,
+                directory_must_be_empty=True,
+            )
+            if record["kind"] == "file":
+                payload, _ = read_regular(backup_dir / str(record["backup_name"]), 0o600, str(record["sha256"]))
+                atomic_write_bytes(path, payload, int(record["mode"]))
+            elif record["kind"] == "absent":
+                current = lstat_or_none(path)
+                if current is None:
+                    continue
+                if stat.S_ISDIR(current.st_mode):
+                    validate_directory(path)
+                    os.rmdir(path)
+                    fsync_directory(path.parent)
+                elif stat.S_ISLNK(current.st_mode) and path == GUARD_ENABLEMENT_LINK:
+                    validate_guard_enablement_link()
+                    path.unlink()
+                    fsync_directory(path.parent)
+                else:
+                    unlink_exact_file(path)
+            elif record["kind"] == "directory":
+                validate_directory(path, int(record["mode"]))
+            elif record["kind"] == "symlink":
+                atomic_restore_symlink(path, str(record["link_target"]))
+            else:
+                fail("unknown backup record kind")
+        except Exception as error:  # continue every exact rollback item
+            errors.append(f"{path}: {error}")
+    if errors:
+        fail("rollback failed: " + "; ".join(errors))
+    verify_originals(records, backup_dir)
+
+
+def verify_originals(records: list[dict[str, object]], backup_dir: Path) -> None:
+    for record in records:
+        path = Path(str(record["path"]))
+        if record["kind"] == "absent":
+            validate_absent(path)
+        elif record["kind"] == "directory":
+            metadata = validate_directory(path, int(record["mode"]))
+            if (metadata.st_dev, metadata.st_ino) != (int(record["dev"]), int(record["ino"])):
+                fail(f"restored directory inode differs: {path}")
+            if {entry.name for entry in path.iterdir()} != set(record.get("children", [])):
+                fail(f"restored directory children differ: {path}")
+        elif record["kind"] == "symlink":
+            validate_guard_enablement_link()
+            if os.readlink(path) != str(record["link_target"]):
+                fail(f"restored symlink differs: {path}")
+        elif record["kind"] == "file":
+            payload, _ = read_regular(path, int(record["mode"]), str(record["sha256"]))
+            backup_payload, _ = read_regular(backup_dir / str(record["backup_name"]), 0o600, str(record["sha256"]))
+            if payload != backup_payload:
+                fail(f"restored bytes differ: {path}")
+
+
+def terminal_bytes(status_value: str, manifest_sha256: str, detail: str = "") -> bytes:
+    return canonical_json({
+        "detail": detail[:512],
+        "manifest_sha256": manifest_sha256,
+        "release": RELEASE_ID,
+        "status": status_value,
+        "version": 1,
+    })
+
+
+def write_terminal(backup_dir: Path, status_value: str, manifest_sha256: str, detail: str = "") -> None:
+    terminal = terminal_bytes(status_value, manifest_sha256, detail)
+    atomic_write_bytes(backup_dir / "transaction-terminal.json", terminal, 0o600, replace=False)
+
+
+def remove_uncommitted_receipt(
+    backup_dir: Path, expected_receipt: bytes | None
+) -> None:
+    receipt = backup_dir / "standby-first.receipt"
+    if lstat_or_none(receipt) is None:
+        return
+    if expected_receipt is None or not regular_matches(
+        receipt, expected_receipt, 0o600
+    ):
+        fail("uncommitted standby receipt changed unexpectedly")
+    receipt.unlink()
+    fsync_directory(backup_dir)
+
+
+def rollback_deployment(
+    node: str,
+    operation_lock: "HeldOperationLock",
+    backup_dir: Path,
+    records: list[dict[str, object]],
+    before_runtime: dict[str, object],
+    manifest_digest: str,
+    trusted_postimages: dict[Path, tuple[bytes, int]],
+    uncommitted_receipt: bytes | None,
+    original_error: BaseException,
+) -> None:
+    rollback_error = ""
+    try:
+        # A pre-commit receipt must never outlive a failed transaction, even
+        # when the live-site lock cannot be reacquired for rollback.
+        remove_uncommitted_receipt(backup_dir, uncommitted_receipt)
+        # A receiver bootstrap temporarily owns the shared operation lock. If that handoff
+        # cannot be reacquired, do not touch any live target; preserve evidence
+        # and fail closed.
+        if not operation_lock.held:
+            operation_lock.reacquire_operation_file()
+        validate_sync_root_inventory(node, complete=(node == "primary"))
+        if not runtime_is_safe_for_rollback(node, before_runtime):
+            fail("runtime state changed before rollback")
+        restore_originals(backup_dir, records, node, trusted_postimages)
+        run_command([str(SYSTEMCTL), "daemon-reload"])
+        if runtime_snapshot(node) != before_runtime:
+            fail("runtime state changed while rolling back")
+        require_timer_disabled_inactive()
+        rollback_detail = str(original_error)
+        try:
+            write_terminal(backup_dir, "rolled-back", manifest_digest, rollback_detail)
+        except BaseException:
+            expected = terminal_bytes("rolled-back", manifest_digest, rollback_detail)
+            if not regular_matches(
+                backup_dir / "transaction-terminal.json", expected, 0o600
+            ):
+                raise
+    except BaseException as error:
+        rollback_error = str(error)
+        try:
+            write_terminal(backup_dir, "rollback-failed", manifest_digest, rollback_error)
+        except BaseException:
+            pass
+    if rollback_error:
+        raise DeploymentError(f"deployment failed ({original_error}); {rollback_error}") from original_error
+    raise DeploymentError(f"deployment failed and was rolled back: {original_error}") from original_error
+
+
+def post_install(
+    node: str,
+    operation_lock: "HeldOperationLock",
+    trusted_postimages: dict[Path, tuple[bytes, int]],
+) -> BootstrapState | None:
+    run_command([str(SYSTEMCTL), "daemon-reload"])
+    verify_installed_assets(node)
+    if node == "primary":
+        require_timer_disabled_inactive()
+        preflight_asset = asset_named(node, "shuzijun-sync-preflight.service")
+        service_asset = asset_named(node, "shuzijun-sync.service")
+        source_verifier = asset_named(node, "verify-shuzijun-sync-source")
+        run_command([str(SYSTEMD_ANALYZE), "verify", str(preflight_asset.target), str(service_asset.target)])
+        run_command([str(source_verifier.target), str(SITE)])
+        require_unit_inactive(SYNC_SERVICE)
+        require_unit_inactive(PREFLIGHT_SERVICE)
+        require_primary_recovery_clear()
+        return None
+
+    sudoers_asset = asset_named(node, "shuzijun-sync-transport.sudoers")
+    guard_asset = asset_named(node, "shuzijun-sync-fpm-guard.service")
+    receiver_asset = asset_named(node, "apply-shuzijun-sync")
+    run_command([str(VISUDO), "-cf", str(sudoers_asset.target)])
+    run_command([str(SYSTEMD_ANALYZE), "verify", str(guard_asset.target)])
+    ensure_directory(SYNC_ROOT, 0o700)
+    ensure_directory(INCOMING_ROOT, 0o700)
+    ensure_directory(STATE_ROOT, 0o700)
+    initialize_accepted_generation(trusted_postimages)
+    # The receiver owns the same site-operation lock for its complete bootstrap contract.
+    # Release immediately before exec and reacquire immediately after it exits;
+    # a competing sender/receiver can only make this bootstrap fail closed.
+    operation_lock.release_operation_file()
+    try:
+        run_command([str(receiver_asset.target), "--bootstrap-state", str(BOOTSTRAP_GENERATION)])
+        attest = run_command([str(receiver_asset.target), "--attest"]).stdout
+        if attest != f"{RECEIVER_SHA256}  {receiver_asset.target}\n":
+            fail("receiver attestation mismatch after bootstrap")
+        protocol = run_command([str(receiver_asset.target), "--protocol"]).stdout
+        if protocol != EXPECTED_PROTOCOL + "\n":
+            fail("receiver protocol mismatch after bootstrap")
+    finally:
+        operation_lock.reacquire_operation_file()
+    bootstrap_state = validate_bootstrap_result()
+    trusted_postimages.update(bootstrap_state.trusted_postimages)
+    # The durable generation-6 commit is the prerequisite for making the guard
+    # a persistent RequiredBy dependency of every future PHP-FPM start.
+    run_command([str(SYSTEMCTL), "enable", FPM_GUARD_SERVICE])
+    run_command([str(SYSTEMCTL), "daemon-reload"])
+    validate_guard_enabled()
+    return bootstrap_state
+
+
+class HeldOperationLock:
+    """Root-only release lock with a root-directory initialization mutex."""
+
+    def __init__(self) -> None:
+        self.root_descriptor: int | None = None
+        self.descriptor: int | None = None
+
+    def _open_and_lock_root(self) -> None:
+        if self.root_descriptor is not None:
+            return
+        validate_directory(SYNC_ROOT, 0o700)
+        descriptor = os.open(
+            SYNC_ROOT,
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            opened = os.fstat(descriptor)
+            named = SYNC_ROOT.lstat()
+            if (
+                (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+                or (opened.st_uid, opened.st_gid) != (ROOT_UID, ROOT_GID)
+                or stat.S_IMODE(opened.st_mode) != 0o700
+            ):
+                fail("opened sync root changed")
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self.root_descriptor = descriptor
+
+    def _acquire_operation_file(self) -> None:
+        if self.descriptor is not None:
+            return
+        # Reject FIFOs/devices/symlinks before a blocking read-only open.
+        validate_operation_lock_path()
+        descriptor = os.open(
+            OPERATION_LOCK,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            validate_operation_lock_file(descriptor)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            validate_operation_lock_file(descriptor)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self.descriptor = descriptor
+
+    def acquire_existing(self) -> None:
+        if lstat_or_none(SYNC_ROOT) is None:
+            return
+        self._open_and_lock_root()
+        if lstat_or_none(OPERATION_LOCK) is None:
+            return
+        self._acquire_operation_file()
+
+    def ensure_created_and_acquired(self) -> None:
+        if lstat_or_none(SYNC_ROOT) is None:
+            ensure_directory(SYNC_ROOT, 0o700)
+        self._open_and_lock_root()
+        if lstat_or_none(OPERATION_LOCK) is None:
+            create_empty_regular_exclusive(OPERATION_LOCK, 0o600)
+        self._acquire_operation_file()
+
+    def validate_stable(self) -> None:
+        if self.root_descriptor is None:
+            validate_absent(SYNC_ROOT)
+            return
+        opened = os.fstat(self.root_descriptor)
+        named = SYNC_ROOT.lstat()
+        if (
+            (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+            or (opened.st_uid, opened.st_gid) != (ROOT_UID, ROOT_GID)
+            or stat.S_IMODE(opened.st_mode) != 0o700
+        ):
+            fail("held sync root changed")
+        if self.descriptor is None:
+            validate_absent(OPERATION_LOCK)
+        else:
+            validate_operation_lock_file(self.descriptor)
+
+    def release_operation_file(self) -> None:
+        if self.descriptor is not None:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+            os.close(self.descriptor)
+            self.descriptor = None
+
+    def reacquire_operation_file(self) -> None:
+        if self.root_descriptor is None:
+            fail("site-operation lock root is not held")
+        self._acquire_operation_file()
+
+    def release(self) -> None:
+        self.release_operation_file()
+        if self.root_descriptor is not None:
+            fcntl.flock(self.root_descriptor, fcntl.LOCK_UN)
+            os.close(self.root_descriptor)
+            self.root_descriptor = None
+
+    @property
+    def held(self) -> bool:
+        return self.descriptor is not None
+
+    def __enter__(self) -> "HeldOperationLock":
+        self.acquire_existing()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.release()
+
+
+class HeldLock:
+    def __init__(self, path: Path):
+        self.path = path
+        self.descriptor: int | None = None
+
+    def acquire(self) -> None:
+        if self.descriptor is not None:
+            return
+        descriptor = os.open(self.path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except Exception:
+            os.close(descriptor)
+            raise
+        self.descriptor = descriptor
+
+    def release(self) -> None:
+        if self.descriptor is not None:
+            fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+            os.close(self.descriptor)
+            self.descriptor = None
+
+    @property
+    def held(self) -> bool:
+        return self.descriptor is not None
+
+    def __enter__(self) -> "HeldLock":
+        self.acquire()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.release()
+
+
+def deploy(node: str, role: str, mode: str) -> Path | None:
+    ensure_release_frozen()
+    validate_parent_paths(STAGE_PARENT_PATHS)
+    validate_directory(STAGE_ROOT, 0o700)
+    with HeldLock(STAGE_ROOT):
+        # Cheap checks are repeated below while both deployment and shared
+        # operation locks are held. No live-site validation is accepted outside
+        # that boundary.
+        validate_role(node, role)
+        validate_stage(node)
+        with HeldOperationLock() as operation_lock:
+            validate_role(node, role)
+            validate_stage(node)
+            preflight(node)
+            if node == "backup":
+                require_bootstrap_precondition()
+            before_runtime = runtime_snapshot(node)
+            if mode == "dry-run":
+                if runtime_snapshot(node) != before_runtime:
+                    fail("service/timer state changed during dry-run")
+                operation_lock.validate_stable()
+                print(f"sync-release: dry-run passed for {node}; no files changed")
+                return None
+
+            # Only apply may initialize the root-only shared lock and managed
+            # sender staging.  All frozen-candidate, role and runtime gates
+            # above have already succeeded, and dry-run never enters here.
+            operation_lock.ensure_created_and_acquired()
+            validate_role(node, role)
+            validate_stage(node)
+            preflight(node)
+            if node == "backup":
+                require_bootstrap_precondition()
+            else:
+                ensure_directory(SENDER_STAGING_ROOT, 0o700)
+                validate_sender_staging_if_present()
+
+            backup_dir, records = create_backup(node)
+            manifest_payload, _ = read_regular(backup_dir / "backup-originals.json", 0o600)
+            manifest_digest = sha256_bytes(manifest_payload)
+            trusted_postimages: dict[Path, tuple[bytes, int]] = {}
+            uncommitted_receipt: bytes | None = None
+            try:
+                for asset in ASSETS[node]:
+                    atomic_replace_from_input(asset, STAGES[node])
+                bootstrap_state = post_install(
+                    node, operation_lock, trusted_postimages
+                )
+                validate_sync_root_inventory(node, complete=True)
+                validate_runtime_transition(node, before_runtime)
+                require_timer_disabled_inactive()
+                verify_installed_assets(node)
+                if node == "primary":
+                    require_unit_inactive(SYNC_SERVICE)
+                    require_unit_inactive(PREFLIGHT_SERVICE)
+                    require_primary_recovery_clear()
+                operation_lock.validate_stable()
+                if node == "backup":
+                    if bootstrap_state is None:
+                        fail("standby bootstrap evidence is missing")
+                    uncommitted_receipt = standby_receipt_bytes(
+                        bootstrap_state, manifest_digest
+                    )
+                    atomic_write_bytes(
+                        backup_dir / "standby-first.receipt",
+                        uncommitted_receipt,
+                        0o600,
+                        replace=False,
+                    )
+                fsync_directory(backup_dir)
+            except BaseException as original_error:
+                if node == "backup" and operation_lock.held:
+                    try:
+                        trusted_postimages.update(
+                            collect_recoverable_bootstrap_postimages()
+                        )
+                    except (DeploymentError, OSError, ValueError):
+                        # An invalid/non-prefix state is deliberately not
+                        # blessed for rollback; exact rollback validation will
+                        # then preserve it for operator inspection.
+                        pass
+                rollback_deployment(
+                    node, operation_lock, backup_dir, records, before_runtime,
+                    manifest_digest, trusted_postimages,
+                    uncommitted_receipt, original_error,
+                )
+
+            # COMMITTED is the final and only irreversible transaction marker.
+            # No validation, filesystem mutation or fallible subprocess follows
+            # it, so an output consumer failure can never trigger rollback.
+            try:
+                write_terminal(backup_dir, "committed", manifest_digest)
+            except BaseException as terminal_error:
+                terminal_path = backup_dir / "transaction-terminal.json"
+                expected_terminal = terminal_bytes("committed", manifest_digest)
+                if not regular_matches(terminal_path, expected_terminal, 0o600):
+                    rollback_deployment(
+                        node, operation_lock, backup_dir, records, before_runtime,
+                        manifest_digest, trusted_postimages,
+                        uncommitted_receipt, terminal_error,
+                    )
+            return backup_dir
+
+
+def usage() -> str:
+    return (
+        f"usage: {DEPLOYER_PATH} <backup|primary> <standby|authority> "
+        "[--dry-run|--apply]\n"
+        "production order: backup standby --apply, copy its exact receipt, then primary authority --apply\n"
+    )
+
+
+def main(argv: list[str]) -> int:
+    if os.geteuid() != ROOT_UID:
+        print("sync-release: root required", file=sys.stderr)
+        return 1
+    if len(argv) not in {2, 3}:
+        print(usage(), file=sys.stderr, end="")
+        return 2
+    node, role = argv[0], argv[1]
+    mode_arg = argv[2] if len(argv) == 3 else "--dry-run"
+    if node not in STAGES or role not in {"standby", "authority"} or mode_arg not in {"--dry-run", "--apply"}:
+        print(usage(), file=sys.stderr, end="")
+        return 2
+    mode = mode_arg[2:]
+    try:
+        validate_self()
+        deploy(node, role, mode)
+    except ReleaseBlocked as error:
+        print(f"sync-release: {error}", file=sys.stderr)
+        return 3
+    except (DeploymentError, OSError, subprocess.SubprocessError) as error:
+        print(f"sync-release: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

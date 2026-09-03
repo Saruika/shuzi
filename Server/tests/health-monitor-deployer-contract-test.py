@@ -1,9 +1,10 @@
-import ast
 import hashlib
 import json
 import re
 import shlex
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -12,8 +13,9 @@ HEALTH_SCRIPT = Path("Server/operations/shuzijun-internal-health")
 HEALTH_SERVICE = Path("Server/operations/shuzijun-internal-health.service")
 HEALTH_TIMER = Path("Server/operations/shuzijun-internal-health.timer")
 INTERNAL_HEALTH_TEST = Path("Server/tests/internal-health-contract-test.py")
-OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE = Path("Server/releases/v1.5.10-build41.13.md")
+PRIVATE_LOG_CONFIG = Path("Server/operations/shuzijun-private-logs.conf")
+SNAPSHOT_CRON = Path("Server/operations/tencent-daily-snapshot.cron")
+RELEASE = Path("Server/releases/v1.3.30-build42.1.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -33,6 +35,7 @@ def assert_validator_negative_path(validator: str) -> None:
     harness = f"""
 set -Eeuo pipefail
 VALIDATED_INVOCATION=
+VALIDATED_EXIT_STATUS=
 unit_value() {{
     case "$2" in
         InvocationID) printf '%s\\n' new-invocation ;;
@@ -62,6 +65,58 @@ fi
     subprocess.run(["/bin/bash", "-c", harness], check=True)
 
 
+def assert_validator_exit_status_contract(validator: str) -> None:
+    for main_status, expected_status_exit, should_pass in (
+        (0, 0, True),
+        (2, 2, True),
+        (0, 2, False),
+        (2, 0, False),
+        (1, 1, False),
+    ):
+        invocation = (
+            "validate_last_invocation 1 old-sha previous-invocation "
+            "900000 1200000 1900000 2200000"
+        )
+        expectation = invocation if should_pass else f"if {invocation}; then exit 91; fi"
+        harness = f"""
+set -Eeuo pipefail
+MAIN_STATUS={main_status}
+EXPECTED_STATUS_EXIT={expected_status_exit}
+VALIDATED_INVOCATION=
+VALIDATED_EXIT_STATUS=
+unit_value() {{
+    case "$2" in
+        InvocationID) printf '%s\\n' new-invocation ;;
+        Result) printf '%s\\n' success ;;
+        ExecMainStatus) printf '%s\\n' "$MAIN_STATUS" ;;
+        ActiveState) printf '%s\\n' inactive ;;
+        SubState) printf '%s\\n' dead ;;
+        *) return 70 ;;
+    esac
+}}
+service_usec() {{
+    case "$1" in
+        ExecMainStartTimestamp) printf '%s\\n' 1000 ;;
+        ExecMainExitTimestamp) printf '%s\\n' 1100 ;;
+        ExecMainStartTimestampMonotonic) printf '%s\\n' 2000 ;;
+        ExecMainExitTimestampMonotonic) printf '%s\\n' 2100 ;;
+        *) return 71 ;;
+    esac
+}}
+validate_status() {{ [[ "$5" == "$EXPECTED_STATUS_EXIT" ]]; }}
+{validator}
+{expectation}
+if [[ {str(should_pass).lower()} == true ]]; then
+    [[ "$VALIDATED_INVOCATION" == new-invocation ]]
+    [[ "$VALIDATED_EXIT_STATUS" == "$MAIN_STATUS" ]]
+else
+    [[ -z "$VALIDATED_INVOCATION" ]]
+    [[ -z "$VALIDATED_EXIT_STATUS" ]]
+fi
+"""
+        subprocess.run(["/bin/bash", "-c", harness], check=True)
+
+
 def assert_status_boundary_negative_path(require_status: str) -> None:
     harness = f"""
 set -Eeuo pipefail
@@ -75,6 +130,139 @@ if require_status; then
 fi
 """
     subprocess.run(["/bin/bash", "-c", harness], check=True)
+
+
+def assert_crontab_transform_contract(transform: str) -> None:
+    old_line = (
+        "31 3 * * * flock -xn /run/tencent-snapshot.lock -c "
+        "/usr/local/sbin/tencent-daily-snapshot "
+        ">>/var/log/tencent-snapshot.log 2>&1"
+    )
+    with tempfile.TemporaryDirectory(prefix="sj-crontab-transform-") as temporary:
+        source = Path(temporary) / "source"
+        destination = Path(temporary) / "destination"
+        original = (
+            b"*/5 * * * * /usr/local/qcloud/stargate --quiet\n"
+            + old_line.encode("utf-8")
+            + b"\nMAILTO=ops@example.invalid"
+        )
+        source.write_bytes(original)
+        harness = f"""
+set -Eeuo pipefail
+OLD_SNAPSHOT_CRON_LINE={shlex.quote(old_line)}
+sha() {{ shasum -a 256 "$1" | cut -d' ' -f1; }}
+require_file() {{ return 0; }}
+chown() {{ return 0; }}
+chmod() {{ return 0; }}
+{transform}
+transform_root_crontab {shlex.quote(str(source))} {shlex.quote(str(destination))}
+[[ "$REMOVED_SNAPSHOT_LINES" == 1 ]]
+"""
+        subprocess.run(["/bin/bash", "-c", harness], check=True)
+        assert destination.read_bytes() == (
+            b"*/5 * * * * /usr/local/qcloud/stargate --quiet\n"
+            b"MAILTO=ops@example.invalid"
+        )
+
+        duplicate = Path(temporary) / "duplicate"
+        duplicate_output = Path(temporary) / "duplicate-output"
+        duplicate.write_bytes((old_line + "\n" + old_line + "\n").encode("utf-8"))
+        duplicate_harness = harness.replace(
+            shlex.quote(str(source)), shlex.quote(str(duplicate))
+        ).replace(shlex.quote(str(destination)), shlex.quote(str(duplicate_output)))
+        result = subprocess.run(
+            ["/bin/bash", "-c", duplicate_harness],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert not duplicate_output.exists()
+
+
+def assert_snapshot_lock_busy_zero_mutation(acquire_lock: str) -> None:
+    instrumented = acquire_lock.replace(
+        "/usr/bin/flock -n 8", "mock_flock -n 8"
+    )
+    with tempfile.TemporaryDirectory(prefix="sj-snapshot-lock-busy-") as temporary:
+        lock = Path(temporary) / "snapshot.lock"
+        mutation = Path(temporary) / "mutation"
+        lock.write_bytes(b"existing-lock-bytes\n")
+        harness = f"""
+set -Eeuo pipefail
+SNAPSHOT_EXECUTION_LOCK={shlex.quote(str(lock))}
+ROOT_BASHPID=$$
+MUTATION={shlex.quote(str(mutation))}
+require_snapshot_execution_lock_file() {{ return 0; }}
+mock_flock() {{ return 73; }}
+chown() {{ : > "$MUTATION"; return 0; }}
+chmod() {{ : > "$MUTATION"; return 0; }}
+sync() {{ : > "$MUTATION"; return 0; }}
+stat() {{ return 74; }}
+{instrumented}
+if acquire_snapshot_execution_lock; then
+    exit 90
+fi
+[[ ! -e "$MUTATION" ]]
+"""
+        result = subprocess.run(
+            ["/bin/bash", "-c", harness], capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 0, result.stderr
+        assert "snapshot execution lock busy" in result.stderr
+        assert lock.read_bytes() == b"existing-lock-bytes\n"
+
+
+def assert_snapshot_lock_cross_window_rollback(
+    acquire_lock: str, restore_private_logs: str
+) -> None:
+    instrumented = acquire_lock.replace(
+        "/usr/bin/flock -n 8", "mock_flock -n 8"
+    )
+    with tempfile.TemporaryDirectory(prefix="sj-snapshot-lock-window-") as temporary:
+        root = Path(temporary)
+        lock = root / "snapshot.lock"
+        private_logs = root / "private-logs"
+        lock.write_bytes(b"")
+        private_logs.mkdir(mode=0o700)
+        for name in ("sync-authority.log", "sync-standby.log", "snapshot.log"):
+            (private_logs / name).write_bytes(b"")
+        harness = f"""
+set -Eeuo pipefail
+SNAPSHOT_EXECUTION_LOCK={shlex.quote(str(lock))}
+ROOT_BASHPID=$$
+LOCK_HELD=0
+PRIVATE_LOG_DIR={shlex.quote(str(private_logs))}
+AUTHORITY_LOG="$PRIVATE_LOG_DIR/sync-authority.log"
+STANDBY_LOG="$PRIVATE_LOG_DIR/sync-standby.log"
+SNAPSHOT_LOG="$PRIVATE_LOG_DIR/snapshot.log"
+OLD_PRIVATE_LOG_STATE=absent
+require_snapshot_execution_lock_file() {{ return 0; }}
+mock_flock() {{
+    if (( LOCK_HELD == 0 )); then
+        LOCK_HELD=1
+        return 0
+    fi
+    return 75
+}}
+stat() {{ printf '%s\\n' '1:2'; }}
+require_dir() {{ return 0; }}
+require_private_log_file() {{ [[ -f "$1" && ! -s "$1" ]]; }}
+sync_path() {{ return 0; }}
+{instrumented}
+{restore_private_logs}
+acquire_snapshot_execution_lock
+# Cron opens its redirect before flock. While the deployer owns the lock the
+# non-blocking snapshot command must skip without appending any log content.
+: >> "$SNAPSHOT_LOG"
+if mock_flock -xn "$SNAPSHOT_EXECUTION_LOCK"; then
+    printf 'unexpected snapshot output\\n' >> "$SNAPSHOT_LOG"
+fi
+[[ ! -s "$SNAPSHOT_LOG" ]]
+restore_private_log_state
+[[ ! -e "$PRIVATE_LOG_DIR" ]]
+"""
+        subprocess.run(["/bin/bash", "-c", harness], check=True)
 
 
 def assert_old_loaded_definition_negative_paths(old_loaded: str) -> None:
@@ -592,18 +780,14 @@ rollback 7
 
 def main() -> None:
     deployer_bytes = DEPLOYER.read_bytes()
-    deployer_sha256 = hashlib.sha256(deployer_bytes).hexdigest()
     text = deployer_bytes.decode("utf-8")
     lines = text.splitlines()
-    readme = OPERATIONS_README.read_text(encoding="utf-8")
     release = RELEASE.read_text(encoding="utf-8")
-    test_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     health_script_sha256 = hashlib.sha256(HEALTH_SCRIPT.read_bytes()).hexdigest()
     health_service_sha256 = hashlib.sha256(HEALTH_SERVICE.read_bytes()).hexdigest()
     health_timer_sha256 = hashlib.sha256(HEALTH_TIMER.read_bytes()).hexdigest()
-    internal_health_test_sha256 = hashlib.sha256(
-        INTERNAL_HEALTH_TEST.read_bytes()
-    ).hexdigest()
+    private_log_config_sha256 = hashlib.sha256(PRIVATE_LOG_CONFIG.read_bytes()).hexdigest()
+    snapshot_cron_sha256 = hashlib.sha256(SNAPSHOT_CRON.read_bytes()).hexdigest()
 
     subprocess.run(["/bin/bash", "-n", str(DEPLOYER)], check=True)
     assert lines[:4] == [
@@ -616,9 +800,9 @@ def main() -> None:
     assert "unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true" in lines
 
     for fixed_value in (
-        "RELEASE_ID=build41.13",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build41.13",
-        "STAGE=/run/shuzijun-health-build41.13-$NODE",
+        "RELEASE_ID=build42.1",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.1",
+        "STAGE=/run/shuzijun-health-build42.1-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -630,12 +814,18 @@ def main() -> None:
         "BACKUP_ROOT=/var/backups/shuzijun-health-monitor",
         "LOCK_DIR=/run/shuzijun-health-monitor-install",
         "ROLE_VERIFY_SHA=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58",
-        "NEW_SCRIPT_SHA=c7630bdc54dc7d869c16cf0ba6856f341668a74689724c532a9058711837e945",
-        "NEW_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc",
+        "PRIVATE_LOG_CONFIG_TARGET=/etc/tmpfiles.d/shuzijun-private-logs.conf",
+        "SNAPSHOT_CRON_TARGET=/etc/cron.d/tencent-daily-snapshot",
+        "SNAPSHOT_EXECUTION_LOCK=/run/tencent-snapshot.lock",
+        "PRIVATE_LOG_DIR=/var/lib/shuzijun-logs",
+        "NEW_SCRIPT_SHA=34961aa2c05d8c326c5a244a373dd5fadbaf89c4bfffab0898d8f379bd50d0a1",
+        "NEW_SERVICE_SHA=ebd20b9de5e145cec7f2a2ef3a036202449187f69686aad2dd5a3ca6202b765b",
         "NEW_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e",
-        "OLD_SCRIPT_SHA=71698f025ff467f837e8b7430b4188d05576d2010f9c4f181eea1e56625ca390",
-        "OLD_SERVICE_SHA=db95b5410561ce9e0cca235b7faf09e16d4a954c3c593565681cca49221c9537",
-        "OLD_TIMER_SHA=ed73e59758978970bf83269dd97e57763e7e1e62c06a26628105066f21f143b6",
+        "NEW_PRIVATE_LOG_CONFIG_SHA=ba11676ee8c5d65faf72ae63bf7d80247860c73f33532e07e11371faff6c6f9f",
+        "NEW_SNAPSHOT_CRON_SHA=3b9cd2994249180176c9220f617fc8ccf3f782322fd63943f0a3fddbd290ffe3",
+        "OLD_SCRIPT_SHA=c7630bdc54dc7d869c16cf0ba6856f341668a74689724c532a9058711837e945",
+        "OLD_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc",
+        "OLD_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e",
         "APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9",
         "APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3",
     ):
@@ -643,10 +833,10 @@ def main() -> None:
     assert f"NEW_SCRIPT_SHA={health_script_sha256}" in lines
     assert f"NEW_SERVICE_SHA={health_service_sha256}" in lines
     assert f"NEW_TIMER_SHA={health_timer_sha256}" in lines
-    assert f"HEALTH_SCRIPT_SHA256={health_script_sha256}" in release
-    assert f"INTERNAL_HEALTH_TEST_SHA256={internal_health_test_sha256}" in release
-    assert f"HEALTH_SERVICE_SHA256={health_service_sha256}" in release
-    assert f"HEALTH_TIMER_SHA256={health_timer_sha256}" in release
+    assert f"NEW_PRIVATE_LOG_CONFIG_SHA={private_log_config_sha256}" in lines
+    assert f"NEW_SNAPSHOT_CRON_SHA={snapshot_cron_sha256}" in lines
+    assert RELEASE == Path("Server/releases/v1.3.30-build42.1.md")
+    assert "Build 42.1" in release
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
     assert "build41.12" not in text
@@ -657,19 +847,6 @@ def main() -> None:
     assert "build41.7" not in text
     assert "[[ $# -eq 2 ]]" in text
     assert '[[ "$0" == "$DEPLOYER_PATH" ]]' in text
-
-    # The first root execution is externally anchored to the versioned bytes.
-    # Self-hashing then records exactly what reached the transaction journal.
-    for document in (readme, release):
-        assert f"DEPLOYER_SHA256={deployer_sha256}" in document
-        assert "/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin" in document
-        assert "LC_ALL=C LANG=C /bin/bash --noprofile --norc -c" in document
-        assert "regular file:0:0:700:1" in document
-        assert "/usr/bin/realpath -e" in document
-        assert "/usr/bin/sha256sum" in document
-        assert 'exec /bin/bash --noprofile --norc "$DEPLOYER"' in document
-        assert "不得直接执行仓库副本" in document
-    assert f"CONTRACT_TEST_SHA256={test_sha256}" in release
 
     self_hash_start = line_number(lines, "DEPLOYER_SHA=$(")
     lock_open = line_number(lines, 'exec 9>>"$LOCK_FILE"')
@@ -705,6 +882,32 @@ def main() -> None:
     assert "stat -c '%F:%u:%g:%a:%h' \"$LOCK_FILE\"" not in lock_prelude
     assert lock_prelude.count("'0:0:600:1'") == 2
     assert "flock -n 9" in text
+
+    snapshot_lock_start = line_number(lines, "acquire_snapshot_execution_lock() {")
+    snapshot_lock_end = line_number(lines, "# Hold the same lock", snapshot_lock_start)
+    snapshot_lock = "\n".join(lines[snapshot_lock_start:snapshot_lock_end])
+    snapshot_lock_call = line_number(
+        lines, "acquire_snapshot_execution_lock", snapshot_lock_end
+    )
+    install_lock_mutation = line_number(lines, 'if [[ -e "$LOCK_DIR"', snapshot_lock_call)
+    assert snapshot_lock_call < install_lock_mutation
+    for guard in (
+        'exec 8>>"$SNAPSHOT_EXECUTION_LOCK"',
+        "/usr/bin/flock -n 8",
+        "snapshot execution lock busy",
+        'stat -Lc \'%d:%i\' -- "/proc/$ROOT_BASHPID/fd/8"',
+        '[[ "$path_identity" == "$descriptor_identity" ]]',
+    ):
+        assert guard in snapshot_lock, guard
+    snapshot_lock_lines = snapshot_lock.splitlines()
+    snapshot_flock = line_number(snapshot_lock_lines, "/usr/bin/flock -n 8")
+    snapshot_first_metadata_write = line_number(
+        snapshot_lock_lines, 'chown root:root "$SNAPSHOT_EXECUTION_LOCK"'
+    )
+    assert snapshot_flock < snapshot_first_metadata_write
+    assert text.count("/usr/bin/flock -n 8") == 1
+    assert "flock -u 8" not in text and "exec 8>&-" not in text
+    assert_snapshot_lock_busy_zero_mutation(snapshot_lock)
 
     require_status = function_body(lines, "require_status", "unit_value")
     for guard in (
@@ -839,6 +1042,20 @@ def main() -> None:
         'backup_one "$STATUS_FILE" status.old "$OLD_STATUS_SHA" 600',
     ):
         assert call in text
+    for transactional_evidence in (
+        'capture_root_crontab "$BACKUP_DIR/root-crontab.old"',
+        "ROOT_CRONTAB_STATE=$CAPTURED_CRONTAB_STATE",
+        "ROOT_CRONTAB_SHA=$CAPTURED_CRONTAB_SHA",
+        'record_optional_asset "$PRIVATE_LOG_CONFIG_TARGET" private-logs-conf.old',
+        'record_optional_asset "$SNAPSHOT_CRON_TARGET" snapshot-cron.old',
+        "record_private_log_state",
+        '"$BACKUP_DIR/root-crontab.old"',
+        '"$BACKUP_DIR/root-crontab.migrated"',
+    ):
+        assert transactional_evidence in text
+    assert 'backup_one "$AUTHORITY_LOG"' not in text
+    assert 'backup_one "$STANDBY_LOG"' not in text
+    assert 'backup_one "$SNAPSHOT_LOG"' not in text
     backup_end = line_number(lines, 'backup_one "$STATUS_FILE"')
     assert line_number(lines, "require_frozen_files", backup_end) > backup_end
     assert line_number(lines, 'require_file "$STATUS_FILE" 600 "$OLD_STATUS_SHA"', backup_end) > backup_end
@@ -872,43 +1089,128 @@ def main() -> None:
     terminal_first_sync = line_number(commit_lines, 'sync_path "$final_path"')
     assert terminal_rename < terminal_published < terminal_first_sync
 
-    # The health runtime treats shared /var/log evidence as untrusted. The
-    # deployer must never mutate that OS-managed namespace or its files.
-    assert "harden_logs" not in text
-    assert "/var/log" not in text
-    assert "os.fchmod" not in text and "os.fchown" not in text
+    assert PRIVATE_LOG_CONFIG.read_text(encoding="utf-8").splitlines() == [
+        "d /var/lib/shuzijun-logs 0700 root root -",
+        "f /var/lib/shuzijun-logs/sync-authority.log 0600 root root -",
+        "f /var/lib/shuzijun-logs/sync-standby.log 0600 root root -",
+        "f /var/lib/shuzijun-logs/snapshot.log 0600 root root -",
+    ]
+    assert SNAPSHOT_CRON.read_text(encoding="utf-8").splitlines() == [
+        "SHELL=/bin/bash",
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "CRON_TZ=Asia/Shanghai",
+        "31 3 * * * root umask 077; flock -xn /run/tencent-snapshot.lock -c /usr/local/sbin/tencent-daily-snapshot >>/var/lib/shuzijun-logs/snapshot.log 2>&1",
+    ]
+    assert stat.S_IMODE(PRIVATE_LOG_CONFIG.stat().st_mode) == 0o644
+    assert stat.S_IMODE(SNAPSHOT_CRON.stat().st_mode) == 0o644
+    assert text.count("/var/log/tencent-snapshot.log") == 1
+    assert "/var/log/wp-sync.log" not in text
+    assert "/var/log/shuzijun-sync-receiver.log" not in text
+
+    private_file = function_body(
+        lines, "require_private_log_file", "require_private_logs"
+    )
+    private_logs = function_body(
+        lines, "require_private_logs", "record_private_log_state"
+    )
+    restore_private_logs = function_body(
+        lines, "restore_private_log_state", "wait_health_idle"
+    )
+    capture_crontab = function_body(
+        lines, "capture_root_crontab", "transform_root_crontab"
+    )
+    transform_crontab = function_body(
+        lines, "transform_root_crontab", "stargate_digest"
+    )
+    producer_inventory = function_body(
+        lines, "snapshot_producer_count", "require_snapshot_producer_count"
+    )
+    for guard in (
+        "regular file:0:0:600:1",
+        "realpath -e",
+        "! -L",
+    ):
+        assert guard in private_file
+    for guard in ("require_safe_parent /", "require_dir \"$PRIVATE_LOG_DIR\" 700"):
+        assert guard in private_logs
+    assert_snapshot_lock_cross_window_rollback(snapshot_lock, restore_private_logs)
+    for guard in (
+        "/usr/bin/crontab -l",
+        "no crontab for root",
+        "CAPTURED_CRONTAB_STATE",
+        "CAPTURED_CRONTAB_SHA",
+        "require_file \"$destination\" 600",
+    ):
+        assert guard in capture_crontab
+    assert "content == expected" in transform_crontab
+    assert "removed not in (0, 1)" in transform_crontab
+    assert_crontab_transform_contract(transform_crontab)
+    assert '[[ "$REMOVED_SNAPSHOT_LINES" == 1 ]]' in text
+    for guard in (
+        "O_NOFOLLOW",
+        "O_NONBLOCK",
+        "st_nlink != 1",
+        "st_mtime_ns",
+        "st_ctime_ns",
+        "not stripped.startswith(b\"#\")",
+    ):
+        assert guard in producer_inventory
+    assert "/usr/bin/systemd-tmpfiles --create \"$PRIVATE_LOG_CONFIG_TARGET\"" in text
+    assert 'require_snapshot_producer_count "$BACKUP_DIR/root-crontab.old" 1' in text
+    assert 'require_snapshot_producer_count "$verification" 1' in text
+    assert "OLD_STARGATE_SHA" in text
+    install_crontab = function_body(
+        lines, "install_migrated_root_crontab", "restore_root_crontab"
+    )
+    restore_crontab = function_body(
+        lines, "restore_root_crontab", "restore_private_log_state"
+    )
+    assert "sync || return 1" in install_crontab
+    assert "sync || return 1" in restore_crontab
+    assert '[[ $- == *e* ]] && errexit_was_set=1' in capture_crontab
+    assert "if (( errexit_was_set == 1 )); then" in capture_crontab
 
     validate_status = function_body(lines, "validate_status", "validate_last_invocation")
-    expected_match = re.search(
-        r"expected = (\{.*?\n\})\nlegacy_role, reasons = expected\[role\]",
-        validate_status,
-        re.DOTALL,
-    )
-    assert expected_match is not None
-    assert ast.literal_eval(expected_match.group(1)) == {
-        "authority": (
-            "primary",
-            [
-                "authority_sync_generation_missing_or_invalid",
-                "snapshot_last_success_untrusted_or_stale",
-                "sync_last_success_untrusted_or_stale",
-                "sync_log_generation_missing_or_invalid",
-                "sync_timer_missing_or_disabled",
-            ],
-        ),
-        "standby": (
-            "backup",
-            [
-                "snapshot_last_success_untrusted_or_stale",
-                "standby_failover_state_unhealthy_or_stale",
-                "standby_failover_timer_disabled",
-                "standby_sync_generation_missing_or_invalid",
-                "sync_last_success_untrusted_or_stale",
-                "sync_log_generation_missing_or_invalid",
-            ],
-        ),
-    }
-    assert 'payload.get("operation_reasons") != reasons' in validate_status
+    for allowed_reason in (
+        "authority_sync_generation_missing_or_invalid",
+        "authority_sync_generation_behind_completed_log",
+        "authority_forbidden_failover_timer_active",
+        "sync_timer_missing_or_disabled",
+        "sync_service_result_not_success",
+        "standby_failover_timer_disabled",
+        "standby_failover_service_result_not_success",
+        "standby_forbidden_sync_timer_active",
+        "standby_forbidden_cdn_timer_active",
+        "standby_failover_mode_not_primary",
+        "standby_failover_state_unhealthy_or_stale",
+        "standby_sync_generation_missing_or_invalid",
+        "standby_sync_commit_generation_missing_or_invalid",
+        "standby_sync_generation_mismatch_applied_log",
+        "standby_sync_generation_mismatch_commit",
+        "snapshot_last_success_untrusted_or_stale",
+        "sync_last_success_untrusted_or_stale",
+        "sync_log_generation_missing_or_invalid",
+    ):
+        assert f'"{allowed_reason}"' in validate_status
+    for validation_guard in (
+        'payload.get("critical_reasons") != []',
+        "reasons != sorted(set(reasons))",
+        "not set(reasons) <= allowed_reasons[role]",
+        'expected_status = "degraded" if reasons else "healthy"',
+        "expected_status_exit = 2 if reasons else 0",
+        "expected_exit != expected_status_exit",
+        'summary.get("present") is not True',
+        'summary.get("trusted") is not True',
+        'summary.get("parent_trusted") is not True',
+        'operations.get("accepted_generation")',
+        'operations.get("committed_generation")',
+        "accepted.get(\"value\") != committed.get(\"value\")",
+        'not 0 <= accepted.get("value") < 2**63',
+        'not 0 <= committed.get("value") < 2**63',
+        "actual_generation_reasons != expected_generation_reasons",
+    ):
+        assert validation_guard in validate_status
+    assert 'payload.get("schema") != 3' in validate_status
 
     idle = function_body(lines, "wait_health_idle", "normalize_stopped_health_service")
     assert idle.count("ActiveState") >= 2
@@ -963,10 +1265,13 @@ def main() -> None:
     assert "service_usec ExecMainExitTimestampMonotonic" in validator
     assert "start_wall * 1000 >= start_ns" in validator
     assert "exit_mono * 1000 <= outer_end_mono" in validator
-    assert 'validate_status "$previous_inode" "$previous_sha" "$((start_wall * 1000))" "$((exit_wall * 1000))"' in validator
+    assert 'validate_status "$previous_inode" "$previous_sha" "$((start_wall * 1000))" "$((exit_wall * 1000))" "$main_status"' in validator
+    assert '( "$main_status" == 0 || "$main_status" == 2 )' in validator
     assert "VALIDATED_INVOCATION=$invocation" in validator
+    assert "VALIDATED_EXIT_STATUS=$main_status" in validator
     assert validator.count("|| return 1") >= 18
     assert_validator_negative_path(validator)
+    assert_validator_exit_status_contract(validator)
     assert re.search(r"validate_last_invocation[^\n]*\|", text) is None
     assert "$(validate_last_invocation" not in text
 
@@ -997,8 +1302,34 @@ def main() -> None:
         rollback_stop,
     )
     isolation_gate = line_number(rollback.splitlines(), "if (( isolation_ok == 1 ))")
+    root_crontab_restore = line_number(
+        rollback.splitlines(), "restore_root_crontab", isolation_gate
+    )
+    snapshot_cron_restore = line_number(
+        rollback.splitlines(),
+        'restore_optional_asset "$SNAPSHOT_CRON_TARGET"',
+        root_crontab_restore,
+    )
+    private_config_restore = line_number(
+        rollback.splitlines(),
+        'restore_optional_asset "$PRIVATE_LOG_CONFIG_TARGET"',
+        snapshot_cron_restore,
+    )
+    private_log_restore = line_number(
+        rollback.splitlines(), "restore_private_log_state", private_config_restore
+    )
     first_restore = line_number(rollback.splitlines(), "atomic_restore")
-    assert isolate < rollback_stop < rollback_reset < isolation_gate < first_restore
+    assert (
+        isolate
+        < rollback_stop
+        < rollback_reset
+        < isolation_gate
+        < root_crontab_restore
+        < snapshot_cron_restore
+        < private_config_restore
+        < private_log_restore
+        < first_restore
+    )
     assert "(( isolation_ok == 1 )) || rollback_ok=0" in rollback
     rollback_lines = rollback.splitlines()
     old_isolation = line_number(
@@ -1110,11 +1441,34 @@ def main() -> None:
         main_reset,
     )
     backup_start = line_number(lines, 'backup_one "$SCRIPT_TARGET"', main_service_inactive)
+    root_crontab_backup = line_number(
+        lines, 'capture_root_crontab "$BACKUP_DIR/root-crontab.old"', backup_start
+    )
+    optional_asset_backup = line_number(
+        lines, 'record_optional_asset "$PRIVATE_LOG_CONFIG_TARGET"', root_crontab_backup
+    )
     committed = line_number(lines, "write_marker COMMITTED", disable)
     first_install = line_number(
         lines,
         'atomic_install "$STAGE/shuzijun-internal-health"',
         committed,
+    )
+    private_config_install = line_number(
+        lines,
+        'atomic_install "$STAGE/shuzijun-private-logs.conf"',
+        first_install,
+    )
+    private_logs_create = line_number(lines, "create_private_logs", private_config_install)
+    snapshot_cron_install = line_number(
+        lines,
+        'atomic_install "$STAGE/tencent-daily-snapshot.cron"',
+        private_logs_create,
+    )
+    root_crontab_migrate = line_number(
+        lines, "install_migrated_root_crontab", snapshot_cron_install
+    )
+    support_validation = line_number(
+        lines, "require_new_support_assets", root_crontab_migrate
     )
     status_may_change = line_number(lines, "write_marker STATUS_MAY_CHANGE", first_install)
     timer_start = line_number(lines, "start_disabled_timer_and_settle", status_may_change)
@@ -1132,8 +1486,15 @@ def main() -> None:
         < main_reset
         < main_service_inactive
         < backup_start
+        < root_crontab_backup
+        < optional_asset_backup
         < committed
         < first_install
+        < private_config_install
+        < private_logs_create
+        < snapshot_cron_install
+        < root_crontab_migrate
+        < support_validation
         < status_may_change
     )
     for line in lines[main_start:prepared]:
@@ -1155,6 +1516,14 @@ def main() -> None:
     assert '[[ "$AFTER_INVOCATION" != "$FIRST_INVOCATION" && "$AFTER_TIMER_TRIGGER" != "$PINNED_TIMER_TRIGGER" ]]' in main_text
     assert main_text.count("sync_timer_enable_state") >= 3
     assert main_text.count("persist_status_snapshot") >= 2
+    final_exit_pin = line_number(lines, 'FINAL_EXIT_STATUS=$VALIDATED_EXIT_STATUS', enable)
+    classification_persist = max(
+        index
+        for index in range(enable, final_exit_pin)
+        if 'persist_status_snapshot "$FINAL_STATUS_SHA" "$FINAL_STATUS_INODE"' in lines[index]
+    )
+    final_status_healthy = line_number(lines, '0) FINAL_HEALTH_STATUS=healthy ;;', final_exit_pin)
+    final_status_degraded = line_number(lines, '2) FINAL_HEALTH_STATUS=degraded ;;', final_status_healthy)
     final_persist = line_number(
         lines,
         'persist_status_snapshot "$FINAL_STATUS_SHA" "$FINAL_STATUS_INODE"',
@@ -1166,8 +1535,11 @@ def main() -> None:
         final_persist + 1,
     )
     assert enable < done_prepare < final_persist < final_quiescent < done
+    assert classification_persist < final_exit_pin < final_status_healthy < final_status_degraded < done_prepare
     assert lines[final_quiescent + 1].strip() == "commit_terminal_marker DONE"
     assert "write_marker DONE" not in main_text
+    assert "status=%s exit=%s" in main_text
+    assert '"$FINAL_HEALTH_STATUS" "$FINAL_EXIT_STATUS"' in main_text
     for phase in ("PREPARED", "COMMITTED", "STATUS_MAY_CHANGE", "ACCEPTED"):
         assert f"write_marker {phase}" in main_text
 

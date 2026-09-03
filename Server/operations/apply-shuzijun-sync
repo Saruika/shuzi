@@ -9,7 +9,8 @@ export PATH LC_ALL LANG
 unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true
 
 SITE=/var/www/html/shuzijun.com.cn
-LOG=/var/log/shuzijun-sync-receiver.log
+LOG_ROOT=/var/lib/shuzijun-logs
+LOG=$LOG_ROOT/sync-standby.log
 VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security
 AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
 AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
@@ -17,31 +18,255 @@ SYNC_ALLOWED_SIGNERS=/etc/shuzijun/sync-signers
 SYNC_ROOT=/var/lib/shuzijun-sync
 CLAIM_ROOT=/var/lib/shuzijun-sync/incoming
 STATE_ROOT=/var/lib/shuzijun-sync/state
+SITE_OPERATION_LOCK="$SYNC_ROOT/site-operation.lock"
 LAST_ACCEPTED_GENERATION="$STATE_ROOT/highest-accepted-generation"
+UPLOADS_RELEASE_ROOT="$SYNC_ROOT/uploads-releases"
+ACTIVE_UPLOADS_GENERATION="$STATE_ROOT/active-uploads-generation"
+UPLOADS_TRANSACTION="$STATE_ROOT/uploads-transaction.json"
+ACTIVE_RELEASE_RECORD="$STATE_ROOT/active-release-v4.json"
+FPM_SERVICE=php8.3-fpm.service
+FPM_GUARD_UNIT=shuzijun-sync-fpm-guard.service
+FPM_GUARD_UNIT_FILE=/etc/systemd/system/shuzijun-sync-fpm-guard.service
+FPM_GUARD_UNIT_SHA256=8d5b40388450c112c1f0ee84456ee960ae6a204323e8137ea0ec4f1c7a1d620e
+FPM_GUARD_LEASE="$STATE_ROOT/fpm-activation-guard.lease"
+FPM_GUARD_ARMED="$STATE_ROOT/fpm-activation-guard-v4.armed"
+FPM_GUARD_COMMIT="$STATE_ROOT/fpm-activation-guard-v4.committed"
 SELF=/usr/local/sbin/apply-shuzijun-sync
-SYNC_PROTOCOL=shuzijun-sync-receiver-v3-signed-uploads-only
+SYNC_PROTOCOL=shuzijun-sync-receiver-v4-transactional-uploads
 
 test "$SITE" = /var/www/html/shuzijun.com.cn
-test -x "$VERIFY"
+
+# The receiver runs as an SSH forced command rather than a long-lived systemd
+# unit. Bound every service-manager and WordPress client invocation locally so
+# a stalled D-Bus client or database subprocess cannot indefinitely postpone
+# the EXIT rollback/isolation supervisor.
+run_with_deadline() {
+    local deadline=$1 kill_grace=$2
+    shift 2
+    [[ "$deadline" =~ ^[1-9][0-9]{0,5}$ \
+        && "$kill_grace" =~ ^[1-9][0-9]{0,3}$ && $# -gt 0 ]] || return 1
+    # fd 9 belongs to callers that supply an fd-pinned inline Python helper.
+    # Keep the deadline supervisor itself on a disjoint descriptor; otherwise
+    # its here-document consumes/replaces the caller's program before Popen.
+    /usr/bin/python3 -I /proc/self/fd/19 "$deadline" "$kill_grace" "$@" 19<<'PY'
+import ctypes
+import os
+import signal
+import subprocess
+import sys
+import time
+
+deadline = int(sys.argv[1])
+kill_grace = int(sys.argv[2])
+command = sys.argv[3:]
+if not 1 <= deadline <= 86400 or not 1 <= kill_grace <= 60 or not command:
+    raise SystemExit(1)
+
+# Several bounded helpers execute an inline, fd-pinned Python program at
+# /proc/self/fd/9. Popen closes inherited descriptors by default; preserve
+# exactly the caller-owned fd 9 only for that explicit command form.  The
+# supervisor source itself is on fd 19 and is never passed to the child.
+pass_fds = (9,) if "/proc/self/fd/9" in command else ()
+child = subprocess.Popen(command, start_new_session=True, pass_fds=pass_fds)
+
+class ForwardedSignal(Exception):
+    def __init__(self, number):
+        self.number = number
+
+def forward(number, _frame):
+    raise ForwardedSignal(number)
+
+def signal_group(number):
+    try:
+        os.killpg(child.pid, number)
+    except ProcessLookupError:
+        pass
+
+def group_alive():
+    try:
+        os.killpg(child.pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+def reinforce_cleanup(number, _frame):
+    # Once teardown begins, later signals may reinforce the child-group stop
+    # but must never unwind the supervisor before SIGKILL/wait completes.
+    signal_group(number)
+
+def stop_group(first_signal):
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, reinforce_cleanup)
+    signal_group(first_signal)
+    limit = time.monotonic() + kill_grace
+    while group_alive() and time.monotonic() < limit:
+        child.poll()
+        time.sleep(0.05)
+    if group_alive():
+        signal_group(signal.SIGKILL)
+    while True:
+        try:
+            child.wait()
+            break
+        except InterruptedError:
+            continue
+
+previous = dict(
+    (number, signal.signal(number, forward))
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+)
+try:
+    try:
+        status = child.wait(timeout=deadline)
+    except subprocess.TimeoutExpired:
+        stop_group(signal.SIGTERM)
+        raise SystemExit(124)
+    except ForwardedSignal as interruption:
+        stop_group(interruption.number)
+        raise SystemExit(128 + interruption.number)
+finally:
+    for number, handler in previous.items():
+        signal.signal(number, handler)
+
+if status < 0:
+    status = 128 - status
+raise SystemExit(status)
+PY
+}
+
+systemctl() {
+    run_with_deadline 20 5 /usr/bin/systemctl "$@"
+}
+
+wp() {
+    run_with_deadline 300 10 /usr/bin/wp "$@"
+}
+
+nginx() {
+    run_with_deadline 20 5 /usr/sbin/nginx "$@"
+}
+
+gzip() {
+    run_with_deadline 300 10 /usr/bin/gzip "$@"
+}
+
+sync() {
+    run_with_deadline 120 10 /usr/bin/sync "$@"
+}
+
+verify_webroot_security() {
+    run_with_deadline 1800 10 "$VERIFY" "$SITE"
+}
+
+append_secure_log() {
+    local message=$1
+    /usr/bin/timeout --signal=TERM --kill-after=5s 30s \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$LOG_ROOT" "$LOG" "$message" 9<<'PY'
+import os
+import hashlib
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+target = Path(sys.argv[2])
+message = sys.argv[3]
+if (root != Path("/var/lib/shuzijun-logs")
+        or target != root / "sync-standby.log"
+        or not message or "\n" in message or "\r" in message
+        or "\x00" in message or len(message.encode("utf-8")) > 4096):
+    raise SystemExit(1)
+for parent in (Path("/var"), Path("/var/lib")):
+    metadata = parent.lstat()
+    if (parent.resolve(strict=True) != parent or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != 0 or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o755):
+        raise SystemExit(1)
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700):
+    raise SystemExit(1)
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+created = False
+try:
+    try:
+        before = os.stat(target.name, dir_fd=directory, follow_symlinks=False)
+        descriptor = os.open(
+            target.name,
+            os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=directory,
+        )
+    except FileNotFoundError:
+        descriptor = os.open(
+            target.name,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_EXCL
+            | os.O_CLOEXEC | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
+        os.fchmod(descriptor, 0o600)
+        before = os.fstat(descriptor)
+        created = True
+    try:
+        current = os.fstat(descriptor)
+        path_now = os.stat(target.name, dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(current.st_mode) or current.st_uid != 0
+                or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o600
+                or current.st_nlink != 1 or current.st_dev != metadata.st_dev
+                or (current.st_dev, current.st_ino) != (path_now.st_dev, path_now.st_ino)
+                or (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino)):
+            raise SystemExit(1)
+        payload = message.encode("utf-8") + b"\n"
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise SystemExit(1)
+            view = view[written:]
+        os.fsync(descriptor)
+        after = os.fstat(descriptor)
+        path_after = os.stat(target.name, dir_fd=directory, follow_symlinks=False)
+        if ((after.st_dev, after.st_ino) != (current.st_dev, current.st_ino)
+                or (path_after.st_dev, path_after.st_ino) != (current.st_dev, current.st_ino)
+                or after.st_size < current.st_size + len(payload)):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    if created:
+        os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
 
 verify_authority_role() {
     local expected_role=$1 verifier_fd_path=/proc/self/fd/7 verifier_sha256
     local authority_verify_parent authority_verify_parent_mode verifier_status=0
-    test -f "$AUTHORITY_VERIFY" && test -x "$AUTHORITY_VERIFY" && test ! -L "$AUTHORITY_VERIFY"
-    test "$(realpath -e -- "$AUTHORITY_VERIFY")" = "$AUTHORITY_VERIFY"
+    test -f "$AUTHORITY_VERIFY" && test -x "$AUTHORITY_VERIFY" \
+        && test ! -L "$AUTHORITY_VERIFY" || return 1
+    test "$(realpath -e -- "$AUTHORITY_VERIFY")" = "$AUTHORITY_VERIFY" || return 1
     for authority_verify_parent in /usr /usr/local /usr/local/sbin; do
-        test "$(realpath -e -- "$authority_verify_parent")" = "$authority_verify_parent"
-        test -d "$authority_verify_parent" && test ! -L "$authority_verify_parent"
-        test "$(stat -c '%u' "$authority_verify_parent")" = 0
-        authority_verify_parent_mode=$(stat -c '%a' "$authority_verify_parent")
-        (( (8#$authority_verify_parent_mode & 8#022) == 0 ))
+        test "$(realpath -e -- "$authority_verify_parent")" = "$authority_verify_parent" \
+            || return 1
+        test -d "$authority_verify_parent" && test ! -L "$authority_verify_parent" \
+            || return 1
+        test "$(stat -c '%u' "$authority_verify_parent")" = 0 || return 1
+        authority_verify_parent_mode=$(stat -c '%a' "$authority_verify_parent") || return 1
+        (( (8#$authority_verify_parent_mode & 8#022) == 0 )) || return 1
     done
-    exec 7<"$AUTHORITY_VERIFY"
-    test "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" = '0:0:1:755'
-    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }')
-    test "$verifier_sha256" = "$AUTHORITY_VERIFY_SHA256"
-    if ! env -i PATH="$PATH" LC_ALL=C LANG=C \
-        /usr/bin/python3 -I "$verifier_fd_path" "$expected_role"; then
+    exec 7<"$AUTHORITY_VERIFY" || return 1
+    test "$(stat -Lc '%u:%g:%h:%a' "$verifier_fd_path")" = '0:0:1:755' \
+        || { exec 7<&-; return 1; }
+    verifier_sha256=$(sha256sum "$verifier_fd_path" | awk '{ print $1 }') \
+        || { exec 7<&-; return 1; }
+    test "$verifier_sha256" = "$AUTHORITY_VERIFY_SHA256" \
+        || { exec 7<&-; return 1; }
+    if ! /usr/bin/timeout --signal=TERM --kill-after=5s 30s \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I "$verifier_fd_path" "$expected_role" >/dev/null; then
         verifier_status=1
     fi
     exec 7<&-
@@ -51,34 +276,356 @@ verify_authority_role() {
 validate_allowed_signers() {
     local parent parent_mode
     for parent in /etc /etc/shuzijun; do
-        test "$(realpath -e -- "$parent")" = "$parent"
-        test -d "$parent" && test ! -L "$parent"
-        test "$(stat -c '%u:%g:%a' "$parent")" = '0:0:755'
+        test "$(realpath -e -- "$parent")" = "$parent" || return 1
+        test -d "$parent" && test ! -L "$parent" || return 1
+        test "$(stat -c '%u:%g:%a' "$parent")" = '0:0:755' || return 1
     done
-    test -f "$SYNC_ALLOWED_SIGNERS" && test ! -L "$SYNC_ALLOWED_SIGNERS"
-    test "$(realpath -e -- "$SYNC_ALLOWED_SIGNERS")" = "$SYNC_ALLOWED_SIGNERS"
-    test "$(stat -c '%u:%g:%h:%a' "$SYNC_ALLOWED_SIGNERS")" = '0:0:1:644'
+    test -f "$SYNC_ALLOWED_SIGNERS" && test ! -L "$SYNC_ALLOWED_SIGNERS" || return 1
+    test "$(realpath -e -- "$SYNC_ALLOWED_SIGNERS")" = "$SYNC_ALLOWED_SIGNERS" || return 1
+    test "$(stat -c '%u:%g:%h:%a' "$SYNC_ALLOWED_SIGNERS")" = '0:0:1:644' || return 1
 }
 
 validate_sync_state_roots() {
     local parent state_directory
     for parent in /var /var/lib; do
-        test "$(realpath -e -- "$parent")" = "$parent"
-        test -d "$parent" && test ! -L "$parent"
-        test "$(stat -c '%u:%g:%a' "$parent")" = '0:0:755'
+        test "$(realpath -e -- "$parent")" = "$parent" || return 1
+        test -d "$parent" && test ! -L "$parent" || return 1
+        test "$(stat -c '%u:%g:%a' "$parent")" = '0:0:755' || return 1
     done
     for state_directory in "$SYNC_ROOT" "$CLAIM_ROOT" "$STATE_ROOT"; do
-        test "$(realpath -e -- "$state_directory")" = "$state_directory"
-        test -d "$state_directory" && test ! -L "$state_directory"
-        test "$(stat -c '%u:%g:%a' "$state_directory")" = '0:0:700'
+        test "$(realpath -e -- "$state_directory")" = "$state_directory" || return 1
+        test -d "$state_directory" && test ! -L "$state_directory" || return 1
+        test "$(stat -c '%u:%g:%a' "$state_directory")" = '0:0:700' || return 1
     done
+}
+
+clean_stale_state_temporaries() {
+    # The caller holds the root-only site-operation lock, so no sender,
+    # receiver or deployer owns a state publication. Recover only exact
+    # 128-bit-token temporary names created by this receiver. Unknown hidden
+    # entries and unsafe inodes remain fail-closed for operator inspection.
+    /usr/bin/timeout --signal=TERM --kill-after=2s 10s \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 "$STATE_ROOT" 9<<'PY'
+import os
+import re
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+root_meta = root.lstat()
+if (root != Path("/var/lib/shuzijun-sync/state")
+        or root.resolve(strict=True) != root
+        or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700):
+    raise SystemExit(1)
+
+temporary_limits = {
+    ".highest-accepted.": 32,
+    ".uploads-transaction.": 32 * 1024,
+    ".active-generation.": 32,
+    ".active-release-v4.": 1024,
+    ".bootstrap-fpm-commit.": 192,
+}
+temporary_pattern = re.compile(
+    r"(" + "|".join(re.escape(value) for value in temporary_limits) + r")"
+    r"([0-9a-f]{32})"
+)
+rollback_pattern = re.compile(r"\.rollback-database\.[1-9][0-9]{0,18}")
+guard_temporary_pattern = re.compile(r"\.fpm-guard-marker\.[0-9a-f]{32}")
+directory = os.open(
+    root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+)
+removed = False
+try:
+    for entry in root.iterdir():
+        if not entry.name.startswith("."):
+            continue
+        if rollback_pattern.fullmatch(entry.name):
+            continue
+        if guard_temporary_pattern.fullmatch(entry.name):
+            # Guard marker writers do not take the site-operation lock. Their
+            # temporaries are recovered only while holding the guard lease.
+            continue
+        match = temporary_pattern.fullmatch(entry.name)
+        if match is None:
+            raise RuntimeError("unknown state temporary")
+        metadata = os.stat(
+            entry.name, dir_fd=directory, follow_symlinks=False
+        )
+        limit = temporary_limits[match.group(1)]
+        if (not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != 0 or metadata.st_gid != 0
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+                or metadata.st_size > limit):
+            raise RuntimeError("unsafe state temporary")
+        os.unlink(entry.name, dir_fd=directory)
+        removed = True
+    if removed:
+        os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
+enter_site_operation_lock_context() {
+    local expected_fd=${SHUZIJUN_SITE_OPERATION_LOCK_FD-}
+    local lock_fd_metadata lock_fd_identity lock_path_identity
+    local lock_fd_device lock_root_device locked_path_identity
+    if [[ "$expected_fd" != 8 ]]; then
+        [[ -z "$expected_fd" ]] || return 1
+        # Python opens the fixed lock with O_NOFOLLOW and re-execs this exact
+        # script while preserving SSH stdin. fd 8 then remains open for the
+        # complete protocol/apply transaction.
+        exec env -i PATH="$PATH" LC_ALL=C LANG=C \
+            /usr/bin/python3 -I /proc/self/fd/9 \
+            "$SELF" "$SYNC_ROOT" "$SITE_OPERATION_LOCK" "$@" 9<<'PY'
+import os
+import stat
+import sys
+from pathlib import Path
+
+script = Path(sys.argv[1])
+root = Path(sys.argv[2])
+lock = Path(sys.argv[3])
+arguments = sys.argv[4:]
+root_meta = root.lstat()
+if (script != Path("/usr/local/sbin/apply-shuzijun-sync")
+        or root != Path("/var/lib/shuzijun-sync")
+        or lock != root / "site-operation.lock"
+        or root.resolve(strict=True) != root
+        or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700):
+    raise SystemExit(1)
+descriptor = os.open(lock, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    metadata = os.fstat(descriptor)
+    named = lock.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+            or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)):
+        raise RuntimeError("unsafe site operation lock")
+    if descriptor != 8:
+        os.dup2(descriptor, 8, inheritable=True)
+    else:
+        os.set_inheritable(8, True)
+finally:
+    if descriptor != 8:
+        os.close(descriptor)
+environment = {
+    "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    "LC_ALL": "C",
+    "LANG": "C",
+    "SHUZIJUN_SITE_OPERATION_LOCK_FD": "8",
+}
+os.execve("/bin/bash", ["/bin/bash", str(script), *arguments], environment)
+PY
+    fi
+    lock_fd_metadata=$(stat -Lc '%u:%g:%h:%a' /proc/self/fd/8) || return 1
+    [[ "$lock_fd_metadata" == '0:0:1:600' ]] || return 1
+    lock_fd_identity=$(stat -Lc '%d:%i' /proc/self/fd/8) || return 1
+    lock_path_identity=$(stat -Lc '%d:%i' "$SITE_OPERATION_LOCK") || return 1
+    [[ "$lock_fd_identity" == "$lock_path_identity" ]] || return 1
+    lock_fd_device=$(stat -Lc '%d' /proc/self/fd/8) || return 1
+    lock_root_device=$(stat -Lc '%d' "$SYNC_ROOT") || return 1
+    [[ "$lock_fd_device" == "$lock_root_device" ]] || return 1
+    flock -n 8 || return 1
+    locked_path_identity=$(stat -Lc '%d:%i' "$SITE_OPERATION_LOCK") || return 1
+    [[ "$lock_fd_identity" == "$locked_path_identity" ]] || return 1
+}
+
+clean_stale_claims() {
+    # The exclusive site lock proves no other receiver can own a claim. Remove
+    # only exact receiver-created, root-only trees; any unknown entry or unsafe
+    # inode fails closed and remains available for operator inspection.
+    /usr/bin/timeout --signal=TERM --kill-after=10s 30m \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 "$CLAIM_ROOT" 9<<'PY'
+import os
+import re
+import shutil
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700):
+    raise SystemExit(1)
+if not shutil.rmtree.avoids_symlink_attacks:
+    raise SystemExit(1)
+name = re.compile(r"batch\.[A-Za-z0-9]+")
+claims = []
+for entry in root.iterdir():
+    if not name.fullmatch(entry.name):
+        raise SystemExit(1)
+    claims.append(entry)
+
+for claim in claims:
+    claim_metadata = claim.lstat()
+    if (not stat.S_ISDIR(claim_metadata.st_mode) or claim_metadata.st_uid != 0
+            or claim_metadata.st_gid != 0 or stat.S_IMODE(claim_metadata.st_mode) != 0o700
+            or claim_metadata.st_dev != metadata.st_dev):
+        raise SystemExit(1)
+    for directory, directory_names, file_names, directory_fd in os.fwalk(
+        claim, topdown=True, follow_symlinks=False
+    ):
+        current = os.fstat(directory_fd)
+        if (not stat.S_ISDIR(current.st_mode) or current.st_uid != 0
+                or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o700
+                or current.st_dev != metadata.st_dev):
+            raise SystemExit(1)
+        for child_name in directory_names:
+            child = os.stat(child_name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISDIR(child.st_mode) or child.st_uid != 0
+                    or child.st_gid != 0 or stat.S_IMODE(child.st_mode) != 0o700
+                    or child.st_dev != metadata.st_dev):
+                raise SystemExit(1)
+        for child_name in file_names:
+            child = os.stat(child_name, dir_fd=directory_fd, follow_symlinks=False)
+            if (not stat.S_ISREG(child.st_mode) or child.st_uid != 0
+                    or child.st_gid != 0 or stat.S_IMODE(child.st_mode) != 0o600
+                    or child.st_nlink != 1 or child.st_dev != metadata.st_dev):
+                raise SystemExit(1)
+
+for claim in claims:
+    shutil.rmtree(claim)
+if claims:
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+PY
+}
+
+persist_new_claim() {
+    local claim=$1
+    run_with_deadline 5 2 /usr/bin/python3 -I /proc/self/fd/9 \
+        "$CLAIM_ROOT" "$claim" 9<<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+claim = Path(sys.argv[2])
+root_meta = root.lstat()
+if (root != Path("/var/lib/shuzijun-sync/incoming")
+        or root.resolve(strict=True) != root
+        or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700
+        or claim.parent != root
+        or re.fullmatch(r"batch\.[A-Za-z0-9]{6}", claim.name) is None):
+    raise SystemExit(1)
+
+root_descriptor = os.open(
+    root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+)
+claim_descriptor = -1
+try:
+    opened_root = os.fstat(root_descriptor)
+    named_root = root.lstat()
+    if ((opened_root.st_dev, opened_root.st_ino)
+            != (named_root.st_dev, named_root.st_ino)):
+        raise RuntimeError("claim root changed")
+    claim_descriptor = os.open(
+        claim.name,
+        os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+        dir_fd=root_descriptor,
+    )
+    claim_meta = os.fstat(claim_descriptor)
+    named_claim = os.stat(
+        claim.name, dir_fd=root_descriptor, follow_symlinks=False
+    )
+    if (not stat.S_ISDIR(claim_meta.st_mode)
+            or claim_meta.st_uid != 0 or claim_meta.st_gid != 0
+            or stat.S_IMODE(claim_meta.st_mode) != 0o700
+            or claim_meta.st_dev != root_meta.st_dev
+            or (claim_meta.st_dev, claim_meta.st_ino)
+                != (named_claim.st_dev, named_claim.st_ino)
+            or os.listdir(claim_descriptor)):
+        raise RuntimeError("unsafe new claim")
+    # Persist the new directory inode before its parent dirent, then return
+    # only after reopening-by-name evidence was checked above.
+    os.fsync(claim_descriptor)
+    os.fsync(root_descriptor)
+finally:
+    if claim_descriptor >= 0:
+        os.close(claim_descriptor)
+    os.close(root_descriptor)
+PY
+}
+
+clean_stale_rollback_sql() {
+    # The exclusive site lock proves that no live receiver can own one of these
+    # process-scoped plaintext rollback files.  A SIGKILL can bypass EXIT, so a
+    # later receiver must remove only the exact, root-only inode shape that this
+    # script creates.  Unknown names or metadata are preserved and fail closed.
+    run_with_deadline 300 10 /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" 9<<'PY'
+import os
+import re
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+root_meta = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700):
+    raise SystemExit(1)
+
+pattern = re.compile(r"\.rollback-database\.[1-9][0-9]{0,18}")
+stale = []
+for entry in root.iterdir():
+    if not entry.name.startswith(".rollback-database."):
+        continue
+    if not pattern.fullmatch(entry.name):
+        raise SystemExit(1)
+    metadata = entry.lstat()
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev):
+        raise SystemExit(1)
+    stale.append(entry)
+
+if stale:
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        for entry in stale:
+            entry.unlink()
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+PY
+}
+
+remove_claim_tree() {
+    local claim=$1
+    /usr/bin/timeout --signal=TERM --kill-after=10s 30m \
+        /usr/bin/rm -rf --one-file-system -- "$claim" || return 1
+    sync -f "$CLAIM_ROOT" || return 1
 }
 
 read_control_frame() {
     local claim=$1
     # Python source is carried on fd 9 so stdin remains the encrypted SSH
     # transport. Read only two bounded control records before authentication.
-    env -i PATH="$PATH" LC_ALL=C LANG=C \
+    /usr/bin/timeout --signal=TERM --kill-after=10s 30m \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
         /usr/bin/python3 -I /proc/self/fd/9 "$claim" 9<<'PY'
 import os
 import stat
@@ -137,20 +684,23 @@ PY
 }
 
 verify_control_signature() {
-    local claim=$1 manifest="$claim/shuzijun-sync-manifest.json"
+    local claim=$1
+    local manifest="$claim/shuzijun-sync-manifest.json"
     local signature="$manifest.sig"
     validate_allowed_signers
     test -f "$manifest" && test ! -L "$manifest"
     test -f "$signature" && test ! -L "$signature"
     test "$(stat -c '%u:%g:%h:%a' "$manifest")" = '0:0:1:600'
     test "$(stat -c '%u:%g:%h:%a' "$signature")" = '0:0:1:600'
-    ssh-keygen -Y verify -f "$SYNC_ALLOWED_SIGNERS" -I shuzijun-sync \
+    /usr/bin/timeout --signal=TERM --kill-after=5s 30s \
+        ssh-keygen -Y verify -f "$SYNC_ALLOWED_SIGNERS" -I shuzijun-sync \
         -n shuzijun-sync -s "$signature" < "$manifest" >/dev/null
 }
 
 ingest_signed_payload() {
     local claim=$1
-    env -i PATH="$PATH" LC_ALL=C LANG=C \
+    /usr/bin/timeout --signal=TERM --kill-after=10s 8h \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
         /usr/bin/python3 -I /proc/self/fd/9 "$claim" 9<<'PY'
 import hashlib
 import json
@@ -275,13 +825,598 @@ print(generation)
 PY
 }
 
+prepare_database_sql() {
+    local claim=$1
+    # Authenticate and ingest the compressed bytes first, then stream them
+    # through a single-member gzip decoder with an absolute output bound.  The
+    # completed SQL inode is linked into place only after CRC/EOF, size,
+    # free-space and metadata checks all pass.
+    /usr/bin/timeout --signal=TERM --kill-after=10s 30m \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 "$claim" 9<<'PY'
+import ctypes
+import os
+import stat
+import sys
+import tempfile
+import zlib
+from pathlib import Path
+
+MAX_DATABASE_SQL_BYTES = 4 * 1024 * 1024 * 1024
+MIN_FREE_RESERVE = 1024 * 1024 * 1024
+INPUT_CHUNK = 1024 * 1024
+OUTPUT_CHUNK = 1024 * 1024
+
+root = Path(sys.argv[1])
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700):
+    raise SystemExit(1)
+
+source = root / "shuzijun-sync.sql.gz"
+source_metadata = source.lstat()
+if (not stat.S_ISREG(source_metadata.st_mode) or source_metadata.st_uid != 0
+        or source_metadata.st_gid != 0 or stat.S_IMODE(source_metadata.st_mode) != 0o600
+        or source_metadata.st_nlink != 1):
+    raise SystemExit(1)
+destination = root / "shuzijun-sync.sql"
+try:
+    destination.lstat()
+except FileNotFoundError:
+    pass
+else:
+    raise SystemExit(1)
+
+temp_descriptor, temp_name = tempfile.mkstemp(prefix=".database-sql.", dir=root)
+temp_path = Path(temp_name)
+decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+total = 0
+
+def write_output(payload):
+    global total
+    if not payload:
+        return
+    total += len(payload)
+    if total > MAX_DATABASE_SQL_BYTES:
+        raise SystemExit(1)
+    filesystem = os.statvfs(root)
+    if filesystem.f_bavail * filesystem.f_frsize < MIN_FREE_RESERVE + len(payload):
+        raise SystemExit(1)
+    view = memoryview(payload)
+    while view:
+        written = os.write(temp_descriptor, view)
+        if written <= 0:
+            raise SystemExit(1)
+        view = view[written:]
+
+try:
+    os.fchmod(temp_descriptor, 0o600)
+    with source.open("rb", buffering=0) as compressed:
+        while True:
+            compressed_chunk = compressed.read(INPUT_CHUNK)
+            if not compressed_chunk:
+                break
+            pending = compressed_chunk
+            while pending:
+                output = decoder.decompress(pending, OUTPUT_CHUNK)
+                write_output(output)
+                pending = decoder.unconsumed_tail
+                if decoder.eof:
+                    if decoder.unused_data or pending or compressed.read(1):
+                        raise SystemExit(1)
+                    break
+            if decoder.eof:
+                break
+    if not decoder.eof:
+        raise SystemExit(1)
+    write_output(decoder.flush())
+    if total == 0:
+        raise SystemExit(1)
+    os.fsync(temp_descriptor)
+    completed = os.fstat(temp_descriptor)
+    if (not stat.S_ISREG(completed.st_mode) or completed.st_uid != 0
+            or completed.st_gid != 0 or stat.S_IMODE(completed.st_mode) != 0o600
+            or completed.st_nlink != 1 or completed.st_size != total):
+        raise SystemExit(1)
+    os.close(temp_descriptor)
+    temp_descriptor = -1
+    named = temp_path.lstat()
+    if (named.st_dev, named.st_ino) != (completed.st_dev, completed.st_ino):
+        raise SystemExit(1)
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise SystemExit(1)
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(temp_path), -100, os.fsencode(destination), 1) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if temp_descriptor >= 0:
+        os.close(temp_descriptor)
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        pass
+PY
+}
+
+prepare_backup_destination() {
+    local stamp=$1 database_logical_bytes=$2
+    # Only exact, completed, root-owned backups participate in retention.  A
+    # malformed lookalike fails closed and is never traversed or deleted.
+    /usr/bin/timeout --signal=TERM --kill-after=10s 5m \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        /var/backups "$stamp" "$database_logical_bytes" 9<<'PY'
+import ctypes
+import hashlib
+import os
+import re
+import shutil
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+MIN_FREE_RESERVE = 1024 * 1024 * 1024
+MIN_BACKUP_BUDGET = 128 * 1024 * 1024
+MAX_DATABASE_LOGICAL_BYTES = 4 * 1024 * 1024 * 1024
+MAX_BACKUP_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024
+EXPECTED_FILES = {"backup.sha256", "wordpress.sql.gz", "wp-config.php"}
+INCOMPLETE_TEMP_NAME = re.compile(r"\.wordpress-sql-gz\.[A-Za-z0-9_-]+")
+NAME = re.compile(r"shuzijun-sync-v1-[0-9]{8}-[0-9]{6}")
+INCOMPLETE_NAME = re.compile(
+    r"\.shuzijun-sync-v1-[0-9]{8}-[0-9]{6}\.incomplete\.[A-Za-z0-9_-]+"
+)
+RETIRING_NAME = re.compile(
+    r"\.shuzijun-sync-v1-[0-9]{8}-[0-9]{6}\.retiring"
+)
+
+root = Path(sys.argv[1])
+stamp = sys.argv[2]
+logical_text = sys.argv[3]
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o755):
+    raise SystemExit(1)
+if not re.fullmatch(r"[0-9]{8}-[0-9]{6}", stamp):
+    raise SystemExit(1)
+if not re.fullmatch(r"(?:0|[1-9][0-9]{0,18})", logical_text):
+    raise SystemExit(1)
+logical_bytes = int(logical_text)
+if logical_bytes > MAX_DATABASE_LOGICAL_BYTES:
+    raise SystemExit(1)
+
+def validate_backup_tree(path, expected_files):
+    entry = path.lstat()
+    if (not stat.S_ISDIR(entry.st_mode) or entry.st_uid != 0 or entry.st_gid != 0
+            or stat.S_IMODE(entry.st_mode) != 0o700 or entry.st_dev != metadata.st_dev):
+        raise SystemExit(1)
+    children = list(path.iterdir())
+    child_names = {child.name for child in children}
+    if expected_files is None:
+        if any(
+            name not in EXPECTED_FILES and not INCOMPLETE_TEMP_NAME.fullmatch(name)
+            for name in child_names
+        ):
+            raise SystemExit(1)
+    elif child_names != expected_files:
+        raise SystemExit(1)
+    for child in children:
+        child_metadata = child.lstat()
+        if (not stat.S_ISREG(child_metadata.st_mode) or child_metadata.st_uid != 0
+                or child_metadata.st_gid != 0
+                or stat.S_IMODE(child_metadata.st_mode) != 0o600
+                or child_metadata.st_nlink != 1
+                or child_metadata.st_dev != metadata.st_dev):
+            raise SystemExit(1)
+    if expected_files is not None:
+        def digest(name):
+            value = hashlib.sha256()
+            with (path / name).open("rb", buffering=0) as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    value.update(chunk)
+            return value.hexdigest()
+        canonical = (
+            f"{digest('wordpress.sql.gz')}  wordpress.sql.gz\n"
+            f"{digest('wp-config.php')}  wp-config.php\n"
+        ).encode("ascii")
+        if (len(canonical) != 163
+                or (path / "backup.sha256").read_bytes() != canonical):
+            raise SystemExit(1)
+
+incomplete = []
+retiring = []
+for entry in root.iterdir():
+    if NAME.fullmatch(entry.name):
+        # A damaged historical restore point is evidence for an operator, but
+        # must not permanently wedge creation of a new verified restore point.
+        # It is deliberately ignored and never selected for retention/deletion.
+        try:
+            validate_backup_tree(entry, EXPECTED_FILES)
+        except SystemExit:
+            continue
+    elif INCOMPLETE_NAME.fullmatch(entry.name):
+        try:
+            validate_backup_tree(entry, None)
+        except SystemExit:
+            continue
+        else:
+            incomplete.append(entry)
+    elif RETIRING_NAME.fullmatch(entry.name):
+        # A kill during symlink-safe rmtree may leave any subset of the three
+        # already-validated files.  Accept only that exact, root-owned shape so
+        # the next run can finish the retirement without touching anything else.
+        try:
+            validate_backup_tree(entry, None)
+            if any(child.name not in EXPECTED_FILES for child in entry.iterdir()):
+                raise SystemExit(1)
+        except SystemExit:
+            continue
+        else:
+            retiring.append(entry)
+if not shutil.rmtree.avoids_symlink_attacks:
+    raise SystemExit(1)
+for stale in incomplete + retiring:
+    shutil.rmtree(stale)
+if incomplete or retiring:
+    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+budget = max(MIN_BACKUP_BUDGET, logical_bytes * 2 + 64 * 1024 * 1024)
+budget = min(budget, MAX_BACKUP_ARCHIVE_BYTES)
+filesystem = os.statvfs(root)
+if filesystem.f_bavail * filesystem.f_frsize < budget + MIN_FREE_RESERVE:
+    raise SystemExit(1)
+
+destination = Path(
+    tempfile.mkdtemp(prefix=f".shuzijun-sync-v1-{stamp}.incomplete.", dir=root)
+)
+created = destination.lstat()
+if (not stat.S_ISDIR(created.st_mode) or created.st_uid != 0 or created.st_gid != 0
+        or stat.S_IMODE(created.st_mode) != 0o700 or created.st_dev != metadata.st_dev):
+    raise SystemExit(1)
+directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+print(destination)
+PY
+}
+
+publish_backup_destination() {
+    local candidate=$1 stamp=$2 database_sha256=$3 config_sha256=$4
+    run_with_deadline 5 2 env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        /var/backups "$candidate" "$stamp" "$database_sha256" \
+        "$config_sha256" 9<<'PY'
+import ctypes
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+candidate = Path(sys.argv[2])
+stamp = sys.argv[3]
+database_sha256 = sys.argv[4]
+config_sha256 = sys.argv[5]
+root_meta = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o755
+        or not re.fullmatch(r"[0-9]{8}-[0-9]{6}", stamp)
+        or not re.fullmatch(r"[0-9a-f]{64}", database_sha256)
+        or not re.fullmatch(r"[0-9a-f]{64}", config_sha256)
+        or candidate.parent != root
+        or not re.fullmatch(
+            rf"\.shuzijun-sync-v1-{stamp}\.incomplete\.[A-Za-z0-9_-]+",
+            candidate.name,
+        )):
+    raise SystemExit(1)
+candidate_meta = candidate.lstat()
+if (not stat.S_ISDIR(candidate_meta.st_mode) or candidate_meta.st_uid != 0
+        or candidate_meta.st_gid != 0 or stat.S_IMODE(candidate_meta.st_mode) != 0o700
+        or candidate_meta.st_dev != root_meta.st_dev):
+    raise SystemExit(1)
+children = {child.name: child for child in candidate.iterdir()}
+if set(children) != {"backup.sha256", "wordpress.sql.gz", "wp-config.php"}:
+    raise SystemExit(1)
+for child in children.values():
+    child_meta = child.lstat()
+    if (not stat.S_ISREG(child_meta.st_mode) or child_meta.st_uid != 0
+            or child_meta.st_gid != 0 or stat.S_IMODE(child_meta.st_mode) != 0o600
+            or child_meta.st_nlink != 1 or child_meta.st_dev != root_meta.st_dev
+            or (child.name != "backup.sha256" and child_meta.st_size < 1)):
+        raise SystemExit(1)
+canonical = (
+    f"{database_sha256}  wordpress.sql.gz\n"
+    f"{config_sha256}  wp-config.php\n"
+).encode("ascii")
+if len(canonical) != 163 or children["backup.sha256"].read_bytes() != canonical:
+    raise SystemExit(1)
+destination = root / f"shuzijun-sync-v1-{stamp}"
+try:
+    destination.lstat()
+except FileNotFoundError:
+    pass
+else:
+    raise SystemExit(1)
+libc = ctypes.CDLL(None, use_errno=True)
+renameat2 = getattr(libc, "renameat2", None)
+if renameat2 is None:
+    raise SystemExit(1)
+renameat2.argtypes = [
+    ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+]
+renameat2.restype = ctypes.c_int
+if renameat2(-100, os.fsencode(candidate), -100, os.fsencode(destination), 1) != 0:
+    error = ctypes.get_errno()
+    raise OSError(error, os.strerror(error))
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+print(destination)
+PY
+}
+
+retire_backup_history() {
+    local destination=$1
+    /usr/bin/timeout --signal=TERM --kill-after=10s 5m \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        /var/backups "$destination" 9<<'PY'
+import hashlib
+import os
+import re
+import shutil
+import stat
+import sys
+from pathlib import Path
+
+RETENTION_COUNT = 7
+EXPECTED_FILES = {"backup.sha256", "wordpress.sql.gz", "wp-config.php"}
+NAME = re.compile(r"shuzijun-sync-v1-[0-9]{8}-[0-9]{6}")
+RETIRING_NAME = re.compile(
+    r"\.shuzijun-sync-v1-[0-9]{8}-[0-9]{6}\.retiring"
+)
+root = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o755
+        or destination.parent != root or not NAME.fullmatch(destination.name)):
+    raise SystemExit(1)
+def digest_at(path, name):
+    value = hashlib.sha256()
+    with (path / name).open("rb", buffering=0) as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+# The new restore point is already durably published while FPM was isolated.
+# Revalidate history and perform slow retention only after FPM is healthy.
+backups = []
+for entry in root.iterdir():
+    if not NAME.fullmatch(entry.name):
+        continue
+    try:
+        entry_metadata = entry.lstat()
+        if (not stat.S_ISDIR(entry_metadata.st_mode) or entry_metadata.st_uid != 0
+                or entry_metadata.st_gid != 0 or stat.S_IMODE(entry_metadata.st_mode) != 0o700
+                or entry_metadata.st_dev != metadata.st_dev):
+            raise ValueError
+        children = list(entry.iterdir())
+        if {child.name for child in children} != EXPECTED_FILES:
+            raise ValueError
+        for child in children:
+            child_metadata = child.lstat()
+            if (not stat.S_ISREG(child_metadata.st_mode) or child_metadata.st_uid != 0
+                    or child_metadata.st_gid != 0
+                    or stat.S_IMODE(child_metadata.st_mode) != 0o600
+                    or child_metadata.st_nlink != 1
+                    or child_metadata.st_dev != metadata.st_dev):
+                raise ValueError
+        entry_canonical = (
+            f"{digest_at(entry, 'wordpress.sql.gz')}  wordpress.sql.gz\n"
+            f"{digest_at(entry, 'wp-config.php')}  wp-config.php\n"
+        ).encode("ascii")
+        if (len(entry_canonical) != 163
+                or (entry / "backup.sha256").read_bytes() != entry_canonical):
+            raise ValueError
+    except (OSError, ValueError):
+        # Preserve malformed historical entries untouched.  They cannot count
+        # toward retention and cannot prevent a new valid backup from landing.
+        continue
+    backups.append(entry)
+if destination not in backups:
+    raise SystemExit(1)
+if not shutil.rmtree.avoids_symlink_attacks:
+    raise SystemExit(1)
+old_backups = sorted(
+    (path for path in backups if path != destination),
+    key=lambda path: path.name,
+)
+# Always retain the just-published backup even if the wall clock moved
+# backwards and its timestamp sorts before an older restore point.
+for expired in old_backups[:max(0, len(old_backups) + 1 - RETENTION_COUNT)]:
+    tombstone = root / f".{expired.name}.retiring"
+    if not RETIRING_NAME.fullmatch(tombstone.name):
+        raise SystemExit(1)
+    try:
+        tombstone.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise SystemExit(1)
+    os.rename(expired, tombstone)
+    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    shutil.rmtree(tombstone)
+    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+print(destination)
+PY
+}
+
+store_backup_archive() {
+    local destination=$1
+    # Store a gzip stream without ever materializing a second uncompressed SQL
+    # dump.  The output remains bounded and cannot consume the disk reserve.
+    /usr/bin/timeout --signal=TERM --kill-after=10s 5m \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 "$destination" 9<<'PY'
+import ctypes
+import hashlib
+import os
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+MAX_BACKUP_ARCHIVE_BYTES = 8 * 1024 * 1024 * 1024
+MIN_FREE_RESERVE = 1024 * 1024 * 1024
+root = Path(sys.argv[1])
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700):
+    raise SystemExit(1)
+destination = root / "wordpress.sql.gz"
+temp_descriptor, temp_name = tempfile.mkstemp(prefix=".wordpress-sql-gz.", dir=root)
+temp_path = Path(temp_name)
+total = 0
+digest = hashlib.sha256()
+try:
+    os.fchmod(temp_descriptor, 0o600)
+    while True:
+        chunk = os.read(0, 1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        digest.update(chunk)
+        if total > MAX_BACKUP_ARCHIVE_BYTES:
+            raise SystemExit(1)
+        filesystem = os.statvfs(root)
+        if filesystem.f_bavail * filesystem.f_frsize < MIN_FREE_RESERVE + len(chunk):
+            raise SystemExit(1)
+        view = memoryview(chunk)
+        while view:
+            written = os.write(temp_descriptor, view)
+            if written <= 0:
+                raise SystemExit(1)
+            view = view[written:]
+    if total == 0:
+        raise SystemExit(1)
+    os.fsync(temp_descriptor)
+    completed = os.fstat(temp_descriptor)
+    if (not stat.S_ISREG(completed.st_mode) or completed.st_uid != 0
+            or completed.st_gid != 0 or stat.S_IMODE(completed.st_mode) != 0o600
+            or completed.st_nlink != 1 or completed.st_size != total):
+        raise SystemExit(1)
+    os.close(temp_descriptor)
+    temp_descriptor = -1
+    named = temp_path.lstat()
+    if (named.st_dev, named.st_ino) != (completed.st_dev, completed.st_ino):
+        raise SystemExit(1)
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise SystemExit(1)
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    if renameat2(-100, os.fsencode(temp_path), -100, os.fsencode(destination), 1) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    directory = os.open(root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    print(digest.hexdigest())
+finally:
+    if temp_descriptor >= 0:
+        os.close(temp_descriptor)
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        pass
+PY
+}
+
+bound_backup_database_sql_stream() {
+    # A backup is useful only if the same receiver can later decode it during
+    # rollback. Enforce the rollback decoder's 4 GiB logical SQL ceiling on
+    # the actual export stream, not just the table-size estimate.
+    run_with_deadline 300 10 /usr/bin/python3 -I /proc/self/fd/9 9<<'PY'
+import os
+
+MAX_DATABASE_SQL_BYTES = 4 * 1024 * 1024 * 1024
+total = 0
+while True:
+    chunk = os.read(0, 1024 * 1024)
+    if not chunk:
+        break
+    total += len(chunk)
+    if total > MAX_DATABASE_SQL_BYTES:
+        raise SystemExit(1)
+    view = memoryview(chunk)
+    while view:
+        written = os.write(1, view)
+        if written <= 0:
+            raise SystemExit(1)
+        view = view[written:]
+if total == 0:
+    raise SystemExit(1)
+PY
+}
+
+read_database_logical_bytes() {
+    local output
+    output=$(
+        run_with_deadline 30 5 /usr/bin/wp db query \
+            'SELECT COALESCE(SUM(data_length + index_length), 0) FROM information_schema.tables WHERE table_schema = DATABASE();' \
+            --skip-column-names --allow-root
+    ) || return 1
+    [[ "$output" =~ ^(0|[1-9][0-9]{0,18})$ ]] || return 1
+    if (( ${#output} > 10 )) \
+        || { (( ${#output} == 10 )) && [[ "$output" > 4294967296 ]]; }; then
+        return 1
+    fi
+    printf '%s\n' "$output"
+}
+
 accept_generation() {
     local generation=$1
-    env -i PATH="$PATH" LC_ALL=C LANG=C \
+    run_with_deadline 5 2 \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
         /usr/bin/python3 -I /proc/self/fd/9 \
         "$STATE_ROOT" "$LAST_ACCEPTED_GENERATION" "$generation" 9<<'PY'
 import os
 import re
+import secrets
 import stat
 import sys
 import tempfile
@@ -315,8 +1450,12 @@ current = int(payload)
 if candidate <= current:
     raise SystemExit(1)
 
-temp_descriptor, temp_name = tempfile.mkstemp(prefix=".highest-accepted.", dir=root)
-temp_path = Path(temp_name)
+temp_path = root / f".highest-accepted.{secrets.token_hex(16)}"
+temp_descriptor = os.open(
+    temp_path,
+    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0o600,
+)
 try:
     os.fchmod(temp_descriptor, 0o600)
     encoded = f"{candidate}\n".encode("ascii")
@@ -342,6 +1481,1352 @@ finally:
         temp_path.unlink()
     except FileNotFoundError:
         pass
+PY
+}
+
+manage_uploads_transaction() {
+    local action=$1 generation=${2:-0} claim=${3:-/} backup=${4:-/}
+    local deadline=30m kill_after=10s
+    case "$action" in
+        inspect|active-generation|validate-activation|validate-stable-base|\
+        activation-release-id|stable-release-id|bootstrap-release-id|\
+        set-phase|exchange|validate-prepared|publish-active|publish-stable)
+            # Guard boot and the masked publication path are both O(1). Give
+            # them a short independent deadline rather than inheriting the
+            # deep candidate/rollback/finalization budget.
+            deadline=5s
+            kill_after=2s
+            ;;
+    esac
+    /usr/bin/timeout --signal=TERM --kill-after="$kill_after" "$deadline" \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$action" "$SYNC_ROOT" "$UPLOADS_RELEASE_ROOT" "$STATE_ROOT" \
+        "$ACTIVE_UPLOADS_GENERATION" "$UPLOADS_TRANSACTION" \
+        "$SITE/wp-content/uploads" "$LAST_ACCEPTED_GENERATION" \
+        "$generation" "$claim" "$backup" 9<<'PY'
+import ctypes
+import hashlib
+import json
+import os
+import pwd
+import re
+import secrets
+import shutil
+import stat
+import sys
+import tempfile
+from pathlib import Path, PurePosixPath
+
+MAX_FILES = 100_000
+MAX_DIRECTORIES = 100_000
+MAX_FILE_BYTES = 8 * 1024 * 1024 * 1024
+MAX_TREE_BYTES = 64 * 1024 * 1024 * 1024
+MIN_FREE_RESERVE = 1024 * 1024 * 1024
+RENAME_EXCHANGE = 2
+FORBIDDEN_NAMES = {".htaccess", ".user.ini"}
+FORBIDDEN_SUFFIXES = {
+    ".cgi", ".pl", ".py", ".rb", ".sh", ".bash", ".zsh", ".fish",
+    ".exe", ".com", ".bat", ".cmd", ".ps1", ".jar", ".war",
+}
+REQUIRED_MEDIA = {
+    "2025/04/gongan-beian.png",
+    "hero-images/hero-1.jpg",
+    "showreel/hls-20260826a/high/index.m3u8",
+    "showreel/hls-20260826a/high/segment-000.ts",
+}
+PHASES = {
+    "staging", "prepared", "accepted", "database-importing",
+    "database-imported", "swapped", "activated", "commit-ready", "committed",
+    "rollback-media",
+}
+TX_KEYS = {
+    "version", "generation", "previous_generation", "phase", "manifest_sha256",
+    "backup", "source", "source_dev", "source_ino", "candidate_name",
+    "candidate_dev", "candidate_ino", "live_dev", "live_ino",
+}
+
+action = sys.argv[1]
+sync_root = Path(sys.argv[2])
+release_root = Path(sys.argv[3])
+state_root = Path(sys.argv[4])
+active_path = Path(sys.argv[5])
+transaction_path = Path(sys.argv[6])
+live = Path(sys.argv[7])
+accepted_path = Path(sys.argv[8])
+active_release_path = state_root / "active-release-v4.json"
+generation_text = sys.argv[9]
+claim = Path(sys.argv[10])
+backup = Path(sys.argv[11])
+www = pwd.getpwnam("www-data")
+
+def strict_directory(path, uid, gid, mode, device=None):
+    metadata = path.lstat()
+    if (path.resolve(strict=True) != path or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != uid or metadata.st_gid != gid
+            or stat.S_IMODE(metadata.st_mode) != mode
+            or (device is not None and metadata.st_dev != device)):
+        raise RuntimeError("unsafe directory")
+    return metadata
+
+for parent in (Path("/var"), Path("/var/lib")):
+    strict_directory(parent, 0, 0, 0o755)
+sync_meta = strict_directory(sync_root, 0, 0, 0o700)
+state_meta = strict_directory(state_root, 0, 0, 0o700, sync_meta.st_dev)
+if (release_root != sync_root / "uploads-releases"
+        or active_path != state_root / "active-uploads-generation"
+        or transaction_path != state_root / "uploads-transaction.json"
+        or active_release_path != state_root / "active-release-v4.json"
+        or live != Path("/var/www/html/shuzijun.com.cn/wp-content/uploads")
+        or accepted_path != state_root / "highest-accepted-generation"):
+    raise SystemExit(1)
+
+def open_payload(path, pattern=None, limit=4096):
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        payload = os.read(descriptor, limit + 1)
+        if os.read(descriptor, 1):
+            raise RuntimeError("oversize state")
+    finally:
+        os.close(descriptor)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_dev != state_meta.st_dev
+            or len(payload) > limit or (pattern is not None and not re.fullmatch(pattern, payload))):
+        raise RuntimeError("unsafe state")
+    return payload
+
+def read_generation(path, allow_zero=False):
+    pattern = rb"(?:0|[1-9][0-9]{0,18})\n" if allow_zero else rb"[1-9][0-9]{0,18}\n"
+    return int(open_payload(path, pattern, 31))
+
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+def create_state_temporary(prefix):
+    if prefix not in {
+        ".active-release-v4.", ".uploads-transaction.", ".active-generation."
+    }:
+        raise RuntimeError("invalid state temporary prefix")
+    for _attempt in range(128):
+        temporary = state_root / f"{prefix}{secrets.token_hex(16)}"
+        try:
+            descriptor = os.open(
+                temporary,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+            )
+        except FileExistsError:
+            continue
+        return descriptor, temporary
+    raise RuntimeError("state temporary allocation exhausted")
+
+def rename_noreplace(source, destination):
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise RuntimeError("renameat2 unavailable")
+    renameat2.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(
+        -100, os.fsencode(source), -100, os.fsencode(destination), 1
+    ) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+def atomic_write(path, payload, prefix, must_be_absent=False):
+    if path.parent != state_root:
+        raise RuntimeError("unsafe state destination")
+    try:
+        existing = open_payload(path, limit=32 * 1024)
+    except FileNotFoundError:
+        existing = None
+    if must_be_absent and existing is not None:
+        raise RuntimeError("state already exists")
+    descriptor, temporary = create_state_temporary(prefix)
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RuntimeError("short state write")
+            view = view[written:]
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (metadata.st_uid != 0 or metadata.st_gid != 0
+                or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1
+                or metadata.st_dev != state_meta.st_dev or metadata.st_size != len(payload)):
+            raise RuntimeError("unsafe temporary state")
+        os.close(descriptor)
+        descriptor = -1
+        if must_be_absent:
+            rename_noreplace(temporary, path)
+        else:
+            os.replace(temporary, path)
+        fsync_directory(state_root)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+def canonical_transaction(document):
+    return (json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode("ascii")
+
+def load_transaction():
+    raw = open_payload(transaction_path, limit=32 * 1024)
+    document = json.loads(raw.decode("ascii"))
+    if (set(document) != TX_KEYS or document.get("version") != 1
+            or canonical_transaction(document) != raw
+            or document.get("phase") not in PHASES):
+        raise RuntimeError("invalid transaction")
+    for key in ("generation", "previous_generation", "source_dev", "source_ino",
+                "candidate_dev", "candidate_ino", "live_dev", "live_ino"):
+        value = document.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RuntimeError("invalid transaction number")
+    if document["generation"] < 1 or document["previous_generation"] < 1:
+        raise RuntimeError("invalid transaction generation")
+    if (not re.fullmatch(r"[0-9a-f]{64}", document.get("manifest_sha256", ""))
+            or not re.fullmatch(r"\.candidate-generation-[1-9][0-9]{0,18}", document.get("candidate_name", ""))
+            or Path(document.get("source", "")).name != "uploads"
+            or Path(document.get("backup", "")).parent != Path("/var/backups")
+            or not re.fullmatch(r"shuzijun-sync-v1-[0-9]{8}-[0-9]{6}", Path(document["backup"]).name)):
+        raise RuntimeError("invalid transaction path")
+    return document
+
+ACTIVE_RELEASE_KEYS = {
+    "evidence_sha256", "generation", "release_id", "uploads_dev", "uploads_ino", "version"
+}
+
+def canonical_active_release(document):
+    return (
+        json.dumps(
+            document,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ) + "\n"
+    ).encode("ascii")
+
+def load_active_release():
+    raw = open_payload(active_release_path, limit=1024)
+    document = json.loads(raw.decode("ascii"))
+    if (set(document) != ACTIVE_RELEASE_KEYS
+            or document.get("version") != 4
+            or canonical_active_release(document) != raw
+            or isinstance(document.get("generation"), bool)
+            or not isinstance(document.get("generation"), int)
+            or not 1 <= document["generation"] <= 9_999_999_999_999_999_999
+            or not re.fullmatch(r"[0-9a-f]{64}", document.get("release_id", ""))
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", document.get("evidence_sha256", "")
+            )):
+        raise RuntimeError("invalid active release record")
+    for key in ("uploads_dev", "uploads_ino"):
+        value = document.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise RuntimeError("invalid active release identity")
+    return document
+
+def read_guard_marker(name):
+    if name not in {
+        "fpm-activation-guard-v4.armed",
+        "fpm-activation-guard-v4.committed",
+    }:
+        raise RuntimeError("invalid guard marker name")
+    marker_path = state_root / name
+    raw = open_payload(
+        marker_path,
+        rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n",
+        192,
+    )
+    before = identity(marker_path.lstat())
+    # Promote a marker that survived a publisher crash after rename but before
+    # directory fsync, then reopen it.  A visible-but-not-yet-durable dirent is
+    # never treated as a committed activation merely because it was readable.
+    fsync_directory(state_root)
+    repeated = open_payload(
+        marker_path,
+        rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n",
+        192,
+    )
+    if identity(marker_path.lstat()) != before or repeated != raw:
+        raise RuntimeError("guard marker changed during durability promotion")
+    generation, release_id, activation_nonce = raw.decode("ascii").strip().split(" ")
+    return int(generation), release_id, activation_nonce
+
+def current_live_identity():
+    metadata = strict_directory(live, www.pw_uid, www.pw_gid, 0o755)
+    return identity(metadata)
+
+def release_identifier(generation, evidence, live_dev, live_ino):
+    if (not isinstance(generation, int) or generation < 1
+            or not re.fullmatch(r"[0-9a-f]{64}", evidence)
+            or not isinstance(live_dev, int) or live_dev < 1
+            or not isinstance(live_ino, int) or live_ino < 1):
+        raise RuntimeError("invalid release identity input")
+    return hashlib.sha256(
+        f"release-v4\0{generation}\0{evidence}\0{live_dev}\0{live_ino}".encode("ascii")
+    ).hexdigest()
+
+def transaction_release_document(document, live_identity):
+    live_dev, live_ino = live_identity
+    if (document["generation"] < 1
+            or (document["candidate_dev"], document["candidate_ino"])
+                != live_identity):
+        raise RuntimeError("transaction release mismatch")
+    evidence = document["manifest_sha256"]
+    return {
+        "evidence_sha256": evidence,
+        "generation": document["generation"],
+        "release_id": release_identifier(
+            document["generation"], evidence, live_dev, live_ino
+        ),
+        "uploads_dev": live_dev,
+        "uploads_ino": live_ino,
+        "version": 4,
+    }
+
+def active_release_document(document=None):
+    generation = read_generation(active_path)
+    if read_generation(accepted_path) != generation:
+        raise RuntimeError("active release generation mismatch")
+    live_dev, live_ino = current_live_identity()
+    commit_generation, commit_release_id, _activation_nonce = read_guard_marker(
+        "fpm-activation-guard-v4.committed"
+    )
+    if commit_generation != generation:
+        raise RuntimeError("active release commit mismatch")
+    if document is None:
+        evidence = hashlib.sha256(
+            f"bootstrap-root-v4\0{generation}\0{live_dev}\0{live_ino}".encode("ascii")
+        ).hexdigest()
+        release = {
+            "evidence_sha256": evidence,
+            "generation": generation,
+            "release_id": release_identifier(
+                generation, evidence, live_dev, live_ino
+            ),
+            "uploads_dev": live_dev,
+            "uploads_ino": live_ino,
+            "version": 4,
+        }
+    else:
+        if (document["generation"] != generation
+                or document["phase"] != "committed"
+                or (document["candidate_dev"], document["candidate_ino"])
+                    != (live_dev, live_ino)):
+            raise RuntimeError("committed transaction release mismatch")
+        release = transaction_release_document(document, (live_dev, live_ino))
+    if release["release_id"] != commit_release_id:
+        raise RuntimeError("active release commit identity mismatch")
+    return release
+
+def write_active_release(document, allow_replace):
+    try:
+        existing = load_active_release()
+    except FileNotFoundError:
+        existing = None
+    if existing == document:
+        # A predecessor may have died after replacing the dirent but before
+        # fsyncing STATE_ROOT. Promote that exact visible record to durable
+        # state, then reopen and verify its inode and bytes before allowing
+        # committed finalization to remove the transaction.
+        before = identity(active_release_path.lstat())
+        fsync_directory(state_root)
+        if (identity(active_release_path.lstat()) != before
+                or load_active_release() != document):
+            raise RuntimeError("active release changed during durability promotion")
+        return
+    if existing is not None and not allow_replace:
+        raise RuntimeError("unexpected existing active release")
+    atomic_write(
+        active_release_path,
+        canonical_active_release(document),
+        ".active-release-v4.",
+        existing is None,
+    )
+
+def write_transaction(document, new=False):
+    atomic_write(transaction_path, canonical_transaction(document), ".uploads-transaction.", new)
+
+def identity(metadata):
+    return metadata.st_dev, metadata.st_ino
+
+def hash_file(path):
+    digest = hashlib.sha256()
+    with path.open("rb", buffering=0) as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def validate_tree(path, uid, gid, mode, expected=None, required=False, allow_empty=False):
+    root_meta = strict_directory(path, uid, gid, mode)
+    files = {}
+    file_count = directory_count = total_bytes = 0
+    for directory, directory_names, file_names, descriptor in os.fwalk(
+        path, topdown=True, follow_symlinks=False
+    ):
+        current = os.fstat(descriptor)
+        if (not stat.S_ISDIR(current.st_mode) or current.st_uid != uid or current.st_gid != gid
+                or stat.S_IMODE(current.st_mode) != mode or current.st_dev != root_meta.st_dev):
+            raise RuntimeError("unsafe media directory")
+        directory_count += 1
+        if directory_count > MAX_DIRECTORIES:
+            raise RuntimeError("too many media directories")
+        relative_directory = Path(directory).relative_to(path)
+        for name in directory_names:
+            child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if (not stat.S_ISDIR(child.st_mode) or child.st_uid != uid or child.st_gid != gid
+                    or stat.S_IMODE(child.st_mode) != mode or child.st_dev != root_meta.st_dev):
+                raise RuntimeError("unsafe media child directory")
+        for name in file_names:
+            child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            lower = name.lower()
+            if (not stat.S_ISREG(child.st_mode) or child.st_uid != uid or child.st_gid != gid
+                    or stat.S_IMODE(child.st_mode) != (0o600 if uid == 0 else 0o644)
+                    or child.st_nlink != 1 or child.st_dev != root_meta.st_dev
+                    or child.st_size > MAX_FILE_BYTES
+                    or (child.st_size > 0 and child.st_blocks * 512 < child.st_size)
+                    or lower in FORBIDDEN_NAMES or ".php" in lower or ".phtml" in lower
+                    or ".phar" in lower or any(lower.endswith(suffix) for suffix in FORBIDDEN_SUFFIXES)):
+                raise RuntimeError("unsafe media file")
+            relative = (relative_directory / name).as_posix()
+            file_path = Path(directory) / name
+            files[relative] = (hash_file(file_path), child.st_size)
+            file_count += 1
+            total_bytes += child.st_size
+            if file_count > MAX_FILES or total_bytes > MAX_TREE_BYTES:
+                raise RuntimeError("media tree exceeds limits")
+    if not allow_empty and (file_count == 0 or total_bytes == 0):
+        raise RuntimeError("empty media tree")
+    if expected is not None and files != expected:
+        raise RuntimeError("media manifest mismatch")
+    if required and not REQUIRED_MEDIA.issubset(files):
+        raise RuntimeError("known media absent")
+    return root_meta, files, file_count, total_bytes
+
+def chown_candidate(path):
+    for directory, directory_names, file_names, descriptor in os.fwalk(
+        path, topdown=False, follow_symlinks=False
+    ):
+        for name in file_names:
+            child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISREG(child.st_mode) or child.st_nlink != 1:
+                raise RuntimeError("unsafe candidate file")
+            os.chown(name, www.pw_uid, www.pw_gid, dir_fd=descriptor, follow_symlinks=False)
+            os.chmod(name, 0o644, dir_fd=descriptor, follow_symlinks=False)
+        for name in directory_names:
+            child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if not stat.S_ISDIR(child.st_mode):
+                raise RuntimeError("unsafe candidate directory")
+            os.chown(name, www.pw_uid, www.pw_gid, dir_fd=descriptor, follow_symlinks=False)
+            os.chmod(name, 0o755, dir_fd=descriptor, follow_symlinks=False)
+        os.fchown(descriptor, www.pw_uid, www.pw_gid)
+        os.fchmod(descriptor, 0o755)
+
+def normalize_partial_candidate_to_root(path, expected_identity):
+    # A SIGKILL during chown_candidate can leave a precise mix of the only two
+    # ownership/mode states that function publishes. Validate every inode and
+    # converge it back to the claim's root-only representation before rename;
+    # links, devices, foreign owners/modes and filesystem crossings fail closed.
+    root_meta = path.lstat()
+    if (identity(root_meta) != expected_identity
+            or not stat.S_ISDIR(root_meta.st_mode)
+            or root_meta.st_dev != release_meta.st_dev):
+        raise RuntimeError("unsafe partial candidate root")
+    for _directory, directory_names, file_names, descriptor in os.fwalk(
+        path, topdown=False, follow_symlinks=False
+    ):
+        current = os.fstat(descriptor)
+        current_owner = (current.st_uid, current.st_gid, stat.S_IMODE(current.st_mode))
+        if (not stat.S_ISDIR(current.st_mode)
+                or current.st_dev != root_meta.st_dev
+                or current_owner not in {
+                    (0, 0, 0o700),
+                    (www.pw_uid, www.pw_gid, 0o700),
+                    (www.pw_uid, www.pw_gid, 0o755),
+                }):
+            raise RuntimeError("unsafe partial candidate directory")
+        for name in directory_names:
+            child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            owner = (child.st_uid, child.st_gid, stat.S_IMODE(child.st_mode))
+            if (not stat.S_ISDIR(child.st_mode)
+                    or child.st_dev != root_meta.st_dev
+                    or owner not in {
+                        (0, 0, 0o700),
+                        (www.pw_uid, www.pw_gid, 0o700),
+                        (www.pw_uid, www.pw_gid, 0o755),
+                    }):
+                raise RuntimeError("unsafe partial candidate child directory")
+            os.chown(name, 0, 0, dir_fd=descriptor, follow_symlinks=False)
+            os.chmod(name, 0o700, dir_fd=descriptor, follow_symlinks=False)
+        for name in file_names:
+            child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            owner = (child.st_uid, child.st_gid, stat.S_IMODE(child.st_mode))
+            lower = name.lower()
+            if (not stat.S_ISREG(child.st_mode) or child.st_nlink != 1
+                    or child.st_dev != root_meta.st_dev
+                    or owner not in {
+                        (0, 0, 0o600),
+                        (www.pw_uid, www.pw_gid, 0o600),
+                        (www.pw_uid, www.pw_gid, 0o644),
+                    }
+                    or lower in FORBIDDEN_NAMES or ".php" in lower
+                    or ".phtml" in lower or ".phar" in lower
+                    or any(lower.endswith(suffix) for suffix in FORBIDDEN_SUFFIXES)):
+                raise RuntimeError("unsafe partial candidate file")
+            os.chown(name, 0, 0, dir_fd=descriptor, follow_symlinks=False)
+            os.chmod(name, 0o600, dir_fd=descriptor, follow_symlinks=False)
+        os.fchown(descriptor, 0, 0)
+        os.fchmod(descriptor, 0o700)
+    fsync_directory(path)
+
+def manifest_uploads(path, expected_generation):
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        raw = b""
+        while len(raw) <= 32 * 1024 * 1024:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            raw += chunk
+    finally:
+        os.close(descriptor)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1
+            or len(raw) > 32 * 1024 * 1024):
+        raise RuntimeError("unsafe manifest")
+    document = json.loads(raw.decode("utf-8"))
+    canonical = (json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode()
+    if (canonical != raw or set(document) != {"files", "generation", "version"}
+            or document["version"] != 2 or document["generation"] != expected_generation):
+        raise RuntimeError("manifest identity mismatch")
+    expected = {}
+    for item in document["files"]:
+        relative = item.get("path")
+        if not isinstance(relative, str) or not relative.startswith("wp-content/uploads/"):
+            continue
+        shortened = relative.removeprefix("wp-content/uploads/")
+        pure = PurePosixPath(shortened)
+        if not shortened or pure.is_absolute() or any(part in {"", ".", ".."} for part in pure.parts):
+            raise RuntimeError("unsafe manifest media path")
+        expected[shortened] = (item["sha256"], item["size"])
+    if not expected:
+        raise RuntimeError("empty manifest media")
+    return expected, hashlib.sha256(raw).hexdigest()
+
+def transition(document, phase, allowed):
+    if document["phase"] not in allowed:
+        raise RuntimeError("invalid transaction transition")
+    document["phase"] = phase
+    write_transaction(document)
+
+def exchange(parent_a, name_a, parent_b, name_b):
+    descriptor_a = os.open(parent_a, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    descriptor_b = os.open(parent_b, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise RuntimeError("renameat2 unavailable")
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+        if renameat2(descriptor_a, os.fsencode(name_a), descriptor_b, os.fsencode(name_b), RENAME_EXCHANGE) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        os.fsync(descriptor_a)
+        if identity(os.fstat(descriptor_a)) != identity(os.fstat(descriptor_b)):
+            os.fsync(descriptor_b)
+    finally:
+        os.close(descriptor_b)
+        os.close(descriptor_a)
+
+def secure_remove_tree(path, expected_identity, allow_empty=False):
+    metadata, _, _, _ = validate_tree(
+        path, www.pw_uid, www.pw_gid, 0o755, allow_empty=allow_empty
+    )
+    if identity(metadata) != expected_identity or not shutil.rmtree.avoids_symlink_attacks:
+        raise RuntimeError("unsafe retained tree")
+    shutil.rmtree(path)
+    fsync_directory(path.parent)
+
+def remove_transaction():
+    open_payload(transaction_path, limit=32 * 1024)
+    transaction_path.unlink()
+    fsync_directory(state_root)
+
+if action == "bootstrap-release-id":
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", generation_text):
+        raise SystemExit(1)
+    generation = int(generation_text)
+    strict_directory(release_root, 0, 0, 0o700, sync_meta.st_dev)
+    try:
+        transaction_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError("bootstrap release cannot have a transaction")
+    if (read_generation(accepted_path) != generation
+            or read_generation(active_path) != generation):
+        raise RuntimeError("bootstrap release generation mismatch")
+    live_dev, live_ino = current_live_identity()
+    evidence = hashlib.sha256(
+        f"bootstrap-root-v4\0{generation}\0{live_dev}\0{live_ino}".encode("ascii")
+    ).hexdigest()
+    print(release_identifier(generation, evidence, live_dev, live_ino))
+    raise SystemExit(0)
+
+if action == "publish-stable":
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", generation_text):
+        raise SystemExit(1)
+    generation = int(generation_text)
+    strict_directory(release_root, 0, 0, 0o700, sync_meta.st_dev)
+    try:
+        transaction_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError("bootstrap release cannot have a transaction")
+    if (read_generation(accepted_path) != generation
+            or read_generation(active_path) != generation):
+        raise RuntimeError("bootstrap release generation mismatch")
+    document = active_release_document()
+    write_active_release(document, False)
+    print(generation)
+    raise SystemExit(0)
+
+if action == "bootstrap":
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", generation_text):
+        raise SystemExit(1)
+    generation = int(generation_text)
+    if read_generation(accepted_path) != generation:
+        raise SystemExit(1)
+    validate_tree(live, www.pw_uid, www.pw_gid, 0o755, required=True)
+    try:
+        transaction_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise SystemExit(1)
+    release_exists = active_exists = False
+    try:
+        release_meta = strict_directory(release_root, 0, 0, 0o700, sync_meta.st_dev)
+        release_exists = True
+        if any(release_root.iterdir()):
+            raise RuntimeError("nonempty bootstrap release root")
+    except FileNotFoundError:
+        release_meta = None
+    try:
+        active = read_generation(active_path)
+        active_exists = True
+        if active != generation:
+            raise RuntimeError("different active generation")
+    except FileNotFoundError:
+        active = None
+    if active_exists and not release_exists:
+        # Publication is ordered release-root first and fsynced before the
+        # active record, so this state cannot be produced by an interrupted
+        # bootstrap and must not be repaired automatically.
+        raise SystemExit(1)
+    if not release_exists:
+        os.mkdir(release_root, 0o700)
+        os.chown(release_root, 0, 0)
+        strict_directory(release_root, 0, 0, 0o700, sync_meta.st_dev)
+        fsync_directory(sync_root)
+    if not active_exists:
+        # An empty, strictly owned release root with no active record is the
+        # exact durable prefix left by SIGKILL after mkdir/fsync.  Re-running
+        # the same accepted-generation bootstrap safely completes it; a
+        # nonempty root was rejected above and is never overwritten.
+        atomic_write(active_path, f"{generation}\n".encode("ascii"), ".active-generation.", True)
+    raise SystemExit(0)
+
+release_meta = strict_directory(release_root, 0, 0, 0o700, sync_meta.st_dev)
+
+if action == "activation-release-id":
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", generation_text):
+        raise SystemExit(1)
+    generation = int(generation_text)
+    if read_generation(accepted_path) != generation:
+        raise RuntimeError("activation accepted generation mismatch")
+    live_identity = current_live_identity()
+    try:
+        transaction = load_transaction()
+    except FileNotFoundError:
+        transaction = None
+    if transaction is None:
+        if read_generation(active_path) != generation:
+            raise RuntimeError("stable activation generation mismatch")
+        release = load_active_release()
+        if (release["generation"] != generation
+                or (release["uploads_dev"], release["uploads_ino"])
+                    != live_identity):
+            raise RuntimeError("stable activation release mismatch")
+    else:
+        if (transaction["generation"] != generation
+                or transaction["phase"] not in {
+                    "swapped", "activated", "commit-ready", "committed"
+                }):
+            raise RuntimeError("transaction is not activation-ready")
+        release = transaction_release_document(transaction, live_identity)
+    print(release["release_id"])
+    raise SystemExit(0)
+
+if action == "stable-release-id":
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", generation_text):
+        raise SystemExit(1)
+    generation = int(generation_text)
+    if read_generation(active_path) != generation:
+        raise RuntimeError("stable release generation mismatch")
+    live_identity = current_live_identity()
+    release = load_active_release()
+    if (release["generation"] != generation
+            or (release["uploads_dev"], release["uploads_ino"])
+                != live_identity):
+        raise RuntimeError("stable release identity mismatch")
+    print(release["release_id"])
+    raise SystemExit(0)
+
+if action == "active-generation":
+    # O(1) stable-state gate used before any service mutation. The compact
+    # release record and current uploads directory inode must describe the
+    # same published generation; deep hashing belongs to pre-publication.
+    generation = read_generation(active_path)
+    live_identity = current_live_identity()
+    release = load_active_release()
+    if (release["generation"] != generation
+            or (release["uploads_dev"], release["uploads_ino"])
+                != live_identity):
+        raise RuntimeError("active release identity mismatch")
+    print(generation)
+    raise SystemExit(0)
+
+if action == "validate-stable-base":
+    # Receiver-only recovery primitive.  It proves the currently published
+    # release and its last durable commit without consulting an armed marker.
+    # The normal guard boot path continues to use validate-activation, which
+    # deliberately rejects an interrupted same-release activation attempt.
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", generation_text):
+        raise SystemExit(1)
+    generation = int(generation_text)
+    if (read_generation(accepted_path) != generation
+            or read_generation(active_path) != generation):
+        raise RuntimeError("stable base generation mismatch")
+    try:
+        transaction_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError("stable base cannot have a transaction")
+    live_identity = current_live_identity()
+    release = load_active_release()
+    commit_generation, commit_release_id, commit_nonce = read_guard_marker(
+        "fpm-activation-guard-v4.committed"
+    )
+    if (release["generation"] != generation
+            or (release["uploads_dev"], release["uploads_ino"]) != live_identity
+            or commit_generation != generation
+            or commit_release_id != release["release_id"]):
+        raise RuntimeError("stable base release evidence mismatch")
+    print(f"{commit_release_id} {commit_nonce}")
+    raise SystemExit(0)
+
+if action == "validate-activation":
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", generation_text):
+        raise SystemExit(1)
+    generation = int(generation_text)
+    if (read_generation(accepted_path) != generation
+            or read_generation(active_path) != generation):
+        raise RuntimeError("activation generation mismatch")
+    live_identity = current_live_identity()
+    commit_generation, commit_release_id, commit_nonce = read_guard_marker(
+        "fpm-activation-guard-v4.committed"
+    )
+    if commit_generation != generation:
+        raise RuntimeError("activation commit generation mismatch")
+    try:
+        transaction = load_transaction()
+    except FileNotFoundError:
+        transaction = None
+    if transaction is None:
+        release = load_active_release()
+        if (release["generation"] != generation
+                or release["release_id"] != commit_release_id
+                or (release["uploads_dev"], release["uploads_ino"])
+                    != live_identity):
+            raise RuntimeError("stable release evidence mismatch")
+        try:
+            armed_generation, armed_release_id, armed_nonce = read_guard_marker(
+                "fpm-activation-guard-v4.armed"
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            # A freshly armed activation must never be authorized by an older
+            # same-generation commit. Successful attempts leave an exact
+            # armed/commit triple; an interrupted attempt fails closed.
+            if (armed_generation != generation
+                    or armed_release_id != commit_release_id
+                    or armed_nonce != commit_nonce):
+                raise RuntimeError("stable activation nonce is uncommitted")
+    else:
+        release = transaction_release_document(transaction, live_identity)
+        armed_generation, armed_release_id, armed_nonce = read_guard_marker(
+            "fpm-activation-guard-v4.armed"
+        )
+        if (transaction["generation"] != generation
+                or transaction["phase"] not in {"commit-ready", "committed"}
+                or (transaction["candidate_dev"], transaction["candidate_ino"])
+                    != live_identity
+                or release["release_id"] != commit_release_id
+                or armed_generation != generation
+                or armed_release_id != commit_release_id
+                or armed_nonce != commit_nonce):
+            raise RuntimeError("transaction activation evidence mismatch")
+    print(generation)
+    raise SystemExit(0)
+
+if action == "validate-active":
+    active = read_generation(active_path)
+    validate_tree(live, www.pw_uid, www.pw_gid, 0o755, required=True)
+    print(active)
+    raise SystemExit(0)
+
+if action == "validate-commit":
+    if not re.fullmatch(r"[1-9][0-9]{0,18}", generation_text):
+        raise SystemExit(1)
+    generation = int(generation_text)
+    if (read_generation(accepted_path) != generation
+            or read_generation(active_path) != generation):
+        raise SystemExit(1)
+    live_meta, _, _, _ = validate_tree(
+        live, www.pw_uid, www.pw_gid, 0o755, required=True
+    )
+    try:
+        active_transaction = load_transaction()
+    except FileNotFoundError:
+        active_transaction = None
+    if active_transaction is not None:
+        if (active_transaction["generation"] != generation
+                or active_transaction["phase"] not in {"commit-ready", "committed"}
+                or identity(live_meta) != (
+                    active_transaction["candidate_dev"],
+                    active_transaction["candidate_ino"],
+                )):
+            raise RuntimeError("transaction is not safe for activation")
+    print(generation)
+    raise SystemExit(0)
+
+if action == "prepare":
+    if (not re.fullmatch(r"[1-9][0-9]{0,18}", generation_text)
+            or claim.parent != sync_root / "incoming"
+            or backup.parent != Path("/var/backups")
+            or not re.fullmatch(r"shuzijun-sync-v1-[0-9]{8}-[0-9]{6}", backup.name)):
+        raise SystemExit(1)
+    generation = int(generation_text)
+    previous = read_generation(active_path)
+    if read_generation(accepted_path, True) >= generation:
+        raise SystemExit(1)
+    try:
+        transaction_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise SystemExit(1)
+    strict_directory(claim, 0, 0, 0o700, sync_meta.st_dev)
+    source = claim / "wp-content" / "uploads"
+    source_meta = strict_directory(source, 0, 0, 0o700, sync_meta.st_dev)
+    expected, manifest_digest = manifest_uploads(claim / "shuzijun-sync-manifest.json", generation)
+    _, _, candidate_count, candidate_bytes = validate_tree(source, 0, 0, 0o700, expected, True)
+    live_meta, _, live_count, live_bytes = validate_tree(
+        live, www.pw_uid, www.pw_gid, 0o755, required=True
+    )
+    if (candidate_count * 4 < live_count * 3 or candidate_bytes * 2 < live_bytes
+            or live_count - candidate_count > max(100, live_count // 4)):
+        raise RuntimeError("mass deletion gate")
+    free = os.statvfs(release_root)
+    if free.f_bavail * free.f_frsize < candidate_bytes + MIN_FREE_RESERVE:
+        raise RuntimeError("insufficient media reserve")
+    previous_entries = []
+    retiring_entries = []
+    for entry in release_root.iterdir():
+        if re.fullmatch(r"\.retiring-previous-generation-[1-9][0-9]{0,18}-for-[1-9][0-9]{0,18}", entry.name):
+            validate_tree(entry, www.pw_uid, www.pw_gid, 0o755, allow_empty=True)
+            retiring_entries.append(entry)
+            continue
+        if not re.fullmatch(r"previous-generation-[1-9][0-9]{0,18}-for-[1-9][0-9]{0,18}", entry.name):
+            raise RuntimeError("unexpected release entry")
+        validate_tree(entry, www.pw_uid, www.pw_gid, 0o755)
+        previous_entries.append(entry)
+    if len(previous_entries) > 1:
+        raise RuntimeError("too many retained media trees")
+    for retiring in retiring_entries:
+        secure_remove_tree(retiring, identity(retiring.lstat()), allow_empty=True)
+    candidate_name = f".candidate-generation-{generation}"
+    candidate = release_root / candidate_name
+    try:
+        candidate.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError("candidate exists")
+    document = {
+        "version": 1,
+        "generation": generation,
+        "previous_generation": previous,
+        "phase": "staging",
+        "manifest_sha256": manifest_digest,
+        "backup": str(backup),
+        "source": str(source),
+        "source_dev": source_meta.st_dev,
+        "source_ino": source_meta.st_ino,
+        "candidate_name": candidate_name,
+        "candidate_dev": source_meta.st_dev,
+        "candidate_ino": source_meta.st_ino,
+        "live_dev": live_meta.st_dev,
+        "live_ino": live_meta.st_ino,
+    }
+    write_transaction(document, True)
+    os.rename(source, candidate)
+    fsync_directory(source.parent)
+    fsync_directory(release_root)
+    chown_candidate(candidate)
+    candidate_meta, _, _, _ = validate_tree(
+        candidate, www.pw_uid, www.pw_gid, 0o755, expected, True
+    )
+    if identity(candidate_meta) != (document["candidate_dev"], document["candidate_ino"]):
+        raise RuntimeError("candidate inode changed")
+    transition(document, "prepared", {"staging"})
+    raise SystemExit(0)
+
+document = load_transaction()
+candidate = release_root / document["candidate_name"]
+if generation_text not in {"0", str(document["generation"])}:
+    raise SystemExit(1)
+
+if action == "set-phase":
+    phase = str(claim)
+    allowed = {
+        "accepted": {"prepared"},
+        "database-importing": {"accepted"},
+        "database-imported": {"database-importing"},
+        "commit-ready": {"activated"},
+        "committed": {"commit-ready"},
+    }
+    if phase not in allowed:
+        raise SystemExit(1)
+    if read_generation(accepted_path) != document["generation"]:
+        raise RuntimeError("transaction generation is not accepted")
+    if phase in {"commit-ready", "committed"}:
+        if (read_generation(active_path) != document["generation"]
+                or identity(live.lstat()) != (
+                    document["candidate_dev"], document["candidate_ino"]
+                )):
+            raise RuntimeError("transaction generation is not active")
+    transition(document, phase, allowed[phase])
+elif action == "exchange":
+    if document["phase"] != "database-imported":
+        raise SystemExit(1)
+    # Both trees were deeply hashed and the signed candidate was chowned while
+    # FPM remained online. release_root is root:0700, so www-data cannot alter
+    # the candidate afterwards. Once FPM is persistently masked, fixed inode,
+    # owner, mode and same-device checks are the bounded publication gate.
+    live_meta = strict_directory(live, www.pw_uid, www.pw_gid, 0o755)
+    candidate_meta = strict_directory(candidate, www.pw_uid, www.pw_gid, 0o755)
+    if (identity(live_meta) != (document["live_dev"], document["live_ino"])
+            or identity(candidate_meta) != (document["candidate_dev"], document["candidate_ino"])
+            or live.parent.stat().st_dev != release_meta.st_dev):
+        raise RuntimeError("exchange identity mismatch")
+    exchange(live.parent, live.name, release_root, candidate.name)
+    after_live = live.lstat()
+    after_candidate = candidate.lstat()
+    if (identity(after_live) != (document["candidate_dev"], document["candidate_ino"])
+            or identity(after_candidate) != (document["live_dev"], document["live_ino"])):
+        raise RuntimeError("exchange postcondition")
+    transition(document, "swapped", {"database-imported"})
+elif action == "validate-prepared":
+    if document["phase"] != "prepared":
+        raise SystemExit(1)
+    live_meta = strict_directory(live, www.pw_uid, www.pw_gid, 0o755)
+    candidate_meta = strict_directory(candidate, www.pw_uid, www.pw_gid, 0o755)
+    source = Path(document["source"])
+    try:
+        source.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError("prepared source unexpectedly exists")
+    if (identity(live_meta) != (document["live_dev"], document["live_ino"])
+            or identity(candidate_meta)
+                != (document["candidate_dev"], document["candidate_ino"])
+            or read_generation(active_path) != document["previous_generation"]):
+        raise RuntimeError("prepared media identity mismatch")
+    print(document["generation"])
+elif action == "publish-active":
+    if document["phase"] != "swapped" or read_generation(active_path) != document["previous_generation"]:
+        raise SystemExit(1)
+    if identity(live.lstat()) != (document["candidate_dev"], document["candidate_ino"]):
+        raise RuntimeError("new live inode mismatch")
+    atomic_write(active_path, f"{document['generation']}\n".encode("ascii"), ".active-generation.")
+    transition(document, "activated", {"swapped"})
+elif action == "rollback-media":
+    phase = document["phase"]
+    if phase == "committed":
+        print("committed")
+        raise SystemExit(0)
+    try:
+        live_identity = identity(live.lstat())
+    except FileNotFoundError:
+        raise RuntimeError("live media missing")
+    try:
+        candidate_identity = identity(candidate.lstat())
+    except FileNotFoundError:
+        candidate_identity = None
+    old_identity = (document["live_dev"], document["live_ino"])
+    new_identity = (document["candidate_dev"], document["candidate_ino"])
+    if live_identity == new_identity and candidate_identity == old_identity:
+        exchange(live.parent, live.name, release_root, candidate.name)
+        live_identity = identity(live.lstat())
+        candidate_identity = identity(candidate.lstat())
+    if live_identity != old_identity:
+        raise RuntimeError("cannot restore previous live media")
+    active = read_generation(active_path)
+    if active == document["generation"]:
+        atomic_write(active_path, f"{document['previous_generation']}\n".encode("ascii"), ".active-generation.")
+    elif active != document["previous_generation"]:
+        raise RuntimeError("active generation mismatch during rollback")
+    needs_database = phase in {
+        "database-importing", "database-imported", "swapped", "activated",
+        "commit-ready", "rollback-media"
+    }
+    if not needs_database:
+        source = Path(document["source"])
+        strict_directory(source.parent, 0, 0, 0o700, sync_meta.st_dev)
+        try:
+            source_identity = identity(source.lstat())
+        except FileNotFoundError:
+            source_identity = None
+        if candidate_identity == new_identity and source_identity is None:
+            normalize_partial_candidate_to_root(candidate, new_identity)
+            os.rename(candidate, source)
+            fsync_directory(release_root)
+            fsync_directory(source.parent)
+        elif source_identity != new_identity or candidate_identity is not None:
+            raise RuntimeError("candidate missing during pre-DB rollback")
+        remove_transaction()
+    else:
+        document["phase"] = "rollback-media"
+        write_transaction(document)
+    print("database" if needs_database else "clean")
+elif action == "finish-rollback":
+    if document["phase"] != "rollback-media":
+        raise SystemExit(1)
+    if (identity(live.lstat()) != (document["live_dev"], document["live_ino"])
+            or read_generation(active_path) != document["previous_generation"]):
+        raise RuntimeError("rollback state mismatch")
+    try:
+        candidate_meta = candidate.lstat()
+    except FileNotFoundError:
+        # SIGKILL may land after symlink-safe deletion removed the candidate
+        # root but before the durable transaction unlink.  With the old live
+        # inode and previous active generation both positively verified above,
+        # absence is the completed cleanup state and is safe to finalize.
+        pass
+    else:
+        if identity(candidate_meta) != (
+                document["candidate_dev"], document["candidate_ino"]):
+            raise RuntimeError("rollback candidate identity mismatch")
+        # A killed rmtree can leave any safe remaining subset, including an
+        # empty root.  Revalidate that subset and resume deletion idempotently.
+        secure_remove_tree(
+            candidate,
+            (document["candidate_dev"], document["candidate_ino"]),
+            allow_empty=True,
+        )
+    remove_transaction()
+elif action == "finalize":
+    if document["phase"] != "committed" or read_generation(active_path) != document["generation"]:
+        raise SystemExit(1)
+    if identity(live.lstat()) != (document["candidate_dev"], document["candidate_ino"]):
+        raise RuntimeError("committed media identity mismatch")
+    # Publish compact, fsync-backed O(1) boot evidence before potentially long
+    # retirement of the old media tree.  A kill after this point leaves both
+    # the valid record and committed transaction for idempotent recovery.
+    write_active_release(active_release_document(document), True)
+    retained_name = (
+        f"previous-generation-{document['previous_generation']}-for-{document['generation']}"
+    )
+    retained = release_root / retained_name
+    try:
+        candidate_identity = identity(candidate.lstat())
+    except FileNotFoundError:
+        candidate_identity = None
+    try:
+        retained_identity = identity(retained.lstat())
+    except FileNotFoundError:
+        retained_identity = None
+    old_identity = (document["live_dev"], document["live_ino"])
+    if not ((candidate_identity == old_identity and retained_identity is None)
+            or (candidate_identity is None and retained_identity == old_identity)):
+        raise RuntimeError("retained media identity mismatch")
+    existing = [entry for entry in release_root.iterdir() if entry not in {candidate, retained}]
+    for entry in existing:
+        if re.fullmatch(r"\.retiring-previous-generation-[1-9][0-9]{0,18}-for-[1-9][0-9]{0,18}", entry.name):
+            secure_remove_tree(entry, identity(entry.lstat()), allow_empty=True)
+            continue
+        if not re.fullmatch(r"previous-generation-[1-9][0-9]{0,18}-for-[1-9][0-9]{0,18}", entry.name):
+            raise RuntimeError("unexpected release entry")
+        entry_meta, _, _, _ = validate_tree(entry, www.pw_uid, www.pw_gid, 0o755)
+        tombstone = release_root / f".retiring-{entry.name}"
+        try:
+            tombstone.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise RuntimeError("retiring media collision")
+        os.rename(entry, tombstone)
+        fsync_directory(release_root)
+        secure_remove_tree(tombstone, identity(entry_meta), allow_empty=True)
+    if retained_identity is None:
+        os.rename(candidate, retained)
+        fsync_directory(release_root)
+    remove_transaction()
+elif action == "inspect":
+    print(f"{document['generation']} {document['previous_generation']} {document['phase']} {document['backup']}")
+else:
+    raise SystemExit(2)
+PY
+}
+
+prepare_uploads_transaction() {
+    manage_uploads_transaction prepare "$1" "$2" "$3"
+}
+
+validate_prepared_uploads_transaction() {
+    manage_uploads_transaction validate-prepared "$1"
+}
+
+set_uploads_transaction_phase() {
+    manage_uploads_transaction set-phase "$1" "$2"
+}
+
+exchange_uploads_transaction() {
+    manage_uploads_transaction exchange "$1"
+}
+
+publish_active_uploads_generation() {
+    manage_uploads_transaction publish-active "$1"
+}
+
+finalize_uploads_transaction() {
+    manage_uploads_transaction finalize "$1"
+}
+
+publish_stable_uploads_release() {
+    manage_uploads_transaction publish-stable "$1"
+}
+
+allocate_rollback_sql() {
+    [[ -z "$ROLLBACK_SQL" && "$BASHPID" =~ ^[1-9][0-9]{0,18}$ ]] || return 1
+    ROLLBACK_SQL="$STATE_ROOT/.rollback-database.$BASHPID"
+    run_with_deadline 5 2 /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" "$ROLLBACK_SQL" 9<<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+target = Path(sys.argv[2])
+root_meta = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700
+        or target.parent != root
+        or not re.fullmatch(r"\.rollback-database\.[1-9][0-9]{0,18}", target.name)):
+    raise SystemExit(1)
+descriptor = os.open(
+    target,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0o600,
+)
+try:
+    os.fchmod(descriptor, 0o600)
+    os.fsync(descriptor)
+    metadata = os.fstat(descriptor)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+            or metadata.st_size != 0):
+        raise RuntimeError("unsafe rollback target")
+finally:
+    os.close(descriptor)
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
+prepare_rollback_sql() {
+    local backup=$1 target=$2
+    /usr/bin/timeout --signal=TERM --kill-after=10s 5m \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        /var/backups "$backup" "$STATE_ROOT" "$target" 9<<'PY'
+import hashlib
+import os
+import re
+import stat
+import sys
+import zlib
+from pathlib import Path
+
+MAX_SQL_BYTES = 4 * 1024 * 1024 * 1024
+MIN_FREE_RESERVE = 1024 * 1024 * 1024
+root = Path(sys.argv[1])
+backup = Path(sys.argv[2])
+state = Path(sys.argv[3])
+temporary = Path(sys.argv[4])
+root_meta = root.lstat()
+state_meta = state.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o755
+        or backup.parent != root
+        or not re.fullmatch(r"shuzijun-sync-v1-[0-9]{8}-[0-9]{6}", backup.name)
+        or state.resolve(strict=True) != state or not stat.S_ISDIR(state_meta.st_mode)
+        or state_meta.st_uid != 0 or state_meta.st_gid != 0
+        or stat.S_IMODE(state_meta.st_mode) != 0o700
+        or temporary.parent != state
+        or not re.fullmatch(r"\.rollback-database\.[1-9][0-9]{0,18}", temporary.name)):
+    raise SystemExit(1)
+backup_meta = backup.lstat()
+if (not stat.S_ISDIR(backup_meta.st_mode) or backup_meta.st_uid != 0
+        or backup_meta.st_gid != 0 or stat.S_IMODE(backup_meta.st_mode) != 0o700
+        or {entry.name for entry in backup.iterdir()} != {
+            "backup.sha256", "wordpress.sql.gz", "wp-config.php"
+        }):
+    raise SystemExit(1)
+
+def digest(path):
+    value = hashlib.sha256()
+    with path.open("rb", buffering=0) as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+for name in ("backup.sha256", "wordpress.sql.gz", "wp-config.php"):
+    child = (backup / name).lstat()
+    if (not stat.S_ISREG(child.st_mode) or child.st_uid != 0 or child.st_gid != 0
+            or stat.S_IMODE(child.st_mode) != 0o600 or child.st_nlink != 1
+            or child.st_dev != backup_meta.st_dev):
+        raise SystemExit(1)
+canonical = (
+    f"{digest(backup / 'wordpress.sql.gz')}  wordpress.sql.gz\n"
+    f"{digest(backup / 'wp-config.php')}  wp-config.php\n"
+).encode("ascii")
+if len(canonical) != 163 or (backup / "backup.sha256").read_bytes() != canonical:
+    raise SystemExit(1)
+
+descriptor = os.open(temporary, os.O_WRONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+total = 0
+try:
+    initial = os.fstat(descriptor)
+    if (not stat.S_ISREG(initial.st_mode) or initial.st_uid != 0
+            or initial.st_gid != 0 or stat.S_IMODE(initial.st_mode) != 0o600
+            or initial.st_nlink != 1 or initial.st_dev != state_meta.st_dev
+            or initial.st_size != 0):
+        raise RuntimeError("unsafe rollback target")
+    with (backup / "wordpress.sql.gz").open("rb", buffering=0) as compressed:
+        while True:
+            chunk = compressed.read(1024 * 1024)
+            if not chunk:
+                break
+            pending = chunk
+            while pending:
+                output = decoder.decompress(pending, 1024 * 1024)
+                pending = decoder.unconsumed_tail
+                total += len(output)
+                if total > MAX_SQL_BYTES:
+                    raise RuntimeError("rollback SQL too large")
+                filesystem = os.statvfs(state)
+                if filesystem.f_bavail * filesystem.f_frsize < MIN_FREE_RESERVE + len(output):
+                    raise RuntimeError("rollback reserve exhausted")
+                view = memoryview(output)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise RuntimeError("short rollback write")
+                    view = view[written:]
+                if decoder.eof:
+                    if decoder.unused_data or pending or compressed.read(1):
+                        raise RuntimeError("non-canonical rollback gzip")
+                    break
+            if decoder.eof:
+                break
+    if not decoder.eof or total == 0 or decoder.flush():
+        raise RuntimeError("incomplete rollback gzip")
+    os.fsync(descriptor)
+    metadata = os.fstat(descriptor)
+    if (metadata.st_uid != 0 or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1
+            or metadata.st_dev != state_meta.st_dev or metadata.st_size != total):
+        raise RuntimeError("unsafe rollback SQL")
+finally:
+    os.close(descriptor)
+PY
+}
+
+remove_rollback_sql() {
+    local sql=$1
+    /usr/bin/timeout --signal=TERM --kill-after=10s 5m \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 "$STATE_ROOT" "$sql" 9<<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+target = Path(sys.argv[2])
+root_meta = root.lstat()
+if (root.resolve(strict=True) != root or target.parent != root
+        or not re.fullmatch(r"\.rollback-database\.[A-Za-z0-9_-]+", target.name)):
+    raise SystemExit(1)
+descriptor = os.open(target, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    metadata = os.fstat(descriptor)
+finally:
+    os.close(descriptor)
+if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1
+        or metadata.st_dev != root_meta.st_dev):
+    raise SystemExit(1)
+target.unlink()
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
 PY
 }
 
@@ -376,128 +2861,1792 @@ PY
     return 0
 }
 
+probe_standby_runtime() {
+    local body status url relative minimum bytes value
+    probe_standby_api || return 1
+    body=$(mktemp /tmp/shuzijun-standby-runtime.XXXXXX) || return 1
+    status=$(curl -q --silent --show-error --compressed --output "$body" \
+        --write-out '%{http_code}' --proto '=https' --tlsv1.2 \
+        --connect-timeout 5 --max-time 30 --noproxy '*' \
+        --resolve 'www.shuzijun.com.cn:443:127.0.0.1' \
+        'https://www.shuzijun.com.cn/') \
+        || { rm -f -- "$body"; return 1; }
+    if [[ "$status" != 200 ]] \
+        || ! grep -Fq 'wp-content/uploads' "$body" \
+        || ! grep -Fq '易姝' "$body"; then
+        rm -f -- "$body"
+        return 1
+    fi
+    while read -r relative minimum; do
+        status=$(curl -q --silent --show-error --output "$body" \
+            --write-out '%{http_code}' --proto '=https' --tlsv1.2 \
+            --connect-timeout 5 --max-time 30 --noproxy '*' \
+            --resolve 'www.shuzijun.com.cn:443:127.0.0.1' \
+            "https://www.shuzijun.com.cn/wp-content/uploads/$relative") \
+            || { rm -f -- "$body"; return 1; }
+        bytes=$(stat -c '%s' "$body")
+        if [[ "$status" != 200 || "$bytes" -lt "$minimum" ]]; then
+            rm -f -- "$body"
+            return 1
+        fi
+        if [[ "$relative" == *.m3u8 ]] && ! grep -q '^#EXTM3U' "$body"; then
+            rm -f -- "$body"
+            return 1
+        fi
+    done <<'MEDIA'
+2025/04/gongan-beian.png 1000
+hero-images/hero-1.jpg 100000
+showreel/hls-20260826a/high/index.m3u8 50
+showreel/hls-20260826a/high/segment-000.ts 100000
+MEDIA
+    rm -f -- "$body"
+    cd "$SITE" || return 1
+    wp db check --allow-root --quiet >/dev/null || return 1
+    value=$(wp option get siteurl --allow-root) || return 1
+    [[ "$value" == 'https://www.shuzijun.com.cn' ]] || return 1
+    value=$(wp option get home --allow-root) || return 1
+    [[ "$value" == 'https://www.shuzijun.com.cn' ]] || return 1
+    value=$(wp post get 6 --field=post_type --allow-root) || return 1
+    [[ "$value" == portfolio ]] || return 1
+    value=$(wp post get 6 --field=post_status --allow-root) || return 1
+    [[ "$value" == publish ]] || return 1
+    value=$(wp post get 7 --field=post_type --allow-root) || return 1
+    [[ "$value" == portfolio ]] || return 1
+    value=$(wp post get 7 --field=post_status --allow-root) || return 1
+    [[ "$value" == publish ]] || return 1
+}
+
+read_unit_file_state() {
+    local unit=$1 state status
+    if state=$(systemctl is-enabled "$unit" 2>/dev/null); then
+        status=0
+    else
+        status=$?
+    fi
+    # Output alone is not evidence: a timed-out or failed command may already
+    # have printed a plausible word. Accept only the exact output/status pairs
+    # used by this transaction.
+    case "$status:$state" in
+        0:enabled|1:disabled|1:masked)
+            printf '%s\n' "$state"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 isolate_failed_fpm() {
-    local failed=0 load_state= active_state= sub_state= enabled_state=
-    systemctl mask --now php8.3-fpm >/dev/null 2>&1 || failed=1
-    systemctl stop php8.3-fpm >/dev/null 2>&1 || failed=1
-    if ! load_state=$(systemctl show php8.3-fpm --property=LoadState --value); then
+    local failed=0 load_state= active_state= sub_state= result= job= enabled_state=
+    # These operations are intentionally idempotent.  Their individual exit
+    # codes are advisory; only the exact persisted/loaded state below decides
+    # whether isolation succeeded.
+    if ! systemctl mask --now "$FPM_SERVICE" >/dev/null 2>&1; then :; fi
+    if ! systemctl stop "$FPM_SERVICE" >/dev/null 2>&1; then :; fi
+    # Persist the mask before reporting isolation: on the later activation
+    # path, the RequiredBy edge is separately synced before this mask is removed.
+    if ! sync -f /etc/systemd/system; then
         failed=1
     fi
-    if ! active_state=$(systemctl show php8.3-fpm --property=ActiveState --value); then
+    if ! load_state=$(systemctl show "$FPM_SERVICE" --property=LoadState --value); then
         failed=1
     fi
-    if ! sub_state=$(systemctl show php8.3-fpm --property=SubState --value); then
+    if ! active_state=$(systemctl show "$FPM_SERVICE" --property=ActiveState --value); then
         failed=1
     fi
-    if ! enabled_state=$(systemctl is-enabled php8.3-fpm 2>/dev/null); then
-        [[ "$enabled_state" == masked ]] || failed=1
+    if ! sub_state=$(systemctl show "$FPM_SERVICE" --property=SubState --value); then
+        failed=1
     fi
+    if ! result=$(systemctl show "$FPM_SERVICE" --property=Result --value); then
+        failed=1
+    fi
+    if ! job=$(systemctl show "$FPM_SERVICE" --property=Job --value); then
+        failed=1
+    fi
+    enabled_state=$(read_unit_file_state "$FPM_SERVICE") || failed=1
     [[ "$load_state" == masked && "$active_state" == inactive \
-        && "$sub_state" == dead && "$enabled_state" == masked ]] || failed=1
-    ! systemctl is-active --quiet php8.3-fpm || failed=1
+        && "$sub_state" == dead && "$result" =~ ^[a-z][a-z-]*$ && -z "$job" \
+        && "$enabled_state" == masked ]] || failed=1
     [[ "$failed" -eq 0 ]]
 }
 
-# Share the site-directory read-only lock with the deployer/configurator. The
-# attestation/protocol queries are intentionally read-only and prove the
-# receiver itself is running on a verified standby before the sender exports.
-exec 8<"$SITE"
-flock -n 8
+durably_unmask_fpm() {
+    local load_state= enabled_state= job=
+    systemctl unmask "$FPM_SERVICE" >/dev/null || return 1
+    # The persistent mask is a directory entry under /etc/systemd/system.
+    # Make its removal durable before allowing any activation; otherwise a
+    # power loss after commit can replay the old /dev/null mask on next boot.
+    sync -f /etc/systemd/system || return 1
+    load_state=$(systemctl show "$FPM_SERVICE" --property=LoadState --value) \
+        || return 1
+    enabled_state=$(read_unit_file_state "$FPM_SERVICE") || return 1
+    job=$(systemctl show "$FPM_SERVICE" --property=Job --value) || return 1
+    [[ "$load_state" == loaded && "$enabled_state" == enabled && -z "$job" ]]
+}
+
+isolate_fpm_from_activation_guard() {
+    local active_state= sub_state= result= job= enabled_state= attempt
+    # The guard runs with a read-only system namespace. It stops FPM through
+    # systemd's AF_UNIX control socket, while its already-fsynced RequiredBy
+    # edge remains the persistent reboot gate. The receiver mutation path uses
+    # isolate_failed_fpm() and a real persistent mask before publication.
+    systemctl stop --no-block "$FPM_SERVICE" >/dev/null 2>&1 || :
+    for attempt in $(seq 1 100); do
+        active_state=$(systemctl show "$FPM_SERVICE" --property=ActiveState --value) \
+            || return 1
+        sub_state=$(systemctl show "$FPM_SERVICE" --property=SubState --value) \
+            || return 1
+        result=$(systemctl show "$FPM_SERVICE" --property=Result --value) || return 1
+        job=$(systemctl show "$FPM_SERVICE" --property=Job --value) || return 1
+        if [[ "$active_state" == inactive && "$sub_state" == dead \
+            && "$result" =~ ^[a-z][a-z-]*$ && -z "$job" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    enabled_state=$(read_unit_file_state "$FPM_GUARD_UNIT") || return 1
+    [[ "$active_state" == inactive && "$sub_state" == dead \
+        && "$result" =~ ^[a-z][a-z-]*$ && -z "$job" && "$enabled_state" == enabled ]] \
+        || return 1
+    validate_fpm_guard_unit || return 1
+}
+
+verify_fpm_ready() {
+    local load_state active_state sub_state result job enabled_state triggered_by
+    load_state=$(systemctl show "$FPM_SERVICE" --property=LoadState --value) || return 1
+    active_state=$(systemctl show "$FPM_SERVICE" --property=ActiveState --value) || return 1
+    sub_state=$(systemctl show "$FPM_SERVICE" --property=SubState --value) || return 1
+    result=$(systemctl show "$FPM_SERVICE" --property=Result --value) || return 1
+    job=$(systemctl show "$FPM_SERVICE" --property=Job --value) || return 1
+    enabled_state=$(read_unit_file_state "$FPM_SERVICE") || return 1
+    triggered_by=$(systemctl show "$FPM_SERVICE" --property=TriggeredBy --value) || return 1
+    [[ "$load_state" == loaded && "$active_state" == active \
+        && "$sub_state" == running && "$result" == success && -z "$job" \
+        && "$enabled_state" == enabled \
+        && -z "$triggered_by" ]] || return 1
+}
+
+validate_fpm_guard_unit() {
+    local fragment drop_ins load_state need_reload enabled_state guard_sha256
+    local service_type notify_access remain_after_exit runtime_max restart_policy restart_delay
+    local start_limit_interval start_limit_burst before_units required_by
+    test -f "$FPM_GUARD_UNIT_FILE" && test ! -L "$FPM_GUARD_UNIT_FILE" || return 1
+    test "$(realpath -e -- "$FPM_GUARD_UNIT_FILE")" = "$FPM_GUARD_UNIT_FILE" || return 1
+    test "$(stat -c '%u:%g:%h:%a' "$FPM_GUARD_UNIT_FILE")" = '0:0:1:644' || return 1
+    guard_sha256=$(sha256sum "$FPM_GUARD_UNIT_FILE" | awk '{ print $1 }') || return 1
+    test "$guard_sha256" = "$FPM_GUARD_UNIT_SHA256" || return 1
+    fragment=$(systemctl show "$FPM_GUARD_UNIT" --property=FragmentPath --value) || return 1
+    drop_ins=$(systemctl show "$FPM_GUARD_UNIT" --property=DropInPaths --value) || return 1
+    load_state=$(systemctl show "$FPM_GUARD_UNIT" --property=LoadState --value) || return 1
+    need_reload=$(systemctl show "$FPM_GUARD_UNIT" --property=NeedDaemonReload --value) || return 1
+    service_type=$(systemctl show "$FPM_GUARD_UNIT" --property=Type --value) || return 1
+    notify_access=$(systemctl show "$FPM_GUARD_UNIT" --property=NotifyAccess --value) || return 1
+    remain_after_exit=$(systemctl show "$FPM_GUARD_UNIT" --property=RemainAfterExit --value) \
+        || return 1
+    runtime_max=$(systemctl show "$FPM_GUARD_UNIT" --property=RuntimeMaxUSec --value) \
+        || return 1
+    restart_policy=$(systemctl show "$FPM_GUARD_UNIT" --property=Restart --value) || return 1
+    restart_delay=$(systemctl show "$FPM_GUARD_UNIT" --property=RestartUSec --value) || return 1
+    start_limit_interval=$(systemctl show \
+        "$FPM_GUARD_UNIT" --property=StartLimitIntervalUSec --value) || return 1
+    start_limit_burst=$(systemctl show \
+        "$FPM_GUARD_UNIT" --property=StartLimitBurst --value) || return 1
+    before_units=$(systemctl show "$FPM_GUARD_UNIT" --property=Before --value) || return 1
+    required_by=$(systemctl show "$FPM_GUARD_UNIT" --property=RequiredBy --value) || return 1
+    enabled_state=$(read_unit_file_state "$FPM_GUARD_UNIT") || return 1
+    [[ "$fragment" == "$FPM_GUARD_UNIT_FILE" && -z "$drop_ins" \
+        && "$load_state" == loaded && "$need_reload" == no \
+        && "$service_type" == notify && "$notify_access" == all \
+        && "$remain_after_exit" == no && "$runtime_max" == 2min \
+        && "$restart_policy" == on-failure && "$restart_delay" == 1s \
+        && "$start_limit_interval" == 10min && "$start_limit_burst" == 3 \
+        && " $before_units " == *" $FPM_SERVICE "* \
+        && ( "$enabled_state" == disabled || "$enabled_state" == enabled ) ]] || return 1
+    if [[ "$enabled_state" == enabled ]]; then
+        [[ " $required_by " == *" $FPM_SERVICE "* ]] || return 1
+    fi
+}
+
+prepare_fpm_guard_state() {
+    local generation=$1
+    run_with_deadline 5 2 env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" "$FPM_GUARD_LEASE" "$FPM_GUARD_ARMED" \
+        "$FPM_GUARD_COMMIT" "$generation" 9<<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+lease = Path(sys.argv[2])
+armed = Path(sys.argv[3])
+committed = Path(sys.argv[4])
+generation = sys.argv[5]
+metadata = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or {lease, armed, committed} != {
+            root / "fpm-activation-guard.lease",
+            root / "fpm-activation-guard-v4.armed",
+            root / "fpm-activation-guard-v4.committed",
+        } or not re.fullmatch(r"[1-9][0-9]{0,18}", generation)):
+    raise SystemExit(1)
+
+flags = os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+created = False
+try:
+    descriptor = os.open(lease, flags)
+except FileNotFoundError:
+    descriptor = os.open(lease, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    created = True
+try:
+    if created:
+        os.fchmod(descriptor, 0o600)
+    current = os.fstat(descriptor)
+    if (not stat.S_ISREG(current.st_mode) or current.st_uid != 0
+            or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_nlink != 1 or current.st_dev != metadata.st_dev
+            or current.st_size != 0):
+        raise SystemExit(1)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+
+for marker in (armed, committed):
+    try:
+        descriptor = os.open(marker, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        continue
+    try:
+        current = os.fstat(descriptor)
+        payload = os.read(descriptor, 192)
+        if os.read(descriptor, 1):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    if (not stat.S_ISREG(current.st_mode) or current.st_uid != 0
+            or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_nlink != 1 or current.st_dev != metadata.st_dev
+            or not re.fullmatch(
+                rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n", payload
+            )):
+        raise SystemExit(1)
+# The prior commit and armed marker are deliberately retained here. The shell
+# first acquires the guard lease; only then may it clear an old armed marker or
+# recover a stale marker-publication temporary without racing a guard writer.
+PY
+}
+
+reset_fpm_guard_attempt_state() {
+    local generation=$1 disposition=${2-reset}
+    [[ "$disposition" == reset || "$disposition" == preserve ]] || return 1
+    run_with_deadline 5 2 env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" "$FPM_GUARD_ARMED" "$FPM_GUARD_COMMIT" \
+        "$generation" "$disposition" 9<<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+armed = Path(sys.argv[2])
+committed = Path(sys.argv[3])
+generation = sys.argv[4]
+disposition = sys.argv[5]
+root_meta = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700
+        or armed != root / "fpm-activation-guard-v4.armed"
+        or committed != root / "fpm-activation-guard-v4.committed"
+        or not re.fullmatch(r"[1-9][0-9]{0,18}", generation)
+        or disposition not in {"reset", "preserve"}):
+    raise SystemExit(1)
+
+marker_pattern = rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n"
+def validate_marker(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        payload = os.read(descriptor, 192)
+        if os.read(descriptor, 1):
+            raise RuntimeError("oversize guard marker")
+    finally:
+        os.close(descriptor)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+            or not re.fullmatch(marker_pattern, payload)):
+        raise RuntimeError("unsafe guard marker")
+
+try:
+    validate_marker(committed)
+except FileNotFoundError:
+    pass
+try:
+    validate_marker(armed)
+except FileNotFoundError:
+    pass
+
+directory = os.open(
+    root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+)
+changed = False
+try:
+    temporary_pattern = re.compile(r"\.fpm-guard-marker\.[0-9a-f]{32}")
+    for entry in root.iterdir():
+        if not temporary_pattern.fullmatch(entry.name):
+            continue
+        metadata = os.stat(entry.name, dir_fd=directory, follow_symlinks=False)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+                or metadata.st_size > 192):
+            raise RuntimeError("unsafe guard marker temporary")
+        os.unlink(entry.name, dir_fd=directory)
+        changed = True
+    if disposition == "reset":
+        try:
+            os.unlink(armed.name, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        else:
+            changed = True
+    if changed:
+        os.fsync(directory)
+finally:
+    os.close(directory)
+PY
+}
+
+publish_fpm_guard_marker() {
+    local marker=$1 generation=$2 release_id=$3 nonce=$4
+    run_with_deadline 5 2 env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" "$marker" "$generation" "$release_id" "$nonce" 9<<'PY'
+import os
+import re
+import secrets
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+root = Path(sys.argv[1])
+marker = Path(sys.argv[2])
+generation = sys.argv[3]
+release_id = sys.argv[4]
+nonce = sys.argv[5]
+metadata = root.lstat()
+allowed = {
+    root / "fpm-activation-guard-v4.armed",
+    root / "fpm-activation-guard-v4.committed",
+}
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or marker not in allowed
+        or not re.fullmatch(r"[1-9][0-9]{0,18}", generation)
+        or not re.fullmatch(r"[0-9a-f]{64}", release_id)
+        or not re.fullmatch(r"[0-9a-f]{64}", nonce)):
+    raise SystemExit(1)
+try:
+    existing = os.open(marker, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+except FileNotFoundError:
+    pass
+else:
+    try:
+        current = os.fstat(existing)
+        value = os.read(existing, 192)
+        if os.read(existing, 1):
+            raise SystemExit(1)
+        named = marker.lstat()
+    finally:
+        os.close(existing)
+    expected = f"{generation} {release_id} {nonce}\n".encode("ascii")
+    if (not stat.S_ISREG(current.st_mode) or current.st_uid != 0
+            or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_nlink != 1 or current.st_dev != metadata.st_dev
+            or (current.st_dev, current.st_ino) != (named.st_dev, named.st_ino)
+            or not re.fullmatch(
+                rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n", value
+            )):
+        raise SystemExit(1)
+    # Same-generation publication is idempotent. A different valid generation
+    # is replaced atomically below; malformed metadata is never overwritten.
+    if value == expected:
+        directory = os.open(
+            root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+        repeated = os.open(marker, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            repeated_meta = os.fstat(repeated)
+            repeated_value = os.read(repeated, 192)
+            if os.read(repeated, 1):
+                raise SystemExit(1)
+            repeated_named = marker.lstat()
+        finally:
+            os.close(repeated)
+        if ((repeated_meta.st_dev, repeated_meta.st_ino)
+                != (current.st_dev, current.st_ino)
+                or (repeated_meta.st_dev, repeated_meta.st_ino)
+                != (repeated_named.st_dev, repeated_named.st_ino)
+                or repeated_value != value):
+            raise SystemExit(1)
+        raise SystemExit(0)
+
+temp_path = root / f".fpm-guard-marker.{secrets.token_hex(16)}"
+descriptor = os.open(
+    temp_path,
+    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+    0o600,
+)
+try:
+    os.fchmod(descriptor, 0o600)
+    encoded = f"{generation} {release_id} {nonce}\n".encode("ascii")
+    view = memoryview(encoded)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise SystemExit(1)
+        view = view[written:]
+    os.fsync(descriptor)
+    current = os.fstat(descriptor)
+    if (not stat.S_ISREG(current.st_mode) or current.st_uid != 0
+            or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o600
+            or current.st_nlink != 1 or current.st_dev != metadata.st_dev
+            or current.st_size != len(encoded)):
+        raise SystemExit(1)
+    os.close(descriptor)
+    descriptor = -1
+    os.replace(temp_path, marker)
+    directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if descriptor >= 0:
+        os.close(descriptor)
+    try:
+        temp_path.unlink()
+    except FileNotFoundError:
+        pass
+PY
+}
+
+read_fpm_guard_marker() {
+    local marker=$1 generation=$2
+    run_with_deadline 5 2 env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" "$marker" "$generation" 9<<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+marker = Path(sys.argv[2])
+generation = sys.argv[3]
+metadata = root.lstat()
+allowed = {
+    root / "fpm-activation-guard-v4.armed",
+    root / "fpm-activation-guard-v4.committed",
+}
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != 0 or metadata.st_gid != 0
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or marker not in allowed
+        or not re.fullmatch(r"[1-9][0-9]{0,18}", generation)):
+    raise SystemExit(1)
+def read_once():
+    descriptor = os.open(marker, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        current = os.fstat(descriptor)
+        value = os.read(descriptor, 192)
+        if os.read(descriptor, 1):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    return current, value
+
+current, value = read_once()
+if (not stat.S_ISREG(current.st_mode) or current.st_uid != 0
+        or current.st_gid != 0 or stat.S_IMODE(current.st_mode) != 0o600
+        or current.st_nlink != 1 or current.st_dev != metadata.st_dev
+        or not re.fullmatch(
+            rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n", value
+        )):
+    raise SystemExit(1)
+directory = os.open(
+    root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+reopened, repeated = read_once()
+if ((reopened.st_dev, reopened.st_ino) != (current.st_dev, current.st_ino)
+        or repeated != value):
+    raise SystemExit(1)
+marker_generation, release_id, nonce = value.decode("ascii").strip().split(" ")
+if marker_generation != generation:
+    raise SystemExit(1)
+sys.stdout.write(release_id + " " + nonce + "\n")
+PY
+}
+
+validate_fpm_guard_marker() {
+    local marker=$1 generation=$2 expected_release_id=${3-} expected_nonce=${4-}
+    local payload release_id nonce
+    payload=$(read_fpm_guard_marker "$marker" "$generation") || return 1
+    read -r release_id nonce <<<"$payload" || return 1
+    [[ "$release_id" =~ ^[0-9a-f]{64}$ && "$nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
+    if [[ -n "$expected_release_id" || -n "$expected_nonce" ]]; then
+        [[ "$expected_release_id" =~ ^[0-9a-f]{64}$ \
+            && "$expected_nonce" =~ ^[0-9a-f]{64}$ \
+            && "$release_id" == "$expected_release_id" \
+            && "$nonce" == "$expected_nonce" ]] \
+            || return 1
+    fi
+}
+
+classify_fpm_guard_commit_marker() {
+    local generation=$1 previous=$2 expected_release_id=${3-} expected_nonce=${4-}
+    [[ "$generation" =~ ^[1-9][0-9]{0,18}$ \
+        && "$previous" =~ ^[1-9][0-9]{0,18}$ \
+        && "$previous" != "$generation" \
+        && ( ( -z "$expected_release_id" && -z "$expected_nonce" ) \
+            || ( "$expected_release_id" =~ ^[0-9a-f]{64}$ \
+                && "$expected_nonce" =~ ^[0-9a-f]{64}$ ) ) ]] \
+        || return 1
+    # Return 0 only for this activation's exact commit, 2 only for a positively
+    # observed absence/previous-generation commit, and 1 for every uncertain
+    # state (I/O, timeout, unsafe inode, malformed bytes, future generation, or
+    # same-generation nonce mismatch). Callers must never collapse 1 into 2.
+    run_with_deadline 5 2 /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" "$FPM_GUARD_COMMIT" "$generation" "$previous" \
+        "$expected_release_id" "$expected_nonce" 9<<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+marker = Path(sys.argv[2])
+generation = sys.argv[3]
+previous = sys.argv[4]
+expected_release_id = sys.argv[5]
+expected_nonce = sys.argv[6]
+root_meta = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700
+        or marker != root / "fpm-activation-guard-v4.committed"
+        or not re.fullmatch(r"[1-9][0-9]{0,18}", generation)
+        or not re.fullmatch(r"[1-9][0-9]{0,18}", previous)
+        or int(previous) >= int(generation)
+        or bool(expected_release_id) != bool(expected_nonce)
+        or (expected_release_id
+            and not re.fullmatch(r"[0-9a-f]{64}", expected_release_id))
+        or (expected_nonce and not re.fullmatch(r"[0-9a-f]{64}", expected_nonce))):
+    raise SystemExit(1)
+
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    def read_once():
+        descriptor = os.open(
+            marker.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=directory,
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            payload = os.read(descriptor, 192)
+            if os.read(descriptor, 1):
+                raise RuntimeError("oversized commit marker")
+        finally:
+            os.close(descriptor)
+        named = os.stat(marker.name, dir_fd=directory, follow_symlinks=False)
+        if (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino):
+            raise RuntimeError("commit marker inode changed")
+        return metadata, payload
+    try:
+        metadata, payload = read_once()
+    except FileNotFoundError:
+        # Persist and recheck the exact absence before declaring the activation
+        # uncommitted.  A missing/previous marker is the only rollback proof;
+        # any fsync/stat I/O uncertainty remains status 1 (fail isolated).
+        os.fsync(directory)
+        try:
+            read_once()
+        except FileNotFoundError:
+            raise SystemExit(2)
+        raise RuntimeError("commit marker appeared during absence promotion")
+    os.fsync(directory)
+    reopened, repeated = read_once()
+    if ((reopened.st_dev, reopened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            or repeated != payload):
+        raise RuntimeError("commit marker changed during durability promotion")
+finally:
+    os.close(directory)
+
+if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+        or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+        or not re.fullmatch(
+            rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n", payload
+        )):
+    raise SystemExit(1)
+marker_generation, marker_release_id, marker_nonce = (
+    payload.decode("ascii").strip().split(" ")
+)
+if marker_generation == generation:
+    if expected_release_id and (
+            marker_release_id != expected_release_id
+            or marker_nonce != expected_nonce):
+        raise SystemExit(1)
+    raise SystemExit(0)
+if marker_generation == previous:
+    raise SystemExit(2)
+raise SystemExit(1)
+PY
+}
+
+new_fpm_activation_nonce() {
+    run_with_deadline 5 2 /usr/bin/python3 -I -c \
+        'import secrets; print(secrets.token_hex(32))'
+}
+
+read_accepted_generation() {
+    run_with_deadline 5 2 env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" "$LAST_ACCEPTED_GENERATION" 9<<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+state = Path(sys.argv[2])
+root_meta = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700
+        or state != root / "highest-accepted-generation"):
+    raise SystemExit(1)
+descriptor = os.open(state, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    meta = os.fstat(descriptor)
+    payload = os.read(descriptor, 32)
+    if os.read(descriptor, 1):
+        raise SystemExit(1)
+finally:
+    os.close(descriptor)
+if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != 0 or meta.st_gid != 0
+        or stat.S_IMODE(meta.st_mode) != 0o600 or meta.st_nlink != 1
+        or meta.st_dev != root_meta.st_dev
+        or not re.fullmatch(rb"[1-9][0-9]{0,18}\n", payload)):
+    raise SystemExit(1)
+sys.stdout.write(payload.decode("ascii").strip() + "\n")
+PY
+}
+
+validate_fpm_guard_commit_matches_accepted() {
+    local expected_nonce=${1-} accepted active marker release_id commit_nonce
+    if [[ -n "$expected_nonce" && ! "$expected_nonce" =~ ^[0-9a-f]{64}$ ]]; then
+        return 1
+    fi
+    accepted=$(read_accepted_generation) || return 1
+    # Guard boot/stop paths must remain O(1): this validates only canonical,
+    # fsync-backed state plus the current uploads-root inode. Full per-file
+    # hashing stays in the receiver's signed transaction checks and patrols.
+    active=$(manage_uploads_transaction validate-activation "$accepted") || return 1
+    test "$active" = "$accepted" || return 1
+    if [[ -n "$expected_nonce" ]]; then
+        marker=$(read_fpm_guard_marker "$FPM_GUARD_COMMIT" "$accepted") || return 1
+        read -r release_id commit_nonce <<<"$marker" || return 1
+        [[ "$release_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+        test "$commit_nonce" = "$expected_nonce" || return 1
+    fi
+}
+
+read_pending_stable_activation() {
+    local accepted base armed commit_release_id commit_nonce
+    local armed_release_id armed_nonce
+    accepted=$(read_accepted_generation) || return 1
+    base=$(manage_uploads_transaction validate-stable-base "$accepted") || return 1
+    read -r commit_release_id commit_nonce <<<"$base" || return 1
+    armed=$(read_fpm_guard_marker "$FPM_GUARD_ARMED" "$accepted") || return 1
+    read -r armed_release_id armed_nonce <<<"$armed" || return 1
+    [[ "$commit_release_id" =~ ^[0-9a-f]{64}$ \
+        && "$commit_nonce" =~ ^[0-9a-f]{64}$ \
+        && "$armed_release_id" == "$commit_release_id" \
+        && "$armed_nonce" =~ ^[0-9a-f]{64}$ \
+        && "$armed_nonce" != "$commit_nonce" ]] || return 1
+    printf '%s %s\n' "$accepted" "$armed_nonce"
+}
+
+classify_commit_ready_transaction() {
+    local accepted details transaction_generation previous phase backup
+    local armed_marker armed_release_id armed_nonce expected_release_id
+    local commit_status
+    accepted=$(read_accepted_generation) || return 1
+    details=$(manage_uploads_transaction inspect) || return 1
+    read -r transaction_generation previous phase backup <<<"$details" || return 1
+    [[ "$transaction_generation" == "$accepted" \
+        && "$previous" =~ ^[1-9][0-9]{0,18}$ \
+        && "$previous" != "$accepted" \
+        && "$phase" == commit-ready && -n "$backup" ]] || return 1
+    expected_release_id=$(manage_uploads_transaction activation-release-id "$accepted") \
+        || return 1
+    [[ "$expected_release_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+    armed_marker=$(read_fpm_guard_marker "$FPM_GUARD_ARMED" "$accepted") || return 1
+    read -r armed_release_id armed_nonce <<<"$armed_marker" || return 1
+    [[ "$armed_release_id" == "$expected_release_id" \
+        && "$armed_nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
+    if classify_fpm_guard_commit_marker \
+        "$accepted" "$previous" "$armed_release_id" "$armed_nonce"; then
+        return 0
+    else
+        commit_status=$?
+    fi
+    case "$commit_status" in
+        2) return 2 ;;
+        *) return 1 ;;
+    esac
+}
+
+assert_fpm_guard_uncommitted_for_generation() {
+    local generation=$1 accepted details transaction_generation previous phase backup
+    local release_id commit_marker commit_release_id commit_nonce
+    [[ "$generation" =~ ^[1-9][0-9]{0,18}$ ]] || return 1
+    accepted=$(read_accepted_generation) || return 1
+    test "$accepted" = "$generation" || return 1
+    details=$(manage_uploads_transaction inspect) || return 1
+    read -r transaction_generation previous phase backup <<<"$details" || return 1
+    [[ "$transaction_generation" == "$generation" \
+        && "$previous" =~ ^[1-9][0-9]{0,18}$ \
+        && "$previous" != "$generation" \
+        && "$phase" == accepted && -n "$backup" ]] || return 1
+    release_id=$(manage_uploads_transaction stable-release-id "$previous") || return 1
+    commit_marker=$(read_fpm_guard_marker "$FPM_GUARD_COMMIT" "$previous") || return 1
+    read -r commit_release_id commit_nonce <<<"$commit_marker" || return 1
+    [[ "$release_id" =~ ^[0-9a-f]{64}$ \
+        && "$commit_release_id" == "$release_id" \
+        && "$commit_nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
+    # All constituent records were read positively and proved to describe the
+    # precise pre-apply state; no expected-negative command can hide an I/O or
+    # parse failure.
+    return 0
+}
+
+validate_fpm_guard_runtime_context() {
+    test "$0" = "$SELF" || return 1
+    test -f "$SELF" && test ! -L "$SELF" || return 1
+    test "$(realpath -e -- "$SELF")" = "$SELF" || return 1
+    test "$(stat -c '%u:%g:%h:%a' "$SELF")" = '0:0:1:755' || return 1
+    validate_sync_state_roots || return 1
+}
+
+watch_fpm_activation_guard() {
+    local lease=$1 armed=$2 committed=$3 generation release_id nonce lock_status
+    local armed_marker armed_release_id
+    [[ "$EUID" -eq 0 && "$lease" == "$FPM_GUARD_LEASE" \
+        && "$armed" == "$FPM_GUARD_ARMED" && "$committed" == "$FPM_GUARD_COMMIT" ]] \
+        || return 1
+    validate_fpm_guard_runtime_context || return 1
+    exec 6<>"$lease" || return 1
+    test "$(stat -Lc '%u:%g:%h:%a' /proc/self/fd/6)" = '0:0:1:600' || return 1
+    if flock -n -E 99 6; then
+        # No receiver owns the lease, so this is a dependency/boot start.  Do
+        # not report READY until a durable successful commit is present.  With
+        # RequiredBy+Before, exiting nonzero keeps PHP-FPM from starting.
+        if validate_fpm_guard_commit_matches_accepted; then
+            systemd-notify --ready || return 1
+            return 0
+        fi
+        if isolate_fpm_from_activation_guard; then
+            printf '%s\n' \
+                'sync receiver guard: uncommitted dependency start was persistently isolated' >&2
+            # Exit 77 is deliberately excluded from Restart=on-failure: exact
+            # isolation is already durable, so no retry loop is useful.
+            return 77
+        else
+            printf '%s\n' \
+                'sync receiver guard: CRITICAL dependency start could not isolate uncommitted activation' >&2
+        fi
+        return 1
+    else
+        lock_status=$?
+    fi
+    # Only the caller-selected conflict status proves that the receiver owns
+    # the lease. I/O errors, an invalid descriptor, or an unsupported flock
+    # invocation must never be mistaken for ownership and must never publish
+    # an armed marker or READY notification.
+    if (( lock_status != 99 )); then
+        return 1
+    fi
+    # The receiver already holds the lease with FPM verified masked.  READY
+    # releases `systemctl start`; this independent process then waits through
+    # the complete unmask/start/probe window.
+    generation=$(read_accepted_generation) || return 1
+    release_id=$(manage_uploads_transaction activation-release-id "$generation") || return 1
+    [[ "$release_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+    if [[ -e "$armed" || -L "$armed" ]]; then
+        # A receiver recovering an interrupted activation intentionally keeps
+        # the exact armed nonce. Reusing it closes the crash window in which a
+        # newly armed attempt coexists with the prior same-release commit.
+        armed_marker=$(read_fpm_guard_marker "$armed" "$generation") || return 1
+        read -r armed_release_id nonce <<<"$armed_marker" || return 1
+        [[ "$armed_release_id" == "$release_id" \
+            && "$nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
+    else
+        nonce=$(new_fpm_activation_nonce) || return 1
+        [[ "$nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
+        publish_fpm_guard_marker \
+            "$armed" "$generation" "$release_id" "$nonce" || return 1
+    fi
+    systemd-notify --ready || return 1
+    flock 6 || return 1
+    if validate_fpm_guard_commit_matches_accepted "$nonce"; then
+        return 0
+    fi
+    if isolate_fpm_from_activation_guard; then
+        printf '%s\n' \
+            'sync receiver guard: uncommitted activation was persistently isolated' >&2
+        # RequiredBy does not propagate a later runtime exit to PHP-FPM; the
+        # explicit verified isolation above is the safety action. Exit 77
+        # prevents a restart storm because that isolation already succeeded.
+        return 77
+    fi
+    printf '%s\n' \
+        'sync receiver guard: CRITICAL could not isolate uncommitted activation' >&2
+    return 1
+}
+
+finalize_fpm_activation_guard() {
+    local committed=$1 lease_metadata
+    [[ "$EUID" -eq 0 && "$committed" == "$FPM_GUARD_COMMIT" ]] || return 1
+    # Only a fully trusted execution context plus an exact durable commit may
+    # skip isolation. Missing/tampered state or receiver metadata is therefore
+    # treated as uncommitted rather than aborting this last-resort stop hook.
+    if validate_fpm_guard_runtime_context \
+        && exec 6<>"$FPM_GUARD_LEASE"; then
+        lease_metadata=$(stat -Lc '%u:%g:%h:%a' /proc/self/fd/6) || lease_metadata=
+        if [[ "$lease_metadata" == '0:0:1:600' ]] \
+            && flock -n 6 \
+            && validate_fpm_guard_commit_matches_accepted; then
+            return 0
+        fi
+    fi
+    if isolate_fpm_from_activation_guard; then
+        printf '%s\n' \
+            'sync receiver guard: uncommitted stop was persistently isolated' >&2
+        return 0
+    fi
+    printf '%s\n' \
+        'sync receiver guard: CRITICAL stop hook could not isolate uncommitted activation' >&2
+    return 1
+}
+
+arm_fpm_activation_guard() {
+    local generation=$1 activation_mode=${2-new}
+    local attempt active_state sub_state result exit_status enabled_state
+    local expected_release_id armed_marker release_id nonce committed_marker
+    local committed_release_id committed_nonce reset_disposition
+    [[ "$activation_mode" == new || "$activation_mode" == resume ]] || return 1
+    expected_release_id=$(manage_uploads_transaction activation-release-id "$generation") \
+        || return 1
+    [[ "$expected_release_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+    validate_fpm_guard_unit || return 1
+    active_state=$(systemctl show "$FPM_GUARD_UNIT" --property=ActiveState --value) \
+        || return 1
+    result=$(systemctl show "$FPM_GUARD_UNIT" --property=Result --value) || return 1
+    exit_status=$(systemctl show "$FPM_GUARD_UNIT" --property=ExecMainStatus --value) \
+        || return 1
+    [[ "$result" != start-limit-hit ]] || return 1
+    case "$active_state" in
+        inactive)
+            [[ "$result" == success || -z "$result" ]] || return 1
+            ;;
+        failed)
+            [[ "$result" == exit-code && "$exit_status" == 77 ]] || return 1
+            ;;
+        active)
+            # A predecessor receiver can die while its lease-backed watcher is
+            # still draining. The caller has already persistently isolated FPM,
+            # so stopping that exact watcher is safe and avoids an artificial
+            # recovery deadlock. No failed/start-limit state is reset.
+            systemctl stop "$FPM_GUARD_UNIT" || return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    active_state=$(systemctl show "$FPM_GUARD_UNIT" --property=ActiveState --value) \
+        || return 1
+    sub_state=$(systemctl show "$FPM_GUARD_UNIT" --property=SubState --value) || return 1
+    result=$(systemctl show "$FPM_GUARD_UNIT" --property=Result --value) || return 1
+    exit_status=$(systemctl show "$FPM_GUARD_UNIT" --property=ExecMainStatus --value) \
+        || return 1
+    [[ "$sub_state" == dead && ( \
+        ( "$active_state" == inactive && "$result" == success ) \
+        || ( "$active_state" == failed && "$result" == exit-code && "$exit_status" == 77 ) \
+    ) ]] || return 1
+    prepare_fpm_guard_state "$generation" || return 1
+    exec 6<>"$FPM_GUARD_LEASE" || return 1
+    test "$(stat -Lc '%u:%g:%h:%a' /proc/self/fd/6)" = '0:0:1:600' || return 1
+    flock -n 6 || return 1
+    reset_disposition=reset
+    if [[ "$activation_mode" == resume ]]; then
+        reset_disposition=preserve
+    fi
+    reset_fpm_guard_attempt_state "$generation" "$reset_disposition" || return 1
+    if [[ "$activation_mode" == resume ]]; then
+        armed_marker=$(read_fpm_guard_marker "$FPM_GUARD_ARMED" "$generation") \
+            || return 1
+        read -r release_id nonce <<<"$armed_marker" || return 1
+        committed_marker=$(read_fpm_guard_marker "$FPM_GUARD_COMMIT" "$generation") \
+            || return 1
+        read -r committed_release_id committed_nonce <<<"$committed_marker" || return 1
+        [[ "$release_id" == "$expected_release_id" \
+            && "$committed_release_id" == "$expected_release_id" \
+            && "$nonce" =~ ^[0-9a-f]{64}$ \
+            && "$committed_nonce" =~ ^[0-9a-f]{64}$ \
+            && "$nonce" != "$committed_nonce" ]] || return 1
+    fi
+    systemctl enable "$FPM_GUARD_UNIT" >/dev/null || return 1
+    enabled_state=$(read_unit_file_state "$FPM_GUARD_UNIT") || return 1
+    test "$enabled_state" = enabled || return 1
+    validate_fpm_guard_unit || return 1
+    # The RequiredBy symlink must survive a hard reset before the persistent
+    # FPM mask is removed by the caller.
+    sync -f /etc/systemd/system || return 1
+    systemctl start "$FPM_GUARD_UNIT" || return 1
+    for attempt in $(seq 1 100); do
+        active_state=$(systemctl show "$FPM_GUARD_UNIT" --property=ActiveState --value) \
+            || return 1
+        sub_state=$(systemctl show "$FPM_GUARD_UNIT" --property=SubState --value) \
+            || return 1
+        if [[ "$active_state" == active && "$sub_state" == running ]]; then
+            armed_marker=$(read_fpm_guard_marker "$FPM_GUARD_ARMED" "$generation") \
+                || return 1
+            read -r release_id nonce <<<"$armed_marker" || return 1
+            [[ "$release_id" == "$expected_release_id" \
+                && "$nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
+            FPM_ACTIVATION_RELEASE_ID=$release_id
+            FPM_ACTIVATION_NONCE=$nonce
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+commit_fpm_activation_guard() {
+    local generation=$1 attempt active_state sub_state result exit_status accepted
+    local release_id nonce
+    release_id=$FPM_ACTIVATION_RELEASE_ID
+    nonce=$FPM_ACTIVATION_NONCE
+    [[ "$release_id" =~ ^[0-9a-f]{64}$ && "$nonce" =~ ^[0-9a-f]{64}$ ]] \
+        || return 1
+    accepted=$(read_accepted_generation) || return 1
+    test "$accepted" = "$generation" || return 1
+    validate_fpm_guard_marker \
+        "$FPM_GUARD_ARMED" "$generation" "$release_id" "$nonce" || return 1
+    publish_fpm_guard_marker \
+        "$FPM_GUARD_COMMIT" "$generation" "$release_id" "$nonce" || return 1
+    # Publication is fsync-backed and makes this generation forward-only.
+    # Mark the supervisor state before any fallible guard shutdown polling or
+    # post-commit housekeeping so those failures cannot stop a healthy FPM.
+    POST_COMMIT=1
+    flock -u 6 || return 1
+    exec 6>&- || return 1
+    for attempt in $(seq 1 100); do
+        active_state=$(systemctl show "$FPM_GUARD_UNIT" --property=ActiveState --value) \
+            || return 1
+        sub_state=$(systemctl show "$FPM_GUARD_UNIT" --property=SubState --value) \
+            || return 1
+        if [[ "$active_state" == inactive && "$sub_state" == dead ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    result=$(systemctl show "$FPM_GUARD_UNIT" --property=Result --value) || return 1
+    exit_status=$(systemctl show "$FPM_GUARD_UNIT" --property=ExecMainStatus --value) \
+        || return 1
+    [[ "$active_state" == inactive && "$sub_state" == dead \
+        && "$result" == success && "$exit_status" == 0 ]] || return 1
+    validate_fpm_guard_commit_matches_accepted "$nonce" || return 1
+    verify_fpm_ready || return 1
+    FPM_ACTIVATION_RELEASE_ID=
+    FPM_ACTIVATION_NONCE=
+}
+
+bootstrap_fpm_guard_state() {
+    local generation=$1 release_id=$2 marker marker_release_id marker_nonce
+    [[ "$release_id" =~ ^[0-9a-f]{64}$ ]] || return 1
+    run_with_deadline 5 2 env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$STATE_ROOT" "$FPM_GUARD_LEASE" "$FPM_GUARD_ARMED" \
+        "$FPM_GUARD_COMMIT" "$LAST_ACCEPTED_GENERATION" "$generation" \
+        "$release_id" 9<<'PY'
+import os
+import ctypes
+import fcntl
+import re
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+lease = Path(sys.argv[2])
+armed = Path(sys.argv[3])
+commit = Path(sys.argv[4])
+accepted = Path(sys.argv[5])
+generation = sys.argv[6]
+release_id = sys.argv[7]
+root_meta = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700
+        or lease != root / "fpm-activation-guard.lease"
+        or armed != root / "fpm-activation-guard-v4.armed"
+        or commit != root / "fpm-activation-guard-v4.committed"
+        or accepted != root / "highest-accepted-generation"
+        or not re.fullmatch(r"[1-9][0-9]{0,18}", generation)
+        or not re.fullmatch(r"[0-9a-f]{64}", release_id)):
+    raise SystemExit(1)
+
+def read_exact_with_identity(path, pattern, size=96):
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(descriptor)
+        payload = os.read(descriptor, size)
+        if os.read(descriptor, 1):
+            raise RuntimeError
+        named = path.lstat()
+    finally:
+        os.close(descriptor)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_gid != 0
+            or stat.S_IMODE(metadata.st_mode) != 0o600 or metadata.st_nlink != 1
+            or metadata.st_dev != root_meta.st_dev
+            or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+            or not re.fullmatch(pattern, payload)):
+        raise RuntimeError
+    return payload, (metadata.st_dev, metadata.st_ino)
+
+def read_exact(path, pattern, size=96):
+    return read_exact_with_identity(path, pattern, size)[0]
+
+if read_exact(accepted, rb"[1-9][0-9]{0,18}\n") != f"{generation}\n".encode("ascii"):
+    raise SystemExit(1)
+
+created_lease = False
+try:
+    lease_payload = read_exact(lease, rb"", 1)
+    if lease_payload:
+        raise RuntimeError
+except FileNotFoundError:
+    descriptor = os.open(
+        lease, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    created_lease = True
+
+lease_descriptor = os.open(
+    lease, os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW
+)
+lease_meta = os.fstat(lease_descriptor)
+lease_named = lease.lstat()
+if (not stat.S_ISREG(lease_meta.st_mode)
+        or lease_meta.st_uid != 0 or lease_meta.st_gid != 0
+        or stat.S_IMODE(lease_meta.st_mode) != 0o600
+        or lease_meta.st_nlink != 1 or lease_meta.st_dev != root_meta.st_dev
+        or lease_meta.st_size != 0
+        or (lease_meta.st_dev, lease_meta.st_ino)
+            != (lease_named.st_dev, lease_named.st_ino)):
+    raise SystemExit(1)
+try:
+    fcntl.flock(lease_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    raise SystemExit(1)
+try:
+    armed.lstat()
+except FileNotFoundError:
+    pass
+else:
+    # Bootstrap is never allowed to clear even a syntactically valid marker.
+    raise SystemExit(1)
+
+nonce = secrets.token_hex(32)
+expected = f"{generation} {release_id} {nonce}\n".encode("ascii")
+existing = None
+existing_identity = None
+try:
+    existing, existing_identity = read_exact_with_identity(
+        commit,
+        rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n",
+        192,
+    )
+except FileNotFoundError:
+    temporary = root / f".bootstrap-fpm-commit.{secrets.token_hex(16)}"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(expected)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RuntimeError("short bootstrap commit write")
+            view = view[written:]
+        os.fsync(descriptor)
+        temporary_meta = os.fstat(descriptor)
+        if (not stat.S_ISREG(temporary_meta.st_mode)
+                or temporary_meta.st_uid != 0 or temporary_meta.st_gid != 0
+                or stat.S_IMODE(temporary_meta.st_mode) != 0o600
+                or temporary_meta.st_nlink != 1
+                or temporary_meta.st_dev != root_meta.st_dev
+                or temporary_meta.st_size != len(expected)):
+            raise RuntimeError("unsafe bootstrap commit temporary")
+    finally:
+        os.close(descriptor)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise RuntimeError("renameat2 unavailable")
+        renameat2.argtypes = [
+            ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+            ctypes.c_char_p, ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        if renameat2(
+            -100, os.fsencode(temporary), -100, os.fsencode(commit), 1
+        ) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+else:
+    existing_generation, existing_release_id, _existing_nonce = (
+        existing.decode("ascii").strip().split(" ")
+    )
+    if existing_generation != generation or existing_release_id != release_id:
+        raise SystemExit(1)
+directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW)
+try:
+    os.fsync(directory)
+finally:
+    os.close(directory)
+repeated, repeated_identity = read_exact_with_identity(
+    commit,
+    rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n",
+    192,
+)
+if existing is not None:
+    if repeated != existing or repeated_identity != existing_identity:
+        raise RuntimeError("bootstrap commit changed during durability promotion")
+elif repeated != expected:
+    raise RuntimeError("bootstrap commit publication mismatch")
+os.close(lease_descriptor)
+PY
+    exec 6<>"$FPM_GUARD_LEASE" || return 1
+    test "$(stat -Lc '%u:%g:%h:%a' /proc/self/fd/6)" = '0:0:1:600' || return 1
+    flock -n 6 || return 1
+    marker=$(read_fpm_guard_marker "$FPM_GUARD_COMMIT" "$generation") || return 1
+    read -r marker_release_id marker_nonce <<<"$marker" || return 1
+    [[ "$marker_release_id" == "$release_id" \
+        && "$marker_nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
+    flock -u 6 || return 1
+    exec 6>&- || return 1
+}
+
+validate_database_markers() {
+    local value
+    cd "$SITE" || return 1
+    wp db check --allow-root --quiet >/dev/null || return 1
+    value=$(wp option get siteurl --allow-root) || return 1
+    [[ "$value" == 'https://www.shuzijun.com.cn' ]] || return 1
+    value=$(wp option get home --allow-root) || return 1
+    [[ "$value" == 'https://www.shuzijun.com.cn' ]] || return 1
+    value=$(wp post get 6 --field=post_type --allow-root) || return 1
+    [[ "$value" == portfolio ]] || return 1
+    value=$(wp post get 6 --field=post_status --allow-root) || return 1
+    [[ "$value" == publish ]] || return 1
+    value=$(wp post get 7 --field=post_type --allow-root) || return 1
+    [[ "$value" == portfolio ]] || return 1
+    value=$(wp post get 7 --field=post_status --allow-root) || return 1
+    [[ "$value" == publish ]] || return 1
+}
+
+restore_database_from_backup() {
+    local backup=$1 status=0
+    allocate_rollback_sql || return 1
+    prepare_rollback_sql "$backup" "$ROLLBACK_SQL" || return 1
+    if cd "$SITE"; then
+        wp db import "$ROLLBACK_SQL" --allow-root >/dev/null || status=1
+        if [[ "$status" -eq 0 ]]; then
+            wp core update-db --allow-root >/dev/null || status=1
+            wp cache flush --allow-root >/dev/null || status=1
+            validate_database_markers || status=1
+        fi
+    else
+        status=1
+    fi
+    if remove_rollback_sql "$ROLLBACK_SQL"; then
+        ROLLBACK_SQL=
+    else
+        status=1
+    fi
+    return "$status"
+}
+
+rollback_incomplete_transaction() {
+    local details generation previous phase backup disposition commit_status
+    details=$(manage_uploads_transaction inspect) || return 1
+    read -r generation previous phase backup <<<"$details" || return 1
+    [[ "$generation" =~ ^[1-9][0-9]{0,18}$ \
+        && "$previous" =~ ^[1-9][0-9]{0,18}$ ]] || return 1
+    if [[ "$phase" == staging || "$phase" == prepared ]]; then
+        # Candidate preparation is intentionally completed while FPM remains
+        # online. It has not touched accepted generation, DB, or live media, so
+        # a supervised failure can restore the root-only claim without taking
+        # PHP offline.
+        disposition=$(manage_uploads_transaction rollback-media "$generation") \
+            || return 1
+        [[ "$disposition" == clean ]] || return 1
+        return 0
+    fi
+    if [[ "$phase" == committed ]]; then
+        # Commit is the sole point after which rollback would misrepresent the
+        # accepted generation. Leave finalization to the committed recovery path.
+        return 2
+    fi
+    if [[ "$phase" == commit-ready ]]; then
+        if classify_commit_ready_transaction; then
+            return 2
+        else
+            commit_status=$?
+        fi
+        case "$commit_status" in
+            2) ;;
+            *)
+                # Missing/malformed transaction context, unsafe marker metadata,
+                # I/O failure or timeout is not proof that commit is absent.
+                # Keep FPM isolated and retain the complete transaction.
+                return 3
+                ;;
+        esac
+    fi
+    isolate_failed_fpm || return 1
+    disposition=$(manage_uploads_transaction rollback-media "$generation") || return 1
+    if [[ "$disposition" == database ]]; then
+        restore_database_from_backup "$backup" || return 1
+        verify_webroot_security || return 1
+        validate_database_markers || return 1
+        manage_uploads_transaction finish-rollback "$generation" || return 1
+    elif [[ "$disposition" != clean ]]; then
+        return 1
+    fi
+    # accepted is monotonic, so a failed generation can never be labelled as a
+    # successful rollback. The previous media/DB are restored only to provide a
+    # safe base for the next generation; FPM deliberately remains masked.
+    isolate_failed_fpm
+}
+
+recover_uploads_transaction_if_needed() {
+    local details generation previous phase backup commit_status forward=0
+    if [[ ! -e "$UPLOADS_TRANSACTION" && ! -L "$UPLOADS_TRANSACTION" ]]; then
+        return 0
+    fi
+    details=$(manage_uploads_transaction inspect) || return 1
+    read -r generation previous phase backup <<<"$details" || return 1
+    if [[ "$phase" == committed ]]; then
+        forward=1
+    elif [[ "$phase" == commit-ready ]]; then
+        if classify_commit_ready_transaction; then
+            forward=1
+        else
+            commit_status=$?
+            case "$commit_status" in
+                2)
+                rollback_incomplete_transaction
+                return $?
+                ;;
+                *) return 1 ;;
+            esac
+        fi
+    fi
+    if [[ "$forward" -eq 1 ]]; then
+        validate_fpm_guard_commit_matches_accepted || return 1
+        validate_database_markers || return 1
+        # The exact activation commit is durable, so make the transaction
+        # forward-only and publish its stable release record before attempting
+        # another service start.  If a previous receiver then died after a new
+        # armed nonce but before replacing the old same-release commit, the
+        # next receiver can resume that nonce from stable state instead of
+        # wedging a commit-ready transaction on a nonce mismatch.
+        POST_COMMIT=1
+        if [[ "$phase" == commit-ready ]]; then
+            set_uploads_transaction_phase "$generation" committed || return 1
+        fi
+        finalize_uploads_transaction "$generation" || return 1
+        # A committed activation was already runtime-probed before its durable
+        # marker was published. If it is still healthy, avoid an unnecessary
+        # outage merely to resume housekeeping.
+        if verify_fpm_ready && probe_standby_runtime; then
+            return 0
+        fi
+        isolate_failed_fpm || return 1
+        arm_fpm_activation_guard "$generation" || return 1
+        durably_unmask_fpm || return 1
+        systemctl start "$FPM_SERVICE" || return 1
+        verify_fpm_ready || return 1
+        probe_standby_runtime || return 1
+        commit_fpm_activation_guard "$generation" || return 1
+        return 0
+    fi
+    rollback_incomplete_transaction
+}
+
+transaction_is_durably_committed() {
+    local details generation previous phase backup commit_status
+    details=$(manage_uploads_transaction inspect) || return 1
+    read -r generation previous phase backup <<<"$details" || return 1
+    if [[ "$phase" == committed ]]; then
+        validate_fpm_guard_commit_matches_accepted || return 1
+        return 0
+    fi
+    [[ "$phase" == commit-ready ]] || return 1
+    if classify_commit_ready_transaction; then
+        return 0
+    else
+        commit_status=$?
+    fi
+    # Positive absence (2), malformed state, I/O failure and timeout all mean
+    # this is not a proven post-commit runtime for supervisor purposes.
+    [[ "$commit_status" -eq 0 ]]
+}
+
+ensure_receiver_baseline() {
+    local accepted active guard_state guard_result guard_exit_status commit_status
+    local activation_mode pending pending_generation pending_nonce
+    active=$(manage_uploads_transaction active-generation) || return 1
+    accepted=$(read_accepted_generation) || return 1
+    if verify_fpm_ready; then
+        [[ "$active" == "$accepted" ]] || return 1
+        validate_fpm_guard_commit_matches_accepted || return 1
+        probe_standby_runtime || return 1
+        return 0
+    fi
+    isolate_failed_fpm || return 1
+    guard_state=$(systemctl show "$FPM_GUARD_UNIT" --property=ActiveState --value) \
+        || return 1
+    guard_result=$(systemctl show "$FPM_GUARD_UNIT" --property=Result --value) \
+        || return 1
+    if [[ "$guard_state" == failed ]]; then
+        guard_exit_status=$(systemctl show \
+            "$FPM_GUARD_UNIT" --property=ExecMainStatus --value) || return 1
+        [[ "$guard_result" == exit-code && "$guard_exit_status" == 77 ]] \
+            || return 1
+    else
+        [[ "$guard_state" == inactive && "$guard_result" == success ]] || return 1
+    fi
+    if [[ "$active" == "$accepted" ]]; then
+        activation_mode=new
+        if validate_fpm_guard_commit_matches_accepted; then
+            :
+        else
+            # The normal O(1) boot gate intentionally rejects armed!=commit.
+            # Under the receiver's site lock and persistent FPM isolation, an
+            # exact stable release plus its prior commit and a matching armed
+            # release with a fresh nonce is a resumable activation attempt.
+            pending=$(read_pending_stable_activation) || return 1
+            read -r pending_generation pending_nonce <<<"$pending" || return 1
+            [[ "$pending_generation" == "$accepted" \
+                && "$pending_nonce" =~ ^[0-9a-f]{64}$ ]] || return 1
+            activation_mode=resume
+        fi
+        # A process may have died after the durable release commit, or during
+        # a later same-release activation. Re-activate only that exact release
+        # and reuse an already published armed nonce when present.
+        arm_fpm_activation_guard "$accepted" "$activation_mode" || return 1
+        durably_unmask_fpm || return 1
+        systemctl start "$FPM_SERVICE" || return 1
+        verify_fpm_ready || return 1
+        probe_standby_runtime || return 1
+        commit_fpm_activation_guard "$accepted" || return 1
+    else
+        # A failed accepted generation has already been rolled back. It remains
+        # deliberately offline and may be healed only by a newer signed batch.
+        generation_is_less "$active" "$accepted" || return 1
+        if classify_fpm_guard_commit_marker "$accepted" "$active"; then
+            # A positive accepted-generation commit with older active media is
+            # contradictory and must never be treated as a healable rollback.
+            return 1
+        else
+            commit_status=$?
+        fi
+        case "$commit_status" in
+            2) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+}
+
+generation_is_less() {
+    local left=$1 right=$2
+    [[ "$left" =~ ^[1-9][0-9]{0,18}$ && "$right" =~ ^[1-9][0-9]{0,18}$ ]] \
+        || return 1
+    if (( ${#left} < ${#right} )); then
+        return 0
+    fi
+    (( ${#left} == ${#right} )) || return 1
+    [[ "$left" < "$right" ]]
+}
+
+begin_supervised_service_window() {
+    [[ "$MUTATION_GUARD" -eq 0 && "$APPLY_SUCCEEDED" -eq 0 ]] || return 1
+    MUTATION_GUARD=1
+}
+
+end_supervised_service_window() {
+    [[ "$MUTATION_GUARD" -eq 1 && "$APPLY_SUCCEEDED" -eq 0 ]] || return 1
+    MUTATION_GUARD=0
+    POST_COMMIT=0
+}
+
+run_receiver_recovery_and_baseline() {
+    # The EXIT/signal trap is installed by the caller before entering this
+    # wrapper. Every potentially mutating systemctl path is therefore covered.
+    begin_supervised_service_window || return 1
+    recover_uploads_transaction_if_needed || return 1
+    ensure_receiver_baseline || return 1
+    end_supervised_service_window || return 1
+}
+
+CLAIM=
+ROLLBACK_SQL=
+FPM_ACTIVATION_RELEASE_ID=
+FPM_ACTIVATION_NONCE=
+PREPARE_IN_PROGRESS=0
+MUTATION_GUARD=0
+APPLY_SUCCEEDED=0
+POST_COMMIT=0
+
+finish_receiver() {
+    local status=$1 isolation_failed=0 cleanup_failed=0 rollback_status=0
+    local preserve_committed_runtime=0
+    trap - EXIT INT TERM HUP
+    set +e
+    if [[ "$MUTATION_GUARD" -eq 0 && "$APPLY_SUCCEEDED" -ne 1 \
+        && ( -e "$UPLOADS_TRANSACTION" || -L "$UPLOADS_TRANSACTION" ) ]]; then
+        # Prevalidated candidate preparation precedes the FPM isolation window.
+        # Its staging/prepared transaction is still supervised and must be
+        # restored before the claim tree is removed.
+        if ! rollback_incomplete_transaction; then
+            cleanup_failed=1
+            status=1
+            printf '%s\n' \
+                'sync receiver: CRITICAL pre-activation transaction cleanup did not complete' >&2
+        fi
+    fi
+    if [[ "$MUTATION_GUARD" -eq 1 && "$APPLY_SUCCEEDED" -ne 1 \
+        && "$status" -eq 0 ]]; then
+        status=1
+    fi
+    if [[ "$MUTATION_GUARD" -eq 1 && "$APPLY_SUCCEEDED" -ne 1 ]]; then
+        if [[ "${POST_COMMIT:-0}" -eq 1 ]]; then
+            preserve_committed_runtime=1
+        elif [[ -e "$UPLOADS_TRANSACTION" || -L "$UPLOADS_TRANSACTION" ]] \
+            && transaction_is_durably_committed; then
+            # Closes the signal window between durable marker publication and
+            # the in-process POST_COMMIT assignment.
+            preserve_committed_runtime=1
+        fi
+        if [[ "$preserve_committed_runtime" -eq 1 ]]; then
+            printf '%s\n' \
+                'sync receiver: committed runtime preserved; housekeeping will resume next run' >&2
+        else
+            if ! isolate_failed_fpm; then
+                isolation_failed=1
+                printf '%s\n' \
+                    'sync receiver: CRITICAL unsuccessful apply could not re-verify persistent PHP-FPM isolation' >&2
+            fi
+            if [[ -e "$UPLOADS_TRANSACTION" || -L "$UPLOADS_TRANSACTION" ]]; then
+                rollback_incomplete_transaction
+                rollback_status=$?
+                if [[ "$rollback_status" -eq 2 ]]; then
+                    printf '%s\n' \
+                        'sync receiver: committed transaction awaits fail-closed recovery finalization' >&2
+                elif [[ "$rollback_status" -ne 0 ]]; then
+                    isolation_failed=1
+                    printf '%s\n' \
+                        'sync receiver: CRITICAL supervised media/database rollback did not complete' >&2
+                fi
+            fi
+        fi
+    fi
+    if [[ -n "$CLAIM" ]]; then
+        case "$CLAIM" in
+            "$CLAIM_ROOT"/batch.*)
+                if [[ -e "$UPLOADS_TRANSACTION" || -L "$UPLOADS_TRANSACTION" ]]; then
+                    # A failed pre-activation rollback still owns source paths
+                    # below this claim. Preserve both claim and transaction so
+                    # the next exclusive run can resume; never orphan source.
+                    cleanup_failed=1
+                    printf '%s\n' \
+                        'sync receiver: preserving claim for incomplete transaction recovery' >&2
+                else
+                    remove_claim_tree "$CLAIM" || cleanup_failed=1
+                fi
+                ;;
+            *)
+                cleanup_failed=1
+                printf '%s\n' 'sync receiver: CRITICAL refusing unsafe claim cleanup path' >&2
+                ;;
+        esac
+    fi
+    if [[ -n "$ROLLBACK_SQL" ]]; then
+        case "$ROLLBACK_SQL" in
+            "$STATE_ROOT"/.rollback-database.*)
+                if remove_rollback_sql "$ROLLBACK_SQL"; then
+                    ROLLBACK_SQL=
+                else
+                    cleanup_failed=1
+                fi
+                ;;
+            *)
+                cleanup_failed=1
+                ;;
+        esac
+    fi
+    if [[ "$status" -eq 0 && ( "$isolation_failed" -ne 0 || "$cleanup_failed" -ne 0 ) ]]; then
+        status=1
+    fi
+    exit "$status"
+}
+
+if [[ $# -eq 4 && "$1" == --guard-watch ]]; then
+    watch_fpm_activation_guard "$2" "$3" "$4"
+    exit $?
+fi
+if [[ $# -eq 2 && "$1" == --guard-finalize ]]; then
+    finalize_fpm_activation_guard "$2"
+    exit $?
+fi
+
+# Hold the root-only operation lock shared by sync deployment, App-content
+# deployment and authority configuration. The attestation/protocol queries are
+# read-only but still pin the exact receiver release observed by the sender.
+validate_sync_state_roots
+enter_site_operation_lock_context "$@"
+test -x "$VERIFY"
 verify_authority_role standby
 test "$SELF" = /usr/local/sbin/apply-shuzijun-sync
 test "$0" = "$SELF"
 test -f "$SELF" && test ! -L "$SELF"
 test "$(realpath -e -- "$SELF")" = "$SELF"
 test "$(stat -c '%u:%g:%h:%a' "$SELF")" = '0:0:1:755'
+exec 10<"$SELF"
+test "$(stat -Lc '%u:%g:%h:%a' /proc/self/fd/10)" = '0:0:1:755'
+test "$(stat -Lc '%d:%i' /proc/self/fd/10)" = "$(stat -Lc '%d:%i' "$SELF")"
+SELF_SHA256=$(sha256sum /proc/self/fd/10 | awk '{ print $1 }')
+[[ "$SELF_SHA256" =~ ^[0-9a-f]{64}$ ]]
+
 if [[ $# -eq 1 && "$1" == --attest ]]; then
-    sha256sum "$SELF"
+    printf '%s  %s\n' "$SELF_SHA256" "$SELF"
     exit 0
 fi
 if [[ $# -eq 1 && "$1" == --protocol ]]; then
     printf '%s\n' "$SYNC_PROTOCOL"
     exit 0
 fi
+if [[ $# -eq 2 && "$1" == --bootstrap-state ]]; then
+    BOOTSTRAP_RELEASE_ID=
+    BOOTSTRAP_ACCEPTED=
+    BOOTSTRAP_ACTIVE=
+    [[ "$EUID" -eq 0 && "$2" =~ ^[1-9][0-9]{0,18}$ ]]
+    validate_sync_state_roots
+    validate_fpm_guard_unit
+    verify_webroot_security >/dev/null
+    verify_fpm_ready
+    probe_standby_runtime
+    BOOTSTRAP_ACCEPTED=$(read_accepted_generation) || exit 1
+    test "$BOOTSTRAP_ACCEPTED" = "$2"
+    clean_stale_state_temporaries
+    manage_uploads_transaction bootstrap "$2"
+    BOOTSTRAP_RELEASE_ID=$(manage_uploads_transaction bootstrap-release-id "$2")
+    [[ "$BOOTSTRAP_RELEASE_ID" =~ ^[0-9a-f]{64}$ ]]
+    bootstrap_fpm_guard_state "$2" "$BOOTSTRAP_RELEASE_ID"
+    BOOTSTRAP_ACTIVE=$(manage_uploads_transaction validate-active) || exit 1
+    test "$BOOTSTRAP_ACTIVE" = "$2"
+    publish_stable_uploads_release "$2"
+    validate_fpm_guard_commit_matches_accepted
+    exit 0
+fi
 [[ $# -eq 1 && "$1" == --ingest ]] \
-    || { printf 'usage: apply-shuzijun-sync --attest|--protocol|--ingest\n' >&2; exit 2; }
+    || { printf 'usage: apply-shuzijun-sync --attest|--protocol|--ingest|--bootstrap-state GENERATION\n' >&2; exit 2; }
 
-"$VERIFY" "$SITE"
-probe_standby_api
+# Install supervision before recovery, stale cleanup, incoming-claim creation,
+# or any service-manager mutation. SIGKILL cannot run a trap, so exact stale
+# claim/rollback cleanup on the next exclusive-lock run is also mandatory.
+trap 'finish_receiver $?' EXIT
+trap 'exit 130' INT TERM HUP
+validate_fpm_guard_unit
 validate_allowed_signers
 validate_sync_state_roots
+clean_stale_state_temporaries
+clean_stale_rollback_sql
+verify_webroot_security >/dev/null
+run_receiver_recovery_and_baseline
+clean_stale_claims
 
 # The SSH stream lands directly in a root-only claim. Only bounded control
 # records are accepted before signature verification; signed per-file sizes,
 # aggregate limits, free-space reserve and hashes gate the remaining stream.
 CLAIM=$(mktemp -d "$CLAIM_ROOT/batch.XXXXXX")
-trap 'rm -rf --one-file-system -- "$CLAIM"' EXIT
+persist_new_claim "$CLAIM"
 read_control_frame "$CLAIM"
 verify_control_signature "$CLAIM"
 GENERATION=$(ingest_signed_payload "$CLAIM")
 install -d -o root -g root -m 0700 "$CLAIM/wp-content/uploads"
-accept_generation "$GENERATION"
-DATABASE="$CLAIM/shuzijun-sync.sql.gz"
-MANIFEST="$CLAIM/shuzijun-sync-manifest.json"
+prepare_database_sql "$CLAIM"
+validate_fpm_guard_unit
 
+# Complete expensive, read-only history/media verification and candidate
+# ownership conversion while the current application remains online. The
+# signed candidate is then unreachable to www-data beneath root:0700
+# release_root; the short isolation window only needs fixed-inode checks.
 STAMP=$(date +%Y%m%d-%H%M%S)
-DEST=/var/backups/pre-sync-$STAMP
-install -d -m 700 "$DEST"
 cd "$SITE"
-wp db export "$DEST/wordpress.sql" --add-drop-table --allow-root >/dev/null
-gzip -9 "$DEST/wordpress.sql"
-cp -a wp-config.php "$DEST/wp-config.php"
-( cd "$DEST" && sha256sum wordpress.sql.gz wp-config.php > backup.sha256 )
-sync -f "$DEST"
-sync -f /var/backups
+DATABASE_LOGICAL_BYTES=$(read_database_logical_bytes) || exit 1
+DEST=$(prepare_backup_destination "$STAMP" "$DATABASE_LOGICAL_BYTES")
+BACKUP_DEST="/var/backups/shuzijun-sync-v1-$STAMP"
+PREPARE_IN_PROGRESS=1
+prepare_uploads_transaction "$GENERATION" "$CLAIM" "$BACKUP_DEST"
+# chown/chmod touched every candidate inode. Persist that complete metadata
+# set on the sync-state filesystem while the current PHP runtime is still
+# online, then recheck the root/live identities before entering isolation.
+sync -f "$SYNC_ROOT"
+PREPARED_AFTER_SYNC=$(validate_prepared_uploads_transaction "$GENERATION") \
+    || exit 1
+test "$PREPARED_AFTER_SYNC" = "$GENERATION"
 
-wp_content="$SITE/wp-content"
-install -d -o root -g www-data -m 755 "$wp_content"
-
-# Only the fixed, signed uploads subtree is synchronized. The destination is
-# scoped to uploads itself, so --delete cannot touch plugins, themes or config;
-# forbidden legacy upload files absent from the signed claim are removed.
-rsync -a --delete --no-owner --no-group --chmod=D755,F644 \
-    "$CLAIM/wp-content/uploads/" "$SITE/wp-content/uploads/"
-
-find "$wp_content" -mindepth 1 -maxdepth 1 \
-    ! -name uploads ! -name cache -exec chown -R root:www-data {} +
-find "$wp_content" \
-    \( -path "$wp_content/uploads" -o -path "$wp_content/cache" \) -prune -o \
-    -type d -exec chmod 755 {} +
-find "$wp_content" \
-    \( -path "$wp_content/uploads" -o -path "$wp_content/cache" \) -prune -o \
-    -type f -exec chmod 644 {} +
-for runtime_dir in uploads cache; do
-    runtime_path="$wp_content/$runtime_dir"
-    if [[ -d "$runtime_path" ]]; then
-        chown -R www-data:www-data "$runtime_path"
-        find "$runtime_path" -type d -exec chmod 755 {} +
-        find "$runtime_path" -type f -exec chmod 644 {} +
-    fi
-done
-"$VERIFY" "$SITE"
-SQL="$CLAIM/shuzijun-sync.sql"
-test ! -e "$SQL" && test ! -L "$SQL"
-gunzip -c "$DATABASE" > "$SQL"
-wp db import "$SQL" --allow-root >/dev/null
-wp core update-db --allow-root >/dev/null
-wp cache flush --allow-root >/dev/null
-
-verify_authority_role standby
-chown root:www-data "$SITE/wp-config.php"
-chmod 640 "$SITE/wp-config.php"
-nginx -t
-systemctl reload nginx
-systemctl restart php8.3-fpm
-if ! probe_standby_api; then
-    if isolate_failed_fpm; then
-        printf 'sync receiver: standby runtime probe failed; PHP-FPM verified inactive/dead and persistently masked\n' >&2
-    else
-        printf 'sync receiver: CRITICAL standby runtime probe failed and PHP-FPM isolation could not be verified; immediate manual isolation required\n' >&2
-    fi
+# Static Nginx remains online. PHP is now persistently masked only across the
+# bounded DB backup/import, O(1) media publication, start, smoke and commit.
+MUTATION_GUARD=1
+PREPARE_IN_PROGRESS=0
+if ! isolate_failed_fpm; then
+    printf '%s\n' \
+        'sync receiver: CRITICAL could not establish persistent PHP-FPM isolation before apply' >&2
     exit 1
 fi
 
-printf '[%s] signed uploads/database sync applied; generation=%s backup=%s\n' \
-    "$(date '+%F %T')" "$GENERATION" "$DEST" >> "$LOG"
-printf 'sync-applied generation=%s backup=%s cache=flushed signed=true uploads-only=true\n' \
-    "$GENERATION" "$DEST"
+DATABASE_BACKUP_SHA256=$(wp db export - --add-drop-table --allow-root --quiet \
+    | bound_backup_database_sql_stream \
+    | gzip -9 | store_backup_archive "$DEST") || exit 1
+[[ "$DATABASE_BACKUP_SHA256" =~ ^[0-9a-f]{64}$ ]]
+install -o root -g root -m 0600 wp-config.php "$DEST/wp-config.php"
+CONFIG_BACKUP_SHA256=$(sha256sum "$DEST/wp-config.php" | awk '{ print $1 }') || exit 1
+[[ "$CONFIG_BACKUP_SHA256" =~ ^[0-9a-f]{64}$ ]]
+( umask 077; printf '%s  wordpress.sql.gz\n%s  wp-config.php\n' \
+    "$DATABASE_BACKUP_SHA256" "$CONFIG_BACKUP_SHA256" > "$DEST/backup.sha256" )
+test "$(stat -c '%u:%g:%h:%a' "$DEST/backup.sha256")" = '0:0:1:600'
+sync -f "$DEST"
+sync -f /var/backups
+DEST=$(publish_backup_destination "$DEST" "$STAMP" \
+    "$DATABASE_BACKUP_SHA256" "$CONFIG_BACKUP_SHA256") || exit 1
+[[ "$DEST" == "$BACKUP_DEST" ]]
+
+accept_generation "$GENERATION"
+set_uploads_transaction_phase "$GENERATION" accepted
+ACCEPTED_AFTER_WRITE=$(read_accepted_generation) || exit 1
+test "$ACCEPTED_AFTER_WRITE" = "$GENERATION"
+if ! assert_fpm_guard_uncommitted_for_generation "$GENERATION"; then
+    printf '%s\n' 'sync receiver: accepted generation failed the exact pre-apply state gate' >&2
+    exit 1
+fi
+
+SQL="$CLAIM/shuzijun-sync.sql"
+test -f "$SQL" && test ! -L "$SQL"
+test "$(stat -c '%u:%g:%h:%a' "$SQL")" = '0:0:1:600'
+set_uploads_transaction_phase "$GENERATION" database-importing
+wp db import "$SQL" --allow-root >/dev/null
+wp core update-db --allow-root >/dev/null
+wp cache flush --allow-root >/dev/null
+validate_database_markers
+set_uploads_transaction_phase "$GENERATION" database-imported
+
+# RENAME_EXCHANGE is the only supported publication primitive. The old live
+# inode becomes the verified rollback tree in the same syscall; there is no
+# symlink, bind mount, delete/copy, or double-rename fallback.
+exchange_uploads_transaction "$GENERATION"
+verify_authority_role standby
+chown root:www-data "$SITE/wp-config.php"
+chmod 640 "$SITE/wp-config.php"
+nginx -t -q
+
+arm_fpm_activation_guard "$GENERATION"
+durably_unmask_fpm
+systemctl start "$FPM_SERVICE"
+verify_fpm_ready
+if ! probe_standby_runtime; then
+    printf '%s\n' \
+        'sync receiver: standby runtime smoke failed; supervised rollback will keep PHP-FPM isolated' >&2
+    exit 1
+fi
+
+# The public runtime has passed all API, homepage, media/HLS and DB markers.
+# Publish the active generation and commit under the still-held guard lease;
+# both are fsync-backed numeric records and must equal accepted.
+test "$(stat -Lc '%d:%i' /proc/self/fd/10)" = "$(stat -Lc '%d:%i' "$SELF")"
+test "$(sha256sum /proc/self/fd/10 | awk '{ print $1 }')" = "$SELF_SHA256"
+publish_active_uploads_generation "$GENERATION"
+set_uploads_transaction_phase "$GENERATION" commit-ready
+commit_fpm_activation_guard "$GENERATION"
+set_uploads_transaction_phase "$GENERATION" committed
+finalize_uploads_transaction "$GENERATION"
+
+# The database/media commit is now durable and FPM is healthy. Mark the
+# mutation successful before slow retention/claim cleanup so either can be
+# resumed without incorrectly rolling back or isolating the published runtime.
+APPLY_SUCCEEDED=1
+if ! retire_backup_history "$DEST"; then
+    printf '%s\n' \
+        'sync receiver: warning: committed backup retention will retry on a later run' >&2
+fi
+remove_claim_tree "$CLAIM"
+CLAIM=
+if ! append_secure_log \
+    "[$(date '+%F %T')] signed uploads/database sync applied; generation=$GENERATION"; then
+    printf '%s\n' 'sync receiver: warning: secure audit append failed after committed apply' >&2
+fi
+printf 'sync-applied generation=%s receiver-sha256=%s protocol=%s cache=flushed signed=true uploads-only=true\n' \
+    "$GENERATION" "$SELF_SHA256" "$SYNC_PROTOCOL"

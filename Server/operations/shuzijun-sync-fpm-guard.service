@@ -1,0 +1,45 @@
+[Unit]
+Description=Hi Shuzi standby sync PHP-FPM activation guard
+StartLimitIntervalSec=10min
+StartLimitBurst=3
+Before=php8.3-fpm.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+RemainAfterExit=no
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/sbin/apply-shuzijun-sync --guard-watch /var/lib/shuzijun-sync/state/fpm-activation-guard.lease /var/lib/shuzijun-sync/state/fpm-activation-guard-v4.armed /var/lib/shuzijun-sync/state/fpm-activation-guard-v4.committed
+ExecStopPost=/usr/local/sbin/apply-shuzijun-sync --guard-finalize /var/lib/shuzijun-sync/state/fpm-activation-guard-v4.committed
+Restart=on-failure
+RestartSec=1s
+RestartPreventExitStatus=77
+RuntimeMaxSec=2min
+TimeoutStopSec=30s
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/shuzijun-sync/state
+ReadOnlyPaths=/var/www/html/shuzijun.com.cn/wp-content/uploads
+InaccessiblePaths=-/root -/var/backups
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+RequiredBy=php8.3-fpm.service

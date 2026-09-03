@@ -1,5 +1,7 @@
 import importlib.util
 import hashlib
+import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -86,7 +88,8 @@ def main() -> None:
     assert '$payload === "authority\\n"' in plugin_text
 
     for transaction_guard in (
-        'SITE_LOCK = Path("/var/www/html/shuzijun.com.cn")',
+        'OPERATION_LOCK_ROOT = Path("/var/lib/shuzijun-sync")',
+        'OPERATION_LOCK = OPERATION_LOCK_ROOT / "site-operation.lock"',
         "--confirm-single-writer",
         "--confirm-writers-drained",
         "--expected-current-sha256",
@@ -96,12 +99,19 @@ def main() -> None:
         "_atomic_replace(current)",
         "_run_verifier(target_role)",
         "backup directory must be an immediate child of the fixed backup root",
-        "fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+        "fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)",
         "_fsync_directory(BACKUP_ROOT)",
         "authority marker rollback did not restore absence",
         "php8.3-fpm must be persistently masked and inactive/dead before role change",
         "_record_commit(backup_dir, target_role)",
         "fixed marker parent mode must be exactly 0755",
+        "site-operation lock root mode must be exactly 0700",
+        "site-operation lock file or opened inode is unsafe",
+        "os.O_EXCL",
+        'getattr(os, "O_NOFOLLOW", 0)',
+        "metadata.st_nlink != 1",
+        "metadata.st_size != 0",
+        "os.fsync(root_descriptor)",
     ):
         assert transaction_guard in configurator_text
     assert f'VERIFIER_SHA256 = "{verifier_sha256}"' in configurator_text
@@ -118,7 +128,9 @@ def main() -> None:
     configurator_lines = configurator_text.splitlines()
     configurator_main = line_number(configurator_lines, "def main(argv: list[str])")
     config_lock = line_number(
-        configurator_lines, "lock_fd = _acquire_site_lock()", configurator_main
+        configurator_lines,
+        "root_lock_fd, lock_fd = _acquire_operation_lock(create=args.apply)",
+        configurator_main,
     )
     locked_current = line_number(
         configurator_lines, "current, _ = _read_current()", config_lock
@@ -169,14 +181,20 @@ def main() -> None:
         role_root = root / "etc" / "shuzijun"
         site = root / "site"
         backup_root = root / "backups"
+        operation_root = root / "var" / "lib" / "shuzijun-sync"
         role_root.mkdir(parents=True)
         site.mkdir()
         backup_root.mkdir()
+        operation_root.mkdir(parents=True, mode=0o700)
+        operation_root.chmod(0o700)
         role_path = role_root / "account-authority-role"
 
         configurator.ROLE_ROOT = role_root
         configurator.ROLE_PATH = role_path
-        configurator.SITE_LOCK = site
+        configurator.OPERATION_LOCK_ROOT = operation_root
+        configurator.OPERATION_LOCK = operation_root / "site-operation.lock"
+        configurator.ROOT_UID = os.geteuid()
+        configurator.ROOT_GID = os.getegid()
         configurator.BACKUP_ROOT = backup_root
         configurator.os.fchown = lambda *_args: None
         configurator._read_current = lambda: (
@@ -188,12 +206,25 @@ def main() -> None:
 
         configurator._run_verifier = local_verifier
         configurator._require_writers_drained = lambda: None
+        absent_root_lock, absent_lock = configurator._acquire_operation_lock(create=False)
+        try:
+            assert absent_lock is None
+            assert not configurator.OPERATION_LOCK.exists()
+        finally:
+            configurator.os.close(absent_root_lock)
+
         success_backup = backup_root / "authority-success"
-        success_lock = configurator._acquire_site_lock()
+        success_root_lock, success_lock = configurator._acquire_operation_lock(create=True)
+        assert success_lock is not None
         try:
             configurator._apply(None, "authority", success_backup, success_lock)
         finally:
             configurator.os.close(success_lock)
+            configurator.os.close(success_root_lock)
+        operation_metadata = configurator.OPERATION_LOCK.lstat()
+        assert stat.S_IMODE(operation_metadata.st_mode) == 0o600
+        assert operation_metadata.st_nlink == 1
+        assert operation_metadata.st_size == 0
         assert role_path.read_bytes() == b"authority\n"
         assert (success_backup / "previous-state").read_bytes() == b"absent\n"
         assert (success_backup / "committed").read_bytes() == (
@@ -211,7 +242,12 @@ def main() -> None:
 
         configurator._run_verifier = rejecting_verifier
         rollback_backup = backup_root / "authority-rollback"
-        rollback_lock = configurator._acquire_site_lock()
+        operation_identity = (
+            configurator.OPERATION_LOCK.stat().st_dev,
+            configurator.OPERATION_LOCK.stat().st_ino,
+        )
+        rollback_root_lock, rollback_lock = configurator._acquire_operation_lock(create=True)
+        assert rollback_lock is not None
         try:
             configurator._apply(None, "authority", rollback_backup, rollback_lock)
         except configurator.ConfigurationError:
@@ -220,9 +256,52 @@ def main() -> None:
             raise AssertionError("post-write verifier failure did not abort transaction")
         finally:
             configurator.os.close(rollback_lock)
+            configurator.os.close(rollback_root_lock)
         assert not role_path.exists()
         assert (rollback_backup / "previous-state").read_bytes() == b"absent\n"
         assert not (rollback_backup / "committed").exists()
+        assert (
+            configurator.OPERATION_LOCK.stat().st_dev,
+            configurator.OPERATION_LOCK.stat().st_ino,
+        ) == operation_identity
+
+        hardlink = operation_root / "site-operation-lock-hardlink"
+        os.link(configurator.OPERATION_LOCK, hardlink)
+        try:
+            try:
+                configurator._acquire_operation_lock(create=False)
+            except configurator.ConfigurationError:
+                pass
+            else:
+                raise AssertionError("hard-linked operation lock was accepted")
+        finally:
+            hardlink.unlink()
+
+        saved_lock = operation_root / "saved-site-operation-lock"
+        configurator.OPERATION_LOCK.rename(saved_lock)
+        configurator.OPERATION_LOCK.symlink_to(saved_lock)
+        try:
+            try:
+                configurator._acquire_operation_lock(create=False)
+            except (configurator.ConfigurationError, OSError):
+                pass
+            else:
+                raise AssertionError("symbolic-link operation lock was accepted")
+        finally:
+            configurator.OPERATION_LOCK.unlink()
+            saved_lock.rename(configurator.OPERATION_LOCK)
+
+        configurator.OPERATION_LOCK.write_bytes(b"not-empty\n")
+        try:
+            try:
+                configurator._acquire_operation_lock(create=False)
+            except configurator.ConfigurationError:
+                pass
+            else:
+                raise AssertionError("nonempty operation lock was accepted")
+        finally:
+            configurator.OPERATION_LOCK.write_bytes(b"")
+            configurator.OPERATION_LOCK.chmod(0o600)
 
     assert (
         "readonly AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role"
@@ -235,7 +314,9 @@ def main() -> None:
     assert '/usr/bin/python3 -I /proc/self/fd/7 "$AUTHORITY_ROLE"' in deployer_text
     assert "stat -Lc '%u:%g:%h:%a'" in deployer_text
     assert "exec 7<&-" in deployer_text
-    early_lock = line_number(deployer_lines, 'exec 8<"$AUTHORITY_LOCK_PATH"', 900)
+    assert 'readonly AUTHORITY_LOCK_PATH="$SITE"' not in deployer_text
+    assert 'exec 8<"$SITE"' not in deployer_text
+    early_lock = line_number(deployer_lines, "acquire_authority_lock", 900)
     early_gate = line_number(deployer_lines, "verify_authority_role", early_lock + 1)
     staging_lock = line_number(deployer_lines, 'exec 9<"$LOCK_PATH"', early_gate + 1)
     verify_current = line_number(deployer_lines, "verify_current_webroot", staging_lock + 1)

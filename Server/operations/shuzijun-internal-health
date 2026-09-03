@@ -18,6 +18,16 @@ OUT_FILE = OUT_DIR / "status.json"
 ROLE_FILE = pathlib.Path("/etc/shuzijun/account-authority-role")
 ROLE_VERIFIER = pathlib.Path("/usr/local/sbin/verify-shuzijun-account-authority-role")
 ROLE_VERIFIER_SHA256 = "5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58"
+PRIVATE_LOG_DIR = pathlib.Path("/var/lib/shuzijun-logs")
+SNAPSHOT_LOG = PRIVATE_LOG_DIR / "snapshot.log"
+AUTHORITY_SYNC_LOG = PRIVATE_LOG_DIR / "sync-authority.log"
+STANDBY_SYNC_LOG = PRIVATE_LOG_DIR / "sync-standby.log"
+ACCEPTED_GENERATION = pathlib.Path(
+    "/var/lib/shuzijun-sync/state/highest-accepted-generation"
+)
+COMMITTED_GENERATION = pathlib.Path(
+    "/var/lib/shuzijun-sync/state/fpm-activation-guard.committed"
+)
 SYNC_MAX_AGE_HOURS = 26
 SNAPSHOT_MAX_AGE_HOURS = 36
 FAILOVER_MAX_AGE_HOURS = 0.5
@@ -89,6 +99,16 @@ def secure_regular_file_metadata(metadata):
     )
 
 
+def secure_private_regular_file_metadata(metadata):
+    return (
+        stat.S_ISREG(metadata.st_mode)
+        and metadata.st_uid == 0
+        and metadata.st_gid == 0
+        and metadata.st_nlink == 1
+        and stat.S_IMODE(metadata.st_mode) == 0o600
+    )
+
+
 def secure_regular_file(path):
     item = pathlib.Path(path)
     try:
@@ -118,6 +138,15 @@ def secure_root_directory(path):
         item.is_absolute()
         and resolved == item
         and secure_root_directory_metadata(metadata)
+    )
+
+
+def secure_private_log_directory_metadata(metadata):
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == 0
+        and metadata.st_gid == 0
+        and stat.S_IMODE(metadata.st_mode) == 0o700
     )
 
 
@@ -243,8 +272,8 @@ def stable_log_tail(item, limit=24000):
         parent_before_fd = os.fstat(directory_fd)
         parent_before_path = os.lstat(item.parent)
         if not (
-            secure_root_directory_metadata(parent_before_fd)
-            and secure_root_directory_metadata(parent_before_path)
+            secure_private_log_directory_metadata(parent_before_fd)
+            and secure_private_log_directory_metadata(parent_before_path)
             and (parent_before_fd.st_dev, parent_before_fd.st_ino)
             == (parent_before_path.st_dev, parent_before_path.st_ino)
         ):
@@ -260,7 +289,7 @@ def stable_log_tail(item, limit=24000):
         )
         file_fd = os.open(item.name, file_flags, dir_fd=directory_fd)
         before_fd = os.fstat(file_fd)
-        if not secure_regular_file_metadata(before_fd):
+        if not secure_private_regular_file_metadata(before_fd):
             return False, present, None, None
         if (before_path.st_dev, before_path.st_ino) != (
             before_fd.st_dev,
@@ -332,7 +361,7 @@ def stable_log_tail(item, limit=24000):
 
 def log_summary(path, max_age_hours, success_markers, start_markers=()):
     item = pathlib.Path(path)
-    if not secure_root_directory_chain(item.parent):
+    if item.parent != PRIVATE_LOG_DIR or not secure_root_directory_chain(item.parent):
         return empty_log_summary(item)
     trusted, present, tail, mtime = stable_log_tail(item)
     result = empty_log_summary(item, parent_trusted=True, present=present)
@@ -422,30 +451,129 @@ def validated_failover_payload(data):
     }
 
 
-def generation_state(path):
+def stable_generation_state(path):
     item = pathlib.Path(path)
     result = {
-        "present": item.exists(),
-        "trusted": secure_regular_file(item),
+        "present": False,
+        "trusted": False,
         "valid": False,
         "value": None,
     }
-    if not result["trusted"] or stat.S_IMODE(item.stat().st_mode) != 0o600:
+    if not secure_root_directory_chain(item.parent):
         return result
+    directory_fd = None
+    file_fd = None
     try:
-        value = item.read_bytes()
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        directory_fd = os.open(item.parent, directory_flags)
+        parent_before_fd = os.fstat(directory_fd)
+        parent_before_path = os.lstat(item.parent)
+        if not (
+            secure_root_directory_metadata(parent_before_fd)
+            and secure_root_directory_metadata(parent_before_path)
+            and (parent_before_fd.st_dev, parent_before_fd.st_ino)
+            == (parent_before_path.st_dev, parent_before_path.st_ino)
+        ):
+            return result
+
+        before_path = os.stat(item.name, dir_fd=directory_fd, follow_symlinks=False)
+        result["present"] = True
+        file_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        file_fd = os.open(item.name, file_flags, dir_fd=directory_fd)
+        before_fd = os.fstat(file_fd)
+        if not secure_private_regular_file_metadata(before_fd):
+            return result
+        if (before_path.st_dev, before_path.st_ino) != (
+            before_fd.st_dev,
+            before_fd.st_ino,
+        ):
+            return result
+        if before_fd.st_size > 32:
+            return result
+        value = os.pread(file_fd, before_fd.st_size, 0)
+        if len(value) != before_fd.st_size:
+            return result
+
+        after_fd = os.fstat(file_fd)
+        after_path = os.stat(item.name, dir_fd=directory_fd, follow_symlinks=False)
+        parent_after_fd = os.fstat(directory_fd)
+        parent_after_path = os.lstat(item.parent)
+        fingerprint = lambda metadata: (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_uid,
+            metadata.st_gid,
+            metadata.st_nlink,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+        parent_fingerprint = lambda metadata: (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_uid,
+            metadata.st_gid,
+        )
+        if fingerprint(before_fd) != fingerprint(after_fd):
+            return result
+        if fingerprint(after_path) != fingerprint(after_fd):
+            return result
+        if parent_fingerprint(parent_before_fd) != parent_fingerprint(parent_after_fd):
+            return result
+        if parent_fingerprint(parent_after_fd) != parent_fingerprint(parent_after_path):
+            return result
+        if not secure_root_directory_chain(item.parent):
+            return result
     except OSError:
         return result
+    finally:
+        for descriptor in (file_fd, directory_fd):
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    result["trusted"] = True
     result["valid"] = valid_generation_bytes(value)
     if result["valid"]:
         result["value"] = int(value[:-1])
     return result
 
 
+def generation_state(path):
+    return stable_generation_state(path)
+
+
 def valid_generation_bytes(value):
     if re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", value) is None:
         return False
     return int(value[:-1]) < 2**63
+
+
+def valid_generation_state(summary):
+    if not isinstance(summary, dict):
+        return False
+    value = summary.get("value")
+    return (
+        summary.get("trusted") is True
+        and summary.get("valid") is True
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value < 2**63
+    )
 
 
 def log_ok(summary):
@@ -458,8 +586,16 @@ def log_ok(summary):
     )
 
 
-def sync_operation_reasons(role, operations, sync_log, generation, failover=None):
+def sync_operation_reasons(
+    role,
+    operations,
+    sync_log,
+    generation,
+    failover=None,
+    committed_generation=None,
+):
     reasons = []
+    generation_valid = valid_generation_state(generation)
     completed_generation = sync_log.get("generation")
     if isinstance(completed_generation, bool) or not isinstance(completed_generation, int):
         reasons.append("sync_log_generation_missing_or_invalid")
@@ -471,7 +607,7 @@ def sync_operation_reasons(role, operations, sync_log, generation, failover=None
             reasons.append("sync_timer_missing_or_disabled")
         if operations.get("sync_service_result") != "success":
             reasons.append("sync_service_result_not_success")
-        if not generation.get("valid"):
+        if not generation_valid:
             reasons.append("authority_sync_generation_missing_or_invalid")
         elif (
             isinstance(completed_generation, int)
@@ -519,7 +655,7 @@ def sync_operation_reasons(role, operations, sync_log, generation, failover=None
             and failover.get("consecutive_failures") == 0
         ):
             reasons.append("standby_failover_state_unhealthy_or_stale")
-        if not generation.get("valid"):
+        if not generation_valid:
             reasons.append("standby_sync_generation_missing_or_invalid")
         elif (
             isinstance(completed_generation, int)
@@ -531,6 +667,12 @@ def sync_operation_reasons(role, operations, sync_log, generation, failover=None
             )
         ):
             reasons.append("standby_sync_generation_mismatch_applied_log")
+        committed_generation = committed_generation or {}
+        committed_valid = valid_generation_state(committed_generation)
+        if not committed_valid:
+            reasons.append("standby_sync_commit_generation_missing_or_invalid")
+        elif generation_valid and generation.get("value") != committed_generation.get("value"):
+            reasons.append("standby_sync_generation_mismatch_commit")
     if not log_ok(sync_log):
         reasons.append("sync_last_success_untrusted_or_stale")
     return reasons
@@ -584,9 +726,9 @@ def main():
         )
 
     snapshot = log_summary(
-        "/var/log/tencent-snapshot.log",
+        SNAPSHOT_LOG,
         SNAPSHOT_MAX_AGE_HOURS,
-        ("created ",),
+        ("created ", "snapshot already exists today; skip"),
     )
     operations = {
         "cdn_publish_timer_active": unit_state("shuzijun-cdn-publish.timer"),
@@ -608,7 +750,7 @@ def main():
     operation_reasons = []
     if account_role == "authority":
         sync_log = log_summary(
-            "/var/log/wp-sync.log",
+            AUTHORITY_SYNC_LOG,
             SYNC_MAX_AGE_HOURS,
             ("incremental sync completed",),
             ("incremental sync started",),
@@ -626,24 +768,29 @@ def main():
         )
     elif account_role == "standby":
         sync_log = log_summary(
-            "/var/log/shuzijun-sync-receiver.log",
+            STANDBY_SYNC_LOG,
             SYNC_MAX_AGE_HOURS,
             ("signed uploads/database sync applied", "incremental sync applied"),
         )
         failover = sanitized_failover()
-        accepted_generation = generation_state(
-            "/var/lib/shuzijun-sync/state/highest-accepted-generation"
-        )
+        accepted_generation = generation_state(ACCEPTED_GENERATION)
+        committed_generation = generation_state(COMMITTED_GENERATION)
         operations.update(
             {
                 "sync_log": sync_log,
                 "failover": failover,
                 "accepted_generation": accepted_generation,
+                "committed_generation": committed_generation,
             }
         )
         operation_reasons.extend(
             sync_operation_reasons(
-                account_role, operations, sync_log, accepted_generation, failover
+                account_role,
+                operations,
+                sync_log,
+                accepted_generation,
+                failover,
+                committed_generation,
             )
         )
 
@@ -662,7 +809,7 @@ def main():
 
     status_name, exit_code = classify_status(critical_reasons, operation_reasons)
     payload = {
-        "schema": 2,
+        "schema": 3,
         "checked_at": now.isoformat(timespec="seconds"),
         "role": legacy_role,
         "account_authority_role": account_role,
