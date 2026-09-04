@@ -16,7 +16,7 @@ HEALTH_TIMER = Path("Server/operations/shuzijun-internal-health.timer")
 INTERNAL_HEALTH_TEST = Path("Server/tests/internal-health-contract-test.py")
 PRIVATE_LOG_CONFIG = Path("Server/operations/shuzijun-private-logs.conf")
 SNAPSHOT_CRON = Path("Server/operations/tencent-daily-snapshot.cron")
-RELEASE = Path("Server/releases/v1.3.30-build42.10.md")
+RELEASE = Path("Server/releases/v1.3.30-build42.13.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -165,6 +165,22 @@ transform_root_crontab {shlex.quote(str(source))} {shlex.quote(str(destination))
             b"MAILTO=ops@example.invalid"
         )
 
+        migrated = Path(temporary) / "migrated"
+        migrated_output = Path(temporary) / "migrated-output"
+        migrated.write_bytes(
+            original.replace(old_line.encode("utf-8") + b"\n", b"")
+        )
+        migrated_harness = harness.replace(
+            shlex.quote(str(source)), shlex.quote(str(migrated))
+        ).replace(
+            shlex.quote(str(destination)), shlex.quote(str(migrated_output))
+        ).replace(
+            '[[ "$REMOVED_SNAPSHOT_LINES" == 1 ]]',
+            '[[ "$REMOVED_SNAPSHOT_LINES" == 0 ]]',
+        )
+        subprocess.run(["/bin/bash", "-c", migrated_harness], check=True)
+        assert migrated_output.read_bytes() == migrated.read_bytes()
+
         duplicate = Path(temporary) / "duplicate"
         duplicate_output = Path(temporary) / "duplicate-output"
         duplicate.write_bytes((old_line + "\n" + old_line + "\n").encode("utf-8"))
@@ -179,6 +195,50 @@ transform_root_crontab {shlex.quote(str(source))} {shlex.quote(str(destination))
         )
         assert result.returncode != 0
         assert not duplicate_output.exists()
+
+
+def assert_snapshot_migration_source_contract(gate: str) -> None:
+    for removed, old_state, old_sha, target_exact, should_pass in (
+        (1, "absent", "", False, True),
+        (1, "present", "unexpected", True, True),
+        (0, "present", "expected-snapshot-sha", True, True),
+        (0, "present", "expected-snapshot-sha", False, False),
+        (0, "absent", "", True, False),
+        (0, "present", "unexpected", True, False),
+        (-1, "present", "expected-snapshot-sha", True, False),
+        (2, "present", "expected-snapshot-sha", True, False),
+    ):
+        invocation = "require_snapshot_migration_source"
+        expectation = (
+            invocation if should_pass else f"if {invocation}; then exit 90; fi"
+        )
+        harness = f"""
+set -Eeuo pipefail
+REMOVED_SNAPSHOT_LINES={removed}
+OLD_SNAPSHOT_CRON_STATE={shlex.quote(old_state)}
+OLD_SNAPSHOT_CRON_SHA={shlex.quote(old_sha)}
+TARGET_EXACT={str(target_exact).lower()}
+SNAPSHOT_CRON_TARGET=/etc/cron.d/tencent-daily-snapshot
+NEW_SNAPSHOT_CRON_SHA=expected-snapshot-sha
+REQUIRE_FILE_CALLS=0
+require_file() {{
+    REQUIRE_FILE_CALLS=$((REQUIRE_FILE_CALLS + 1))
+    [[ "$1" == "$SNAPSHOT_CRON_TARGET" && "$2" == 644 && "$3" == "$NEW_SNAPSHOT_CRON_SHA" ]]
+    [[ "$TARGET_EXACT" == true ]]
+}}
+{gate}
+{expectation}
+if [[ "$REMOVED_SNAPSHOT_LINES" == 0 ]]; then
+    if [[ "$OLD_SNAPSHOT_CRON_STATE" == present && "$OLD_SNAPSHOT_CRON_SHA" == "$NEW_SNAPSHOT_CRON_SHA" ]]; then
+        (( REQUIRE_FILE_CALLS == 1 ))
+    else
+        (( REQUIRE_FILE_CALLS == 0 ))
+    fi
+else
+    (( REQUIRE_FILE_CALLS == 0 ))
+fi
+"""
+        subprocess.run(["/bin/bash", "-c", harness], check=True)
 
 
 def assert_snapshot_lock_busy_zero_mutation(acquire_lock: str) -> None:
@@ -312,6 +372,7 @@ require_service_execution_context() {{ return 0; }}
 unit_value() {{
     local unit=$1 property=$2
     case "$property" in
+        LoadState) printf '%s\\n' loaded ;;
         ActiveState)
             [[ "$unit" == *.timer ]] && printf '%s\\n' "$TIMER_STATE" || printf '%s\\n' "$SERVICE_STATE"
             ;;
@@ -538,87 +599,137 @@ fi
     subprocess.run(["/bin/bash", "-c", negative], check=True)
 
 
-def assert_stopped_service_normalizer_contract(normalizer: str) -> None:
-    for reset_rc, load_state, state, substate, job, should_pass in (
-        (0, "loaded", "inactive", "dead", "", True),
-        (5, "loaded", "inactive", "dead", "", True),
-        (5, "not-found", "inactive", "dead", "", False),
-        (5, "masked", "inactive", "dead", "", False),
-        (5, "loaded", "failed", "failed", "", False),
-        (5, "loaded", "active", "running", "", False),
-        (5, "loaded", "inactive", "dead", "queued-job", False),
+def assert_systemctl_unit_intent_contract(intent: str) -> None:
+    for action in ("stop", "reset-failed"):
+        for rc, should_pass in ((0, True), (5, True), (1, False), (4, False), (6, False)):
+            invocation = f"run_systemctl_unit_intent {action}"
+            expectation = (
+                invocation if should_pass else f"if {invocation}; then exit 97; fi"
+            )
+            harness = f"""
+set -Eeuo pipefail
+SYSTEMCTL_RC={rc}
+systemctl() {{
+    [[ "$1" == {action} && "$2" == shuzijun-internal-health.service ]]
+    return "$SYSTEMCTL_RC"
+}}
+{intent}
+{expectation}
+"""
+            subprocess.run(["/bin/bash", "-c", harness], check=True)
+
+
+def assert_isolate_health_runtime_contract(
+    isolate: str, intent: str
+) -> None:
+    for stop_rc, reset_rc, files_trusted, reload_rc, mode, sleep_rc, should_pass in (
+        (5, 5, True, 0, "transient", 0, True),
+        (0, 0, True, 0, "loaded", 0, True),
+        (1, 0, True, 0, "loaded", 0, False),
+        (0, 4, True, 0, "loaded", 0, False),
+        (5, 5, False, 0, "loaded", 0, False),
+        (5, 5, True, 1, "loaded", 0, False),
+        (5, 5, True, 0, "unstable", 0, False),
+        (5, 5, True, 0, "transient", 77, False),
     ):
-        invocation = "normalize_stopped_health_service"
-        expectation = invocation if should_pass else f"if {invocation}; then exit 97; fi"
+        invocation = "isolate_health_runtime old"
+        expectation = (
+            invocation if should_pass else f"if {invocation}; then exit 98; fi"
+        )
         harness = f"""
 set -Eeuo pipefail
+STOP_RC={stop_rc}
 RESET_RC={reset_rc}
-LOAD_STATE={load_state}
-STATE={state}
-SUBSTATE={substate}
-JOB={job}
-systemctl() {{
-    [[ "$1" == reset-failed && "$2" == shuzijun-internal-health.service ]]
-    return "$RESET_RC"
+FILES_TRUSTED={str(files_trusted).lower()}
+RELOAD_RC={reload_rc}
+MODE={mode}
+SLEEP_RC={sleep_rc}
+FILE_CHECKS=0
+RUNTIME_CHECKS=0
+RELOADED=0
+require_runtime_files_for_isolation() {{
+    [[ "$1" == old ]]
+    FILE_CHECKS=$((FILE_CHECKS + 1))
+    [[ "$FILES_TRUSTED" == true ]]
 }}
-unit_value() {{
-    [[ "$1" == shuzijun-internal-health.service ]]
-    case "$2" in
-        LoadState) printf '%s\\n' "$LOAD_STATE" ;;
-        ActiveState) printf '%s\\n' "$STATE" ;;
-        SubState) printf '%s\\n' "$SUBSTATE" ;;
-        Job) printf '%s\\n' "$JOB" ;;
-        *) return 71 ;;
+systemctl() {{
+    case "$1" in
+        stop) return "$STOP_RC" ;;
+        reset-failed) return "$RESET_RC" ;;
+        daemon-reload)
+            (( FILE_CHECKS == 2 )) || return 79
+            RELOADED=1
+            return "$RELOAD_RC"
+            ;;
+        *) return 78 ;;
     esac
 }}
-{normalizer}
+require_isolated_health_runtime_once() {{
+    [[ "$1" == old && "$RELOADED" == 1 ]] || return 1
+    RUNTIME_CHECKS=$((RUNTIME_CHECKS + 1))
+    case "$MODE:$RUNTIME_CHECKS" in
+        loaded:*) return 0 ;;
+        transient:1) return 1 ;;
+        transient:*) return 0 ;;
+        unstable:*) (( RUNTIME_CHECKS % 2 == 0 )) ;;
+        *) return 1 ;;
+    esac
+}}
+sleep() {{ return "$SLEEP_RC"; }}
+seq() {{ printf '1\\n2\\n3\\n4\\n'; }}
+{intent}
+{isolate}
 {expectation}
+if [[ {str(should_pass).lower()} == true ]]; then
+    (( FILE_CHECKS == 2 && RELOADED == 1 ))
+    if [[ "$MODE" == transient ]]; then
+        (( RUNTIME_CHECKS == 3 ))
+    else
+        (( RUNTIME_CHECKS == 2 ))
+    fi
+fi
 """
         subprocess.run(["/bin/bash", "-c", harness], check=True)
 
-    drift = f"""
-set -Eeuo pipefail
-second_sample=0
-systemctl() {{ return 5; }}
-sleep() {{ second_sample=1; }}
-unit_value() {{
-    [[ "$1" == shuzijun-internal-health.service ]]
-    case "$2" in
-        LoadState) printf '%s\\n' loaded ;;
-        ActiveState) (( second_sample == 0 )) && printf '%s\\n' inactive || printf '%s\\n' active ;;
-        SubState) (( second_sample == 0 )) && printf '%s\\n' dead || printf '%s\\n' running ;;
-        Job) printf '\\n' ;;
-        *) return 71 ;;
-    esac
-}}
-{normalizer}
-if normalize_stopped_health_service; then
-    exit 98
-fi
-"""
-    subprocess.run(["/bin/bash", "-c", drift], check=True)
 
-    read_failure = f"""
+def assert_consecutive_stability_contract(
+    stable: str, stable_name: str, probe_name: str
+) -> None:
+    harness = f"""
 set -Eeuo pipefail
-second_sample=0
-systemctl() {{ return 5; }}
-sleep() {{ second_sample=1; }}
-unit_value() {{
-    (( second_sample == 0 )) || return 72
-    case "$2" in
-        LoadState) printf '%s\\n' loaded ;;
-        ActiveState) printf '%s\\n' inactive ;;
-        SubState) printf '%s\\n' dead ;;
-        Job) printf '\\n' ;;
-        *) return 71 ;;
-    esac
-}}
-{normalizer}
-if normalize_stopped_health_service; then
+checks=0
+{probe_name}() {{ checks=$((checks + 1)); (( checks >= 2 )); }}
+sleep() {{ return 0; }}
+{stable}
+{stable_name}
+(( checks == 3 ))
+"""
+    subprocess.run(["/bin/bash", "-c", harness], check=True)
+
+    negative = f"""
+set -Eeuo pipefail
+checks=0
+{probe_name}() {{ checks=$((checks + 1)); (( checks % 2 == 0 )); }}
+sleep() {{ return 0; }}
+seq() {{ printf '1\\n2\\n3\\n4\\n'; }}
+{stable}
+if {stable_name}; then
     exit 99
 fi
+(( checks >= 4 ))
 """
-    subprocess.run(["/bin/bash", "-c", read_failure], check=True)
+    subprocess.run(["/bin/bash", "-c", negative], check=True)
+
+    sleep_failure = f"""
+set -Eeuo pipefail
+{probe_name}() {{ return 0; }}
+sleep() {{ return 77; }}
+{stable}
+if {stable_name}; then
+    exit 100
+fi
+"""
+    subprocess.run(["/bin/bash", "-c", sleep_failure], check=True)
 
 
 def assert_rollback_isolator_negative_path(rollback: str) -> None:
@@ -634,8 +745,8 @@ done_marker_matches() {{ return 1; }}
 sync_path() {{ return 0; }}
 require_timer_disabled_link() {{ return 0; }}
 sync_timer_enable_state() {{ return 0; }}
-normalize_stopped_health_service() {{ return 0; }}
-require_old_runtime_isolated() {{ return 97; }}
+isolate_health_runtime() {{ [[ "$1" == known ]]; }}
+require_old_runtime_isolated_stable() {{ return 97; }}
 systemctl() {{
     printf '%s\\n' "$*" >&3
     if [[ "$1" == is-active ]]; then
@@ -690,12 +801,13 @@ sync_path() {{ return 0; }}
 require_timer_disabled_link() {{ return 0; }}
 require_timer_enabled_link() {{ return 0; }}
 sync_timer_enable_state() {{ return 0; }}
-normalize_stopped_health_service() {{
+isolate_health_runtime() {{
+    [[ "$1" == known ]] || return 68
     service_failed=0
-    printf '%s\n' NORMALIZE >&3
+    printf '%s\n' ISOLATE >&3
     return 0
 }}
-require_old_runtime_isolated() {{ (( service_busy == 0 && service_failed == 0 )); }}
+require_old_runtime_isolated_stable() {{ (( service_busy == 0 && service_failed == 0 )); }}
 require_old_runtime_enabled_inactive() {{ (( service_busy == 0 && service_failed == 0 )); }}
 require_old_runtime_active() {{
     if (( service_busy == 1 )); then
@@ -778,7 +890,7 @@ rollback 7
     assert "COMMIT" in events, events
     assert "OLD_ACTIVE_BUSY" not in events, events
     assert sum(event.startswith("disable --now") for event in events) == 1, events
-    assert events.count("NORMALIZE") == 1, events
+    assert events.count("ISOLATE") == 1, events
     assert sum(event.startswith("reset-failed shuzijun-internal-health.service") for event in events) == 1, events
     assert sum(event.startswith("start shuzijun-internal-health.service") for event in events) == 1, events
 
@@ -848,8 +960,8 @@ def main() -> None:
     assert f"NEW_TIMER_SHA={health_timer_sha256}" in lines
     assert f"NEW_PRIVATE_LOG_CONFIG_SHA={private_log_config_sha256}" in lines
     assert f"NEW_SNAPSHOT_CRON_SHA={snapshot_cron_sha256}" in lines
-    assert RELEASE == Path("Server/releases/v1.3.30-build42.10.md")
-    assert "Build 42.10" in release
+    assert RELEASE == Path("Server/releases/v1.3.30-build42.13.md")
+    assert "Build 42.13" in release
     for release_value in (
         f"HEALTH_DEPLOYER_SHA256={deployer_sha256}",
         f"HEALTH_DEPLOYER_CONTRACT_SHA256={deployer_contract_sha256}",
@@ -1013,10 +1125,20 @@ def main() -> None:
         lines, "require_old_runtime_loaded", "require_old_runtime_isolated"
     )
     old_isolated = function_body(
-        lines, "require_old_runtime_isolated", "require_old_runtime_enabled_inactive"
+        lines, "require_old_runtime_isolated", "require_old_runtime_isolated_stable"
+    )
+    old_isolated_stable = function_body(
+        lines,
+        "require_old_runtime_isolated_stable",
+        "require_old_runtime_enabled_inactive",
     )
     old_active = function_body(lines, "require_old_runtime_active", "require_stage")
-    new_units = function_body(lines, "require_new_units", "marker_matches")
+    new_units = function_body(
+        lines, "require_new_units_once", "require_new_units_stable"
+    )
+    new_units_stable = function_body(
+        lines, "require_new_units_stable", "marker_matches"
+    )
     assert "require_old_runtime_loaded active inactive-or-failed preflight || return 1" in old_state
     for body in (old_loaded, new_units):
         assert "service_dropins=$(unit_value" in body
@@ -1164,7 +1286,10 @@ def main() -> None:
         lines, "capture_root_crontab", "transform_root_crontab"
     )
     transform_crontab = function_body(
-        lines, "transform_root_crontab", "snapshot_producer_count"
+        lines, "transform_root_crontab", "require_snapshot_migration_source"
+    )
+    snapshot_migration_source = function_body(
+        lines, "require_snapshot_migration_source", "snapshot_producer_count"
     )
     producer_inventory = function_body(
         lines, "snapshot_producer_count", "require_snapshot_producer_count"
@@ -1189,7 +1314,8 @@ def main() -> None:
     assert "content == expected" in transform_crontab
     assert "removed not in (0, 1)" in transform_crontab
     assert_crontab_transform_contract(transform_crontab)
-    assert '[[ "$REMOVED_SNAPSHOT_LINES" == 1 ]]' in text
+    assert_snapshot_migration_source_contract(snapshot_migration_source)
+    assert '[[ "$REMOVED_SNAPSHOT_LINES" == 1 ]]' not in text
     for guard in (
         "O_NOFOLLOW",
         "O_NONBLOCK",
@@ -1264,20 +1390,54 @@ def main() -> None:
         assert validation_guard in validate_status
     assert 'payload.get("schema") != 3' in validate_status
 
-    idle = function_body(lines, "wait_health_idle", "normalize_stopped_health_service")
+    idle = function_body(
+        lines, "wait_health_idle", "require_runtime_files_for_isolation"
+    )
     assert idle.count("ActiveState") >= 2
     assert idle.count("Job") >= 2
     assert "state_again" in idle and "job_again" in idle
-    stopped_normalizer = function_body(
-        lines, "normalize_stopped_health_service", "require_old_state_stable"
+    runtime_files = function_body(
+        lines,
+        "require_runtime_files_for_isolation",
+        "require_isolated_health_runtime_once",
     )
-    assert "if systemctl reset-failed shuzijun-internal-health.service; then" in stopped_normalizer
-    assert "for sample in 1 2" in stopped_normalizer
-    assert "LoadState" in stopped_normalizer
-    assert "ActiveState" in stopped_normalizer
-    assert "SubState" in stopped_normalizer
-    assert "Job" in stopped_normalizer
-    assert_stopped_service_normalizer_contract(stopped_normalizer)
+    isolated_once = function_body(
+        lines, "require_isolated_health_runtime_once", "run_systemctl_unit_intent"
+    )
+    systemctl_intent = function_body(
+        lines, "run_systemctl_unit_intent", "isolate_health_runtime"
+    )
+    isolate_runtime = function_body(
+        lines, "isolate_health_runtime", "require_old_state_stable"
+    )
+    assert 'require_frozen_files || return 1' in runtime_files
+    for target, mode, old_sha, new_sha in (
+        ("$SCRIPT_TARGET", "700", "$OLD_SCRIPT_SHA", "$NEW_SCRIPT_SHA"),
+        ("$SERVICE_TARGET", "644", "$OLD_SERVICE_SHA", "$NEW_SERVICE_SHA"),
+        ("$TIMER_TARGET", "644", "$OLD_TIMER_SHA", "$NEW_TIMER_SHA"),
+    ):
+        assert (
+            f'require_known_file "{target}" {mode} "{old_sha}" "{new_sha}"'
+            in runtime_files
+        )
+    for guard in (
+        '[[ "$timer_load" == loaded && "$service_load" == loaded ]]',
+        '[[ "$timer_state" == inactive && "$timer_substate" == dead && -z "$timer_job" ]]',
+        '[[ "$service_state" == inactive && "$service_substate" == dead && -z "$service_job" ]]',
+        '[[ "$timer_unit" == shuzijun-internal-health.service && "$timer_reload" == no ]]',
+        '[[ "$service_reload" == no && "$service_type" == oneshot ]]',
+    ):
+        assert guard in isolated_once, guard
+    assert_systemctl_unit_intent_contract(systemctl_intent)
+    assert_isolate_health_runtime_contract(isolate_runtime, systemctl_intent)
+    assert_consecutive_stability_contract(
+        old_isolated_stable,
+        "require_old_runtime_isolated_stable",
+        "require_old_runtime_isolated",
+    )
+    assert_consecutive_stability_contract(
+        new_units_stable, "require_new_units_stable", "require_new_units_once"
+    )
     stable_old_state = function_body(
         lines, "require_old_state_stable", "validate_timer_quiescent"
     )
@@ -1311,7 +1471,9 @@ def main() -> None:
     assert_timer_activation_evidence_contract(timer_evidence)
     assert re.search(r"LastTriggerUSec(?!Monotonic)", text) is None
 
-    validator = function_body(lines, "validate_last_invocation", "require_new_units")
+    validator = function_body(
+        lines, "validate_last_invocation", "require_new_units_once"
+    )
     assert "outer_start_mono=$6 outer_end_mono=$7" in validator
     assert "service_usec ExecMainStartTimestamp" in validator
     assert "service_usec ExecMainExitTimestampMonotonic" in validator
@@ -1345,13 +1507,8 @@ def main() -> None:
     )
     assert "no rollback was performed" in rollback
     isolate = line_number(rollback.splitlines(), "systemctl disable --now")
-    rollback_stop = line_number(
-        rollback.splitlines(), "systemctl stop shuzijun-internal-health.service", isolate
-    )
-    rollback_reset = line_number(
-        rollback.splitlines(),
-        "normalize_stopped_health_service",
-        rollback_stop,
+    rollback_isolate = line_number(
+        rollback.splitlines(), "isolate_health_runtime known", isolate
     )
     isolation_gate = line_number(rollback.splitlines(), "if (( isolation_ok == 1 ))")
     root_crontab_restore = line_number(
@@ -1373,8 +1530,7 @@ def main() -> None:
     first_restore = line_number(rollback.splitlines(), "atomic_restore")
     assert (
         isolate
-        < rollback_stop
-        < rollback_reset
+        < rollback_isolate
         < isolation_gate
         < root_crontab_restore
         < snapshot_cron_restore
@@ -1385,9 +1541,9 @@ def main() -> None:
     assert "(( isolation_ok == 1 )) || rollback_ok=0" in rollback
     rollback_lines = rollback.splitlines()
     old_isolation = line_number(
-        rollback_lines, "require_old_runtime_isolated || rollback_ok=0"
+        rollback_lines, "require_old_runtime_isolated_stable || rollback_ok=0"
     )
-    assert rollback.count("require_old_runtime_isolated || rollback_ok=0") == 1
+    assert rollback.count("require_old_runtime_isolated_stable || rollback_ok=0") == 1
     activation_lines = [
         index
         for index, line in enumerate(rollback_lines)
@@ -1479,20 +1635,8 @@ def main() -> None:
     old_state_gate = line_number(lines, "require_old_state_stable", main_start)
     prepared = line_number(lines, "write_marker PREPARED", main_start)
     disable = line_number(lines, "systemctl disable --now", prepared)
-    main_stop = line_number(
-        lines, "systemctl stop shuzijun-internal-health.service", disable
-    )
-    main_reset = line_number(
-        lines,
-        "normalize_stopped_health_service",
-        main_stop,
-    )
-    main_service_inactive = line_number(
-        lines,
-        '[[ "$(systemctl is-active shuzijun-internal-health.service)" == inactive ]]',
-        main_reset,
-    )
-    backup_start = line_number(lines, 'backup_one "$SCRIPT_TARGET"', main_service_inactive)
+    main_isolate = line_number(lines, "isolate_health_runtime old", disable)
+    backup_start = line_number(lines, 'backup_one "$SCRIPT_TARGET"', main_isolate)
     root_crontab_backup = line_number(
         lines, 'capture_root_crontab "$BACKUP_DIR/root-crontab.old"', backup_start
     )
@@ -1534,9 +1678,7 @@ def main() -> None:
         old_state_gate
         < prepared
         < disable
-        < main_stop
-        < main_reset
-        < main_service_inactive
+        < main_isolate
         < backup_start
         < root_crontab_backup
         < optional_asset_backup
@@ -1555,6 +1697,8 @@ def main() -> None:
             line,
         ), line
     assert status_may_change < timer_start < first_start < accepted < enable < done < clear_traps
+    assert text.count("systemctl stop shuzijun-internal-health.service") == 1
+    assert main_text.count("require_new_units_stable") == 2
     pre_pin_evidence = "\n".join(lines[status_may_change:timer_start])
     assert "timer_usec" not in pre_pin_evidence
     assert "InvocationID" not in pre_pin_evidence

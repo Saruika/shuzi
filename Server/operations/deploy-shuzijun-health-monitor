@@ -242,6 +242,22 @@ require_file() {
     [[ "$(sha "$path")" == "$expected_sha" ]] || { printf 'file hash mismatch: %s\n' "$path" >&2; return 1; }
 }
 
+require_known_file() {
+    local path=$1 mode=$2 metadata current_sha expected
+    shift 2
+    (( $# > 0 )) || return 1
+    [[ ! -L "$path" && -f "$path" ]] || { printf 'unsafe file: %s\n' "$path" >&2; return 1; }
+    [[ "$(realpath -e -- "$path")" == "$path" ]] || { printf 'non-canonical file: %s\n' "$path" >&2; return 1; }
+    metadata=$(stat -c '%u:%g:%a:%h' -- "$path") || return 1
+    [[ "$metadata" == "0:0:$mode:1" ]] || { printf 'file metadata mismatch: %s %s\n' "$path" "$metadata" >&2; return 1; }
+    current_sha=$(sha "$path") || return 1
+    for expected in "$@"; do
+        [[ "$current_sha" == "$expected" ]] && return 0
+    done
+    printf 'file hash is not an approved release value: %s\n' "$path" >&2
+    return 1
+}
+
 require_status() {
     require_dir "$STATUS_DIR" 700 || return 1
     require_safe_parent /var || return 1
@@ -384,8 +400,8 @@ require_old_state() {
 require_old_runtime_loaded() {
     local expected_timer_state=$1 expected_service_state=$2
     local timer_policy=${3:-strict}
-    local timer_state timer_substate timer_job timer_unit timer_reload
-    local service_state service_substate service_job service_result service_main_status service_reload service_type
+    local timer_load timer_state timer_substate timer_job timer_unit timer_reload
+    local service_load service_state service_substate service_job service_result service_main_status service_reload service_type
     local service_dropins timer_dropins exec_condition exec_start_pre exec_start_post exec_reload exec_stop exec_stop_post success_status
     [[ "$expected_timer_state" == inactive || "$expected_timer_state" == active ]] || return 1
     [[ "$expected_service_state" == inactive || "$expected_service_state" == inactive-or-failed ]] || return 1
@@ -393,16 +409,19 @@ require_old_runtime_loaded() {
     require_frozen_files || return 1
     require_file "$ROLE_VERIFY" 755 "$ROLE_VERIFY_SHA" || return 1
     /usr/bin/python3 -I "$ROLE_VERIFY" "$ROLE" || return 1
+    timer_load=$(unit_value shuzijun-internal-health.timer LoadState) || return 1
     timer_state=$(unit_value shuzijun-internal-health.timer ActiveState) || return 1
     timer_substate=$(unit_value shuzijun-internal-health.timer SubState) || return 1
     timer_job=$(unit_value shuzijun-internal-health.timer Job) || return 1
     timer_unit=$(unit_value shuzijun-internal-health.timer Unit) || return 1
     timer_reload=$(unit_value shuzijun-internal-health.timer NeedDaemonReload) || return 1
+    service_load=$(unit_value shuzijun-internal-health.service LoadState) || return 1
     service_state=$(unit_value shuzijun-internal-health.service ActiveState) || return 1
     service_substate=$(unit_value shuzijun-internal-health.service SubState) || return 1
     service_job=$(unit_value shuzijun-internal-health.service Job) || return 1
     service_reload=$(unit_value shuzijun-internal-health.service NeedDaemonReload) || return 1
     service_type=$(unit_value shuzijun-internal-health.service Type) || return 1
+    [[ "$timer_load" == loaded && "$service_load" == loaded ]] || return 1
     [[ "$timer_state" == "$expected_timer_state" && -z "$timer_job" ]] || return 1
     if [[ "$expected_timer_state" == active ]]; then
         if [[ "$timer_policy" == preflight ]]; then
@@ -452,6 +471,21 @@ require_old_runtime_isolated() {
     require_old_runtime_loaded inactive inactive || return 1
     [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]] || return 1
     require_timer_disabled_link || return 1
+}
+
+require_old_runtime_isolated_stable() {
+    local attempt
+    for attempt in $(seq 1 40); do
+        if require_old_runtime_isolated; then
+            sleep 0.25 || return 1
+            if require_old_runtime_isolated; then
+                return 0
+            fi
+        fi
+        sleep 0.25 || return 1
+    done
+    printf 'old health runtime did not become stably loaded and isolated\n' >&2
+    return 1
 }
 
 require_old_runtime_enabled_inactive() {
@@ -725,6 +759,17 @@ PY
     require_file "$destination" 600 "$TRANSFORMED_CRONTAB_SHA" || return 1
 }
 
+require_snapshot_migration_source() {
+    case "$REMOVED_SNAPSHOT_LINES" in
+        1) return 0 ;;
+        0)
+            [[ "$OLD_SNAPSHOT_CRON_STATE" == present && "$OLD_SNAPSHOT_CRON_SHA" == "$NEW_SNAPSHOT_CRON_SHA" ]] || return 1
+            require_file "$SNAPSHOT_CRON_TARGET" 644 "$NEW_SNAPSHOT_CRON_SHA"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
 snapshot_producer_count() {
     local root_crontab=$1
     require_safe_parent /etc || return 1
@@ -884,19 +929,112 @@ wait_health_idle() {
     return 1
 }
 
-normalize_stopped_health_service() {
-    local sample load_state state substate job
-    if systemctl reset-failed shuzijun-internal-health.service; then
-        :
+require_runtime_files_for_isolation() {
+    local policy=$1
+    require_safe_parent /usr || return 1
+    require_safe_parent /usr/local || return 1
+    require_safe_parent /usr/local/sbin || return 1
+    require_safe_parent /etc || return 1
+    require_safe_parent /etc/systemd || return 1
+    require_safe_parent /etc/systemd/system || return 1
+    case "$policy" in
+        old)
+            require_frozen_files || return 1
+            ;;
+        known)
+            require_known_file "$SCRIPT_TARGET" 700 "$OLD_SCRIPT_SHA" "$NEW_SCRIPT_SHA" || return 1
+            require_known_file "$SERVICE_TARGET" 644 "$OLD_SERVICE_SHA" "$NEW_SERVICE_SHA" || return 1
+            require_known_file "$TIMER_TARGET" 644 "$OLD_TIMER_SHA" "$NEW_TIMER_SHA" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    require_file "$ROLE_VERIFY" 755 "$ROLE_VERIFY_SHA" || return 1
+    /usr/bin/python3 -I "$ROLE_VERIFY" "$ROLE" || return 1
+    systemd-analyze verify "$SERVICE_TARGET" "$TIMER_TARGET" || return 1
+}
+
+require_isolated_health_runtime_once() {
+    local policy=$1 timer_load timer_state timer_substate timer_job timer_fragment timer_dropins timer_unit timer_reload
+    local service_load service_state service_substate service_job service_fragment service_dropins service_reload service_type
+    local exec_condition exec_start_pre exec_start_post exec_reload exec_stop exec_stop_post success_status
+    require_runtime_files_for_isolation "$policy" || return 1
+    [[ "$(systemctl is-enabled shuzijun-internal-health.timer 2>/dev/null || true)" == disabled ]] || return 1
+    require_timer_disabled_link || return 1
+
+    timer_load=$(unit_value shuzijun-internal-health.timer LoadState) || return 1
+    timer_state=$(unit_value shuzijun-internal-health.timer ActiveState) || return 1
+    timer_substate=$(unit_value shuzijun-internal-health.timer SubState) || return 1
+    timer_job=$(unit_value shuzijun-internal-health.timer Job) || return 1
+    service_load=$(unit_value shuzijun-internal-health.service LoadState) || return 1
+    service_state=$(unit_value shuzijun-internal-health.service ActiveState) || return 1
+    service_substate=$(unit_value shuzijun-internal-health.service SubState) || return 1
+    service_job=$(unit_value shuzijun-internal-health.service Job) || return 1
+    [[ "$timer_load" == loaded && "$service_load" == loaded ]] || return 1
+    [[ "$timer_state" == inactive && "$timer_substate" == dead && -z "$timer_job" ]] || return 1
+    [[ "$service_state" == inactive && "$service_substate" == dead && -z "$service_job" ]] || return 1
+
+    timer_fragment=$(unit_value shuzijun-internal-health.timer FragmentPath) || return 1
+    timer_dropins=$(unit_value shuzijun-internal-health.timer DropInPaths) || return 1
+    timer_unit=$(unit_value shuzijun-internal-health.timer Unit) || return 1
+    timer_reload=$(unit_value shuzijun-internal-health.timer NeedDaemonReload) || return 1
+    [[ "$timer_fragment" == "$TIMER_TARGET" && -z "$timer_dropins" ]] || return 1
+    [[ "$timer_unit" == shuzijun-internal-health.service && "$timer_reload" == no ]] || return 1
+
+    service_fragment=$(unit_value shuzijun-internal-health.service FragmentPath) || return 1
+    service_dropins=$(unit_value shuzijun-internal-health.service DropInPaths) || return 1
+    service_reload=$(unit_value shuzijun-internal-health.service NeedDaemonReload) || return 1
+    service_type=$(unit_value shuzijun-internal-health.service Type) || return 1
+    [[ "$service_fragment" == "$SERVICE_TARGET" && -z "$service_dropins" ]] || return 1
+    [[ "$service_reload" == no && "$service_type" == oneshot ]] || return 1
+    require_exact_exec_start "$SERVICE_OBJECT_PATH" /usr/bin/python3 /usr/bin/python3 -I /usr/local/sbin/shuzijun-internal-health || return 1
+    require_service_execution_context shuzijun-internal-health.service || return 1
+    exec_condition=$(unit_value shuzijun-internal-health.service ExecCondition) || return 1
+    exec_start_pre=$(unit_value shuzijun-internal-health.service ExecStartPre) || return 1
+    exec_start_post=$(unit_value shuzijun-internal-health.service ExecStartPost) || return 1
+    exec_reload=$(unit_value shuzijun-internal-health.service ExecReload) || return 1
+    exec_stop=$(unit_value shuzijun-internal-health.service ExecStop) || return 1
+    exec_stop_post=$(unit_value shuzijun-internal-health.service ExecStopPost) || return 1
+    [[ -z "$exec_condition" && -z "$exec_start_pre" && -z "$exec_start_post" ]] || return 1
+    [[ -z "$exec_reload" && -z "$exec_stop" && -z "$exec_stop_post" ]] || return 1
+    success_status=$(unit_value shuzijun-internal-health.service SuccessExitStatus) || return 1
+    [[ " $success_status " == *' 2 '* || "$success_status" == 2 ]] || return 1
+}
+
+run_systemctl_unit_intent() {
+    local action=$1 rc
+    case "$action" in
+        stop|reset-failed) ;;
+        *) return 1 ;;
+    esac
+    if systemctl "$action" shuzijun-internal-health.service >/dev/null 2>&1; then
+        rc=0
+    else
+        rc=$?
     fi
-    for sample in 1 2; do
-        load_state=$(unit_value shuzijun-internal-health.service LoadState) || return 1
-        state=$(unit_value shuzijun-internal-health.service ActiveState) || return 1
-        substate=$(unit_value shuzijun-internal-health.service SubState) || return 1
-        job=$(unit_value shuzijun-internal-health.service Job) || return 1
-        [[ "$load_state" == loaded && "$state" == inactive && "$substate" == dead && -z "$job" ]] || return 1
-        (( sample == 2 )) || sleep 0.25
+    case "$rc" in
+        0|5) return 0 ;;
+        *) printf 'systemctl %s returned unexpected status %s\n' "$action" "$rc" >&2; return 1 ;;
+    esac
+}
+
+isolate_health_runtime() {
+    local policy=$1 attempt consecutive=0
+    require_runtime_files_for_isolation "$policy" || return 1
+    run_systemctl_unit_intent stop || return 1
+    run_systemctl_unit_intent reset-failed || return 1
+    require_runtime_files_for_isolation "$policy" || return 1
+    systemctl daemon-reload || return 1
+    for attempt in $(seq 1 40); do
+        if require_isolated_health_runtime_once "$policy"; then
+            consecutive=$((consecutive + 1))
+            (( consecutive == 2 )) && return 0
+        else
+            consecutive=0
+        fi
+        sleep 0.25 || return 1
     done
+    printf 'health runtime did not reach a stable isolated state\n' >&2
+    return 1
 }
 
 require_old_state_stable() {
@@ -1179,14 +1317,17 @@ validate_last_invocation() {
     VALIDATED_EXIT_STATUS=$main_status
 }
 
-require_new_units() {
-    local service_dropins timer_dropins service_job timer_job service_reload timer_reload timer_unit service_type
+require_new_units_once() {
+    local service_load timer_load service_dropins timer_dropins service_job timer_job service_reload timer_reload timer_unit service_type
     local exec_condition exec_start_pre exec_start_post exec_reload exec_stop exec_stop_post success_status
     require_file "$SCRIPT_TARGET" 700 "$NEW_SCRIPT_SHA" || return 1
     require_file "$SERVICE_TARGET" 644 "$NEW_SERVICE_SHA" || return 1
     require_file "$TIMER_TARGET" 644 "$NEW_TIMER_SHA" || return 1
     require_new_support_assets || return 1
     systemd-analyze verify "$SERVICE_TARGET" "$TIMER_TARGET" || return 1
+    service_load=$(unit_value shuzijun-internal-health.service LoadState) || return 1
+    timer_load=$(unit_value shuzijun-internal-health.timer LoadState) || return 1
+    [[ "$service_load" == loaded && "$timer_load" == loaded ]] || return 1
     [[ "$(unit_value shuzijun-internal-health.service FragmentPath)" == "$SERVICE_TARGET" ]] || return 1
     [[ "$(unit_value shuzijun-internal-health.timer FragmentPath)" == "$TIMER_TARGET" ]] || return 1
     service_dropins=$(unit_value shuzijun-internal-health.service DropInPaths) || return 1
@@ -1213,6 +1354,21 @@ require_new_units() {
     [[ -z "$exec_reload" && -z "$exec_stop" && -z "$exec_stop_post" ]] || return 1
     success_status=$(unit_value shuzijun-internal-health.service SuccessExitStatus) || return 1
     [[ " $success_status " == *' 2 '* || "$success_status" == 2 ]] || return 1
+}
+
+require_new_units_stable() {
+    local attempt consecutive=0
+    for attempt in $(seq 1 40); do
+        if require_new_units_once; then
+            consecutive=$((consecutive + 1))
+            (( consecutive == 2 )) && return 0
+        else
+            consecutive=0
+        fi
+        sleep 0.25 || return 1
+    done
+    printf 'new health runtime did not become stably loaded\n' >&2
+    return 1
 }
 
 marker_matches() {
@@ -1359,11 +1515,7 @@ rollback() {
         exit "$original_rc"
     fi
     systemctl disable --now shuzijun-internal-health.timer >/dev/null 2>&1 || isolation_ok=0
-    systemctl stop shuzijun-internal-health.service >/dev/null 2>&1 || isolation_ok=0
-    normalize_stopped_health_service >/dev/null 2>&1 || isolation_ok=0
-    [[ "$(systemctl is-active shuzijun-internal-health.timer 2>/dev/null)" == inactive ]] || isolation_ok=0
-    [[ "$(systemctl is-active shuzijun-internal-health.service 2>/dev/null)" == inactive ]] || isolation_ok=0
-    require_timer_disabled_link || isolation_ok=0
+    isolate_health_runtime known >/dev/null 2>&1 || isolation_ok=0
     sync_timer_enable_state || isolation_ok=0
     require_timer_disabled_link || isolation_ok=0
     (( isolation_ok == 1 )) || rollback_ok=0
@@ -1392,7 +1544,7 @@ rollback() {
     fi
     if (( rollback_ok == 1 )); then
         systemctl daemon-reload || rollback_ok=0
-        require_old_runtime_isolated || rollback_ok=0
+        require_old_runtime_isolated_stable || rollback_ok=0
     fi
     if (( rollback_ok == 1 )); then
         systemctl enable shuzijun-internal-health.timer >/dev/null 2>&1 || rollback_ok=0
@@ -1503,11 +1655,7 @@ write_marker PREPARED "node=$NODE role=$ROLE release=$RELEASE_ID deployer_sha=$D
 PHASE=PREPARED
 
 systemctl disable --now shuzijun-internal-health.timer
-systemctl stop shuzijun-internal-health.service
-normalize_stopped_health_service
-[[ "$(systemctl is-active shuzijun-internal-health.timer)" == inactive ]]
-[[ "$(systemctl is-active shuzijun-internal-health.service)" == inactive ]]
-require_timer_disabled_link
+isolate_health_runtime old
 sync_timer_enable_state
 require_timer_disabled_link
 
@@ -1524,9 +1672,9 @@ ROOT_CRONTAB_STATE=$CAPTURED_CRONTAB_STATE
 ROOT_CRONTAB_SHA=$CAPTURED_CRONTAB_SHA
 require_snapshot_producer_count "$BACKUP_DIR/root-crontab.old" 1
 transform_root_crontab "$BACKUP_DIR/root-crontab.old" "$BACKUP_DIR/root-crontab.migrated"
-[[ "$REMOVED_SNAPSHOT_LINES" == 1 ]]
 record_optional_asset "$PRIVATE_LOG_CONFIG_TARGET" private-logs-conf.old OLD_PRIVATE_LOG_CONFIG_STATE OLD_PRIVATE_LOG_CONFIG_SHA
 record_optional_asset "$SNAPSHOT_CRON_TARGET" snapshot-cron.old OLD_SNAPSHOT_CRON_STATE OLD_SNAPSHOT_CRON_SHA
+require_snapshot_migration_source
 record_private_log_state
 require_frozen_files
 require_file "$STATUS_FILE" 600 "$OLD_STATUS_SHA"
@@ -1582,7 +1730,7 @@ atomic_install "$STAGE/tencent-daily-snapshot.cron" "$SNAPSHOT_CRON_TARGET" 644 
 install_migrated_root_crontab "$BACKUP_DIR/root-crontab.migrated"
 require_new_support_assets
 systemctl daemon-reload
-require_new_units
+require_new_units_stable
 [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == disabled ]]
 [[ "$(systemctl is-active shuzijun-internal-health.timer)" == inactive ]]
 require_timer_disabled_link
@@ -1670,7 +1818,7 @@ case "$FINAL_EXIT_STATUS" in
 esac
 DONE_CONTENT="invocation=$FINAL_INVOCATION status_sha=$FINAL_STATUS_SHA status_inode=$FINAL_STATUS_INODE"
 prepare_terminal_marker DONE "$DONE_CONTENT"
-require_new_units
+require_new_units_stable
 sync_timer_enable_state
 require_timer_enabled_link
 [[ "$(systemctl is-enabled shuzijun-internal-health.timer)" == enabled ]]

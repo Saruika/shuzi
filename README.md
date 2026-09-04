@@ -99,6 +99,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.10.md`](Server/releases/v1.3.30-build42.10.md)：修复健康监控对签名同步 v4 三字段提交收据的兼容与误报。
 - [`Server/releases/v1.3.30-build42.11.md`](Server/releases/v1.3.30-build42.11.md)：为已提交的 generation 7 增加签名回执恢复、崩溃安全墓碑和受审一次性 systemd 迁移。
 - [`Server/releases/v1.3.30-build42.12.md`](Server/releases/v1.3.30-build42.12.md)：修复上海到新加坡签名同步被通用 SSH 限速误伤的问题，并增加只覆盖建连阶段的有界重试。
+- [`Server/releases/v1.3.30-build42.13.md`](Server/releases/v1.3.30-build42.13.md)：修复快照计划已迁移时的重复部署，并正确处理 systemd 回收 inactive oneshot 造成的假失败。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
@@ -165,6 +166,12 @@ Build 42 在录屏、投屏和切后台的公开保护之外，按产品方明�
 - 新加坡节点对固定上海 authority 的 TCP/22 流量使用优先精确规则，其他来源继续使用通用 SSH 限速、密钥认证和 fail2ban。
 - 发布器和正式 sender 使用 OpenSSH 原生三次建连尝试；它不会重放已经开始的远端命令，协议、签名、主机公钥和回执异常仍立即失败关闭。
 - 第 7 代旧回执已完成一次性对账，定时器通过预置持久化时间戳恢复，未产生意外的 generation 8。
+
+### Build 42.13 健康监控重连
+
+- 健康监控部署器同时兼容“尚未迁移”和“已精确迁移”的腾讯云快照计划，重复执行不再因删除数为零误回滚。
+- `stop` 或 `reset-failed` 遇到 systemd 已回收的 oneshot 时，仅容忍明确的返回码 5；重载后必须连续两次验证完整静止状态。
+- 正向部署与回滚共用同一个状态门禁；活动、失败、任务未清空、文件或 unit 属性漂移仍会立即停止。
 
 ## v1.3.29-build41
 
