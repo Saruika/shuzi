@@ -15,7 +15,7 @@ HEALTH_TIMER = Path("Server/operations/shuzijun-internal-health.timer")
 INTERNAL_HEALTH_TEST = Path("Server/tests/internal-health-contract-test.py")
 PRIVATE_LOG_CONFIG = Path("Server/operations/shuzijun-private-logs.conf")
 SNAPSHOT_CRON = Path("Server/operations/tencent-daily-snapshot.cron")
-RELEASE = Path("Server/releases/v1.3.30-build42.2.md")
+RELEASE = Path("Server/releases/v1.3.30-build42.3.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -788,6 +788,7 @@ def main() -> None:
     lines = text.splitlines()
     release = RELEASE.read_text(encoding="utf-8")
     health_script_sha256 = hashlib.sha256(HEALTH_SCRIPT.read_bytes()).hexdigest()
+    health_service_text = HEALTH_SERVICE.read_text(encoding="utf-8")
     health_service_sha256 = hashlib.sha256(HEALTH_SERVICE.read_bytes()).hexdigest()
     health_timer_sha256 = hashlib.sha256(HEALTH_TIMER.read_bytes()).hexdigest()
     private_log_config_sha256 = hashlib.sha256(PRIVATE_LOG_CONFIG.read_bytes()).hexdigest()
@@ -802,11 +803,13 @@ def main() -> None:
     ]
     assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin" in lines
     assert "unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true" in lines
+    assert "ExecStart=/usr/bin/python3 -I /usr/local/sbin/shuzijun-internal-health" in health_service_text
+    assert "SuccessExitStatus=2" in health_service_text
 
     for fixed_value in (
-        "RELEASE_ID=build42.2",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.2",
-        "STAGE=/run/shuzijun-health-build42.2-$NODE",
+        "RELEASE_ID=build42.3",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.3",
+        "STAGE=/run/shuzijun-health-build42.3-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -839,8 +842,8 @@ def main() -> None:
     assert f"NEW_TIMER_SHA={health_timer_sha256}" in lines
     assert f"NEW_PRIVATE_LOG_CONFIG_SHA={private_log_config_sha256}" in lines
     assert f"NEW_SNAPSHOT_CRON_SHA={snapshot_cron_sha256}" in lines
-    assert RELEASE == Path("Server/releases/v1.3.30-build42.2.md")
-    assert "Build 42.2" in release
+    assert RELEASE == Path("Server/releases/v1.3.30-build42.3.md")
+    assert "Build 42.3" in release
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
     assert "build41.12" not in text
@@ -1014,7 +1017,7 @@ def main() -> None:
     assert "inactive:dead" in old_loaded and "failed:failed" in old_loaded
     assert '[[ "$service_result" == exit-code && "$service_main_status" == 1 ]] || return 1' in old_loaded
     assert '[[ "$success_status" == 2 ]] || return 1' in old_loaded
-    assert 'require_exact_exec_start "$SERVICE_OBJECT_PATH" /usr/local/sbin/shuzijun-internal-health /usr/local/sbin/shuzijun-internal-health || return 1' in old_loaded
+    assert 'require_exact_exec_start "$SERVICE_OBJECT_PATH" /usr/bin/python3 /usr/bin/python3 -I /usr/local/sbin/shuzijun-internal-health || return 1' in old_loaded
     assert "require_service_execution_context shuzijun-internal-health.service || return 1" in old_loaded
     assert 'require_exact_exec_start "$SERVICE_OBJECT_PATH" /usr/bin/python3 /usr/bin/python3 -I /usr/local/sbin/shuzijun-internal-health || return 1' in new_units
     assert "require_service_execution_context shuzijun-internal-health.service || return 1" in new_units
