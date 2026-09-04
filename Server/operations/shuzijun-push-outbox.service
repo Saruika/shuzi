@@ -34,7 +34,6 @@ ProtectKernelLogs=true
 ProtectControlGroups=true
 ProtectProc=invisible
 ProcSubset=pid
-RestrictSUIDSGID=true
 LockPersonality=true
 RestrictRealtime=true
 RestrictNamespaces=true

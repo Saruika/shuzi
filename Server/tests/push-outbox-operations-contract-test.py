@@ -92,6 +92,7 @@ assert "ProtectSystem=strict" in service
 assert "ProtectHome=true" in service
 assert "PrivateDevices=true" in service
 assert "CapabilityBoundingSet=CAP_SETUID CAP_SETGID" in service
+assert "RestrictSUIDSGID=" not in service
 assert re.search(r"^AmbientCapabilities=\s*$", service, re.MULTILINE)
 assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in service
 
