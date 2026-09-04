@@ -1,7 +1,9 @@
 import SwiftUI
+import Security
 import UIKit
 
 struct CollaborationInquiryView: View {
+    @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.openURL) private var openURL
     @State private var contactName = ""
     @State private var contactMethod = ""
@@ -11,12 +13,27 @@ struct CollaborationInquiryView: View {
     @State private var preferredDate = Calendar.current.date(byAdding: .day, value: 14, to: .now) ?? .now
     @State private var budget = ""
     @State private var details = ""
-    @State private var copiedItem: CopiedItem?
+    @State private var acceptsSubmissionNotice = false
+    @State private var submissionID = UUID()
+    @State private var isSubmitting = false
+    @State private var notice: CollaborationNotice?
+    @State private var serverSubmissionEnabled = false
     @State private var showMailFallback = false
 
+    private let submissionClient = CollaborationSubmissionClient()
+
     private var canSend: Bool {
-        !contactName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !contactMethod.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !isSubmitting
+            && CollaborationSubmissionValidation.isValidRequiredField(
+                contactName,
+                maximumLength: 80
+            )
+            && CollaborationSubmissionValidation.isValidRequiredField(
+                contactMethod,
+                maximumLength: 160
+            )
+            && (!serverSubmissionEnabled
+                || (fanAccount.isApproved && acceptsSubmissionNotice))
     }
 
     private var inquiryText: String {
@@ -66,7 +83,7 @@ struct CollaborationInquiryView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
-        .alert(item: $copiedItem) { item in
+        .alert(item: $notice) { item in
             Alert(title: Text(item.title), message: Text(item.message), dismissButton: .default(Text("知道了")))
         }
         .alert("未找到可用的邮件应用", isPresented: $showMailFallback) {
@@ -75,6 +92,7 @@ struct CollaborationInquiryView: View {
         } message: {
             Text("邀约内容已经复制，可在任意邮件或聊天应用中粘贴发送。")
         }
+        .task { await refreshSubmissionCapability() }
     }
 
     private var header: some View {
@@ -87,7 +105,11 @@ struct CollaborationInquiryView: View {
                 .font(.system(.largeTitle, design: .serif))
                 .accessibilityIdentifier("collaboration-heading")
                 .accessibilityAddTraits(.isHeader)
-            Text("填写简要信息后，可以通过邮件或任意聊天应用发送。")
+            Text(
+                serverSubmissionEnabled
+                    ? "填写简要信息后直接提交，管理员会在收件箱中处理。"
+                    : "填写简要信息后，通过系统邮件应用发送。"
+            )
                 .font(.subheadline)
                 .foregroundStyle(AppTheme.muted)
         }
@@ -117,7 +139,7 @@ struct CollaborationInquiryView: View {
                 Spacer()
                 Button("复制艺人资料") {
                     UIPasteboard.general.string = artistProfileText
-                    copiedItem = .profile
+                    notice = .profileCopied
                 }
                 .foregroundStyle(AppTheme.gold)
                 .frame(minHeight: 44)
@@ -196,30 +218,54 @@ struct CollaborationInquiryView: View {
 
     private var submitActions: some View {
         VStack(spacing: 11) {
-            ShareLink(item: inquiryText) {
-                Label("分享邀约内容", systemImage: "square.and.arrow.up")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
-                    .foregroundStyle(AppTheme.ink)
-            }
-            .disabled(!canSend)
-            .opacity(canSend ? 1 : 0.45)
+            if serverSubmissionEnabled {
+                Toggle(isOn: $acceptsSubmissionNotice) {
+                    Text("我同意将上述邀约信息提交至服务器，供管理员处理并发送到合作邮箱。")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .tint(AppTheme.gold)
+                .accessibilityIdentifier("collaboration-consent")
 
-            Button { sendEmail() } label: {
-                Label("发送到工作邮箱", systemImage: "envelope")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 14)
-                    .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
-                    .foregroundStyle(AppTheme.warmWhite)
+                Button {
+                    Task { await submitInquiry() }
+                } label: {
+                    HStack(spacing: 10) {
+                        if isSubmitting {
+                            ProgressView().tint(AppTheme.ink)
+                        }
+                        Label(
+                            isSubmitting ? "正在提交" : "提交合作邀约",
+                            systemImage: isSubmitting ? "hourglass" : "paperplane.fill"
+                        )
+                    }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
+                        .foregroundStyle(AppTheme.ink)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .opacity(canSend ? 1 : 0.45)
+                .accessibilityIdentifier("collaboration-submit")
+            } else {
+                Button { sendEmail() } label: {
+                    Label("发送到工作邮箱", systemImage: "envelope")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
+                        .foregroundStyle(AppTheme.ink)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .opacity(canSend ? 1 : 0.45)
+                .accessibilityIdentifier("collaboration-email")
             }
-            .buttonStyle(.plain)
-            .disabled(!canSend)
-            .opacity(canSend ? 1 : 0.45)
 
             Button {
                 UIPasteboard.general.string = inquiryText
-                copiedItem = .inquiry
+                notice = .inquiryCopied(serverSubmissionEnabled: serverSubmissionEnabled)
             } label: {
                 Text("复制邀约内容")
                     .font(.caption)
@@ -232,7 +278,12 @@ struct CollaborationInquiryView: View {
     }
 
     private var privacyNote: some View {
-        Label("填写内容只保留在当前页面，发送前不会上传到服务器。", systemImage: "lock")
+        Label(
+            serverSubmissionEnabled
+                ? "点击提交前，填写内容只保留在当前页面。仅在服务器确认已保存后，App 才会显示提交成功；合作邮件由服务器可靠重试。"
+                : "填写内容只保留在当前页面，发送前不会上传到服务器。",
+            systemImage: "lock"
+        )
             .font(.caption2)
             .foregroundStyle(AppTheme.muted)
             .fixedSize(horizontal: false, vertical: true)
@@ -262,21 +313,70 @@ struct CollaborationInquiryView: View {
         return trimmed.isEmpty ? "未填写" : trimmed
     }
 
+    private func submitInquiry() async {
+        guard serverSubmissionEnabled, canSend else { return }
+        isSubmitting = true
+        defer { isSubmitting = false }
+
+        do {
+            let draft = try CollaborationSubmissionDraft(
+                submissionID: submissionID,
+                contactName: contactName,
+                contactMethod: contactMethod,
+                organization: organization,
+                projectType: projectType.rawValue,
+                city: city,
+                preferredDate: preferredDate,
+                budget: budget,
+                details: details
+            )
+            let receipt = try await submissionClient.submit(draft)
+            notice = .submitted(requestID: receipt.requestID)
+            resetSubmittedForm()
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription
+                ?? CollaborationSubmissionError.networkUnavailable.errorDescription
+                ?? "合作邀约暂时无法提交。"
+            notice = .submissionFailed(message)
+        }
+    }
+
+    private func resetSubmittedForm() {
+        contactName = ""
+        contactMethod = ""
+        organization = ""
+        city = ""
+        budget = ""
+        details = ""
+        acceptsSubmissionNotice = false
+        submissionID = UUID()
+    }
+
+    private func refreshSubmissionCapability() async {
+        guard fanAccount.isApproved,
+              let capabilities = try? await submissionClient.fetchCapabilities() else {
+            serverSubmissionEnabled = false
+            return
+        }
+        serverSubmissionEnabled = capabilities.collaborationSubmissionEnabled
+    }
+
     private func sendEmail() {
         var components = URLComponents()
         components.scheme = "mailto"
         components.path = ContentCatalog.collaborationEmailAddress
         components.queryItems = [
-            URLQueryItem(name: "subject", value: "易姝合作邀约｜\(organization.isEmpty ? projectType.title : organization)"),
-            URLQueryItem(name: "body", value: inquiryText)
+            URLQueryItem(
+                name: "subject",
+                value: "易姝合作邀约｜\(organization.isEmpty ? projectType.title : organization)"
+            ),
+            URLQueryItem(name: "body", value: inquiryText),
         ]
-
         guard let url = components.url else {
             UIPasteboard.general.string = inquiryText
             showMailFallback = true
             return
         }
-
         openURL(url) { accepted in
             guard !accepted else { return }
             UIPasteboard.general.string = inquiryText
@@ -307,11 +407,450 @@ private enum ProjectType: String, CaseIterable, Identifiable {
     }
 }
 
-private enum CopiedItem: String, Identifiable {
-    case profile
-    case inquiry
+private enum CollaborationNotice: Identifiable {
+    case profileCopied
+    case inquiryCopied(serverSubmissionEnabled: Bool)
+    case submitted(requestID: UUID)
+    case submissionFailed(String)
+
+    var id: String {
+        switch self {
+        case .profileCopied: "profile-copied"
+        case .inquiryCopied(let serverSubmissionEnabled):
+            "inquiry-copied-\(serverSubmissionEnabled)"
+        case .submitted(let requestID): "submitted-\(requestID.uuidString)"
+        case .submissionFailed(let message): "failed-\(message)"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .profileCopied: "艺人资料已复制"
+        case .inquiryCopied: "邀约内容已复制"
+        case .submitted: "合作邀约已收到"
+        case .submissionFailed: "未能提交"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .profileCopied:
+            "可以直接粘贴到聊天或邮件中。"
+        case .inquiryCopied(let serverSubmissionEnabled):
+            serverSubmissionEnabled
+                ? "这是本地副本；如需管理员收到，请仍点击“提交合作邀约”。"
+                : "这是本地副本；如需发送，请点击“发送到工作邮箱”并在邮件应用中确认。"
+        case .submitted(let requestID):
+            "服务器已保存，并已进入管理员收件箱和合作邮件发送队列。请求编号：\(requestID.uuidString.lowercased())"
+        case .submissionFailed(let message):
+            message
+        }
+    }
+}
+
+enum CollaborationRequestStatus: String, Codable, CaseIterable, Identifiable {
+    case received
+    case reviewing
+    case contacted
+    case closed
+    case spam
 
     var id: String { rawValue }
-    var title: String { self == .profile ? "艺人资料已复制" : "邀约内容已复制" }
-    var message: String { self == .profile ? "可以直接粘贴到聊天或邮件中。" : "可以粘贴到任意聊天或邮件应用中发送。" }
+
+    var title: String {
+        switch self {
+        case .received: "待处理"
+        case .reviewing: "跟进中"
+        case .contacted: "已联系"
+        case .closed: "已完成"
+        case .spam: "无效邀约"
+        }
+    }
+}
+
+struct AppFeatureCapabilities: Decodable, Equatable {
+    let collaborationSubmissionEnabled: Bool
+    let collaborationInboxEnabled: Bool
+
+    var isConsistent: Bool {
+        collaborationSubmissionEnabled == collaborationInboxEnabled
+    }
+}
+
+struct CollaborationSubmissionDraft: Encodable, Equatable {
+    let submissionID: String
+    let contactName: String
+    let contactMethod: String
+    let organization: String
+    let projectType: String
+    let city: String
+    let preferredDate: String
+    let budget: String
+    let details: String
+
+    init(
+        submissionID: UUID,
+        contactName: String,
+        contactMethod: String,
+        organization: String,
+        projectType: String,
+        city: String,
+        preferredDate: Date,
+        budget: String,
+        details: String
+    ) throws {
+        let normalizedContactName = try CollaborationSubmissionValidation.requiredSingleLine(
+            contactName,
+            maximumLength: 80
+        )
+        let normalizedContactMethod = try CollaborationSubmissionValidation.requiredSingleLine(
+            contactMethod,
+            maximumLength: 160
+        )
+        guard ["drama", "commercial", "brand", "modeling", "event", "other"]
+            .contains(projectType) else {
+            throw CollaborationSubmissionError.invalidInput
+        }
+
+        self.submissionID = submissionID.uuidString.lowercased()
+        self.contactName = normalizedContactName
+        self.contactMethod = normalizedContactMethod
+        self.organization = try CollaborationSubmissionValidation.optionalSingleLine(
+            organization,
+            maximumLength: 120
+        )
+        self.projectType = projectType
+        self.city = try CollaborationSubmissionValidation.optionalSingleLine(
+            city,
+            maximumLength: 80
+        )
+        self.preferredDate = CollaborationSubmissionValidation.calendarDate(preferredDate)
+        self.budget = try CollaborationSubmissionValidation.optionalSingleLine(
+            budget,
+            maximumLength: 80
+        )
+        self.details = try CollaborationSubmissionValidation.multilineDetails(details)
+    }
+}
+
+enum CollaborationSubmissionValidation {
+    static func isValidRequiredField(_ value: String, maximumLength: Int) -> Bool {
+        (try? requiredSingleLine(value, maximumLength: maximumLength)) != nil
+    }
+
+    static func requiredSingleLine(_ value: String, maximumLength: Int) throws -> String {
+        let normalized = try normalizedSingleLine(value, maximumLength: maximumLength)
+        guard !normalized.isEmpty else { throw CollaborationSubmissionError.invalidInput }
+        return normalized
+    }
+
+    static func optionalSingleLine(_ value: String, maximumLength: Int) throws -> String {
+        try normalizedSingleLine(value, maximumLength: maximumLength)
+    }
+
+    static func multilineDetails(_ value: String) throws -> String {
+        let normalizedNewlines = value
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedNewlines.count <= 4_000,
+              !normalizedNewlines.unicodeScalars.contains(where: isDisallowedControl) else {
+            throw CollaborationSubmissionError.invalidInput
+        }
+        return normalizedNewlines
+    }
+
+    static func calendarDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        // Preserve the calendar day selected by the user. Converting a local
+        // midnight to UTC can otherwise move the date back one day in China.
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    static func isCanonicalUUIDv4(_ value: String) -> Bool {
+        value.range(
+            of: #"^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"#,
+            options: .regularExpression
+        ) != nil && UUID(uuidString: value)?.uuidString.lowercased() == value
+    }
+
+    private static func normalizedSingleLine(
+        _ value: String,
+        maximumLength: Int
+    ) throws -> String {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.count <= maximumLength,
+              !normalized.contains("\n"),
+              !normalized.contains("\r"),
+              !normalized.unicodeScalars.contains(where: isDisallowedControl) else {
+            throw CollaborationSubmissionError.invalidInput
+        }
+        return normalized
+    }
+
+    private static func isDisallowedControl(_ scalar: UnicodeScalar) -> Bool {
+        CharacterSet.controlCharacters.contains(scalar)
+            && scalar != "\n".unicodeScalars.first
+            && scalar != "\t".unicodeScalars.first
+    }
+}
+
+struct CollaborationSubmissionReceipt: Decodable, Equatable {
+    let requestID: UUID
+    let status: CollaborationRequestStatus
+    let receivedAt: Date
+    let duplicate: Bool
+
+    private enum CodingKeys: CodingKey {
+        case requestID
+        case status
+        case receivedAt
+        case duplicate
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawID = try container.decode(String.self, forKey: .requestID)
+        guard CollaborationSubmissionValidation.isCanonicalUUIDv4(rawID),
+              let requestID = UUID(uuidString: rawID) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .requestID,
+                in: container,
+                debugDescription: "Invalid collaboration request identifier"
+            )
+        }
+        self.requestID = requestID
+        status = try container.decode(CollaborationRequestStatus.self, forKey: .status)
+        receivedAt = try container.decode(Date.self, forKey: .receivedAt)
+        duplicate = try container.decode(Bool.self, forKey: .duplicate)
+    }
+}
+
+enum CollaborationReceiptValidation {
+    static func isAccepted(
+        _ receipt: CollaborationSubmissionReceipt,
+        now: Date = .now
+    ) -> Bool {
+        // A duplicate retry can legitimately observe an administrator-advanced
+        // status. The canonical receipt ID, known status enum and timestamp are
+        // the integrity boundary; only requiring `received` creates false
+        // failures after the server has already persisted and processed it.
+        receipt.receivedAt <= now.addingTimeInterval(5 * 60)
+    }
+}
+
+enum CollaborationSubmissionError: LocalizedError {
+    case invalidInput
+    case sessionExpired
+    case networkUnavailable
+    case invalidResponse
+    case server(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidInput:
+            "请检查联系人、联系方式和邀约内容后重试。"
+        case .sessionExpired:
+            "登录已失效，请重新登录后提交。"
+        case .networkUnavailable:
+            "无法安全连接合作服务，请检查网络后重试。"
+        case .invalidResponse:
+            "合作服务返回了无法验证的结果，请稍后重试。"
+        case .server(let message):
+            message
+        }
+    }
+}
+
+struct CollaborationSubmissionClient {
+    private let apiRoot = AppURL.make("https://shuzijun.com.cn/wp-json")
+    private let session: URLSession
+
+    init(
+        session: URLSession = SecureURLSessionFactory.make(
+            requestTimeout: 30,
+            resourceTimeout: 45
+        )
+    ) {
+        self.session = session
+    }
+
+    func fetchCapabilities() async throws -> AppFeatureCapabilities {
+        let credentials = try CollaborationFanCredential.load()
+        let endpoint = apiRoot.appending(path: "shuzijun/v1/app-capabilities")
+        let (data, http) = try await response(
+            endpoint: endpoint,
+            method: "GET",
+            body: nil,
+            credentials: credentials,
+            maximumBytes: 16 * 1_024
+        )
+        guard (200..<300).contains(http.statusCode) else {
+            throw responseError(data: data, http: http)
+        }
+        guard !data.isEmpty,
+              AppNetworkSecurityPolicy.isJSONMIMEType(
+                http.value(forHTTPHeaderField: "Content-Type")
+              ),
+              let capabilities = try? JSONDecoder().decode(
+                AppFeatureCapabilities.self,
+                from: data
+              ),
+              capabilities.isConsistent else {
+            throw CollaborationSubmissionError.invalidResponse
+        }
+        return capabilities
+    }
+
+    func submit(_ draft: CollaborationSubmissionDraft) async throws
+        -> CollaborationSubmissionReceipt {
+        let credentials = try CollaborationFanCredential.load()
+        let endpoint = apiRoot.appending(path: "shuzijun/v1/collaboration-requests")
+        let (data, http) = try await response(
+            endpoint: endpoint,
+            method: "POST",
+            body: try JSONEncoder().encode(draft),
+            credentials: credentials,
+            maximumBytes: 64 * 1_024
+        )
+        guard (200..<300).contains(http.statusCode) else {
+            throw responseError(data: data, http: http)
+        }
+        guard !data.isEmpty,
+              AppNetworkSecurityPolicy.isJSONMIMEType(
+                http.value(forHTTPHeaderField: "Content-Type")
+              ) else {
+            throw CollaborationSubmissionError.invalidResponse
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let receipt = try? decoder.decode(CollaborationSubmissionReceipt.self, from: data),
+              CollaborationReceiptValidation.isAccepted(receipt) else {
+            throw CollaborationSubmissionError.invalidResponse
+        }
+        return receipt
+    }
+
+    private func response(
+        endpoint: URL,
+        method: String,
+        body: Data?,
+        credentials: CollaborationFanCredential,
+        maximumBytes: Int
+    ) async throws -> (Data, HTTPURLResponse) {
+        guard AppNetworkSecurityPolicy.isTrustedAdminAPIURL(endpoint),
+              ["GET", "POST"].contains(method) else {
+            throw CollaborationSubmissionError.invalidResponse
+        }
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = method
+        request.timeoutInterval = 30
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.httpBody = body
+        if body != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+        request.setValue("Yishu-iOS-Collaboration/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue(credentials.installID, forHTTPHeaderField: "X-Yishu-Install-ID")
+        request.setValue("Bearer \(credentials.token)", forHTTPHeaderField: "Authorization")
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw CollaborationSubmissionError.networkUnavailable
+        }
+        guard data.count <= maximumBytes,
+              let http = response as? HTTPURLResponse,
+              AppNetworkSecurityPolicy.isTrustedAdminAPIURL(http.url) else {
+            throw CollaborationSubmissionError.invalidResponse
+        }
+        return (data, http)
+    }
+
+    private func responseError(
+        data: Data,
+        http: HTTPURLResponse
+    ) -> CollaborationSubmissionError {
+        if http.statusCode == 401 { return .sessionExpired }
+        let payload = AppNetworkSecurityPolicy.isJSONMIMEType(
+            http.value(forHTTPHeaderField: "Content-Type")
+        ) ? try? JSONDecoder().decode(CollaborationServerError.self, from: data) : nil
+        return .server(
+            CollaborationSubmissionClient.safeServerMessage(
+                payload?.message,
+                statusCode: http.statusCode
+            )
+        )
+    }
+
+    private static func safeServerMessage(_ raw: String?, statusCode: Int) -> String {
+        guard (400..<500).contains(statusCode), let raw else {
+            return "合作服务暂时不可用（HTTP \(statusCode)）。"
+        }
+        let withoutHTML = String(raw.prefix(300)).replacingOccurrences(
+            of: "<[^>]+>",
+            with: " ",
+            options: .regularExpression
+        )
+        let printable = withoutHTML.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0)
+        }
+        let normalized = String(String.UnicodeScalarView(printable))
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return normalized.isEmpty
+            ? "合作邀约提交失败（HTTP \(statusCode)）。"
+            : String(normalized.prefix(180))
+    }
+}
+
+private struct CollaborationServerError: Decodable {
+    let message: String?
+}
+
+private struct CollaborationFanCredential {
+    let token: String
+    let installID: String
+
+    static func load() throws -> CollaborationFanCredential {
+        guard let tokenData = loadKeychain(account: "session-token"),
+              let token = String(data: tokenData, encoding: .utf8),
+              token.range(
+                of: #"^[A-Za-z0-9_-]{43,128}$"#,
+                options: .regularExpression
+              ) != nil,
+              let installData = loadKeychain(account: "installation-id"),
+              let rawInstallID = String(data: installData, encoding: .utf8),
+              let installUUID = UUID(uuidString: rawInstallID) else {
+            throw CollaborationSubmissionError.sessionExpired
+        }
+        return CollaborationFanCredential(
+            token: token,
+            installID: installUUID.uuidString.lowercased()
+        )
+    }
+
+    private static func loadKeychain(account: String) -> Data? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "cn.com.shuzijun.yishu.fan-account",
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else {
+            return nil
+        }
+        return result as? Data
+    }
 }

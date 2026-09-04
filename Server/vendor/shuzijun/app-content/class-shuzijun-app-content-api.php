@@ -34,9 +34,10 @@ final class Shuzijun_App_Content_API {
     const FAN_META_APPLE_REFRESH_TOKEN = '_yishu_fan_apple_refresh_token';
     const FAN_META_APPLE_AUTH_IAT = '_yishu_fan_apple_auth_iat';
     const FAN_META_AUTH_AUDIT = '_yishu_fan_auth_audit';
-    const FAN_CONSENT_VERSION = '2026-09-02-approval-v3';
+    const FAN_CONSENT_VERSION = '2026-09-04-approval-v4';
     const FAN_ACCEPTED_LEGACY_CONSENT_VERSIONS = array(
         '2026-08-31-approval-v2',
+        '2026-09-02-approval-v3',
     );
     const FAN_DOUYIN_OPTION_PREFIX = 'yishu_fan_douyin_';
     const FAN_SESSION_OPTION_PREFIX = 'yishu_fan_session_';
@@ -97,17 +98,9 @@ final class Shuzijun_App_Content_API {
             && hash_equals(self::FAN_CONSENT_VERSION, $version);
     }
 
-    /**
-     * Release 1.5.10 is the bounded Build 40/41 rollout bridge: a new
-     * acknowledgement may use the current v3 or an exact allowlisted v2.
-     * Missing, malformed and unknown versions still fail closed. A later
-     * release must remove this new-acknowledgement bridge after Build 40 is
-     * retired, without rewriting the version the client actually submitted.
-     */
+    /** New acknowledgements must exactly match the policy shown by this build. */
     public static function fan_new_consent_version_is_accepted($version) {
-        if (self::fan_consent_version_is_current($version)) { return true; }
-        return is_string($version)
-            && in_array($version, self::FAN_ACCEPTED_LEGACY_CONSENT_VERSIONS, true);
+        return self::fan_consent_version_is_current($version);
     }
 
     /**
@@ -325,6 +318,16 @@ final class Shuzijun_App_Content_API {
             'permission_callback' => array(__CLASS__, 'can_manage'),
         ));
 
+        // This read-only declaration is always present so released Apps can
+        // fail closed without guessing from a 404. It never enables Phase 1:
+        // both flags remain false until the internal fuse, explicit feature
+        // and mail readiness constants, authority marker and storage agree.
+        register_rest_route('shuzijun/v1', '/app-capabilities', array(
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => array(__CLASS__, 'app_capabilities'),
+            'permission_callback' => array(__CLASS__, 'can_read_app_capabilities'),
+        ));
+
         register_rest_route('shuzijun/v1', '/fan/register', array(
             'methods' => WP_REST_Server::CREATABLE,
             'callback' => array(__CLASS__, 'register_fan'),
@@ -489,12 +492,46 @@ final class Shuzijun_App_Content_API {
         return self::can_manage_capability($request, self::CAPABILITY, 'yishu_app_rate_');
     }
 
+    public static function can_read_app_capabilities(WP_REST_Request $request) {
+        $authorization = trim((string) $request->get_header('authorization'));
+        if (preg_match('/^Bearer\\s+[A-Za-z0-9_-]{43,512}$/', $authorization)) {
+            // Fan clients retain the exact approved-account/content gate.
+            self::$fan_session_context = null;
+            return self::can_access_app_content($request);
+        }
+        if (preg_match('/^Basic\\s+[A-Za-z0-9+\\/=]{8,4096}$/', $authorization)) {
+            // Administrator clients use the dedicated collaboration capability;
+            // this read-only check does not grant submission or mutation rights.
+            return self::authenticate_manager_for_capability(
+                $request,
+                self::COLLABORATION_CAPABILITY
+            );
+        }
+        return false;
+    }
+
+    public static function app_capabilities() {
+        $collaboration_enabled = self::collaboration_phase1_enabled()
+            && self::account_authority_enabled()
+            && self::collaboration_storage_ready()
+            && self::collaboration_mail_transport_ready();
+        $response = rest_ensure_response(array(
+            'collaborationSubmissionEnabled' => $collaboration_enabled,
+            'collaborationInboxEnabled' => $collaboration_enabled,
+        ));
+        $response->header('Cache-Control', 'private, no-store, max-age=0');
+        $response->header('Pragma', 'no-cache');
+        $response->header('Vary', 'Authorization, X-Yishu-Install-ID');
+        return $response;
+    }
+
     public static function can_manage_fans($request = null) {
         return self::can_manage_capability($request, self::FAN_CAPABILITY, 'yishu_fan_admin_rate_');
     }
 
     public static function can_manage_collaboration($request = null) {
-        if (!self::collaboration_phase1_enabled()) { return false; }
+        if (!self::collaboration_phase1_enabled()
+            || !self::collaboration_mail_transport_ready()) { return false; }
         return self::can_manage_capability(
             $request,
             self::COLLABORATION_CAPABILITY,
@@ -503,7 +540,8 @@ final class Shuzijun_App_Content_API {
     }
 
     public static function can_submit_collaboration(WP_REST_Request $request) {
-        if (!self::collaboration_phase1_enabled()) { return false; }
+        if (!self::collaboration_phase1_enabled()
+            || !self::collaboration_mail_transport_ready()) { return false; }
         // A content manager is intentionally not a substitute for an approved
         // fan here. Clear any previous request context before delegating to the
         // same account-status gate used by the protected app manifest.

@@ -26,7 +26,7 @@ enum FanPermission: String, CaseIterable, Identifiable {
     }
 }
 
-enum FanAccountStatus: String, CaseIterable {
+enum FanAccountStatus: String, CaseIterable, Codable {
     case pending
     case active
     case rejected
@@ -43,7 +43,7 @@ enum FanAccountConsentPolicy {
     /// Every new acknowledgement is tied to the currently published policy.
     /// The server alone owns the compatibility allowlist for already stored
     /// acknowledgements so an old App cannot opt itself into legacy consent.
-    static let currentVersion = "2026-09-02-approval-v3"
+    static let currentVersion = "2026-09-04-approval-v4"
 }
 
 struct FanProfile: Codable, Equatable {
@@ -151,6 +151,9 @@ struct FanProfile: Codable, Equatable {
     }
 
     var accountStatus: FanAccountStatus? { FanAccountStatus(rawValue: status) }
+    var hasRequiredDouyinID: Bool {
+        FanAccountValidation.isCompleteDouyinID(douyinID)
+    }
     var hasConsistentAccountSetupState: Bool {
         FanAccountValidation.hasConsistentSecuritySetupState(
             douyinID: douyinID,
@@ -164,6 +167,7 @@ struct FanProfile: Codable, Equatable {
         accountStatus == .active
             && !requiresAccountSetup
             && !requiresPasswordChange
+            && hasRequiredDouyinID
             && hasConsistentAccountSetupState
             && sessionExpiresAt > date
     }
@@ -186,9 +190,57 @@ struct FanRequiredSetupInput: Equatable {
 
 struct FanAppleRegistrationState: Codable, Equatable {
     let expiresAt: Date
+    let isDouyinMigration: Bool
+    let displayName: String
+    let preservedStatus: FanAccountStatus?
+
+    init(
+        expiresAt: Date,
+        isDouyinMigration: Bool = false,
+        displayName: String = "",
+        preservedStatus: FanAccountStatus? = nil
+    ) {
+        self.expiresAt = expiresAt
+        self.isDouyinMigration = isDouyinMigration
+        self.displayName = displayName
+        self.preservedStatus = preservedStatus
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case expiresAt
+        case isDouyinMigration
+        case displayName
+        case preservedStatus
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        expiresAt = try container.decode(Date.self, forKey: .expiresAt)
+        // During a staged rollout the previous server omits these fields; its
+        // onboarding response can only represent a new application.
+        isDouyinMigration = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .isDouyinMigration
+        ) ?? false
+        displayName = try container.decodeIfPresent(
+            String.self,
+            forKey: .displayName
+        ) ?? ""
+        preservedStatus = try container.decodeIfPresent(
+            FanAccountStatus.self,
+            forKey: .preservedStatus
+        )
+    }
 
     func isValid(now: Date = Date()) -> Bool {
-        expiresAt > now && expiresAt.timeIntervalSince(now) <= 30 * 60
+        guard expiresAt > now, expiresAt.timeIntervalSince(now) <= 30 * 60 else {
+            return false
+        }
+        if isDouyinMigration {
+            return preservedStatus != nil
+                && FanAccountValidation.isValidDisplayName(displayName)
+        }
+        return preservedStatus == nil
     }
 }
 
@@ -246,14 +298,11 @@ enum FanAccountValidation {
         return candidate
     }
 
-    /// Douyin is an optional identity hint. An entirely blank value is valid;
-    /// when a user chooses to provide one it must still satisfy the same
-    /// normalization contract as existing accounts.
-    static func normalizedOptionalDouyinID(_ value: String) -> String? {
-        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return ""
-        }
-        return normalizedDouyinID(value)
+    /// A completed fan profile must carry a real, normalized Douyin ID.
+    /// Invitation placeholders are server-only onboarding state and never
+    /// satisfy the member identity requirement.
+    static func isCompleteDouyinID(_ value: String) -> Bool {
+        normalizedDouyinID(value) == value && !isInvitationPlaceholderDouyinID(value)
     }
 
     static func isValidDisplayName(_ value: String) -> Bool {
@@ -357,7 +406,11 @@ enum FanAccountValidation {
     static func isValidProfile(_ profile: FanProfile, now: Date = Date()) -> Bool {
         UUID(uuidString: profile.userID) != nil
             && normalizedIdentityCode(profile.identityCode) == profile.identityCode
-            && normalizedOptionalDouyinID(profile.douyinID) == profile.douyinID
+            // Keep legacy blank profiles decodable so their owners can still
+            // view account state, sign out and delete data. `isApproved`
+            // separately fails closed until a required Douyin ID is present.
+            && (profile.douyinID.isEmpty
+                || normalizedDouyinID(profile.douyinID) == profile.douyinID)
             && FanAccountSource(rawValue: profile.accountSource) != nil
             && !profile.requiresAppleRegistration
             && FanAccountStatus(rawValue: profile.status) != nil
@@ -380,7 +433,8 @@ enum FanAccountValidation {
                 && !user.requiresPasswordChange
                 && user.passwordRecoveryExpiresAt == nil
         }
-        return normalizedOptionalDouyinID(user.douyinID) == user.douyinID
+        return (user.douyinID.isEmpty
+                || normalizedDouyinID(user.douyinID) == user.douyinID)
             && hasConsistentSecuritySetupState(
                 douyinID: user.douyinID,
                 requiresAccountSetup: user.requiresAccountSetup,
@@ -400,7 +454,7 @@ enum FanAccountValidation {
     ) throws -> FanRequiredSetupInput {
         let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isValidDisplayName(cleanName) else { throw FanAccountError.invalidDisplayName }
-        guard let cleanDouyinID = normalizedOptionalDouyinID(douyinID),
+        guard let cleanDouyinID = normalizedDouyinID(douyinID),
               !isInvitationPlaceholderDouyinID(cleanDouyinID) else {
             throw FanAccountError.invalidDouyinID
         }
@@ -428,7 +482,7 @@ enum FanAccountValidation {
     ) throws -> FanAppleRegistrationInput {
         let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isValidDisplayName(cleanName) else { throw FanAccountError.invalidDisplayName }
-        guard let cleanDouyinID = normalizedOptionalDouyinID(douyinID),
+        guard let cleanDouyinID = normalizedDouyinID(douyinID),
               !isInvitationPlaceholderDouyinID(cleanDouyinID) else {
             throw FanAccountError.invalidDouyinID
         }
@@ -469,7 +523,7 @@ enum FanAccountError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidDisplayName: "请填写 1–30 个字符的昵称。"
-        case .invalidDouyinID: "抖音 ID 为选填；如填写，请使用 2–50 位 ID，不要填链接。"
+        case .invalidDouyinID: "请填写 2–50 位抖音 ID，不要填链接。未绑定的旧账号请在账号页完成资料升级。"
         case .consentRequired: "请先阅读并确认账号资料的使用说明。"
         case .weakPassword: "密码至少 10 位，并包含文字或字母、数字、符号中的至少两类。"
         case .passwordMismatch: "两次输入的密码不一致。"
@@ -507,6 +561,28 @@ enum FanAccountOperationGuard {
         currentToken: String?
     ) -> Bool {
         requestGeneration == currentGeneration && expectedToken == currentToken
+    }
+}
+
+enum FanAppleRegistrationCompletionPolicy {
+    static func accepts(_ profile: FanProfile) -> Bool {
+        profile.accountStatus != nil
+            && !profile.requiresAccountSetup
+            && !profile.requiresPasswordChange
+            && profile.hasRequiredDouyinID
+    }
+
+    static func notice(for status: FanAccountStatus) -> String {
+        switch status {
+        case .active:
+            "抖音 ID 已补全，账号可继续使用。"
+        case .pending:
+            "账号申请已提交，请等待管理员审批。"
+        case .rejected:
+            "抖音 ID 已补全，账号申请仍未通过。"
+        case .suspended:
+            "抖音 ID 已补全，账号访问仍处于暂停状态。"
+        }
     }
 }
 
@@ -721,7 +797,7 @@ final class FanAccountStore: ObservableObject {
             errorMessage = FanAccountError.invalidDisplayName.errorDescription
             return
         }
-        guard let cleanDouyinID = FanAccountValidation.normalizedOptionalDouyinID(douyinID),
+        guard let cleanDouyinID = FanAccountValidation.normalizedDouyinID(douyinID),
               !FanAccountValidation.isInvitationPlaceholderDouyinID(cleanDouyinID) else {
             errorMessage = FanAccountError.invalidDouyinID.errorDescription
             return
@@ -905,9 +981,13 @@ final class FanAccountStore: ObservableObject {
                 currentToken: token
             ) else { return }
             try acceptApple(response, localAppleUserID: submission.localAppleUserID)
-            noticeMessage = profile == nil
-                ? "Apple 身份已验证，请完成账号申请。"
-                : nil
+            if let registration = appleRegistration {
+                noticeMessage = registration.isDouyinMigration
+                    ? "Apple 身份已验证，请补全必填的抖音 ID。原账号状态和权限会保留。"
+                    : "Apple 身份已验证，请完成账号申请。"
+            } else {
+                noticeMessage = nil
+            }
         } catch {
             guard FanAccountOperationGuard.canAccept(
                 requestGeneration: operationGeneration,
@@ -967,14 +1047,94 @@ final class FanAccountStore: ObservableObject {
                 currentGeneration: refreshGeneration,
                 expectedToken: expectedToken,
                 currentToken: token
-            ), response.profile.accountStatus == .pending,
+            ), FanAppleRegistrationCompletionPolicy.accepts(response.profile),
+               let completedStatus = response.profile.accountStatus else {
+                throw FanAccountError.invalidResponse
+            }
+            try accept(response, requiringTokenRotation: true)
+            appleRegistration = nil
+            noticeMessage = FanAppleRegistrationCompletionPolicy.notice(for: completedStatus)
+        } catch {
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ) else { return }
+            errorMessage = (error as? FanAccountError)?.errorDescription
+                ?? FanAccountError.unavailable.errorDescription
+        }
+    }
+
+    func completeRequiredDouyinID(
+        displayName: String,
+        douyinID: String,
+        currentPassword: String,
+        acceptedDataUse: Bool
+    ) async {
+        noticeMessage = nil
+        let cleanName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard FanAccountValidation.isValidDisplayName(cleanName) else {
+            errorMessage = FanAccountError.invalidDisplayName.errorDescription
+            return
+        }
+        guard let cleanDouyinID = FanAccountValidation.normalizedDouyinID(douyinID),
+              !FanAccountValidation.isInvitationPlaceholderDouyinID(cleanDouyinID) else {
+            errorMessage = FanAccountError.invalidDouyinID.errorDescription
+            return
+        }
+        guard acceptedDataUse else {
+            errorMessage = FanAccountError.consentRequired.errorDescription
+            return
+        }
+        guard let existingProfile = profile,
+              token != nil,
+              !existingProfile.requiresAccountSetup,
+              !existingProfile.requiresPasswordChange,
+              !existingProfile.hasRequiredDouyinID else {
+            errorMessage = FanAccountError.accountSetupNotRequired.errorDescription
+            return
+        }
+        if existingProfile.accountSource != FanAccountSource.apple.rawValue {
+            guard !currentPassword.isEmpty, currentPassword.count <= 512 else {
+                errorMessage = FanAccountError.invalidCredentials.errorDescription
+                return
+            }
+        }
+
+        refreshGeneration &+= 1
+        let operationGeneration = refreshGeneration
+        let expectedToken = token
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let body = try JSONEncoder().encode(FanDouyinProfileUpgradeRequest(
+                displayName: cleanName,
+                douyinID: cleanDouyinID,
+                currentPassword: existingProfile.accountSource == FanAccountSource.apple.rawValue
+                    ? nil : currentPassword,
+                installID: installID.uuidString.lowercased(),
+                consentVersion: FanAccountConsentPolicy.currentVersion
+            ))
+            let response: FanAuthResponse = try await perform(
+                path: "shuzijun/v1/fan/complete-apple-registration",
+                method: "POST",
+                body: body,
+                authorized: true
+            )
+            guard FanAccountOperationGuard.canAccept(
+                requestGeneration: operationGeneration,
+                currentGeneration: refreshGeneration,
+                expectedToken: expectedToken,
+                currentToken: token
+            ), response.profile.userID == existingProfile.userID,
+               response.profile.hasRequiredDouyinID,
                !response.profile.requiresAccountSetup,
                !response.profile.requiresPasswordChange else {
                 throw FanAccountError.invalidResponse
             }
             try accept(response, requiringTokenRotation: true)
-            appleRegistration = nil
-            noticeMessage = "账号申请已提交，请等待管理员审批。"
+            noticeMessage = "抖音 ID 已补全，账号可继续使用。"
         } catch {
             guard FanAccountOperationGuard.canAccept(
                 requestGeneration: operationGeneration,
@@ -1555,6 +1715,9 @@ final class FanAccountStore: ObservableObject {
             if profile?.requiresPasswordChange == true {
                 throw FanAccountError.passwordRecoveryRequired
             }
+            if profile != nil, profile?.hasRequiredDouyinID == false {
+                throw FanAccountError.invalidDouyinID
+            }
             switch profile?.accountStatus {
             case .some(.pending): throw FanAccountError.approvalPending
             case .some(.rejected): throw FanAccountError.approvalRejected
@@ -1784,6 +1947,7 @@ final class FanAccountStore: ObservableObject {
         case (401, "fan_login_invalid"): return .invalidCredentials
         case (401, _): return .sessionExpired
         case (_, "fan_account_setup_required"): return .accountSetupRequired
+        case (_, "fan_douyin_id_required"): return .invalidDouyinID
         case (_, "fan_invitation_expired"): return .invitationExpired
         case (_, "fan_password_recovery_expired"): return .passwordRecoveryExpired
         case (_, "fan_password_recovery_session_required"): return .passwordRecoveryRequired
@@ -1923,7 +2087,7 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
 
     var id: String { userID }
     var requiresIdentityCompletion: Bool {
-        requiresAccountSetup || requiresAppleRegistration
+        requiresAccountSetup || requiresAppleRegistration || douyinID.isEmpty
     }
     var hasConsistentAccountSetupState: Bool {
         FanAccountValidation.hasConsistentSecuritySetupState(
@@ -1979,6 +2143,14 @@ struct FanAppleAuthRequest: Encodable, Equatable {
 private struct FanAppleRegistrationRequest: Encodable {
     let displayName: String
     let douyinID: String
+    let installID: String
+    let consentVersion: String
+}
+
+private struct FanDouyinProfileUpgradeRequest: Encodable {
+    let displayName: String
+    let douyinID: String
+    let currentPassword: String?
     let installID: String
     let consentVersion: String
 }

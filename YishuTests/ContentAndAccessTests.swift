@@ -467,6 +467,28 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
+    func testLandscapeIPadWarmsEveryHeroBeforePaging() {
+        XCTAssertEqual(
+            HomeHeroRenderPolicy.prefetchIndices(
+                selection: 0,
+                count: 5,
+                presentation: .fit
+            ),
+            [0, 1, 2, 3, 4]
+        )
+        for index in 0..<5 {
+            XCTAssertTrue(
+                HomeHeroRenderPolicy.shouldLoadRemoteImage(
+                    at: index,
+                    selection: 0,
+                    count: 5,
+                    presentation: .fit
+                ),
+                "iPad 横屏第 \(index + 1) 张首页图片没有在切页前加载"
+            )
+        }
+    }
+
     func testRemoteLaunchPostersDoNotReuseAHomeHero() {
         let homeHeroes = Set(ContentCatalog.heroImages)
 
@@ -1026,23 +1048,22 @@ final class ContentAndAccessTests: XCTestCase {
     func testNewFanAcknowledgementsUseTheCurrentPrivacyPolicyVersion() {
         XCTAssertEqual(
             FanAccountConsentPolicy.currentVersion,
-            "2026-09-02-approval-v3"
+            "2026-09-04-approval-v4"
         )
     }
 
-    func testFanRegistrationAcceptsBlankOrNormalizesASafeOptionalDouyinID() {
+    func testFanRegistrationRequiresAndNormalizesASafeDouyinID() {
         XCTAssertEqual(FanAccountValidation.normalizedDouyinID(" @YiShu_2026 "), "yishu_2026")
         XCTAssertEqual(FanAccountValidation.normalizedDouyinID("一只梳子君"), "一只梳子君")
         XCTAssertNil(FanAccountValidation.normalizedDouyinID("https://v.douyin.com/example"))
         XCTAssertNil(FanAccountValidation.normalizedDouyinID("a b"))
         XCTAssertNil(FanAccountValidation.normalizedDouyinID("@"))
-        XCTAssertEqual(FanAccountValidation.normalizedOptionalDouyinID("   "), "")
-        XCTAssertEqual(
-            FanAccountValidation.normalizedOptionalDouyinID(" @YiShu_2026 "),
-            "yishu_2026"
-        )
-        XCTAssertNil(FanAccountValidation.normalizedOptionalDouyinID("https://v.douyin.com/example"))
-        XCTAssertNil(FanAccountValidation.normalizedOptionalDouyinID("@"))
+        XCTAssertNil(FanAccountValidation.normalizedDouyinID("   "))
+        XCTAssertTrue(FanAccountValidation.isCompleteDouyinID("yishu_2026"))
+        XCTAssertFalse(FanAccountValidation.isCompleteDouyinID(""))
+        XCTAssertFalse(FanAccountValidation.isCompleteDouyinID(
+            "invite_0123456789abcdef01234567"
+        ))
     }
 
     func testFanPasswordPolicyRequiresLengthAndTwoCharacterCategories() {
@@ -1153,6 +1174,44 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
+    func testAppleDouyinMigrationAcceptsEveryPreservedAccountStatus() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        for status in FanAccountStatus.allCases {
+            let profile = FanProfile(
+                userID: UUID().uuidString.lowercased(),
+                identityCode: "HS-ABCD-2345",
+                displayName: "旧 Apple 粉丝",
+                douyinID: "apple_migrated_fan",
+                installationCode: "IN-ABC-234",
+                permissions: FanPermission.allCases.map(\.rawValue),
+                status: status.rawValue,
+                sessionExpiresAt: now.addingTimeInterval(600),
+                accountSource: FanAccountSource.apple.rawValue
+            )
+
+            XCTAssertTrue(
+                FanAppleRegistrationCompletionPolicy.accepts(profile),
+                "Apple 旧账号补全抖音 ID 时必须保留并接受 \(status.rawValue) 状态"
+            )
+            XCTAssertFalse(FanAppleRegistrationCompletionPolicy.notice(for: status).isEmpty)
+        }
+
+        let incomplete = FanProfile(
+            userID: UUID().uuidString.lowercased(),
+            identityCode: "HS-ABCD-2345",
+            displayName: "未完成账号",
+            douyinID: "invite_0123456789abcdef01234567",
+            installationCode: "IN-ABC-234",
+            permissions: [],
+            status: FanAccountStatus.pending.rawValue,
+            sessionExpiresAt: now.addingTimeInterval(600),
+            requiresAccountSetup: true,
+            invitationExpiresAt: now.addingTimeInterval(600),
+            accountSource: FanAccountSource.apple.rawValue
+        )
+        XCTAssertFalse(FanAppleRegistrationCompletionPolicy.accepts(incomplete))
+    }
+
     func testUncertainDeletionResultsFailClosedButExplicitClientErrorsDoNot() {
         XCTAssertTrue(FanDeletionFailurePolicy.shouldFailClosed(after: .unavailable))
         XCTAssertTrue(FanDeletionFailurePolicy.shouldFailClosed(after: .invalidResponse))
@@ -1213,7 +1272,7 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(object["nonce"])
     }
 
-    func testAppleRegistrationRequiresNameAndConsentButKeepsDouyinOptional() throws {
+    func testAppleRegistrationRequiresNameDouyinIDAndConsent() throws {
         XCTAssertEqual(
             try FanAccountValidation.validatedAppleRegistration(
                 displayName: " 梳子粉丝 ",
@@ -1232,19 +1291,36 @@ final class ContentAndAccessTests: XCTestCase {
             douyinID: "fan_2026",
             acceptedDataUse: true
         ))
-        XCTAssertEqual(
+        XCTAssertThrowsError(
             try FanAccountValidation.validatedAppleRegistration(
                 displayName: "梳子粉丝",
                 douyinID: "  ",
                 acceptedDataUse: true
-            ),
-            FanAppleRegistrationInput(displayName: "梳子粉丝", douyinID: "")
+            )
         )
         XCTAssertThrowsError(try FanAccountValidation.validatedAppleRegistration(
             displayName: "梳子粉丝",
             douyinID: "https://v.douyin.com/example",
             acceptedDataUse: true
         ))
+    }
+
+    func testAppleOnboardingResponseDistinguishesNewApplicationAndMigration() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let legacy = Data(#"{"expiresAt":"2026-09-04T12:20:00Z"}"#.utf8)
+        let legacyState = try decoder.decode(FanAppleRegistrationState.self, from: legacy)
+        XCTAssertFalse(legacyState.isDouyinMigration)
+        XCTAssertEqual(legacyState.displayName, "")
+        XCTAssertNil(legacyState.preservedStatus)
+
+        let migration = Data(
+            #"{"expiresAt":"2026-09-04T12:20:00Z","isDouyinMigration":true,"displayName":"旧 Apple 粉丝","preservedStatus":"suspended"}"#.utf8
+        )
+        let migrationState = try decoder.decode(FanAppleRegistrationState.self, from: migration)
+        XCTAssertTrue(migrationState.isDouyinMigration)
+        XCTAssertEqual(migrationState.displayName, "旧 Apple 粉丝")
+        XCTAssertEqual(migrationState.preservedStatus, .suspended)
     }
 
     func testAppleCredentialRevocationPolicyFailsClosed() {
@@ -1522,7 +1598,7 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(unmarkedPlaceholder))
     }
 
-    func testAdminDirectorySeparatesIncompleteAppleRegistrationFromCompletedOptionalDouyin() throws {
+    func testAdminDirectoryMarksIncompleteAndLegacyBlankDouyinProfiles() throws {
         let data = Data(
             """
             {
@@ -1558,7 +1634,7 @@ final class ContentAndAccessTests: XCTestCase {
             accountSource: FanAccountSource.apple.rawValue,
             requiresAppleRegistration: false
         )
-        XCTAssertFalse(completedWithoutDouyin.requiresIdentityCompletion)
+        XCTAssertTrue(completedWithoutDouyin.requiresIdentityCompletion)
         XCTAssertTrue(FanAccountValidation.isValidAdminFanUser(completedWithoutDouyin))
 
         let wrongSource = AdminFanUser(
@@ -1576,7 +1652,7 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(wrongSource))
     }
 
-    func testApprovedProfileWithoutOptionalDouyinRemainsCompleteAndUsable() {
+    func testLegacyApprovedProfileWithoutDouyinRemainsManageableButCannotAccessContent() {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let profile = FanProfile(
             userID: "00000000-0000-4000-8000-000000000005",
@@ -1591,8 +1667,9 @@ final class ContentAndAccessTests: XCTestCase {
 
         XCTAssertTrue(profile.hasConsistentAccountSetupState)
         XCTAssertTrue(FanAccountValidation.isValidProfile(profile, now: now))
-        XCTAssertTrue(profile.isApproved(at: now))
-        XCTAssertTrue(profile.hasPermission(.galleryFull, at: now))
+        XCTAssertFalse(profile.hasRequiredDouyinID)
+        XCTAssertFalse(profile.isApproved(at: now))
+        XCTAssertFalse(profile.hasPermission(.galleryFull, at: now))
     }
 
     func testNormalProfileRejectsIncompleteAppleRegistrationMarker() {
@@ -1712,7 +1789,7 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
-    func testRequiredSetupValidationAllowsBlankOptionalDouyinAndRequiresPasswordRotation() throws {
+    func testRequiredSetupValidationRequiresDouyinAndPasswordRotation() throws {
         let temporaryPassword = TestCredentialFixture.temporaryValue
         let valid = try FanAccountValidation.validatedRequiredSetup(
             displayName: "  测试粉丝  ",
@@ -1725,15 +1802,14 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(valid.displayName, "测试粉丝")
         XCTAssertEqual(valid.douyinID, "real_fan")
 
-        let withoutDouyin = try FanAccountValidation.validatedRequiredSetup(
+        XCTAssertThrowsError(try FanAccountValidation.validatedRequiredSetup(
             displayName: "测试粉丝",
             douyinID: "   ",
             currentPassword: temporaryPassword,
             newPassword: TestCredentialFixture.replacementValue,
             newPasswordConfirmation: TestCredentialFixture.replacementValue,
             acceptedDataUse: true
-        )
-        XCTAssertEqual(withoutDouyin.douyinID, "")
+        ))
 
         XCTAssertThrowsError(
             try FanAccountValidation.validatedRequiredSetup(
@@ -1935,6 +2011,191 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(sanitized, "portrait__Injected_php.jpg")
         XCTAssertFalse(sanitized.contains("\r"))
         XCTAssertFalse(sanitized.contains("\n"))
+    }
+
+    func testCollaborationSubmissionNormalizesFieldsAndUsesStableIdempotencyID() throws {
+        let submissionID = UUID(uuidString: "7d8cb55b-7358-4d25-8e4c-af657a122d44")!
+        let date = Date(timeIntervalSince1970: 1_788_192_000)
+        let draft = try CollaborationSubmissionDraft(
+            submissionID: submissionID,
+            contactName: "  林女士  ",
+            contactMethod: "  13800000000  ",
+            organization: "  梧桐影业  ",
+            projectType: "drama",
+            city: "  杭州  ",
+            preferredDate: date,
+            budget: "  5 万元  ",
+            details: "  短剧女主角\r\n拍摄 7 天  "
+        )
+
+        XCTAssertEqual(draft.submissionID, submissionID.uuidString.lowercased())
+        XCTAssertEqual(draft.contactName, "林女士")
+        XCTAssertEqual(draft.contactMethod, "13800000000")
+        XCTAssertEqual(draft.organization, "梧桐影业")
+        XCTAssertEqual(draft.city, "杭州")
+        XCTAssertEqual(draft.budget, "5 万元")
+        XCTAssertEqual(draft.details, "短剧女主角\n拍摄 7 天")
+
+        let payload = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(draft)
+        ) as? [String: Any]
+        XCTAssertEqual(payload?["submissionID"] as? String, draft.submissionID)
+        XCTAssertEqual(payload?["projectType"] as? String, "drama")
+        XCTAssertNotNil(payload?["preferredDate"] as? String)
+    }
+
+    func testCollaborationSubmissionRejectsMissingOrMultilineRequiredFields() {
+        let submissionID = UUID(uuidString: "e4af5d2e-b6b2-42fa-a2ee-3b8777379d27")!
+        XCTAssertThrowsError(
+            try CollaborationSubmissionDraft(
+                submissionID: submissionID,
+                contactName: "   ",
+                contactMethod: "13800000000",
+                organization: "",
+                projectType: "drama",
+                city: "",
+                preferredDate: .now,
+                budget: "",
+                details: ""
+            )
+        )
+        XCTAssertThrowsError(
+            try CollaborationSubmissionDraft(
+                submissionID: submissionID,
+                contactName: "林女士\n伪造字段",
+                contactMethod: "13800000000",
+                organization: "",
+                projectType: "drama",
+                city: "",
+                preferredDate: .now,
+                budget: "",
+                details: ""
+            )
+        )
+    }
+
+    func testCollaborationReceiptRequiresCanonicalV4Identifier() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let valid = Data(
+            #"{"requestID":"7d8cb55b-7358-4d25-8e4c-af657a122d44","status":"received","receivedAt":"2026-09-04T12:00:00Z","duplicate":false}"#.utf8
+        )
+        let receipt = try decoder.decode(CollaborationSubmissionReceipt.self, from: valid)
+        XCTAssertEqual(receipt.status, .received)
+        XCTAssertFalse(receipt.duplicate)
+
+        let invalidVersion = Data(
+            #"{"requestID":"7d8cb55b-7358-1d25-8e4c-af657a122d44","status":"received","receivedAt":"2026-09-04T12:00:00Z","duplicate":false}"#.utf8
+        )
+        XCTAssertThrowsError(
+            try decoder.decode(CollaborationSubmissionReceipt.self, from: invalidVersion)
+        )
+    }
+
+    func testCollaborationRetryAcceptsReceiptAfterAdminAdvancedStatus() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let advanced = Data(
+            #"{"requestID":"7d8cb55b-7358-4d25-8e4c-af657a122d44","status":"reviewing","receivedAt":"2026-09-04T12:00:00Z","duplicate":true}"#.utf8
+        )
+        let receipt = try decoder.decode(CollaborationSubmissionReceipt.self, from: advanced)
+        XCTAssertTrue(receipt.duplicate)
+        XCTAssertEqual(receipt.status, .reviewing)
+        XCTAssertTrue(
+            CollaborationReceiptValidation.isAccepted(
+                receipt,
+                now: Date(timeIntervalSince1970: 1_788_544_100)
+            )
+        )
+    }
+
+    func testCollaborationCapabilitiesRequireExactPair() {
+        XCTAssertTrue(
+            AppFeatureCapabilities(
+                collaborationSubmissionEnabled: true,
+                collaborationInboxEnabled: true
+            ).isConsistent
+        )
+        XCTAssertTrue(
+            AppFeatureCapabilities(
+                collaborationSubmissionEnabled: false,
+                collaborationInboxEnabled: false
+            ).isConsistent
+        )
+        XCTAssertFalse(
+            AppFeatureCapabilities(
+                collaborationSubmissionEnabled: true,
+                collaborationInboxEnabled: false
+            ).isConsistent
+        )
+        XCTAssertFalse(
+            AppFeatureCapabilities(
+                collaborationSubmissionEnabled: false,
+                collaborationInboxEnabled: true
+            ).isConsistent
+        )
+    }
+
+    func testAdminCollaborationDirectoryValidatesMailAndStatusContracts() {
+        let now = Date(timeIntervalSince1970: 1_788_544_000)
+        let request = AdminCollaborationRequest(
+            requestID: "7d8cb55b-7358-4d25-8e4c-af657a122d44",
+            fanUserID: "e4af5d2e-b6b2-42fa-a2ee-3b8777379d27",
+            contactName: "林女士",
+            contactMethod: "13800000000",
+            organization: "梧桐影业",
+            projectType: "drama",
+            city: "杭州",
+            preferredDate: "2026-10-01",
+            budget: "5 万元",
+            details: "短剧女主角",
+            status: CollaborationRequestStatus.received.rawValue,
+            version: 1,
+            receivedAt: now.addingTimeInterval(-60),
+            updatedAt: now,
+            delivery: AdminCollaborationDelivery(
+                status: "pending",
+                attempts: 0,
+                errorCode: ""
+            )
+        )
+        let directory = AdminCollaborationDirectory(
+            requests: [request],
+            page: 1,
+            perPage: 100,
+            total: 1,
+            statuses: CollaborationRequestStatus.allCases.map(\.rawValue)
+        )
+        XCTAssertTrue(
+            AdminCollaborationValidation.isValid(
+                directory,
+                filteredBy: .received,
+                now: now
+            )
+        )
+
+        let invalidDelivery = AdminCollaborationRequest(
+            requestID: request.requestID,
+            fanUserID: request.fanUserID,
+            contactName: request.contactName,
+            contactMethod: request.contactMethod,
+            organization: request.organization,
+            projectType: request.projectType,
+            city: request.city,
+            preferredDate: request.preferredDate,
+            budget: request.budget,
+            details: request.details,
+            status: request.status,
+            version: request.version,
+            receivedAt: request.receivedAt,
+            updatedAt: request.updatedAt,
+            delivery: AdminCollaborationDelivery(
+                status: "retrying-forever",
+                attempts: 99,
+                errorCode: "raw error with spaces"
+            )
+        )
+        XCTAssertFalse(AdminCollaborationValidation.isValid(invalidDelivery, now: now))
     }
 
     func testWeatherKitConditionsHaveChinesePresentation() {

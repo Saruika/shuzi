@@ -124,6 +124,111 @@ struct AdminFanPasswordRecoveryResponse: Codable, Equatable {
     let passwordRecovery: AdminFanPasswordRecovery
 }
 
+struct AdminCollaborationDelivery: Codable, Equatable {
+    let status: String
+    let attempts: Int
+    let errorCode: String
+}
+
+struct AdminCollaborationRequest: Codable, Identifiable, Equatable {
+    let requestID: String
+    let fanUserID: String
+    let contactName: String
+    let contactMethod: String
+    let organization: String
+    let projectType: String
+    let city: String
+    let preferredDate: String
+    let budget: String
+    let details: String
+    let status: String
+    let version: Int
+    let receivedAt: Date
+    let updatedAt: Date
+    let delivery: AdminCollaborationDelivery
+
+    var id: String { requestID }
+    var requestStatus: CollaborationRequestStatus? {
+        CollaborationRequestStatus(rawValue: status)
+    }
+}
+
+struct AdminCollaborationDirectory: Codable, Equatable {
+    let requests: [AdminCollaborationRequest]
+    let page: Int
+    let perPage: Int
+    let total: Int
+    let statuses: [String]
+}
+
+enum AdminCollaborationValidation {
+    private static let deliveryStatuses = Set(["pending", "processing", "sent", "dead"])
+
+    static func isValid(
+        _ directory: AdminCollaborationDirectory,
+        filteredBy status: CollaborationRequestStatus? = nil,
+        now: Date = Date()
+    ) -> Bool {
+        guard directory.page >= 1,
+              (1...100).contains(directory.perPage),
+              directory.total >= directory.requests.count,
+              directory.requests.count <= directory.perPage,
+              Set(directory.statuses) == Set(CollaborationRequestStatus.allCases.map(\.rawValue)),
+              Set(directory.requests.map(\.requestID)).count == directory.requests.count,
+              directory.requests.allSatisfy({ isValid($0, now: now) }) else {
+            return false
+        }
+        return status.map { expected in
+            directory.requests.allSatisfy { $0.requestStatus == expected }
+        } ?? true
+    }
+
+    static func isValid(_ request: AdminCollaborationRequest, now: Date = Date()) -> Bool {
+        let optionalSingleLines = [request.organization, request.city, request.budget]
+        let optionalLimits = [120, 80, 80]
+        return CollaborationSubmissionValidation.isCanonicalUUIDv4(request.requestID)
+            && (request.fanUserID.isEmpty
+                || CollaborationSubmissionValidation.isCanonicalUUIDv4(request.fanUserID))
+            && CollaborationSubmissionValidation.isValidRequiredField(
+                request.contactName,
+                maximumLength: 80
+            )
+            && CollaborationSubmissionValidation.isValidRequiredField(
+                request.contactMethod,
+                maximumLength: 160
+            )
+            && zip(optionalSingleLines, optionalLimits).allSatisfy {
+                (try? CollaborationSubmissionValidation.optionalSingleLine(
+                    $0.0,
+                    maximumLength: $0.1
+                )) != nil
+            }
+            && ["drama", "commercial", "brand", "modeling", "event", "other"]
+                .contains(request.projectType)
+            && isValidDate(request.preferredDate)
+            && (try? CollaborationSubmissionValidation.multilineDetails(request.details))
+                == request.details
+            && request.requestStatus != nil
+            && request.version >= 1
+            && request.receivedAt <= request.updatedAt
+            && request.updatedAt <= now.addingTimeInterval(5 * 60)
+            && deliveryStatuses.contains(request.delivery.status)
+            && (0...5).contains(request.delivery.attempts)
+            && request.delivery.errorCode.count <= 80
+            && request.delivery.errorCode.range(
+                of: #"^[a-z0-9_]*$"#,
+                options: .regularExpression
+            ) != nil
+    }
+
+    private static func isValidDate(_ value: String) -> Bool {
+        value.isEmpty || value.range(
+            of: #"^\d{4}-\d{2}-\d{2}$"#,
+            options: .regularExpression
+        ) != nil
+    }
+}
+
 enum AdminFanPasswordRecoveryValidation {
     static func isValid(
         _ recovery: AdminFanPasswordRecovery,
@@ -445,6 +550,15 @@ final class AdminSessionStore: ObservableObject {
         return directory
     }
 
+    func fetchFeatureCapabilities() async throws -> AppFeatureCapabilities {
+        let capabilities: AppFeatureCapabilities = try await authorizedJSON(
+            path: "shuzijun/v1/app-capabilities",
+            method: "GET"
+        )
+        guard capabilities.isConsistent else { throw AdminAPIError.invalidResponse }
+        return capabilities
+    }
+
     func createFanInvitations(count: Int) async throws -> [AdminFanInvitation] {
         guard AdminFanInvitationValidation.allowedCount.contains(count) else {
             throw AdminAPIError.invalidResponse
@@ -520,16 +634,72 @@ final class AdminSessionStore: ObservableObject {
         return response.user
     }
 
+    func fetchCollaborationRequests(
+        status: CollaborationRequestStatus? = nil,
+        page: Int = 1,
+        perPage: Int = 100
+    ) async throws -> AdminCollaborationDirectory {
+        guard (1...100_000).contains(page), (1...100).contains(perPage) else {
+            throw AdminAPIError.invalidResponse
+        }
+        var queryItems = [
+            URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "perPage", value: String(perPage)),
+        ]
+        if let status {
+            queryItems.append(URLQueryItem(name: "status", value: status.rawValue))
+        }
+        let directory: AdminCollaborationDirectory = try await authorizedJSON(
+            path: "shuzijun/v1/app-admin/collaboration-requests",
+            method: "GET",
+            queryItems: queryItems
+        )
+        guard directory.page == page,
+              directory.perPage == perPage,
+              AdminCollaborationValidation.isValid(directory, filteredBy: status) else {
+            throw AdminAPIError.invalidResponse
+        }
+        return directory
+    }
+
+    func updateCollaborationRequest(
+        _ request: AdminCollaborationRequest,
+        status: CollaborationRequestStatus
+    ) async throws -> AdminCollaborationRequest {
+        guard AdminCollaborationValidation.isValid(request),
+              request.requestStatus != status else {
+            if request.requestStatus == status { return request }
+            throw AdminAPIError.invalidResponse
+        }
+        let body = try JSONEncoder().encode(
+            AdminCollaborationStatusUpdate(status: status.rawValue, version: request.version)
+        )
+        let response: AdminCollaborationUpdateResponse = try await authorizedJSON(
+            path: "shuzijun/v1/app-admin/collaboration-requests/\(request.requestID)",
+            method: "POST",
+            body: body
+        )
+        guard response.request.requestID == request.requestID,
+              response.request.requestStatus == status,
+              response.request.version == request.version + 1,
+              AdminCollaborationValidation.isValid(response.request) else {
+            throw AdminAPIError.invalidResponse
+        }
+        return response.request
+    }
+
     private func authorizedJSON<T: Decodable>(
         path: String,
         method: String,
         body: Data? = nil,
+        queryItems: [URLQueryItem] = [],
         authenticationProbe: Bool = false
     ) async throws -> T {
         let requestGeneration = authenticationGeneration
         var request = try authorizedRequest(
             path: path,
             method: method,
+            queryItems: queryItems,
             authenticationProbe: authenticationProbe
         )
         if let body {
@@ -557,6 +727,7 @@ final class AdminSessionStore: ObservableObject {
     private func authorizedRequest(
         path: String,
         method: String,
+        queryItems: [URLQueryItem] = [],
         authenticationProbe: Bool = false
     ) throws -> URLRequest {
         if !authenticationProbe,
@@ -570,12 +741,26 @@ final class AdminSessionStore: ObservableObject {
               !path.contains(".."),
               !path.contains("?"),
               !path.contains("#"),
+              queryItems.count <= 3,
+              queryItems.allSatisfy({ item in
+                  ["page", "perPage", "status"].contains(item.name)
+                      && item.value?.range(
+                          of: #"^[a-z0-9]{1,20}$"#,
+                          options: .regularExpression
+                      ) != nil
+              }),
               ["GET", "POST"].contains(method) else {
             throw AdminAPIError.invalidResponse
         }
         let token = Data("\(credential.username):\(credential.applicationPassword)".utf8).base64EncodedString()
         let endpointRoot = path == "wp/v2/media" ? mediaUploadRoot : apiRoot
-        let endpoint = endpointRoot.appending(path: path)
+        let baseEndpoint = endpointRoot.appending(path: path)
+        var components = URLComponents(
+            url: baseEndpoint,
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = queryItems.isEmpty ? nil : queryItems
+        guard let endpoint = components?.url else { throw AdminAPIError.invalidResponse }
         guard AppNetworkSecurityPolicy.isTrustedAdminRequestURL(endpoint) else {
             throw AdminAPIError.invalidResponse
         }
@@ -750,6 +935,15 @@ private struct AdminFanInvitationRequest: Encodable {
 
 private struct AdminFanAccessUpdateResponse: Decodable {
     let user: AdminFanUser
+}
+
+private struct AdminCollaborationStatusUpdate: Encodable {
+    let status: String
+    let version: Int
+}
+
+private struct AdminCollaborationUpdateResponse: Decodable {
+    let request: AdminCollaborationRequest
 }
 
 private struct WordPressError: Decodable {

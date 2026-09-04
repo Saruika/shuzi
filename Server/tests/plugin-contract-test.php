@@ -85,12 +85,22 @@ $GLOBALS['yishu_test_scheduled'] = array();
 $GLOBALS['yishu_test_registered_actions'] = array();
 $GLOBALS['yishu_test_registered_filters'] = array();
 $GLOBALS['yishu_test_registered_routes'] = array();
+$GLOBALS['yishu_test_fired_actions'] = array();
 $GLOBALS['yishu_test_lock_result'] = '1';
 $GLOBALS['yishu_test_lock_results'] = array();
 
 final class Yishu_Test_WPDB {
     public string $options = 'wp_options';
+    public string $users = 'wp_users';
+    public string $usermeta = 'wp_usermeta';
+    public string $prefix = 'wp_';
     public string $last_error = '';
+    public array $existing_tables = array();
+    public array $table_probe_failures = array();
+    public array $collaboration_request_ids = array();
+    public array $executed_queries = array();
+    public array $user_display_names = array();
+    public array $user_meta_rows = array();
 
     public function prepare(string $query, ...$arguments): array {
         return array('query' => $query, 'arguments' => $arguments);
@@ -100,6 +110,7 @@ final class Yishu_Test_WPDB {
         if (!is_array($prepared)) { return null; }
         $query = (string) ($prepared['query'] ?? '');
         $arguments = (array) ($prepared['arguments'] ?? array());
+        $this->last_error = '';
         if (strpos($query, 'SELECT GET_LOCK') !== false) {
             $lock_name = (string) ($arguments[0] ?? '');
             foreach ($GLOBALS['yishu_test_lock_results'] as $prefix => $result) {
@@ -114,8 +125,57 @@ final class Yishu_Test_WPDB {
                 ? maybe_serialize($GLOBALS['yishu_test_options'][$name])
                 : null;
         }
+        if (strpos($query, 'SELECT display_name FROM wp_users') !== false) {
+            $user_id = (int) ($arguments[0] ?? 0);
+            return array_key_exists($user_id, $this->user_display_names)
+                ? (string) $this->user_display_names[$user_id]
+                : null;
+        }
+        if (strpos($query, 'SELECT meta_value FROM wp_usermeta') !== false) {
+            $user_id = (int) ($arguments[0] ?? 0);
+            $meta_key = (string) ($arguments[1] ?? '');
+            return array_key_exists($meta_key, $this->user_meta_rows[$user_id] ?? array())
+                ? maybe_serialize($this->user_meta_rows[$user_id][$meta_key])
+                : null;
+        }
+        if (strpos($query, 'SHOW TABLES LIKE') !== false) {
+            $table = (string) ($arguments[0] ?? '');
+            if (in_array($table, $this->table_probe_failures, true)) {
+                $this->last_error = 'simulated_table_probe_failure';
+                return null;
+            }
+            return in_array($table, $this->existing_tables, true) ? $table : null;
+        }
         return null;
     }
+
+    public function get_col($prepared): array {
+        $this->last_error = '';
+        if (!is_array($prepared)) { return array(); }
+        $query = (string) ($prepared['query'] ?? '');
+        $arguments = (array) ($prepared['arguments'] ?? array());
+        if (strpos($query, 'SELECT id FROM wp_yishu_collaboration_requests') !== false) {
+            return array_values($this->collaboration_request_ids[(int) ($arguments[0] ?? 0)] ?? array());
+        }
+        return array();
+    }
+
+    public function query($prepared) {
+        $query = is_array($prepared)
+            ? (string) ($prepared['query'] ?? '')
+            : (string) $prepared;
+        $arguments = is_array($prepared)
+            ? (array) ($prepared['arguments'] ?? array())
+            : array();
+        $this->last_error = '';
+        $this->executed_queries[] = $query;
+        if (strpos($query, 'DELETE FROM wp_yishu_collaboration_requests') !== false) {
+            return count($this->collaboration_request_ids[(int) ($arguments[0] ?? 0)] ?? array());
+        }
+        return 1;
+    }
+
+    public function esc_like(string $value): string { return $value; }
 }
 
 $GLOBALS['wpdb'] = new Yishu_Test_WPDB();
@@ -125,6 +185,9 @@ function add_action(...$args): void {
 }
 function add_filter(...$args): void {
     $GLOBALS['yishu_test_registered_filters'][] = $args;
+}
+function do_action(string $name, ...$args): void {
+    $GLOBALS['yishu_test_fired_actions'][] = array($name, $args);
 }
 function register_rest_route(string $namespace, string $route, array $arguments): bool {
     $GLOBALS['yishu_test_registered_routes'][] = array(
@@ -337,6 +400,22 @@ expect_true(
             true
         ),
     '默认关闭时不得注册粉丝或管理员合作邀约 REST 路由'
+);
+expect_true(
+    in_array('/app-capabilities', $default_route_names, true)
+        && strpos(
+            $plugin_source,
+            "'permission_callback' => array(__CLASS__, 'can_read_app_capabilities')"
+        ) !== false,
+    '应始终注册只读能力声明，供 App 在合作服务未开放时失败关闭'
+);
+$disabled_capabilities = Shuzijun_App_Content_API::app_capabilities();
+expect_true(
+    $disabled_capabilities instanceof WP_REST_Response
+        && ($disabled_capabilities->data['collaborationSubmissionEnabled'] ?? null) === false
+        && ($disabled_capabilities->data['collaborationInboxEnabled'] ?? null) === false
+        && ($disabled_capabilities->headers['Cache-Control'] ?? '') === 'private, no-store, max-age=0',
+    '内建熔断关闭时能力声明必须明确返回 false 且禁止缓存'
 );
 $disabled_collaboration_request = new WP_REST_Request();
 expect_true(
@@ -552,33 +631,33 @@ expect_same(
     invoke_plugin_method('normalize_douyin_id', array('https://v.douyin.com/test')),
     '抖音 ID 必须拒绝链接'
 );
-expect_same(
-    '',
-    invoke_plugin_method('normalize_optional_douyin_id', array("  \n")),
-    '选填抖音 ID 留空必须是有效值'
-);
-expect_same(
-    '',
-    invoke_plugin_method('normalize_optional_douyin_id', array(null)),
-    '选填抖音 ID 缺失时必须按空值处理'
-);
-expect_same(
-    'yishu_2026',
-    invoke_plugin_method('normalize_optional_douyin_id', array(' @YiShu_2026 ')),
-    '选填抖音 ID 有值时必须保持归一化'
+expect_error_code(
+    'fan_douyin_id_invalid',
+    invoke_plugin_method('normalize_required_douyin_id', array("  \n")),
+    '必填抖音 ID 不得留空'
 );
 expect_error_code(
     'fan_douyin_id_invalid',
-    invoke_plugin_method('normalize_optional_douyin_id', array('https://v.douyin.com/test')),
-    '选填抖音 ID 非空时仍必须拒绝链接'
+    invoke_plugin_method('normalize_required_douyin_id', array(null)),
+    '必填抖音 ID 缺失时必须失败关闭'
+);
+expect_same(
+    'yishu_2026',
+    invoke_plugin_method('normalize_required_douyin_id', array(' @YiShu_2026 ')),
+    '必填抖音 ID 必须保持归一化'
+);
+expect_error_code(
+    'fan_douyin_id_invalid',
+    invoke_plugin_method('normalize_required_douyin_id', array('https://v.douyin.com/test')),
+    '必填抖音 ID 必须拒绝链接'
 );
 expect_error_code(
     'fan_douyin_id_invalid',
     invoke_plugin_method(
-        'normalize_optional_douyin_id',
+        'normalize_required_douyin_id',
         array('invite_' . str_repeat('a', 24))
     ),
-    '邀请占位值不得伪装为用户选填的抖音 ID'
+    '邀请占位值不得伪装为用户填写的抖音 ID'
 );
 
 $fan_registration_source = plugin_method_source($plugin_source, 'register_fan');
@@ -586,54 +665,51 @@ $apple_registration_completion_source = plugin_method_source(
     $plugin_source,
     'complete_fan_apple_registration'
 );
-$invitation_completion_optional_source = plugin_method_source(
+$invitation_completion_source = plugin_method_source(
     $plugin_source,
     'complete_fan_invitation'
 );
 expect_true(
     $fan_registration_source !== ''
         && $apple_registration_completion_source !== ''
-        && $invitation_completion_optional_source !== ''
-        && strpos($fan_registration_source, 'normalize_optional_douyin_id') !== false
-        && strpos($apple_registration_completion_source, 'normalize_optional_douyin_id') !== false
-        && strpos($invitation_completion_optional_source, 'normalize_optional_douyin_id') !== false
-        && strpos($fan_registration_source, "\$douyin_reservation = \$douyin_id !== ''") !== false
-        && strpos($fan_registration_source, "\$douyin_reservation !== ''") !== false
-        && strpos($apple_registration_completion_source, "\$reservation = \$douyin_id !== ''") !== false
-        && strpos($apple_registration_completion_source, "if (\$douyin_id !== '')") !== false
-        && strpos($invitation_completion_optional_source, "if (\$douyin_id !== '')") !== false
-        && strpos(
-            $invitation_completion_optional_source,
-            "(\$real_reservation !== ''"
-        ) !== false,
-    '注册、Apple 申请和邀请完成必须允许空抖音 ID，且空值不得创建唯一预留'
+        && $invitation_completion_source !== ''
+        && strpos($fan_registration_source, 'normalize_required_douyin_id') !== false
+        && strpos($apple_registration_completion_source, 'normalize_required_douyin_id') !== false
+        && strpos($invitation_completion_source, 'normalize_required_douyin_id') !== false,
+    '注册、Apple 申请和邀请完成必须在服务器端拒绝空或非法抖音 ID'
 );
 
 expect_same(
-    '2026-09-02-approval-v3',
+    '2026-09-04-approval-v4',
     Shuzijun_App_Content_API::FAN_CONSENT_VERSION,
-    '当前隐私同意版本必须与 2026-09-02 政策一致'
+    '当前隐私同意版本必须与 2026-09-04 政策一致'
 );
 expect_same(
-    array('2026-08-31-approval-v2'),
+    array(
+        '2026-08-31-approval-v2',
+        '2026-09-02-approval-v3',
+    ),
     Shuzijun_App_Content_API::FAN_ACCEPTED_LEGACY_CONSENT_VERSIONS,
     '存量同意兼容只能使用显式最小白名单'
 );
 expect_true(
     Shuzijun_App_Content_API::fan_consent_version_is_current(
-        '2026-09-02-approval-v3'
+        '2026-09-04-approval-v4'
     )
         && !Shuzijun_App_Content_API::fan_consent_version_is_current(
-            '2026-08-31-approval-v2'
+            '2026-09-02-approval-v3'
         )
         && !Shuzijun_App_Content_API::fan_consent_version_is_current(null),
-    '当前版本匹配器只能精确识别 v3'
+    '当前版本匹配器只能精确识别 v4'
 );
 expect_true(
     Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
-        '2026-09-02-approval-v3'
+        '2026-09-04-approval-v4'
     )
-        && Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
+        && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
+            '2026-09-02-approval-v3'
+        )
+        && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
             '2026-08-31-approval-v2'
         )
         && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
@@ -643,13 +719,17 @@ expect_true(
         && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(array(
             '2026-08-31-approval-v2',
         )),
-    '1.5.10 过渡期新同意只能精确接受 v3 与白名单 v2，未知、缺失或非字符串必须失败'
+    '新同意只能精确接受 v4，v2、v3、未知、缺失或非字符串必须失败'
 );
 expect_true(
     Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
-        'version' => '2026-09-02-approval-v3',
-        'acceptedAt' => '2026-09-02T00:00:00+00:00',
+        'version' => '2026-09-04-approval-v4',
+        'acceptedAt' => '2026-09-04T00:00:00+00:00',
     ))
+        && Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
+            'version' => '2026-09-02-approval-v3',
+            'acceptedAt' => '2026-09-02T00:00:00+00:00',
+        ))
         && Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
             'version' => '2026-08-31-approval-v2',
             'acceptedAt' => '2026-08-31T00:00:00+00:00',
@@ -658,12 +738,12 @@ expect_true(
             'version' => '2026-08-30-approval-v1',
         ))
         && !Shuzijun_App_Content_API::fan_stored_consent_is_accepted(null),
-    '已存 v2 和 v3 记录必须保持有效，未知或缺失记录必须失败关闭'
+    '已存 v2、v3 和 v4 记录必须保持有效，未知或缺失记录必须失败关闭'
 );
 foreach (array(
     $fan_registration_source,
     $apple_registration_completion_source,
-    $invitation_completion_optional_source,
+    $invitation_completion_source,
 ) as $new_consent_source) {
     expect_true(
         strpos(
@@ -676,7 +756,7 @@ foreach (array(
             ) !== false
             && strpos($new_consent_source, "'version' => \$consent_version") !== false
             && strpos($new_consent_source, "'version' => self::FAN_CONSENT_VERSION") === false,
-        '每个新同意入口都必须使用 1.5.10 过渡白名单，并保存客户端实际提交的原版本'
+        '每个新同意入口都必须验证当前 v4，并保存客户端实际提交的原版本'
     );
 }
 
@@ -803,7 +883,7 @@ $duplicate_collaboration_response = invoke_plugin_method(
     array(array(
         'public_id' => '223e4567-e89b-42d3-a456-426614174000',
         'payload_hash' => $normalized_collaboration['payloadHash'],
-        'status' => 'received',
+        'status' => 'reviewing',
         'created_at' => '2026-09-02 10:00:00',
     ), $normalized_collaboration['payloadHash'], true)
 );
@@ -811,9 +891,20 @@ expect_true(
     $duplicate_collaboration_response instanceof WP_REST_Response
         && $duplicate_collaboration_response->status === 200
         && ($duplicate_collaboration_response->data['duplicate'] ?? false) === true
+        && ($duplicate_collaboration_response->data['status'] ?? '') === 'reviewing'
         && ($duplicate_collaboration_response->headers['Cache-Control'] ?? '')
             === 'private, no-store, max-age=0',
-    '同一粉丝、同一 submission UUID 与同一 payload 必须幂等返回原请求'
+    '同一粉丝、同一 submission UUID 与同一 payload 在管理员推进状态后仍必须幂等返回原请求'
+);
+expect_error_code(
+    'collaboration_storage_unavailable',
+    invoke_plugin_method('collaboration_submission_response', array(array(
+        'public_id' => '223e4567-e89b-42d3-a456-426614174000',
+        'payload_hash' => str_repeat('a', 64),
+        'status' => 'arbitrary-status',
+        'created_at' => '2026-09-02 10:00:00',
+    ), str_repeat('a', 64), true)),
+    '重复回执只能返回服务端允许的合作状态'
 );
 expect_error_code(
     'collaboration_idempotency_conflict',
@@ -905,6 +996,37 @@ $collaboration_audit_end = strpos($plugin_source, 'private static function sched
 $collaboration_audit_source = ($collaboration_audit_start === false || $collaboration_audit_end === false)
     ? ''
     : substr($plugin_source, $collaboration_audit_start, $collaboration_audit_end - $collaboration_audit_start);
+$collaboration_capabilities_source = plugin_method_source($plugin_source, 'app_capabilities');
+$collaboration_capabilities_permission_source = plugin_method_source(
+    $plugin_source,
+    'can_read_app_capabilities'
+);
+$collaboration_mail_ready_source = plugin_method_source(
+    $plugin_source,
+    'collaboration_mail_transport_ready'
+);
+$collaboration_purge_source = plugin_method_source(
+    $plugin_source,
+    'purge_collaboration_data_for_fan_user'
+);
+$collaboration_fan_revalidation_source = plugin_method_source(
+    $plugin_source,
+    'collaboration_fan_context_is_current_from_database'
+);
+$fan_remove_source = plugin_method_source($plugin_source, 'remove_fan_user');
+$fan_deletion_hook_source = plugin_method_source($plugin_source, 'prepare_fan_user_deletion');
+$fan_deletion_finalize_source = plugin_method_source(
+    $plugin_source,
+    'finalize_fan_user_deletion'
+);
+$fan_deletion_release_registration_source = plugin_method_source(
+    $plugin_source,
+    'register_fan_user_deletion_release_hooks'
+);
+$fan_deletion_abort_source = plugin_method_source(
+    $plugin_source,
+    'abort_fan_user_deletion'
+);
 $collaboration_gate_source = plugin_method_source(
     $plugin_source,
     'collaboration_phase1_enabled'
@@ -967,6 +1089,51 @@ expect_true(
     '合作路由、权限、schema/Cron hook 注册与激活时动作必须全部受硬门禁保护'
 );
 expect_true(
+    $collaboration_capabilities_source !== ''
+        && $collaboration_capabilities_permission_source !== ''
+        && $collaboration_mail_ready_source !== ''
+        && strpos(
+            $collaboration_capabilities_source,
+            'self::collaboration_mail_transport_ready()'
+        ) !== false
+        && strpos(
+            $collaboration_mail_ready_source,
+            "defined('YISHU_COLLABORATION_MAIL_TRANSPORT_READY')"
+        ) !== false
+        && strpos(
+            $collaboration_mail_ready_source,
+            "constant('YISHU_COLLABORATION_MAIL_TRANSPORT_READY') === true"
+        ) !== false
+        && strpos(
+            $collaboration_mail_ready_source,
+            "defined('YISHU_COLLABORATION_EMAIL')"
+        ) !== false
+        && strpos($collaboration_mail_ready_source, "function_exists('wp_mail')") !== false
+        && strpos($collaboration_mail_ready_source, 'self::collaboration_work_email()') !== false
+        && strpos($collaboration_mail_ready_source, 'apply_filters') === false
+        && substr_count($collaboration_capabilities_source, '$collaboration_enabled') >= 3,
+    '提交与收件箱能力必须成对返回，且要求运维明确确认邮件传输和收件地址，不能仅依赖 wp_mail 存在'
+);
+expect_true(
+    strpos($collaboration_capabilities_permission_source, "preg_match('/^Bearer") !== false
+        && strpos($collaboration_capabilities_permission_source, 'self::$fan_session_context = null') !== false
+        && strpos(
+            $collaboration_capabilities_permission_source,
+            'self::can_access_app_content($request)'
+        ) !== false
+        && strpos($collaboration_capabilities_permission_source, "preg_match('/^Basic") !== false
+        && strpos(
+            $collaboration_capabilities_permission_source,
+            'self::authenticate_manager_for_capability('
+        ) !== false
+        && strpos(
+            $collaboration_capabilities_permission_source,
+            'self::COLLABORATION_CAPABILITY'
+        ) !== false
+        && strpos($collaboration_capabilities_permission_source, 'return true;') === false,
+    '能力声明只允许已批准粉丝 Bearer 或具有合作专用权限的 Basic 管理员读取，不得匿名放行'
+);
+expect_true(
     strpos($plugin_source, "'/collaboration-requests'") !== false
         && strpos($plugin_source, "'/app-admin/collaboration-requests'") !== false
         && strpos($plugin_source, "'/app-admin/collaboration-requests/(?P<request_id>[a-f0-9-]{36})'") !== false
@@ -994,14 +1161,155 @@ expect_true(
 );
 expect_true(
     $collaboration_submit_source !== ''
+        && $collaboration_fan_revalidation_source !== ''
         && strpos($collaboration_submit_source, "array('collaboration_user'") !== false
         && strpos($collaboration_submit_source, "array('collaboration_install'") !== false
         && strpos($collaboration_submit_source, "array('collaboration_net'") !== false
+        && strpos($collaboration_submit_source, 'self::acquire_fan_lock($fan_user_id)') !== false
+        && strpos(
+            $collaboration_submit_source,
+            'self::collaboration_fan_context_is_current_from_database($context)'
+        ) !== false
+        && strpos(
+            $collaboration_submit_source,
+            "collaboration_fan_context_is_current_from_database(\n                    \$context,\n                    true"
+        ) !== false
+        && strpos($collaboration_submit_source, "query('START TRANSACTION')")
+            < strpos(
+                $collaboration_submit_source,
+                "collaboration_fan_context_is_current_from_database(\n                    \$context,\n                    true"
+            )
+        && strpos(
+            $collaboration_submit_source,
+            "collaboration_fan_context_is_current_from_database(\n                    \$context,\n                    true"
+        ) < strpos($collaboration_submit_source, '$wpdb->insert($tables[\'requests\']')
+        && strpos($collaboration_submit_source, 'self::release_fan_lock(') !== false
         && strpos($collaboration_submit_source, "query('START TRANSACTION')") !== false
         && strpos($collaboration_submit_source, "query('COMMIT')") !== false
         && strpos($collaboration_submit_source, "query('ROLLBACK')") !== false
         && strpos($collaboration_submit_source, "'request_received'") !== false,
-    '新合作邀约必须经用户、安装、网络三层限流并事务性写入请求、Outbox 和审计'
+    '新合作邀约必须与删号串行化，并在写事务内再次复核会话与账号状态'
+);
+expect_true(
+    strpos($collaboration_fan_revalidation_source, 'self::fan_session_context_is_current_from_database(') !== false
+        && strpos($collaboration_fan_revalidation_source, "'normal',") !== false
+        && strpos($collaboration_fan_revalidation_source, '$wpdb->users') !== false
+        && strpos($collaboration_fan_revalidation_source, "\$status !== 'active'") !== false
+        && strpos($collaboration_fan_revalidation_source, 'self::FAN_META_INVITATION') !== false
+        && strpos($collaboration_fan_revalidation_source, 'self::FAN_META_PASSWORD_RECOVERY') !== false
+        && strpos($collaboration_fan_revalidation_source, 'self::FAN_META_APPLE_SETUP') !== false
+        && strpos($collaboration_fan_revalidation_source, 'self::normalize_required_douyin_id') !== false
+        && strpos($collaboration_fan_revalidation_source, 'self::fan_stored_consent_is_accepted') !== false
+        && strpos($collaboration_fan_revalidation_source, 'self::FAN_META_PERMISSIONS') !== false
+        && strpos($collaboration_fan_revalidation_source, 'sort($fresh_permissions, SORT_STRING)') !== false
+        && strpos($collaboration_fan_revalidation_source, '$fresh_permissions === $callback_permissions') !== false
+        && strpos($collaboration_fan_revalidation_source, "' FOR UPDATE'") !== false,
+    '持有粉丝锁后必须从数据库复核用户存在、active、资料完整、同意、权限快照与当前会话'
+);
+$revalidation_user_id = 91;
+$revalidation_token_hash = str_repeat('a', 64);
+$revalidation_context = array(
+    'userID' => $revalidation_user_id,
+    'scope' => 'normal',
+    'expires' => time() + HOUR_IN_SECONDS,
+    'credentialEpoch' => 2,
+    'authMethod' => 'password',
+    'recentAuthUntil' => 0,
+    'sessionID' => str_repeat('b', 32),
+    'installHash' => str_repeat('c', 64),
+    'tokenHash' => $revalidation_token_hash,
+    'permissions' => array('gallery_full'),
+);
+$GLOBALS['yishu_test_options'][
+    Shuzijun_App_Content_API::FAN_SESSION_OPTION_PREFIX . $revalidation_token_hash
+] = $revalidation_context;
+$GLOBALS['wpdb']->user_display_names[$revalidation_user_id] = '合作测试用户';
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id] = array(
+    Shuzijun_App_Content_API::FAN_META_UUID => '123e4567-e89b-42d3-a456-426614174091',
+    Shuzijun_App_Content_API::FAN_META_CODE => 'HS-ABCD-2345',
+    Shuzijun_App_Content_API::FAN_META_STATUS => 'active',
+    Shuzijun_App_Content_API::FAN_META_DOUYIN_ID => 'yishu_91',
+    Shuzijun_App_Content_API::FAN_META_CONSENT => array(
+        'version' => Shuzijun_App_Content_API::FAN_CONSENT_VERSION,
+        'acceptedAt' => gmdate('c'),
+    ),
+    Shuzijun_App_Content_API::FAN_META_PERMISSIONS => array('gallery_full'),
+    Shuzijun_App_Content_API::FAN_META_CREDENTIAL_EPOCH => 2,
+);
+expect_true(
+    invoke_plugin_method(
+        'collaboration_fan_context_is_current_from_database',
+        array($revalidation_context, true)
+    ) === true,
+    '写入事务内的数据库复核应接受会话、资料、active 状态和权限一致的账号'
+);
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][
+    Shuzijun_App_Content_API::FAN_META_STATUS
+] = 'suspended';
+expect_true(
+    invoke_plugin_method(
+        'collaboration_fan_context_is_current_from_database',
+        array($revalidation_context, true)
+    ) === false,
+    '权限回调后被暂停的账号不得写入合作邀约'
+);
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][
+    Shuzijun_App_Content_API::FAN_META_STATUS
+] = 'active';
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][
+    Shuzijun_App_Content_API::FAN_META_CODE
+] = '';
+expect_true(
+    invoke_plugin_method(
+        'collaboration_fan_context_is_current_from_database',
+        array($revalidation_context, true)
+    ) === false,
+    '权限回调后身份码缺失的账号不得写入合作邀约'
+);
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][
+    Shuzijun_App_Content_API::FAN_META_CODE
+] = 'HS-ABCD-2345';
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][
+    Shuzijun_App_Content_API::FAN_META_PERMISSIONS
+] = array('video_view');
+expect_true(
+    invoke_plugin_method(
+        'collaboration_fan_context_is_current_from_database',
+        array($revalidation_context, true)
+    ) === false,
+    '权限回调后权限快照已改变时不得用旧快照写入合作邀约'
+);
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][
+    Shuzijun_App_Content_API::FAN_META_PERMISSIONS
+] = array('gallery_full');
+$empty_permission_context = $revalidation_context;
+$empty_permission_context['permissions'] = array();
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][
+    Shuzijun_App_Content_API::FAN_META_PERMISSIONS
+] = array();
+expect_true(
+    invoke_plugin_method(
+        'collaboration_fan_context_is_current_from_database',
+        array($empty_permission_context, true)
+    ) === true,
+    '合法的空细分权限仍应与内容门禁一致，但不得接受过期权限快照'
+);
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][
+    Shuzijun_App_Content_API::FAN_META_PERMISSIONS
+] = array('gallery_full');
+unset($GLOBALS['yishu_test_options'][
+    Shuzijun_App_Content_API::FAN_SESSION_OPTION_PREFIX . $revalidation_token_hash
+]);
+expect_true(
+    invoke_plugin_method(
+        'collaboration_fan_context_is_current_from_database',
+        array($revalidation_context, true)
+    ) === false,
+    '权限回调后已撤销的会话不得写入合作邀约'
+);
+unset(
+    $GLOBALS['wpdb']->user_display_names[$revalidation_user_id],
+    $GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id]
 );
 expect_true(
     $collaboration_worker_source !== ''
@@ -1035,6 +1343,104 @@ expect_true(
         && strpos($collaboration_audit_source, 'metadata_json') !== false,
     '合作邀约审计表必须是严格 allowlist，不得写入联系资料或项目说明'
 );
+expect_true(
+    $collaboration_purge_source !== ''
+        && $fan_remove_source !== ''
+        && $fan_deletion_hook_source !== ''
+        && $fan_deletion_finalize_source !== ''
+        && $fan_deletion_release_registration_source !== ''
+        && $fan_deletion_abort_source !== ''
+        && strpos($collaboration_purge_source, 'self::collaboration_phase1_enabled()') === false
+        && strpos($collaboration_purge_source, 'self::collaboration_table_names()') !== false
+        && strpos($collaboration_purge_source, 'self::COLLABORATION_SCHEMA_OPTION') === false
+        && strpos($collaboration_purge_source, 'account_deletion_schema_probe_failed') !== false
+        && strpos($collaboration_purge_source, "query('START TRANSACTION')") !== false
+        && strpos($collaboration_purge_source, 'DELETE a FROM {$tables[\'audit\']} a') !== false
+        && strpos($collaboration_purge_source, 'DELETE o FROM {$tables[\'outbox\']} o') !== false
+        && strpos($collaboration_purge_source, 'DELETE FROM {$tables[\'requests\']}') !== false
+        && strpos($collaboration_purge_source, "query('COMMIT')") !== false
+        && strpos($collaboration_purge_source, "query('ROLLBACK')") !== false
+        && strpos($fan_remove_source, 'self::purge_collaboration_data_for_fan_user') !== false
+        && strpos($fan_remove_source, 'wp_delete_user') !== false
+        && strpos($fan_remove_source, 'self::purge_collaboration_data_for_fan_user')
+            < strpos($fan_remove_source, 'wp_delete_user')
+        && strpos($fan_remove_source, 'self::$fan_user_deletion_prepared[$user_id] = true') !== false
+        && strpos($fan_deletion_hook_source, 'self::acquire_fan_lock($user_id)') !== false
+        && strpos($fan_deletion_hook_source, 'self::purge_collaboration_data_for_fan_user') !== false
+        && strpos($fan_deletion_hook_source, 'self::abort_fan_user_deletion') !== false
+        && strpos($fan_deletion_hook_source, 'self::release_fan_user_deletion_lock($user_id)') !== false
+        && strpos($fan_deletion_release_registration_source, "add_action('deleted_user'") !== false
+        && strpos($fan_deletion_release_registration_source, "add_action('shutdown'") !== false
+        && strpos($fan_deletion_finalize_source, 'self::release_fan_user_deletion_lock') !== false
+        && strpos($fan_deletion_abort_source, "function_exists('wp_die')") !== false
+        && strpos($fan_deletion_abort_source, 'throw new RuntimeException') !== false,
+    'App 与 WordPress 核心删号都必须在不可逆删除开始前清除合作 PII，失败时必须阻断删号'
+);
+
+// Physical-table discovery, rather than the advisory schema option, is the
+// deletion authority. Exercise the missing/corrupt-marker cases dynamically so
+// a future shortcut cannot silently strand collaboration PII.
+$purge_db = $GLOBALS['wpdb'];
+$collaboration_tables = array(
+    'wp_yishu_collaboration_requests',
+    'wp_yishu_collaboration_outbox',
+    'wp_yishu_collaboration_audit',
+);
+$purge_db->existing_tables = $collaboration_tables;
+$purge_db->collaboration_request_ids[77] = array(901, 902);
+unset($GLOBALS['yishu_test_options'][Shuzijun_App_Content_API::COLLABORATION_SCHEMA_OPTION]);
+expect_true(
+    Shuzijun_App_Content_API::purge_collaboration_data_for_fan_user(77) === true
+        && substr_count(implode("\n", $purge_db->executed_queries), 'DELETE ') === 3,
+    '即使 schema option 缺失，只要物理表存在就必须事务性清除合作数据'
+);
+$purge_db->executed_queries = array();
+$GLOBALS['yishu_test_options'][Shuzijun_App_Content_API::COLLABORATION_SCHEMA_OPTION] = 'corrupt';
+$purge_db->collaboration_request_ids[78] = array(903);
+expect_true(
+    Shuzijun_App_Content_API::purge_collaboration_data_for_fan_user(78) === true
+        && substr_count(implode("\n", $purge_db->executed_queries), 'DELETE ') === 3,
+    '即使 schema option 损坏，物理表中的合作数据仍必须被清除'
+);
+$purge_db->executed_queries = array();
+$purge_db->existing_tables = array($collaboration_tables[0]);
+expect_true(
+    Shuzijun_App_Content_API::purge_collaboration_data_for_fan_user(79) === false
+        && strpos(implode("\n", $purge_db->executed_queries), 'START TRANSACTION') === false,
+    '合作表不完整时不得误报清理成功或继续删号'
+);
+$core_delete_blocked = false;
+try {
+    Shuzijun_App_Content_API::prepare_fan_user_deletion(79);
+} catch (RuntimeException $error) {
+    $core_delete_blocked = $error->getMessage()
+        === 'fan_user_deletion_privacy_cleanup_failed';
+}
+expect_true(
+    $core_delete_blocked
+        && in_array(
+            array('yishu_fan_security_audit', array('account_deletion_cleanup_failed')),
+            $GLOBALS['yishu_test_fired_actions'],
+            true
+        ),
+    'WordPress core/admin 删号在合作 PII 清理失败时必须于不可逆删除前终止'
+);
+$purge_db->existing_tables = $collaboration_tables;
+$purge_db->table_probe_failures = array($collaboration_tables[1]);
+expect_true(
+    Shuzijun_App_Content_API::purge_collaboration_data_for_fan_user(80) === false,
+    '物理表探测出错时必须失败关闭，不得把查询错误当成无数据'
+);
+$purge_db->existing_tables = array();
+$purge_db->table_probe_failures = array();
+$purge_db->executed_queries = array();
+expect_true(
+    Shuzijun_App_Content_API::purge_collaboration_data_for_fan_user(81) === true
+        && !$purge_db->executed_queries,
+    '确认三张物理表均不存在时可安全视为无历史合作数据'
+);
+$purge_db->collaboration_request_ids = array();
+unset($GLOBALS['yishu_test_options'][Shuzijun_App_Content_API::COLLABORATION_SCHEMA_OPTION]);
 
 $apple_now = time();
 $apple_nonce_hash = str_repeat('a', 64);
@@ -1382,7 +1788,7 @@ $invitation_meta_source = ($invitation_meta_start === false || $invitation_meta_
     ? ''
     : substr($plugin_source, $invitation_meta_start, $invitation_meta_end - $invitation_meta_start);
 expect_true(
-    strpos($plugin_source, 'Version: 1.5.10') !== false
+    strpos($plugin_source, 'Version: 1.5.11') !== false
         && Shuzijun_App_Content_API::FAN_CAPABILITY === 'manage_yishu_fan_accounts'
         && Shuzijun_App_Content_API::FAN_INVITATION_TTL === 86400
         && Shuzijun_App_Content_API::FAN_ONBOARDING_SESSION_TTL === 600
@@ -1544,6 +1950,35 @@ $apple_login_end = strpos($plugin_source, 'private static function fan_apple_onb
 $apple_login_source = ($apple_login_start === false || $apple_login_end === false)
     ? ''
     : substr($plugin_source, $apple_login_start, $apple_login_end - $apple_login_start);
+$apple_onboarding_payload_source = plugin_method_source(
+    $plugin_source,
+    'fan_apple_onboarding_payload'
+);
+$normalized_apple_migration_setup = invoke_plugin_method(
+    'normalize_fan_apple_setup',
+    array(array(
+        'version' => 1,
+        'generation' => str_repeat('a', 32),
+        'createdAt' => gmdate('c'),
+        'douyinMigration' => true,
+    ))
+);
+expect_true(
+    is_array($normalized_apple_migration_setup)
+        && !empty($normalized_apple_migration_setup['douyinMigration'])
+        && strpos($apple_login_source, "'douyinMigration' => true") !== false
+        && $apple_onboarding_payload_source !== ''
+        && strpos($apple_onboarding_payload_source, "'isDouyinMigration' => \$is_douyin_migration") !== false
+        && strpos($apple_onboarding_payload_source, "'displayName' => ''") !== false
+        && strpos($apple_onboarding_payload_source, "'preservedStatus' => null") !== false
+        && strpos($apple_onboarding_payload_source, "array('pending', 'active', 'rejected', 'suspended')") !== false
+        && strpos($apple_registration_completion_source, "\$is_douyin_migration") !== false
+        && strpos($apple_registration_completion_source, 'sanitize_fan_permissions') !== false
+        && strpos($apple_registration_completion_source, 'FAN_META_STATUS') !== false
+        && strpos($apple_registration_completion_source, 'FAN_META_PERMISSIONS') !== false
+        && strpos($apple_registration_completion_source, "array('gallery_full', 'video_view')") !== false,
+    'Apple 存量空抖音 ID 迁移必须保留已校验状态与权限，新账号仍使用安全默认权限'
+);
 $apple_s2s_delete_start = strpos($plugin_source, 'private static function remove_fan_for_apple_subject_hash');
 $apple_s2s_delete_end = strpos($plugin_source, 'public static function can_delete_fan_account', $apple_s2s_delete_start);
 $apple_s2s_delete_source = ($apple_s2s_delete_start === false || $apple_s2s_delete_end === false)
@@ -1586,7 +2021,7 @@ expect_true(
         && strpos($plugin_source, "'https://appleid.apple.com/auth/keys'") !== false
         && strpos($plugin_source, "JWK::parseKeySet(\$filtered, 'RS256')") !== false
         && strpos($plugin_source, "(string) (\$headers->alg ?? '') !== 'RS256'") !== false
-        && strpos($plugin_source, 'Version: 1.5.10') !== false,
+        && strpos($plugin_source, 'Version: 1.5.11') !== false,
     'Apple 认证必须强制 authorization code 交换并用 RS256/JWKS 严格验证'
 );
 $apple_jwks_start = strpos($plugin_source, 'private static function fetch_apple_jwk_keys');
@@ -1800,7 +2235,7 @@ expect_true(
         && $apple_registration_readiness_source !== ''
         && strpos($apple_registration_readiness_source, 'FAN_META_CODE') !== false
         && strpos($apple_registration_readiness_source, 'FAN_META_DOUYIN_ID') !== false
-        && strpos($apple_registration_readiness_source, 'normalize_optional_douyin_id') !== false
+        && strpos($apple_registration_readiness_source, 'normalize_required_douyin_id') !== false
         && strpos($apple_registration_readiness_source, "\$douyin_id !== ''") === false
         && strpos($apple_registration_readiness_source, 'FAN_META_CONSENT') !== false
         && strpos($plugin_source, '!self::apple_registration_is_complete($owner)') !== false
@@ -1853,7 +2288,8 @@ $fan_update_source = ($fan_update_start === false || $fan_update_end === false)
 expect_true(
     $apple_session_source !== ''
         && strpos($apple_session_source, "(\$context['scope'] ?? '') === 'apple_onboarding'") !== false
-        && strpos($apple_session_source, "array('appleRegistration' => array(") !== false
+        && strpos($apple_session_source, 'self::fan_apple_onboarding_payload(') !== false
+        && strpos($apple_session_source, "array('appleRegistration' => \$registration)") !== false
         && strpos(
             $apple_session_source,
             "} else {\n            \$payload = array('profile' => self::fan_profile"
@@ -1865,14 +2301,14 @@ expect_true(
         && strpos($fan_admin_profile_source, "'identityCode'") !== false
         && strpos($fan_admin_profile_source, "'douyinID'") !== false
         && strpos($plugin_source, "'accountSource' => \$source") !== false
-        && strpos($plugin_source, "'requiresAppleRegistration' => \$source === 'apple' && !empty(\$setup)") !== false
+        && strpos($plugin_source, "'requiresAppleRegistration' => \$source === 'apple'") !== false
+        && strpos($plugin_source, 'fan_has_required_douyin_id') !== false
         && $fan_update_source !== ''
         && strpos($fan_update_source, "\$status === 'active'") !== false
         && strpos($fan_update_source, 'FAN_META_APPLE_SETUP') !== false
-        && strpos($fan_update_source, 'normalize_optional_douyin_id') !== false
-        && strpos($fan_update_source, '(!$douyin_id ||') === false
+        && strpos($fan_update_source, 'normalize_required_douyin_id') !== false
         && strpos($fan_update_source, "'fan_account_setup_required'") !== false,
-    '管理目录只显示 Apple 来源/完成状态，资料未提交时不得提前激活，已提交的空抖音 ID 不得阻断审批'
+    '管理目录必须标记未完成资料，并拒绝批准未填抖音 ID 的账号'
 );
 expect_true(
     is_string($backup_proxy_source)
@@ -1889,8 +2325,8 @@ expect_true(
         && strpos($privacy_policy_source, '最长 30 天保留') !== false
         && strpos($privacy_policy_source, '旧授权并发重建账号') !== false
         && strpos($privacy_policy_source, 'Apple 是 Apple ID 登录身份验证的处理方') !== false
-        && strpos($privacy_policy_source, '抖音 ID 为明确选填') !== false
-        && strpos($privacy_policy_source, '不影响注册、账号完整性、审批、登录、权限或删号') !== false
+        && strpos($privacy_policy_source, '抖音 ID 是注册') !== false
+        && strpos($privacy_policy_source, '未填写时不能完成新账号申请或获得内容访问') !== false
         && strpos($privacy_policy_source, '尚未完成 Apple 账号申请的用户也可删除') !== false
         && strpos($privacy_policy_source, '管理员内容上传') !== false
         && strpos($privacy_policy_source, '照片、视频和封面') !== false

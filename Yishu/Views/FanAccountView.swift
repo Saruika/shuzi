@@ -74,6 +74,9 @@ struct FanAccountView: View {
     @State private var invitedNewPassword = ""
     @State private var invitedPasswordConfirmation = ""
     @State private var acceptedInvitationDataUse = false
+    @State private var profileUpgradeDouyinID = ""
+    @State private var profileUpgradeCurrentPassword = ""
+    @State private var acceptedProfileUpgradeDataUse = false
     @State private var recoveryTemporaryPassword = ""
     @State private var recoveryNewPassword = ""
     @State private var recoveryPasswordConfirmation = ""
@@ -116,6 +119,11 @@ struct FanAccountView: View {
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .toolbar(.hidden, for: .tabBar)
         .task { await account.restoreSession() }
+        .onAppear {
+            if account.appleRegistration != nil {
+                prepareAppleRegistrationFields(for: account.appleRegistration)
+            }
+        }
         .task(id: "\(account.profile?.status ?? "none"):\(account.profile?.requiresAccountSetup == true)") {
             await monitorPendingApproval()
         }
@@ -123,12 +131,13 @@ struct FanAccountView: View {
             guard oldUserID != newUserID else { return }
             clearAuthenticationPasswords()
             clearInvitationSetupFields()
+            clearDouyinProfileUpgradeFields()
             clearAppleRegistrationFields()
             deleteCurrentPassword = ""
             copiedLabel = nil
         }
-        .onChange(of: account.appleRegistration != nil) { _, _ in
-            clearAppleRegistrationFields()
+        .onChange(of: account.appleRegistration) { _, registration in
+            prepareAppleRegistrationFields(for: registration)
         }
         .onChange(of: account.profile?.requiresAccountSetup) { _, requiresSetup in
             if requiresSetup != true { clearInvitationSetupFields() }
@@ -144,6 +153,9 @@ struct FanAccountView: View {
                 appleSignIn.cancel()
                 clearAllPasswords()
                 clearAppleRegistrationFields()
+                profileUpgradeCurrentPassword = ""
+            } else if account.appleRegistration != nil {
+                prepareAppleRegistrationFields(for: account.appleRegistration)
             }
         }
         .onChange(of: account.isAuthenticated) { _, authenticated in
@@ -245,7 +257,7 @@ struct FanAccountView: View {
                 .disabled(account.isWorking || appleSignIn.isWorking)
                 .opacity(account.isWorking || appleSignIn.isWorking ? 0.55 : 1)
 
-                Text("首次通过 Apple 验证后，仍需填写昵称并提交申请；抖音 ID 选填。")
+                Text("首次通过 Apple 验证后，仍需填写昵称和抖音 ID 并提交申请。")
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)
                     .multilineTextAlignment(.center)
@@ -318,17 +330,19 @@ struct FanAccountView: View {
     }
 
     private var appleRegistrationContent: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        let registration = account.appleRegistration
+        let isMigration = registration?.isDouyinMigration == true
+        return VStack(alignment: .leading, spacing: 22) {
             VStack(alignment: .leading, spacing: 9) {
                 Text("APPLE ID VERIFIED")
                     .font(.caption2.weight(.semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
-                Text("完成账号申请")
+                Text(isMigration ? "补全抖音 ID" : "完成账号申请")
                     .font(.system(.largeTitle, design: .serif))
                     .accessibilityIdentifier("fan-apple-registration-required")
                     .accessibilityAddTraits(.isHeader)
-                Text("你的 Apple 身份已通过服务器验证。请主动填写以下资料；管理员批准前不会开放主页和媒体内容。")
+                Text(appleRegistrationExplanation(registration))
                     .font(.subheadline)
                     .lineSpacing(5)
                     .foregroundStyle(AppTheme.muted)
@@ -339,13 +353,13 @@ struct FanAccountView: View {
                     .textContentType(.nickname)
                     .accessibilityLabel("昵称")
                     .accessibilityIdentifier("fan-apple-display-name")
-                TextField("抖音 ID（选填，不要填链接）", text: $appleRegistrationDraft.douyinID)
+                TextField("抖音 ID（必填，不要填链接）", text: $appleRegistrationDraft.douyinID)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                    .accessibilityLabel("抖音 ID，选填，请不要填写链接")
+                    .accessibilityLabel("抖音 ID，必填，请不要填写链接")
                     .accessibilityIdentifier("fan-apple-douyin-id")
 
-                Text("抖音 ID 为选填；如自愿填写，只用于管理员核验，不会影响注册、审批或内容权限，也不会向其他粉丝公开。")
+                Text("抖音 ID 是账号申请的必填资料，仅用于管理员核验身份，不会向其他粉丝公开。")
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)
 
@@ -361,7 +375,7 @@ struct FanAccountView: View {
                 .accessibilityIdentifier("fan-apple-privacy-policy")
 
                 Toggle(isOn: $appleRegistrationDraft.acceptedDataUse) {
-                    Text("我已阅读隐私政策：昵称、随机身份码和安装记录用于账号识别、安全登录与权限分配；如填写抖音 ID，仅用于管理员核验。")
+                    Text("我已阅读隐私政策：昵称、抖音 ID、随机身份码和安装记录用于账号识别、管理员核验、安全登录与权限分配。")
                         .font(.caption)
                         .lineSpacing(4)
                 }
@@ -380,7 +394,11 @@ struct FanAccountView: View {
                         }
                     }
                 } label: {
-                    accountButtonLabel(account.isWorking ? "正在提交" : "同意并提交审批")
+                    accountButtonLabel(
+                        account.isWorking
+                            ? "正在提交"
+                            : (isMigration ? "同意并补全资料" : "同意并提交审批")
+                    )
                 }
                 .disabled(account.isWorking || !appleRegistrationDraft.acceptedDataUse)
                 .accessibilityIdentifier("fan-apple-registration-submit")
@@ -407,7 +425,7 @@ struct FanAccountView: View {
             Button(role: .destructive) {
                 showAppleDeleteConfirmation = true
             } label: {
-                Label("永久删除账号申请", systemImage: "trash")
+                Label(isMigration ? "永久删除账号" : "永久删除账号申请", systemImage: "trash")
                     .font(.caption.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -425,10 +443,10 @@ struct FanAccountView: View {
             TextField("昵称", text: $displayName)
                 .textContentType(.nickname)
                 .accessibilityLabel("昵称")
-            TextField("抖音 ID（选填，不要填链接）", text: $douyinID)
+            TextField("抖音 ID（必填，不要填链接）", text: $douyinID)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .accessibilityLabel("抖音 ID，选填，请不要填写链接")
+                .accessibilityLabel("抖音 ID，必填，请不要填写链接")
                 .accessibilityIdentifier("fan-register-douyin-id")
             SecureField("设置密码（至少 10 位）", text: $registrationPassword)
                 .textContentType(.newPassword)
@@ -437,7 +455,7 @@ struct FanAccountView: View {
                 .textContentType(.newPassword)
                 .accessibilityLabel("确认密码")
 
-            Text("抖音 ID 为选填；如自愿填写，仅用于管理员核验，不会影响注册、审批或内容权限。")
+            Text("抖音 ID 必须填写，仅用于管理员核验身份，不会向其他粉丝公开。")
                 .font(.caption2)
                 .foregroundStyle(AppTheme.muted)
 
@@ -453,7 +471,7 @@ struct FanAccountView: View {
             .accessibilityIdentifier("fan-register-privacy-policy")
 
             Toggle(isOn: $acceptedDataUse) {
-                Text("我已阅读隐私政策：昵称、随机身份码和安装记录用于账号识别、安全登录与权限分配；如填写抖音 ID，仅用于管理员核验。上述资料不用于广告跟踪。")
+                Text("我已阅读隐私政策：昵称、抖音 ID、随机身份码和安装记录用于账号识别、管理员核验、安全登录与权限分配。上述资料不用于广告跟踪。")
                     .font(.caption)
                     .lineSpacing(4)
             }
@@ -508,14 +526,18 @@ struct FanAccountView: View {
     }
 
     private func profileContent(_ profile: FanProfile) -> some View {
-        VStack(alignment: .leading, spacing: 26) {
+        let requiresDouyinCompletion = !profile.requiresAccountSetup
+            && !profile.hasRequiredDouyinID
+        return VStack(alignment: .leading, spacing: 26) {
             VStack(alignment: .leading, spacing: 9) {
                 Text(profile.requiresAccountSetup
                      ? "SECURE ACCOUNT SETUP"
                      : (profile.requiresPasswordChange
                         ? "PASSWORD RECOVERY"
-                        : (profile.status == FanAccountStatus.active.rawValue
-                            ? "APPROVED MEMBER" : "ACCESS REVIEW")))
+                        : (requiresDouyinCompletion
+                            ? "IDENTITY UPDATE REQUIRED"
+                            : (profile.status == FanAccountStatus.active.rawValue
+                                ? "APPROVED MEMBER" : "ACCESS REVIEW"))))
                     .font(.caption2.weight(.semibold))
                     .tracking(3)
                     .foregroundStyle(AppTheme.gold)
@@ -528,13 +550,17 @@ struct FanAccountView: View {
                         ? "完成本人设置前不会开放 App 内容"
                         : (profile.requiresPasswordChange
                             ? "请先设置一个只有你知道的新密码"
-                            : statusTitle(profile.status)),
+                            : (requiresDouyinCompletion
+                                ? "请先补全抖音 ID，内容访问已暂停"
+                                : statusTitle(profile.status))),
                     systemImage: profile.requiresAccountSetup || profile.requiresPasswordChange
+                        || requiresDouyinCompletion
                         ? "key.horizontal.fill" : statusIcon(profile.status)
                 )
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(
                         !profile.requiresAccountSetup && !profile.requiresPasswordChange
+                            && !requiresDouyinCompletion
                             && profile.status == FanAccountStatus.active.rawValue
                             ? AppTheme.gold : .orange
                     )
@@ -561,7 +587,7 @@ struct FanAccountView: View {
                     Divider().overlay(.white.opacity(0.08))
                     identityRow(
                         "抖音 ID",
-                        value: profile.douyinID.isEmpty ? "未填写（选填）" : profile.douyinID,
+                        value: profile.douyinID.isEmpty ? "未填写（必须补全）" : profile.douyinID,
                         copyable: false
                     )
                     Divider().overlay(.white.opacity(0.08))
@@ -570,6 +596,22 @@ struct FanAccountView: View {
                     identityRow("身份记录 UUID", value: profile.userID, copyable: true)
                 }
                 .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+
+                if requiresDouyinCompletion {
+                    Label(
+                        "这是旧版未绑定抖音 ID 的账号。为了保护账号身份，暂时不能访问影像内容。请在下方完成资料升级；你仍可退出或主动删除账号。",
+                        systemImage: "person.text.rectangle"
+                    )
+                    .font(.subheadline)
+                    .lineSpacing(5)
+                    .foregroundStyle(.orange)
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                    .accessibilityIdentifier("fan-douyin-id-required")
+
+                    requiredDouyinUpgradeForm(profile)
+                }
 
                 if profile.status == FanAccountStatus.active.rawValue
                     || profile.status == FanAccountStatus.suspended.rawValue {
@@ -600,20 +642,22 @@ struct FanAccountView: View {
                     }
                 }
 
-                NavigationLink {
-                    FanAccountSecurityView()
-                } label: {
-                    Label(
-                        account.usesAppleSignIn ? "登录设备与会话" : "密码与登录设备",
-                        systemImage: "lock.shield"
-                    )
-                        .font(.caption.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+                if !requiresDouyinCompletion {
+                    NavigationLink {
+                        FanAccountSecurityView()
+                    } label: {
+                        Label(
+                            account.usesAppleSignIn ? "登录设备与会话" : "密码与登录设备",
+                            systemImage: "lock.shield"
+                        )
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("fan-account-security")
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("fan-account-security")
             }
 
             if let copiedLabel {
@@ -645,7 +689,7 @@ struct FanAccountView: View {
                  ? "管理员只会看到这次生成的临时凭据一次，无法读取你设置的新密码。完成后临时密码和旧会话会立即失效。"
                  : (profile.requiresPasswordChange
                     ? "恢复凭据只会向管理员显示一次。完成后临时密码和所有旧会话都会失效。"
-                    : "请妥善保存身份码。管理员只能看到昵称、身份码、审批状态、权限以及你自愿填写的抖音 ID，无法查看你的密码。"))
+                    : "请妥善保存身份码。管理员只能看到昵称、身份码、审批状态、权限和用于身份核验的抖音 ID，无法查看你的密码。"))
                 .font(.caption2)
                 .lineSpacing(4)
                 .foregroundStyle(AppTheme.muted)
@@ -702,10 +746,10 @@ struct FanAccountView: View {
             TextField("本人昵称", text: $invitedDisplayName)
                 .textContentType(.nickname)
                 .accessibilityLabel("本人昵称")
-            TextField("本人抖音 ID（选填，不要填链接）", text: $invitedDouyinID)
+            TextField("本人抖音 ID（必填，不要填链接）", text: $invitedDouyinID)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-                .accessibilityLabel("本人抖音 ID，选填，请不要填写链接")
+                .accessibilityLabel("本人抖音 ID，必填，请不要填写链接")
                 .accessibilityIdentifier("fan-setup-douyin-id")
             SecureField("重新输入管理员给你的临时密码", text: $currentTemporaryPassword)
                 .textContentType(.password)
@@ -729,7 +773,7 @@ struct FanAccountView: View {
             .accessibilityIdentifier("fan-setup-privacy-policy")
 
             Toggle(isOn: $acceptedInvitationDataUse) {
-                Text("我本人已阅读隐私政策，同意昵称、随机身份码和安装记录用于账号识别、安全登录与权限分配；如填写抖音 ID，仅用于管理员核验。")
+                Text("我本人已阅读隐私政策，同意昵称、抖音 ID、随机身份码和安装记录用于账号识别、管理员核验、安全登录与权限分配。")
                     .font(.caption)
                     .lineSpacing(4)
             }
@@ -757,6 +801,76 @@ struct FanAccountView: View {
             }
             .disabled(account.isWorking || !acceptedInvitationDataUse)
             .accessibilityIdentifier("fan-setup-submit")
+        }
+        .padding(16)
+        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+        .textFieldStyle(AccountTextFieldStyle())
+    }
+
+    @ViewBuilder
+    private func requiredDouyinUpgradeForm(_ profile: FanProfile) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if profile.accountSource == FanAccountSource.apple.rawValue {
+                Text("请重新使用 Apple ID 验证。验证成功后会进入资料补全页，填写抖音 ID 后即可继续。")
+                    .font(.caption)
+                    .lineSpacing(4)
+                    .foregroundStyle(AppTheme.muted)
+
+                NativeAppleSignInButton { window in
+                    beginAppleAuthorization(purpose: .signIn, presentationAnchor: window)
+                }
+                .frame(height: 50)
+                .disabled(account.isWorking || appleSignIn.isWorking)
+                .opacity(account.isWorking || appleSignIn.isWorking ? 0.55 : 1)
+                .accessibilityIdentifier("fan-douyin-upgrade-apple")
+            } else {
+                TextField("抖音 ID（必填，不要填链接）", text: $profileUpgradeDouyinID)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .accessibilityLabel("补全抖音 ID，必填，请不要填写链接")
+                    .accessibilityIdentifier("fan-douyin-upgrade-id")
+                SecureField("当前密码", text: $profileUpgradeCurrentPassword)
+                    .textContentType(.password)
+                    .accessibilityIdentifier("fan-douyin-upgrade-password")
+
+                NavigationLink {
+                    PrivacyPolicyView()
+                } label: {
+                    Label("补全前查看隐私政策", systemImage: "hand.raised")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AppTheme.gold)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+
+                Toggle(isOn: $acceptedProfileUpgradeDataUse) {
+                    Text("我已阅读当前隐私政策，同意将抖音 ID 用于管理员核验账号身份。")
+                        .font(.caption)
+                        .lineSpacing(4)
+                }
+                .tint(AppTheme.gold)
+                .accessibilityIdentifier("fan-douyin-upgrade-consent")
+
+                Button {
+                    Task {
+                        await account.completeRequiredDouyinID(
+                            displayName: profile.displayName,
+                            douyinID: profileUpgradeDouyinID,
+                            currentPassword: profileUpgradeCurrentPassword,
+                            acceptedDataUse: acceptedProfileUpgradeDataUse
+                        )
+                        if account.profile?.hasRequiredDouyinID == true {
+                            clearDouyinProfileUpgradeFields()
+                        } else {
+                            profileUpgradeCurrentPassword = ""
+                        }
+                    }
+                } label: {
+                    accountButtonLabel(account.isWorking ? "正在安全补全" : "同意并补全抖音 ID")
+                }
+                .disabled(account.isWorking || !acceptedProfileUpgradeDataUse)
+                .accessibilityIdentifier("fan-douyin-upgrade-submit")
+            }
         }
         .padding(16)
         .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
@@ -815,6 +929,7 @@ struct FanAccountView: View {
     private func profileHeading(_ profile: FanProfile) -> String {
         if profile.requiresAccountSetup { return "完成首次设置" }
         if profile.requiresPasswordChange { return "重新设置密码" }
+        if !profile.hasRequiredDouyinID { return "需要补全资料" }
         switch profile.accountStatus {
         case .some(.active): return "你好，\(profile.displayName)"
         case .some(.pending): return "申请已提交"
@@ -890,6 +1005,12 @@ struct FanAccountView: View {
         acceptedInvitationDataUse = false
     }
 
+    private func clearDouyinProfileUpgradeFields() {
+        profileUpgradeDouyinID = ""
+        profileUpgradeCurrentPassword = ""
+        acceptedProfileUpgradeDataUse = false
+    }
+
     private func clearAuthenticationPasswords() {
         registrationPassword = ""
         passwordConfirmation = ""
@@ -912,11 +1033,38 @@ struct FanAccountView: View {
         clearAuthenticationPasswords()
         clearInvitationPasswords()
         clearRecoveryPasswords()
+        profileUpgradeCurrentPassword = ""
         deleteCurrentPassword = ""
     }
 
     private func clearAppleRegistrationFields() {
         appleRegistrationDraft.clear()
+    }
+
+    private func prepareAppleRegistrationFields(for registration: FanAppleRegistrationState?) {
+        clearAppleRegistrationFields()
+        guard let registration, registration.isDouyinMigration,
+              FanAccountValidation.isValidDisplayName(registration.displayName) else { return }
+        appleRegistrationDraft.displayName = registration.displayName
+    }
+
+    private func appleRegistrationExplanation(
+        _ registration: FanAppleRegistrationState?
+    ) -> String {
+        guard let registration, registration.isDouyinMigration,
+              let status = registration.preservedStatus else {
+            return "你的 Apple 身份已通过服务器验证。请主动填写以下资料；管理员批准前不会开放主页和媒体内容。"
+        }
+        switch status {
+        case .active:
+            return "这是已获批准的 Apple 账号。补填必填的抖音 ID 后会恢复原有权限，无需重新审批。"
+        case .pending:
+            return "这是已有的 Apple 账号。补填必填的抖音 ID 后，原有待审批状态会继续保留。"
+        case .rejected:
+            return "这是已有的 Apple 账号。补填必填的抖音 ID 后，原有未通过状态会继续保留。"
+        case .suspended:
+            return "这是已有的 Apple 账号。补填必填的抖音 ID 后，原有暂停状态会继续保留。"
+        }
     }
 
     private func profileRefreshButton(_ profile: FanProfile) -> some View {
@@ -1369,7 +1517,7 @@ struct FanAccessAdminView: View {
                 .font(.headline)
                 .foregroundStyle(AppTheme.gold)
 
-            Text("临时凭据仅显示这一次，有效期 24 小时。对方首次登录后必须本人填写昵称、确认隐私政策并设置新密码；抖音 ID 选填。在完成设置前无法访问任何作品内容。")
+            Text("临时凭据仅显示这一次，有效期 24 小时。对方首次登录后必须本人填写昵称和抖音 ID、确认隐私政策并设置新密码。在完成设置前无法访问任何作品内容。")
                 .font(.caption)
                 .lineSpacing(4)
                 .foregroundStyle(AppTheme.muted)
@@ -1623,7 +1771,7 @@ private struct FanAccessDetailView: View {
                              ? "等待完成账号申请"
                              : user.requiresAccountSetup
                              ? "待本人完成首次设置"
-                             : (user.douyinID.isEmpty ? "抖音 ID 未填写（选填）" : "@\(user.douyinID)"))
+                             : (user.douyinID.isEmpty ? "抖音 ID 待补全（不可开放内容）" : "@\(user.douyinID)"))
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(AppTheme.gold)
                         Text(user.identityCode)
@@ -1650,8 +1798,10 @@ private struct FanAccessDetailView: View {
                         if user.requiresIdentityCompletion {
                             Label(
                                 user.requiresAppleRegistration
-                                    ? "对方已通过 Apple 验证，但尚未完成账号申请；现在不能批准或开放内容。"
-                                    : "对方尚未完成首次设置。即使账号为待审批状态，也不能提前批准或访问内容。",
+                                    ? "对方已通过 Apple 验证，但尚未完成昵称和抖音 ID 资料；现在不能批准或开放内容。"
+                                    : (user.requiresAccountSetup
+                                        ? "对方尚未完成首次设置。即使账号为待审批状态，也不能提前批准或访问内容。"
+                                        : "这是旧版未绑定抖音 ID 的账号；请先协助完成资料升级，在此之前不可开放内容。"),
                                 systemImage: user.requiresAppleRegistration
                                     ? "apple.logo" : "key.horizontal.fill"
                             )
@@ -1965,7 +2115,7 @@ private struct FanAdminUserRow: View {
                      : user.requiresAccountSetup
                      ? "待本人完成首次设置 · \(user.identityCode)"
                      : (user.douyinID.isEmpty
-                        ? "抖音 ID 未填写（选填） · \(user.identityCode)"
+                        ? "抖音 ID 待补全 · \(user.identityCode)"
                         : "@\(user.douyinID) · \(user.identityCode)"))
                     .font(.caption2)
                     .foregroundStyle(AppTheme.muted)

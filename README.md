@@ -2,7 +2,7 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前版本：`1.3.30 (42)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前候选版本：`1.3.31 (43)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
@@ -11,8 +11,8 @@
 - **影视**：内嵌 Showreel 与公开影视履历，支持静音和暂停，不弹出系统全屏播放器。
 - **收藏**：收藏和最近浏览按粉丝账号分开保存，退出或换号时不会向另一账号暴露记录。
 - **关于**：艺人简介、社交平台、合作邀约和管理员入口。
-- **注册审批**：保留身份码与密码登录，并新增原生“通过 Apple 登录”。Apple 首次验证后仍必须由本人填写昵称、确认隐私政策并提交申请，管理员批准后才开放 App 主内容；抖音 ID 选填。
-- **一次性邀请**：管理员可批量生成最多 5 个 24 小时临时账号；本人首次登录必须填写昵称、同意隐私政策并更换密码，抖音 ID 选填，完成设置前无法访问作品内容。
+- **注册审批**：保留身份码与密码登录，并支持原生“通过 Apple 登录”。无论使用哪种方式，新申请都必须由本人填写昵称和抖音 ID、确认当前隐私政策，并经管理员批准后才开放 App 主内容。
+- **一次性邀请**：管理员可批量生成最多 5 个 24 小时临时账号；本人首次登录必须填写昵称和抖音 ID、同意隐私政策并更换密码，完成设置前无法访问作品内容。
 - **账号安全**：密码账号可自助改密，所有账号都可查看已登录设备并撤销其他会话；Apple 账号不在 App 内设置密码。忘记密码时由管理员为密码账号生成只显示一次的短时恢复凭据。
 - **内容工作台**：管理员可直接在手机内上传并替换开屏、首页轮播、关于页人物图、相册照片、Showreel 与影视海报，并调整轮播和相册顺序；发布后的图片只从云端按需加载。
 - **用户权限**：管理员可按昵称、抖音 ID 或身份码查找粉丝，远程分配白名单内的 App 权限或暂停账号。
@@ -69,7 +69,7 @@ xcodebuild -project Yishu.xcodeproj \
 ## 内容与服务端
 
 - [`ADMIN_CONTENT.md`](ADMIN_CONTENT.md)：管理员入口、上传约束与内容发布流程。
-- [`FAN_ACCOUNTS.md`](FAN_ACCOUNTS.md)：粉丝注册、选填抖音 ID、身份/安装码、远程权限、会话和数据删除说明。
+- [`FAN_ACCOUNTS.md`](FAN_ACCOUNTS.md)：粉丝注册、必填抖音 ID、存量账号迁移、身份/安装码、远程权限、会话和数据删除说明。
 - [`SUBSCRIPTION_SETUP.md`](SUBSCRIPTION_SETUP.md)：人民币 3 元/月订阅商品、Sandbox 和 TestFlight 验收步骤。
 - [`Server/entitlement-verifier/README.md`](Server/entitlement-verifier/README.md)：Apple 订阅凭证校验服务。
 - [`Server/nginx/README.md`](Server/nginx/README.md)：REST 认证头转发配置。
@@ -101,8 +101,16 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.12.md`](Server/releases/v1.3.30-build42.12.md)：修复上海到新加坡签名同步被通用 SSH 限速误伤的问题，并增加只覆盖建连阶段的有界重试。
 - [`Server/releases/v1.3.30-build42.13.md`](Server/releases/v1.3.30-build42.13.md)：修复快照计划已迁移时的重复部署，并正确处理 systemd 回收 inactive oneshot 造成的假失败。
 - [`Server/releases/v1.3.30-build42.14.md`](Server/releases/v1.3.30-build42.14.md)：兼容备节点 `reset-failed` 对已回收 oneshot 的实际返回码，后置双采样仍保持失败关闭。
+- [`Server/releases/v1.5.11-build43.md`](Server/releases/v1.5.11-build43.md)：抖音 ID 必填、Apple 存量账号迁移、合作邀约持久化候选与数据删除/竞态复核发布清单。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
+
+### Build 43 账号、合作与 iPad 连续性（GitHub 候选）
+
+- App 1.3.31 Build 43 的新注册、Apple 首次资料提交、邀请完成和存量空 ID 补全都必须提交抖音 ID 与 `2026-09-04-approval-v4`。存量空 ID 账号补全前仍可登录和删号，但不能读取受保护影像。
+- 服务端 1.5.11 对新确认只接受 v4，但已存 v2/v3 记录仍有效。它不得在 Build 43 具备分发条件前部署，否则仍提交 v3 的 Build 42 新确认会被拒绝。当前变更只准备代码与 GitHub 版本，不部署生产服务。
+- iPad 横屏首页对竖版主视觉使用模糊铺底与 `fit` 完整前景；最多 5 张首页图只在运行时内存预热，切换未就绪时暂保留上一帧，不向本地文件或 URL 缓存写入图片。
+- 合作邀约的持久化收件箱、邮件 Outbox 与重试逻辑仅为已审候选，内建生产熔断仍保持关闭；在收件人、认证发信通道、退信监控和端到端验收完成前，不声明邮件已上线或必达。
 
 ### Build 41 媒体策略
 

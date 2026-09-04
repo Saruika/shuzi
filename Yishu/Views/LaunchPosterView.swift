@@ -11,7 +11,10 @@ struct LaunchPosterView: View {
     @State private var artworkIsVisible = false
     @State private var remoteImageIsVisible = false
     @State private var artworkScale: CGFloat = 1.035
-    @State private var copyIsVisible = false
+    // The title must never depend on a remote image finishing its request.
+    // Starting visible also prevents a recreated launch-poster hierarchy from
+    // resetting the copy to an invisible pre-animation state.
+    @State private var copyIsVisible = true
 
     private var pausesAutomaticDismissal: Bool {
         voiceOverEnabled || switchControlEnabled || dynamicTypeSize.isAccessibilitySize
@@ -52,7 +55,6 @@ struct LaunchPosterView: View {
 
                 ZStack {
                     launchPlaceholder(in: proxy.size)
-                        .onAppear(perform: revealCopyIfNeeded)
 
                     DownsampledAsyncImage(
                         url: poster.imageURL,
@@ -176,17 +178,6 @@ struct LaunchPosterView: View {
             withAnimation(.linear(duration: min(max(poster.displaySeconds, 1.5), 5) + 0.6)) {
                 artworkScale = 1
             }
-            withAnimation(.easeOut(duration: 0.55).delay(0.12)) {
-                copyIsVisible = true
-            }
-        }
-    }
-
-    private func revealCopyIfNeeded() {
-        guard !copyIsVisible else { return }
-        if reduceMotion {
-            copyIsVisible = true
-        } else {
             withAnimation(.easeOut(duration: 0.55).delay(0.12)) {
                 copyIsVisible = true
             }

@@ -1252,7 +1252,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         )
         XCTAssertEqual(pageIndicator.value as? String, "第 1 张，共 5 张")
         if expectsFullComposition {
-            let fittedImage = element("home-hero-actual-fitted-image", in: app)
+            let fittedImage = element("home-hero-actual-fitted-image-0", in: app)
             XCTAssertTrue(fittedImage.waitForExistence(timeout: 5), "缺少 iPad 横屏完整图片范围")
             let visibleImageFrame = window.frame.intersection(fittedImage.frame)
             XCTAssertGreaterThanOrEqual(

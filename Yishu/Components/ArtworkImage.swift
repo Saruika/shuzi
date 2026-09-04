@@ -242,6 +242,7 @@ struct DownsampledAsyncImage<Content: View>: View {
     let targetSize: CGSize
     var maximumPixelSize: Int = 2_200
     var showsRetryButton = true
+    var onImageLoaded: ((UIImage) -> Void)?
     let content: (AsyncImagePhase) -> Content
 
     @Environment(\.displayScale) private var displayScale
@@ -256,12 +257,14 @@ struct DownsampledAsyncImage<Content: View>: View {
         targetSize: CGSize,
         maximumPixelSize: Int = 2_200,
         showsRetryButton: Bool = true,
+        onImageLoaded: ((UIImage) -> Void)? = nil,
         @ViewBuilder content: @escaping (AsyncImagePhase) -> Content
     ) {
         self.url = url
         self.targetSize = targetSize
         self.maximumPixelSize = maximumPixelSize
         self.showsRetryButton = showsRetryButton
+        self.onImageLoaded = onImageLoaded
         self.content = content
     }
 
@@ -313,8 +316,7 @@ struct DownsampledAsyncImage<Content: View>: View {
             guard let url, maxPixelSize > 0 else { return }
             if let cachedPreview = await ArtworkImagePipeline.shared.cachedPreview(for: url) {
                 guard !Task.isCancelled else { return }
-                image = cachedPreview
-                loadedURL = url
+                publish(cachedPreview, for: url)
             }
             do {
                 let loaded = try await ArtworkImagePipeline.shared.image(
@@ -322,8 +324,7 @@ struct DownsampledAsyncImage<Content: View>: View {
                     maxPixelSize: maxPixelSize
                 )
                 guard !Task.isCancelled else { return }
-                image = loaded
-                loadedURL = url
+                publish(loaded, for: url)
             } catch is CancellationError {
                 return
             } catch {
@@ -346,6 +347,15 @@ struct DownsampledAsyncImage<Content: View>: View {
 
     private func retry() {
         retryGeneration &+= 1
+    }
+
+    private func publish(_ loadedImage: UIImage, for url: URL) {
+        let shouldNotify = image !== loadedImage || loadedURL != url
+        image = loadedImage
+        loadedURL = url
+        if shouldNotify {
+            onImageLoaded?(loadedImage)
+        }
     }
 
     private var phase: AsyncImagePhase {

@@ -3,6 +3,10 @@
 defined('ABSPATH') || exit;
 
 trait Shuzijun_App_Fan_Identity {
+    private static $fan_user_deletion_prepared = array();
+    private static $fan_user_deletion_locks = array();
+    private static $fan_user_deletion_release_hooks_registered = false;
+
     public static function normalize_identity_code($value) {
         if (!is_scalar($value)) { return ''; }
         $compact = strtoupper((string) preg_replace('/[\s-]+/u', '', trim((string) $value)));
@@ -27,25 +31,35 @@ trait Shuzijun_App_Fan_Identity {
         return $candidate;
     }
 
-    public static function normalize_optional_douyin_id($value) {
-        if ($value === null) { return ''; }
+    public static function normalize_required_douyin_id($value) {
         if (!is_scalar($value)) {
             return new WP_Error(
                 'fan_douyin_id_invalid',
-                '抖音 ID 为选填；如填写，请使用 2–50 位 ID，不要填链接。',
+                '请填写 2–50 位抖音 ID，不要填链接。',
                 array('status' => 400)
             );
         }
-        if (trim((string) $value) === '') { return ''; }
         $douyin_id = self::normalize_douyin_id($value);
         if ($douyin_id === '' || self::is_invitation_douyin_id($douyin_id)) {
             return new WP_Error(
                 'fan_douyin_id_invalid',
-                '抖音 ID 为选填；如填写，请使用 2–50 位 ID，不要填链接。',
+                '请填写 2–50 位抖音 ID，不要填链接。',
                 array('status' => 400)
             );
         }
         return $douyin_id;
+    }
+
+    private static function fan_has_required_douyin_id($user_id) {
+        $stored = (string) self::fan_meta_from_database(
+            (int) $user_id,
+            self::FAN_META_DOUYIN_ID,
+            ''
+        );
+        $normalized = self::normalize_douyin_id($stored);
+        return $normalized !== ''
+            && hash_equals($stored, $normalized)
+            && !self::is_invitation_douyin_id($stored);
     }
 
     private static function matching_request_install_id(WP_REST_Request $request) {
@@ -1078,7 +1092,8 @@ trait Shuzijun_App_Fan_Identity {
         if (!is_array($value)
             || (int) ($value['version'] ?? 0) !== 1
             || !preg_match('/^[a-f0-9]{32}$/', (string) ($value['generation'] ?? ''))
-            || !isset($value['createdAt']) || !is_scalar($value['createdAt'])) {
+            || !isset($value['createdAt']) || !is_scalar($value['createdAt'])
+            || (isset($value['douyinMigration']) && !is_bool($value['douyinMigration']))) {
             return new WP_Error(
                 'fan_apple_profile_required',
                 '请重新使用 Apple ID 登录后完成资料。',
@@ -1094,6 +1109,7 @@ trait Shuzijun_App_Fan_Identity {
             'generation' => (string) $value['generation'],
             'createdAt' => gmdate('c', $created),
             'createdTimestamp' => $created,
+            'douyinMigration' => !empty($value['douyinMigration']),
         );
     }
 
@@ -1194,6 +1210,37 @@ trait Shuzijun_App_Fan_Identity {
                         return new WP_Error('fan_apple_audit_unavailable', '暂时无法安全记录 Apple 登录。', array('status' => 503));
                     }
                     $setup = self::fan_meta_from_database($owner, self::FAN_META_APPLE_SETUP, null);
+                    if (empty($setup) && !self::fan_has_required_douyin_id($owner)) {
+                        try {
+                            $migration_generation = bin2hex(random_bytes(16));
+                        } catch (Throwable $error) {
+                            return new WP_Error(
+                                'fan_apple_profile_required',
+                                'Apple 账号资料需要升级，请稍后再试。',
+                                array('status' => 503)
+                            );
+                        }
+                        $setup = array(
+                            'version' => 1,
+                            'generation' => $migration_generation,
+                            'createdAt' => gmdate('c'),
+                            'douyinMigration' => true,
+                        );
+                        if (!self::update_user_meta_verified(
+                            $owner,
+                            self::FAN_META_APPLE_SETUP,
+                            $setup
+                        )) {
+                            return new WP_Error(
+                                'fan_apple_profile_required',
+                                'Apple 账号资料需要升级，请稍后再试。',
+                                array('status' => 503)
+                            );
+                        }
+                        // Existing normal sessions must stop serving content as
+                        // soon as the required identity upgrade begins.
+                        self::revoke_all_fan_sessions($owner);
+                    }
                     $scope = empty($setup) ? 'normal' : 'apple_onboarding';
                     if ($scope === 'apple_onboarding' && is_wp_error(self::normalize_fan_apple_setup($setup))) {
                         return new WP_Error('fan_apple_profile_required', '请联系管理员检查 Apple 账号状态。', array('status' => 409));
@@ -1302,12 +1349,48 @@ trait Shuzijun_App_Fan_Identity {
         }
     }
 
+    private static function fan_apple_onboarding_payload($user_id, $session) {
+        $setup = self::normalize_fan_apple_setup(self::fan_meta_from_database(
+            (int) $user_id,
+            self::FAN_META_APPLE_SETUP,
+            null
+        ));
+        if (is_wp_error($setup)) { return $setup; }
+        $is_douyin_migration = !empty($setup['douyinMigration']);
+        $payload = array(
+            'expiresAt' => gmdate('c', (int) $session['expires']),
+            'isDouyinMigration' => $is_douyin_migration,
+            'displayName' => '',
+            'preservedStatus' => null,
+        );
+        if (!$is_douyin_migration) { return $payload; }
+
+        $user = get_userdata((int) $user_id);
+        $preserved_status = sanitize_key((string) self::fan_meta_from_database(
+            (int) $user_id,
+            self::FAN_META_STATUS,
+            ''
+        ));
+        if (!($user instanceof WP_User)
+            || is_wp_error(self::validate_fan_display_name((string) $user->display_name))
+            || !in_array($preserved_status, array('pending', 'active', 'rejected', 'suspended'), true)) {
+            return new WP_Error(
+                'fan_apple_profile_required',
+                'Apple 账号资料无法安全迁移，请联系管理员。',
+                array('status' => 409)
+            );
+        }
+        $payload['displayName'] = (string) $user->display_name;
+        $payload['preservedStatus'] = $preserved_status;
+        return $payload;
+    }
+
     private static function fan_apple_onboarding_response($user_id, $session, $status = 200) {
+        $registration = self::fan_apple_onboarding_payload((int) $user_id, $session);
+        if (is_wp_error($registration)) { return $registration; }
         $response = new WP_REST_Response(array(
             'token' => (string) $session['token'],
-            'appleRegistration' => array(
-                'expiresAt' => gmdate('c', (int) $session['expires']),
-            ),
+            'appleRegistration' => $registration,
         ), (int) $status);
         $response->header('Cache-Control', 'private, no-store, max-age=0');
         $response->header('Pragma', 'no-cache');
@@ -1741,7 +1824,7 @@ trait Shuzijun_App_Fan_Identity {
             self::FAN_META_DOUYIN_ID,
             ''
         );
-        $douyin_id = self::normalize_optional_douyin_id($stored_douyin_id);
+        $douyin_id = self::normalize_required_douyin_id($stored_douyin_id);
         $consent = self::fan_meta_from_database(
             (int) $user_id,
             self::FAN_META_CONSENT,
@@ -2450,15 +2533,28 @@ trait Shuzijun_App_Fan_Identity {
     }
 
     private static function remove_fan_user($user_id, $douyin_reservation = '') {
-        self::revoke_all_fan_sessions((int) $user_id);
-        if (!function_exists('wp_delete_user')) {
-            require_once ABSPATH . 'wp-admin/includes/user.php';
-        }
-        if (!function_exists('wp_delete_user') || !wp_delete_user((int) $user_id)) {
+        $user_id = (int) $user_id;
+        if ($user_id <= 0 || !self::purge_collaboration_data_for_fan_user($user_id)) {
             return false;
         }
-        if ($douyin_reservation) { delete_option((string) $douyin_reservation); }
-        return true;
+        // The App deletion paths already hold the per-user lock. Mark the
+        // successful purge so WordPress's delete_user hook does not acquire the
+        // same named lock recursively; the outer caller keeps it until this
+        // function returns.
+        self::$fan_user_deletion_prepared[$user_id] = true;
+        try {
+            self::revoke_all_fan_sessions($user_id);
+            if (!function_exists('wp_delete_user')) {
+                require_once ABSPATH . 'wp-admin/includes/user.php';
+            }
+            if (!function_exists('wp_delete_user') || !wp_delete_user($user_id)) {
+                return false;
+            }
+            if ($douyin_reservation) { delete_option((string) $douyin_reservation); }
+            return true;
+        } finally {
+            unset(self::$fan_user_deletion_prepared[$user_id]);
+        }
     }
 
     private static function rate_limit($bucket, $identity, $limit, $window) {
@@ -2709,7 +2805,8 @@ trait Shuzijun_App_Fan_Identity {
 
     private static function fan_session_context_is_current_from_database(
         $context,
-        $required_scope = ''
+        $required_scope = '',
+        $for_update = false
     ) {
         if (!is_array($context)) { return false; }
         $token_hash = strtolower((string) ($context['tokenHash'] ?? ''));
@@ -2728,12 +2825,20 @@ trait Shuzijun_App_Fan_Identity {
             || !method_exists($wpdb, 'prepare')) {
             return false;
         }
+        $locking_clause = $for_update ? ' FOR UPDATE' : '';
         $serialized_session = $wpdb->get_var($wpdb->prepare(
-            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1",
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s LIMIT 1{$locking_clause}",
             self::FAN_SESSION_OPTION_PREFIX . $token_hash
         ));
-        if (!is_string($serialized_session)) { return false; }
+        if (!is_string($serialized_session) || !empty($wpdb->last_error)) { return false; }
         $fresh_session = maybe_unserialize($serialized_session);
+        $credential_epoch = (int) self::fan_meta_from_database(
+            $user_id,
+            self::FAN_META_CREDENTIAL_EPOCH,
+            0,
+            (bool) $for_update
+        );
+        if (!empty($wpdb->last_error)) { return false; }
         return is_array($fresh_session)
             && (int) ($fresh_session['userID'] ?? 0) === $user_id
             && (string) ($fresh_session['scope'] ?? '') === $required_scope
@@ -2743,7 +2848,7 @@ trait Shuzijun_App_Fan_Identity {
             // later password/security transition advances the account epoch
             // and therefore still invalidates them.
             && (int) ($fresh_session['credentialEpoch'] ?? 1)
-                === self::fan_credential_epoch($user_id)
+                === ($credential_epoch > 0 ? $credential_epoch : 1)
             && hash_equals(
                 (string) ($fresh_session['authMethod'] ?? 'password'),
                 (string) ($context['authMethod'] ?? 'password')
@@ -3212,7 +3317,30 @@ trait Shuzijun_App_Fan_Identity {
 
     public static function prepare_fan_user_deletion($user_id) {
         $user_id = (int) $user_id;
-        if ($user_id <= 0 || !get_user_meta($user_id, self::FAN_META_UUID, true)) { return; }
+        if ($user_id <= 0) { return; }
+
+        // App-owned deletion already purged under its outer per-user lock.
+        // Core/admin deletion does not provide an abort filter, so delete_user
+        // (which WordPress fires before deleting posts, meta or the user row)
+        // must acquire and retain that lock until deleted_user fires.
+        if (empty(self::$fan_user_deletion_prepared[$user_id])
+            && !isset(self::$fan_user_deletion_locks[$user_id])) {
+            $lock_owner = self::acquire_fan_lock($user_id);
+            if (is_wp_error($lock_owner)) {
+                self::abort_fan_user_deletion('account_deletion_lock_unavailable');
+            }
+            self::$fan_user_deletion_locks[$user_id] = $lock_owner;
+            self::register_fan_user_deletion_release_hooks();
+            if (!self::purge_collaboration_data_for_fan_user($user_id)) {
+                self::release_fan_user_deletion_lock($user_id);
+                self::abort_fan_user_deletion('account_deletion_cleanup_failed');
+            }
+        }
+
+        // A damaged/missing fan UUID must not bypass collaboration cleanup.
+        // Once physical-table cleanup is proven, non-fan users need no further
+        // plugin-specific metadata work.
+        if (!get_user_meta($user_id, self::FAN_META_UUID, true)) { return; }
         self::revoke_all_fan_sessions($user_id);
         $apple_sub_hash = (string) get_user_meta($user_id, self::FAN_META_APPLE_SUB_HASH, true);
         if (self::valid_apple_sub_hash($apple_sub_hash)) {
@@ -3245,6 +3373,45 @@ trait Shuzijun_App_Fan_Identity {
                 }
             }
         }
+    }
+
+    public static function finalize_fan_user_deletion($user_id) {
+        self::release_fan_user_deletion_lock((int) $user_id);
+    }
+
+    public static function release_pending_fan_user_deletion_locks() {
+        foreach (array_keys(self::$fan_user_deletion_locks) as $user_id) {
+            self::release_fan_user_deletion_lock((int) $user_id);
+        }
+    }
+
+    private static function register_fan_user_deletion_release_hooks() {
+        if (self::$fan_user_deletion_release_hooks_registered) { return; }
+        // Register lazily from the pre-delete hook so no class/bootstrap change
+        // is required. shutdown is a final safety net if a later delete_user
+        // callback aborts before WordPress emits deleted_user.
+        add_action('deleted_user', array(__CLASS__, 'finalize_fan_user_deletion'), 10, 1);
+        add_action('shutdown', array(__CLASS__, 'release_pending_fan_user_deletion_locks'), PHP_INT_MAX, 0);
+        self::$fan_user_deletion_release_hooks_registered = true;
+    }
+
+    private static function release_fan_user_deletion_lock($user_id) {
+        $user_id = (int) $user_id;
+        if (!isset(self::$fan_user_deletion_locks[$user_id])) { return; }
+        $lock_owner = self::$fan_user_deletion_locks[$user_id];
+        unset(self::$fan_user_deletion_locks[$user_id]);
+        self::release_fan_lock($user_id, $lock_owner);
+    }
+
+    private static function abort_fan_user_deletion($audit_event) {
+        do_action('yishu_fan_security_audit', sanitize_key((string) $audit_event));
+        $message = '为防止遗留合作邀约中的个人资料，本次删除已安全中止，请稍后重试。';
+        if (function_exists('wp_die')) {
+            wp_die($message, '暂时无法删除用户', array('response' => 503));
+        }
+        // do_action() cannot return a veto. Throwing here is the fail-closed
+        // fallback and still occurs before WordPress starts irreversible work.
+        throw new RuntimeException('fan_user_deletion_privacy_cleanup_failed');
     }
 
     private static function fan_invitation_profile_fields($user_id) {
@@ -3294,7 +3461,8 @@ trait Shuzijun_App_Fan_Identity {
         $setup = get_user_meta((int) $user_id, self::FAN_META_APPLE_SETUP, true);
         return array(
             'accountSource' => $source,
-            'requiresAppleRegistration' => $source === 'apple' && !empty($setup),
+            'requiresAppleRegistration' => $source === 'apple'
+                && (!empty($setup) || !self::fan_has_required_douyin_id((int) $user_id)),
         );
     }
 

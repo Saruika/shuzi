@@ -117,6 +117,8 @@ struct AdminView: View {
     @State private var operationMessage: String?
     @State private var operationFailed = false
     @State private var pendingFanCount = 0
+    @State private var pendingCollaborationCount = 0
+    @State private var collaborationInboxEnabled = false
     @State private var hasLoadedAdministratorContent = false
     @State private var isLoadingAdministratorContent = false
     @State private var administratorContentError: String?
@@ -159,15 +161,17 @@ struct AdminView: View {
             }
         }
         .task(id: admin.isAuthenticated) {
-            await monitorPendingFanCount()
+            await monitorPendingCounts()
         }
         .onChange(of: admin.isAuthenticated) { _, authenticated in
             applicationPassword = ""
             if authenticated {
-                Task { await refreshPendingFanCount() }
+                Task { await refreshPendingCounts() }
             } else {
                 invalidateAdministratorContentLoad()
                 pendingFanCount = 0
+                pendingCollaborationCount = 0
+                collaborationInboxEnabled = false
             }
         }
         .onChange(of: scenePhase) { _, phase in
@@ -342,6 +346,9 @@ struct AdminView: View {
         VStack(alignment: .leading, spacing: 34) {
             dashboardHeader
             fanAccessEditor
+            if collaborationInboxEnabled {
+                collaborationInboxEditor
+            }
             launchPosterEditor
             heroEditor
             aboutPortraitEditor
@@ -571,6 +578,45 @@ struct AdminView: View {
         }
     }
 
+    private var collaborationInboxEditor: some View {
+        AdminSection(title: "合作邀约", subtitle: "查看服务器已收到的邀约，并记录处理进度") {
+            if pendingCollaborationCount > 0 {
+                Label(
+                    "有 \(pendingCollaborationCount) 条新合作邀约等待处理",
+                    systemImage: "envelope.badge.fill"
+                )
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppTheme.gold)
+                    .padding(13)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(AppTheme.gold.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                    .accessibilityIdentifier("admin-pending-collaboration-banner")
+            }
+
+            NavigationLink {
+                CollaborationInboxView()
+            } label: {
+                HStack {
+                    Label("打开合作邀约收件箱", systemImage: "tray.full")
+                    Spacer()
+                    if pendingCollaborationCount > 0 {
+                        Text("\(pendingCollaborationCount)")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(AppTheme.ink)
+                            .accessibilityLabel("\(pendingCollaborationCount) 条待处理")
+                    }
+                }
+                .adminPrimaryButton()
+            }
+            .buttonStyle(.plain)
+
+            Text("邀约只有在服务器持久化成功后才会出现在这里；合作邮件的发送状态也会同步显示。")
+                .font(.caption2)
+                .lineSpacing(4)
+                .foregroundStyle(AppTheme.muted)
+        }
+    }
+
     private func refreshPendingFanCount() async {
         guard admin.isAuthenticated,
               let directory = try? await admin.fetchFanDirectory() else { return }
@@ -579,10 +625,31 @@ struct AdminView: View {
         }.count
     }
 
-    private func monitorPendingFanCount() async {
+    private func refreshPendingCollaborationCount() async {
+        guard admin.isAuthenticated else { return }
+        guard let capabilities = try? await admin.fetchFeatureCapabilities(),
+              capabilities.collaborationInboxEnabled else {
+            collaborationInboxEnabled = false
+            pendingCollaborationCount = 0
+            return
+        }
+        collaborationInboxEnabled = true
+        guard let directory = try? await admin.fetchCollaborationRequests(
+                status: .received,
+                perPage: 1
+              ) else { return }
+        pendingCollaborationCount = directory.total
+    }
+
+    private func refreshPendingCounts() async {
+        await refreshPendingFanCount()
+        await refreshPendingCollaborationCount()
+    }
+
+    private func monitorPendingCounts() async {
         guard admin.isAuthenticated else { return }
         while !Task.isCancelled, admin.isAuthenticated {
-            await refreshPendingFanCount()
+            await refreshPendingCounts()
             do {
                 try await Task.sleep(for: .seconds(20))
             } catch {
@@ -1295,6 +1362,272 @@ struct AdminView: View {
         let stamp = Int(Date().timeIntervalSince1970)
         let suffix = UUID().uuidString.lowercased().prefix(8)
         return "\(prefix)-\(stamp)-\(suffix).\(type.preferredFilenameExtension ?? "bin")"
+    }
+}
+
+private struct CollaborationInboxView: View {
+    @EnvironmentObject private var admin: AdminSessionStore
+    @State private var directory: AdminCollaborationDirectory?
+    @State private var isLoading = false
+    @State private var updatingRequestIDs = Set<String>()
+    @State private var errorMessage: String?
+
+    var body: some View {
+        ZStack {
+            AppTheme.ink.ignoresSafeArea()
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    header
+
+                    if isLoading, directory == nil {
+                        HStack(spacing: 12) {
+                            ProgressView().tint(AppTheme.gold)
+                            Text("正在读取合作邀约")
+                        }
+                        .font(.subheadline)
+                        .foregroundStyle(AppTheme.muted)
+                    } else if let directory, directory.requests.isEmpty {
+                        ContentUnavailableView(
+                            "暂无合作邀约",
+                            systemImage: "tray",
+                            description: Text("新邀约经服务器确认保存后会显示在这里。")
+                        )
+                        .foregroundStyle(AppTheme.muted)
+                    } else if let directory {
+                        ForEach(directory.requests) { request in
+                            requestCard(request)
+                        }
+                        if directory.total > directory.requests.count {
+                            Text("当前显示最新 \(directory.requests.count) 条，共 \(directory.total) 条。")
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.muted)
+                        }
+                    }
+                }
+                .padding(.horizontal, 18)
+                .padding(.top, 16)
+                .padding(.bottom, 60)
+                .frame(maxWidth: 840, alignment: .leading)
+                .frame(maxWidth: .infinity)
+            }
+            .scrollIndicators(.hidden)
+            .refreshable { await load() }
+        }
+        .navigationTitle("合作邀约")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .task { await load() }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("COLLABORATION INBOX")
+                .font(.caption2.weight(.semibold))
+                .tracking(3)
+                .foregroundStyle(AppTheme.gold)
+            Text("合作邀约收件箱")
+                .font(.system(.largeTitle, design: .serif))
+                .accessibilityAddTraits(.isHeader)
+            if let directory {
+                Text("共 \(directory.total) 条 · 待处理 \(pendingCount(in: directory)) 条")
+                    .font(.subheadline)
+                    .foregroundStyle(AppTheme.muted)
+            }
+            if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.updatesFrequently)
+                Button {
+                    Task { await load() }
+                } label: {
+                    Label("重新读取", systemImage: "arrow.clockwise")
+                        .adminSecondaryButton()
+                }
+                .disabled(isLoading)
+            }
+        }
+    }
+
+    private func requestCard(_ request: AdminCollaborationRequest) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(request.contactName)
+                        .font(.title3.weight(.semibold))
+                    Text(projectTypeTitle(request.projectType))
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.gold)
+                }
+                Spacer()
+                Menu {
+                    ForEach(CollaborationRequestStatus.allCases) { status in
+                        Button(status.title) {
+                            Task { await update(request, to: status) }
+                        }
+                        .disabled(status == request.requestStatus)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if updatingRequestIDs.contains(request.requestID) {
+                            ProgressView().tint(AppTheme.gold)
+                        }
+                        Text(request.requestStatus?.title ?? "未知状态")
+                        Image(systemName: "chevron.up.chevron.down")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppTheme.warmWhite)
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .disabled(updatingRequestIDs.contains(request.requestID))
+                .accessibilityLabel("处理状态：\(request.requestStatus?.title ?? "未知")")
+            }
+
+            Divider().overlay(.white.opacity(0.1))
+
+            detailRow("联系方式", value: request.contactMethod)
+            if !request.organization.isEmpty {
+                detailRow("公司 / 项目", value: request.organization)
+            }
+            if !request.city.isEmpty {
+                detailRow("拍摄城市", value: request.city)
+            }
+            if !request.preferredDate.isEmpty {
+                detailRow("意向日期", value: request.preferredDate)
+            }
+            if !request.budget.isEmpty {
+                detailRow("预算范围", value: request.budget)
+            }
+            if !request.details.isEmpty {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("项目说明")
+                        .font(.caption2)
+                        .foregroundStyle(AppTheme.muted)
+                    Text(request.details)
+                        .font(.body)
+                        .lineSpacing(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Divider().overlay(.white.opacity(0.1))
+
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Label(mailDeliveryTitle(request.delivery), systemImage: mailDeliveryIcon(request.delivery))
+                    .foregroundStyle(mailDeliveryColor(request.delivery))
+                Spacer()
+                Text(request.receivedAt.formatted(date: .abbreviated, time: .shortened))
+                    .foregroundStyle(AppTheme.muted)
+            }
+            .font(.caption2)
+
+            Text("请求编号 \(request.requestID)")
+                .font(.caption2.monospaced())
+                .foregroundStyle(AppTheme.muted)
+                .textSelection(.enabled)
+        }
+        .padding(16)
+        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func detailRow(_ label: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(AppTheme.muted)
+                .frame(width: 78, alignment: .leading)
+            Text(value)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func load() async {
+        guard admin.isAuthenticated, !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            directory = try await admin.fetchCollaborationRequests(perPage: 100)
+            errorMessage = nil
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription
+                ?? "无法读取合作邀约。"
+        }
+    }
+
+    private func update(
+        _ request: AdminCollaborationRequest,
+        to status: CollaborationRequestStatus
+    ) async {
+        guard admin.isAuthenticated,
+              request.requestStatus != status,
+              !updatingRequestIDs.contains(request.requestID) else { return }
+        updatingRequestIDs.insert(request.requestID)
+        defer { updatingRequestIDs.remove(request.requestID) }
+        do {
+            let updated = try await admin.updateCollaborationRequest(request, status: status)
+            guard var current = directory,
+                  let index = current.requests.firstIndex(where: {
+                      $0.requestID == updated.requestID
+                  }) else {
+                await load()
+                return
+            }
+            var requests = current.requests
+            requests[index] = updated
+            current = AdminCollaborationDirectory(
+                requests: requests,
+                page: current.page,
+                perPage: current.perPage,
+                total: current.total,
+                statuses: current.statuses
+            )
+            directory = current
+            errorMessage = nil
+        } catch {
+            errorMessage = (error as? LocalizedError)?.errorDescription
+                ?? "无法更新合作邀约。"
+        }
+    }
+
+    private func pendingCount(in directory: AdminCollaborationDirectory) -> Int {
+        directory.requests.filter { $0.requestStatus == .received }.count
+    }
+
+    private func projectTypeTitle(_ rawValue: String) -> String {
+        switch rawValue {
+        case "drama": "短剧 / 影视出演"
+        case "commercial": "商业拍摄"
+        case "brand": "品牌合作"
+        case "modeling": "平面 / 模特"
+        case "event": "活动出席"
+        default: "其他合作"
+        }
+    }
+
+    private func mailDeliveryTitle(_ delivery: AdminCollaborationDelivery) -> String {
+        switch delivery.status {
+        case "sent": "邮件服务已接受"
+        case "dead": "邮件多次重试失败"
+        case "processing": "正在交给邮件服务"
+        default: "等待交给邮件服务"
+        }
+    }
+
+    private func mailDeliveryIcon(_ delivery: AdminCollaborationDelivery) -> String {
+        switch delivery.status {
+        case "sent": "envelope.badge.fill"
+        case "dead": "exclamationmark.triangle.fill"
+        case "processing": "arrow.triangle.2.circlepath"
+        default: "clock"
+        }
+    }
+
+    private func mailDeliveryColor(_ delivery: AdminCollaborationDelivery) -> Color {
+        delivery.status == "dead" ? .orange : AppTheme.gold
     }
 }
 

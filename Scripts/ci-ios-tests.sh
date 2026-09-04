@@ -20,13 +20,27 @@ for attempt in 1 2 3 4 5 6; do
     xcodebuild -project Yishu.xcodeproj -scheme Yishu -showdestinations 2>&1 || true
   )"
   destination_id="$(printf '%s\n' "$destination_listing" | awk -v family="$device_family" '
-    $0 ~ /platform:iOS Simulator/ && $0 ~ ("name:[[:space:]]*" family) {
-      line = $0
+    function identifier(line) {
       sub(/^.*id:/, "", line)
       sub(/,.*/, "", line)
       gsub(/[[:space:]]/, "", line)
-      print line
-      exit
+      return line
+    }
+    $0 ~ /platform:iOS Simulator/ && $0 ~ ("name:[[:space:]]*" family) {
+      if (fallback == "") { fallback = identifier($0) }
+      if (family == "iPhone") {
+        preferred = $0 ~ /name:[[:space:]]*iPhone .* Pro Max/
+      } else {
+        preferred = $0 ~ /name:[[:space:]]*iPad Pro 13-inch/
+      }
+      if (preferred) {
+        print identifier($0)
+        found = 1
+        exit
+      }
+    }
+    END {
+      if (!found && fallback != "") { print fallback }
     }
   ')"
   [[ -n "$destination_id" ]] && break

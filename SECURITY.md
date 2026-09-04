@@ -21,15 +21,15 @@
 - 生产 Nginx 在通用 PHP/静态文件规则之前拒绝 `wp-config.php`、任何附加在 `.php` 后的未知后缀、密钥/数据库/压缩包、配置/源码备份和编辑器残留；主备节点同步前后都会验证 Web 根目录，恢复副本只允许放在站外 root-only 目录。
 - 官网和图片 CDN 配置上海主源与新加坡备用源；状态型账号、审批和内容清单请求则通过非 CDN 域名直达上海权威数据库，并由备用节点同命名空间反向代理兜底，避免逐请求切换到未实时同步的数据副本。
 - 粉丝账号与 WordPress 管理身份严格分离：注册用户只是内部随机用户名的 `subscriber`，粉丝权限白名单不包含内容管理 capability。
-- 粉丝注册的抖音 ID 为选填：空值不建立唯一预留，也不影响注册、审批、登录、权限或删号；如填写则仍限制格式和唯一性。系统通过网络/安装双维度注册限流及网络/身份码双维度登录限流抑制滥用。客户端地址只会从回环或固定备用节点的受信链路接受；备用节点公网/CDN 入口会覆盖自定义地址头，防止伪造限流身份。
+- 粉丝新注册、Apple 首次资料提交和邀请账号首次设置的抖音 ID 为必填：客户端与服务器均拒绝空值、邀请占位值和非法格式，并执行唯一预留。存量空 ID 账号可继续登录和删号，但内容端点失败关闭；用户必须重新验证密码或 Apple ID 并同意当前政策才能补全。系统通过网络/安装双维度注册限流及网络/身份码双维度登录限流抑制滥用。客户端地址只会从回环或固定备用节点的受信链路接受；备用节点公网/CDN 入口会覆盖自定义地址头，防止伪造限流身份。
 - 原生 Apple 登录不接受客户端自报的 Apple user ID。客户端先请求绑定安装记录、purpose 和短 TTL 的服务端 challenge；服务端只保存 nonce/state/安装记录的哈希并单次消费。客户端先恒时比对回调 state，再上传 Apple identity token、authorization code、challenge ID、state 和安装记录；token/code/nonce/state 不落盘、不写日志。
 - 服务端验证 Apple JWT 的签名、issuer、audience、nonce、签发/到期时间，并以 HMAC 后的 subject 关联账号；authorization code 只发往 Apple token 端点。Apple refresh token 加密保存，只用于维持登录关联和删号时撤销 Apple 授权，不能作为 App bearer token 使用。
-- Apple 登录形成三重门禁：一是 Apple 签名身份验证，二是本人填写昵称并确认当前隐私政策，三是管理员人工批准。抖音 ID 选填，不作为第二层门禁。第一步只签发短时 `apple_onboarding` 会话；完成第二步前内容接口失败关闭，管理员目录显示“等待完成账号申请”，客户端和服务端都不允许提前批准为 active。
+- Apple 登录形成三重门禁：一是 Apple 签名身份验证，二是本人填写昵称和必填抖音 ID 并确认当前隐私政策，三是管理员人工批准。第一步只签发短时 `apple_onboarding` 会话；完成第二步前内容接口失败关闭，管理员目录显示“等待完成账号申请”，客户端和服务端都不允许提前批准为 active。
 - 粉丝会话使用 256-bit 随机 bearer token；原令牌只保存在 ThisDeviceOnly Keychain，服务器只持久化 SHA-256 哈希并绑定本机随机安装标识哈希。会话有效期 30 天，每账号最多 8 个，不依赖 Redis 存活。
 - 会话目录只返回不可用于登录的公开会话 ID、安装记录码、登录/到期时间和当前设备标志，不返回令牌或令牌哈希。普通会话可撤销任一其他设备，不允许用相同接口撤销当前会话。
 - 新注册账号默认 `pending`，管理员可批准或拒绝；App 启动与每次回到前台都会复核状态，未批准时采用失败关闭策略并丢弃旧版受保护目录缓存。
 - Apple 会话冷启动在展示任何受保护缓存前先调用系统 credential state。明确的 revoked/notFound/transferred 或未知状态会使用对应提示并失败关闭；Apple 系统查询本身暂时失败时不伪装成“已撤销”，而是继续以仍有效的服务端 profile/token 为权威，并采用 15 秒、60 秒、5 分钟的有界退避，退到后台立即取消。
-- 管理员邀请使用 24 小时有效、只显示一次的随机临时密码。临时登录只签发 10 分钟 onboarding scope 会话；本人设置昵称、新密码并确认当前隐私政策前，客户端和服务端都拒绝受保护内容。抖音 ID 选填，留空不阻断完成设置。完成设置会递增凭据版本、撤销全部旧会话并使临时密码失效。
+- 管理员邀请使用 24 小时有效、只显示一次的随机临时密码。临时登录只签发 10 分钟 onboarding scope 会话；本人设置昵称、必填抖音 ID、新密码并确认当前隐私政策前，客户端和服务端都拒绝受保护内容。完成设置会递增凭据版本、撤销全部旧会话并使临时密码失效。
 - 管理员密码恢复使用 15 分钟有效、只显示一次的随机临时密码；服务器不保存可读明文。创建时立即撤销全部旧会话；首次领取绑定安装记录，其他设备重放被拒绝，同一安装重新登录会撤销上一恢复会话。恢复会话只有 10 分钟且不能读取内容或会话目录；用户完成强制改密后才换发普通会话。
 - 用户主动改密必须在锁内重新验证当前密码，新密码需符合强度策略且不得与当前密码相同。成功后轮换凭据版本、撤销全部旧会话，只向当前安装换发新会话。
 - 粉丝创建、审批与权限管理使用独立 `manage_yishu_fan_accounts` capability；内容发布能力本身不能创建或激活粉丝账号。普通审批接口不能把未完成首次设置的邀请提前激活。
@@ -45,7 +45,7 @@
 - Apple Developer 的显式 App ID `cn.com.shuzijun.yishu` 必须启用 Sign in with Apple 与 WeatherKit；开发、Ad Hoc 和 App Store 描述文件须在能力开启后重新生成。归档中应同时存在 `com.apple.developer.applesignin` 和 WeatherKit entitlement。
 - Apple 登录私钥仅放在 Web 根目录外的受限路径，通过 `YISHU_APPLE_TEAM_ID`、`YISHU_APPLE_KEY_ID`、`YISHU_APPLE_PRIVATE_KEY_PATH` 引用；仓库、构建产物、日志和巡检报告均不得包含 `.p8`、client secret 或任何 Apple 用户凭据。
 - 生产服务器必须安装 `Server/composer.lock` 锁定的非开发依赖，并允许受控出站 HTTPS 访问 Apple JWKS、token 与 revoke 端点。WP-Cron 或等价任务必须能执行 Apple 授权撤销重试与过期 challenge 清理。
-- 发布前须运行 iPhone/iPad 单元与 UI 回归、Release 分析和实际 `.app` 敏感文件扫描，再在 TestFlight 真机完整验收 Apple 新注册、选填抖音 ID（分别留空和填写）、审批、重复登录、凭据撤销、网络中断、onboarding 删号和已批准账号删号。
+- 发布前须运行 iPhone/iPad 单元与 UI 回归、Release 分析和实际 `.app` 敏感文件扫描，再在 TestFlight 真机完整验收 Apple 新注册、空抖音 ID 双端拒绝、有效 ID 提交、存量空 ID 迁移、审批、重复登录、凭据撤销、网络中断、onboarding 删号和已批准账号删号。
 - App Store Connect 隐私标签、App 内政策和网页版政策必须一致说明昵称、抖音 ID、用户/安装标识、短时 Apple token/code、加密 refresh token 与 Apple 登录处理关系；客户端不请求 `.fullName` 或 `.email`，因此不得宣称收集 Apple 返回的姓名或邮箱。
 
 ## 恢复付费订阅前必须完成

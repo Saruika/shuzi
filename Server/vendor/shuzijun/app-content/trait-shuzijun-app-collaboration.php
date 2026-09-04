@@ -113,7 +113,8 @@ trait Shuzijun_App_Collaboration {
     }
 
     public static function create_collaboration_request(WP_REST_Request $request) {
-        if (!self::collaboration_phase1_enabled()) {
+        if (!self::collaboration_phase1_enabled()
+            || !self::collaboration_mail_transport_ready()) {
             return self::collaboration_feature_disabled_error();
         }
         $context = self::$fan_session_context;
@@ -132,6 +133,22 @@ trait Shuzijun_App_Collaboration {
         }
 
         $fan_user_id = (int) $context['userID'];
+        $fan_lock_owner = self::acquire_fan_lock($fan_user_id);
+        if (is_wp_error($fan_lock_owner)) {
+            return new WP_Error(
+                'collaboration_submission_busy',
+                '账号资料正在更新，请稍后重试邀约。',
+                array('status' => 409)
+            );
+        }
+        try {
+        if (!self::collaboration_fan_context_is_current_from_database($context)) {
+            return new WP_Error(
+                'collaboration_fan_required',
+                '账号资料、权限或登录状态已变更，请重新登录后提交。',
+                array('status' => 403)
+            );
+        }
         $existing = self::find_collaboration_submission(
             $fan_user_id,
             (string) $input['submissionID']
@@ -182,6 +199,23 @@ trait Shuzijun_App_Collaboration {
             }
             $committed = false;
             try {
+                // The permission callback ran before this method and account
+                // state may have changed since then. Re-read and lock the
+                // session, user and profile rows inside the write transaction;
+                // never persist using the callback's stale snapshot.
+                if (!self::collaboration_fan_context_is_current_from_database(
+                    $context,
+                    true
+                )) {
+                    if ($wpdb->query('ROLLBACK') === false) {
+                        return self::collaboration_storage_error();
+                    }
+                    return new WP_Error(
+                        'collaboration_fan_required',
+                        '账号资料、权限或登录状态已变更，请重新登录后提交。',
+                        array('status' => 403)
+                    );
+                }
                 $public_id = strtolower((string) wp_generate_uuid4());
                 if (!self::is_uuid_v4($public_id)) {
                     throw new RuntimeException('public_id_unavailable');
@@ -259,10 +293,14 @@ trait Shuzijun_App_Collaboration {
         } finally {
             self::release_named_fan_lock($lock);
         }
+        } finally {
+            self::release_fan_lock($fan_user_id, $fan_lock_owner);
+        }
     }
 
     public static function list_collaboration_requests(WP_REST_Request $request) {
-        if (!self::collaboration_phase1_enabled()) {
+        if (!self::collaboration_phase1_enabled()
+            || !self::collaboration_mail_transport_ready()) {
             return self::collaboration_feature_disabled_error();
         }
         if (!self::collaboration_storage_ready()) { return self::collaboration_storage_error(); }
@@ -328,7 +366,8 @@ trait Shuzijun_App_Collaboration {
     }
 
     public static function update_collaboration_request(WP_REST_Request $request) {
-        if (!self::collaboration_phase1_enabled()) {
+        if (!self::collaboration_phase1_enabled()
+            || !self::collaboration_mail_transport_ready()) {
             return self::collaboration_feature_disabled_error();
         }
         if (!self::collaboration_storage_ready()) { return self::collaboration_storage_error(); }
@@ -433,6 +472,7 @@ trait Shuzijun_App_Collaboration {
 
     public static function ensure_collaboration_outbox_schedule() {
         if (!self::collaboration_phase1_enabled()
+            || !self::collaboration_mail_transport_ready()
             || !self::account_authority_enabled()
             || !self::collaboration_storage_ready()) {
             return false;
@@ -453,6 +493,7 @@ trait Shuzijun_App_Collaboration {
 
     public static function sweep_collaboration_outbox() {
         if (!self::collaboration_phase1_enabled()
+            || !self::collaboration_mail_transport_ready()
             || !self::account_authority_enabled()
             || !self::collaboration_storage_ready()) {
             return false;
@@ -486,6 +527,7 @@ trait Shuzijun_App_Collaboration {
     public static function process_collaboration_outbox($job_id) {
         $job_id = (int) $job_id;
         if (!self::collaboration_phase1_enabled()
+            || !self::collaboration_mail_transport_ready()
             || $job_id <= 0
             || !self::account_authority_enabled()
             || !self::collaboration_storage_ready()) {
@@ -588,8 +630,213 @@ trait Shuzijun_App_Collaboration {
         return true;
     }
 
-    private static function collaboration_tables() {
-        if (!self::collaboration_phase1_enabled()) { return null; }
+    public static function purge_collaboration_data_for_fan_user($fan_user_id) {
+        $fan_user_id = (int) $fan_user_id;
+        if ($fan_user_id <= 0) { return false; }
+
+        // Cleanup must remain available after the feature is disabled. A future
+        // rollback, lost option row or corrupt schema marker must not strand
+        // data that an earlier enabled release wrote. The physical tables are
+        // the authority for deletion, never the optional schema marker.
+        global $wpdb;
+        $tables = self::collaboration_table_names();
+        if (!$tables || !isset($wpdb) || !method_exists($wpdb, 'get_var')
+            || !method_exists($wpdb, 'get_col') || !method_exists($wpdb, 'prepare')
+            || !method_exists($wpdb, 'esc_like') || !method_exists($wpdb, 'query')) {
+            return false;
+        }
+
+        $present = 0;
+        foreach ($tables as $table) {
+            $found = $wpdb->get_var($wpdb->prepare(
+                'SHOW TABLES LIKE %s',
+                $wpdb->esc_like($table)
+            ));
+            if (!empty($wpdb->last_error)) {
+                do_action('yishu_collaboration_security_audit', 'account_deletion_schema_probe_failed');
+                return false;
+            }
+            if (is_string($found) && hash_equals($table, $found)) { $present++; }
+        }
+        if ($present === 0) { return true; }
+        if ($present !== count($tables)) {
+            do_action('yishu_collaboration_security_audit', 'account_deletion_schema_incomplete');
+            return false;
+        }
+
+        if ($wpdb->query('START TRANSACTION') === false) { return false; }
+        $committed = false;
+        try {
+            $request_ids = $wpdb->get_col($wpdb->prepare(
+                "SELECT id FROM {$tables['requests']}
+                 WHERE fan_user_id = %d ORDER BY id ASC FOR UPDATE",
+                $fan_user_id
+            ));
+            if (!is_array($request_ids) || !empty($wpdb->last_error)) {
+                throw new RuntimeException('collaboration_delete_lookup_failed');
+            }
+            foreach ($request_ids as $request_id) {
+                if (!is_scalar($request_id) || !ctype_digit((string) $request_id)
+                    || (int) $request_id <= 0) {
+                    throw new RuntimeException('collaboration_delete_lookup_invalid');
+                }
+            }
+            $request_ids = array_map('intval', array_values($request_ids));
+            if (count(array_unique($request_ids)) !== count($request_ids)) {
+                throw new RuntimeException('collaboration_delete_lookup_invalid');
+            }
+            if ($request_ids) {
+                // Child rows are removed first so no queued delivery or audit
+                // record can remain linked to the deleted fan or its PII.
+                $audit_deleted = $wpdb->query($wpdb->prepare(
+                    "DELETE a FROM {$tables['audit']} a
+                     INNER JOIN {$tables['requests']} r ON r.id = a.request_id
+                     WHERE r.fan_user_id = %d",
+                    $fan_user_id
+                ));
+                $outbox_deleted = $wpdb->query($wpdb->prepare(
+                    "DELETE o FROM {$tables['outbox']} o
+                     INNER JOIN {$tables['requests']} r ON r.id = o.request_id
+                     WHERE r.fan_user_id = %d",
+                    $fan_user_id
+                ));
+                $requests_deleted = $wpdb->query($wpdb->prepare(
+                    "DELETE FROM {$tables['requests']} WHERE fan_user_id = %d",
+                    $fan_user_id
+                ));
+                if ($audit_deleted === false || $outbox_deleted === false
+                    || $requests_deleted !== count($request_ids)) {
+                    throw new RuntimeException('collaboration_delete_failed');
+                }
+            }
+            if ($wpdb->query('COMMIT') === false) {
+                throw new RuntimeException('collaboration_delete_commit_failed');
+            }
+            $committed = true;
+            return true;
+        } catch (Throwable $error) {
+            if (!$committed) { $wpdb->query('ROLLBACK'); }
+            do_action('yishu_collaboration_security_audit', 'account_deletion_cleanup_failed');
+            return false;
+        }
+    }
+
+    private static function collaboration_fan_context_is_current_from_database(
+        $context,
+        $for_update = false
+    ) {
+        if (!is_array($context)
+            || ($context['scope'] ?? '') !== 'normal'
+            || !self::fan_session_context_is_current_from_database(
+                $context,
+                'normal',
+                (bool) $for_update
+            )) {
+            return false;
+        }
+
+        $fan_user_id = (int) ($context['userID'] ?? 0);
+        global $wpdb;
+        if ($fan_user_id <= 0 || !isset($wpdb->users)
+            || !method_exists($wpdb, 'get_var') || !method_exists($wpdb, 'prepare')) {
+            return false;
+        }
+        $locking_clause = $for_update ? ' FOR UPDATE' : '';
+        $display_name = $wpdb->get_var($wpdb->prepare(
+            "SELECT display_name FROM {$wpdb->users} WHERE ID = %d LIMIT 1{$locking_clause}",
+            $fan_user_id
+        ));
+        if (!is_string($display_name) || !empty($wpdb->last_error)
+            || is_wp_error(self::validate_fan_display_name($display_name))) {
+            return false;
+        }
+
+        $uuid = (string) self::fan_meta_from_database(
+            $fan_user_id,
+            self::FAN_META_UUID,
+            '',
+            (bool) $for_update
+        );
+        if (!empty($wpdb->last_error)
+            || preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/', $uuid) !== 1) {
+            return false;
+        }
+        $identity_code = (string) self::fan_meta_from_database(
+            $fan_user_id,
+            self::FAN_META_CODE,
+            '',
+            (bool) $for_update
+        );
+        if (!empty($wpdb->last_error) || $identity_code === ''
+            || self::normalize_identity_code($identity_code) !== $identity_code) {
+            return false;
+        }
+        $status = (string) self::fan_meta_from_database(
+            $fan_user_id,
+            self::FAN_META_STATUS,
+            '',
+            (bool) $for_update
+        );
+        if (!empty($wpdb->last_error) || $status !== 'active') { return false; }
+
+        foreach (array(
+            self::FAN_META_INVITATION,
+            self::FAN_META_PASSWORD_RECOVERY,
+            self::FAN_META_APPLE_SETUP,
+        ) as $incomplete_marker) {
+            $marker = self::fan_meta_from_database(
+                $fan_user_id,
+                $incomplete_marker,
+                null,
+                (bool) $for_update
+            );
+            if (!empty($wpdb->last_error) || !empty($marker)) { return false; }
+        }
+
+        $stored_douyin_id = (string) self::fan_meta_from_database(
+            $fan_user_id,
+            self::FAN_META_DOUYIN_ID,
+            '',
+            (bool) $for_update
+        );
+        $douyin_id = self::normalize_required_douyin_id($stored_douyin_id);
+        if (!empty($wpdb->last_error) || is_wp_error($douyin_id)
+            || !hash_equals($stored_douyin_id, (string) $douyin_id)) {
+            return false;
+        }
+
+        $consent = self::fan_meta_from_database(
+            $fan_user_id,
+            self::FAN_META_CONSENT,
+            null,
+            (bool) $for_update
+        );
+        if (!empty($wpdb->last_error) || !self::fan_stored_consent_is_accepted($consent)) {
+            return false;
+        }
+
+        $fresh_permissions = self::fan_meta_from_database(
+            $fan_user_id,
+            self::FAN_META_PERMISSIONS,
+            null,
+            (bool) $for_update
+        );
+        if (!empty($wpdb->last_error) || !is_array($fresh_permissions)) { return false; }
+        $fresh_permissions = self::sanitize_fan_permissions($fresh_permissions);
+        $callback_permissions = self::sanitize_fan_permissions(
+            isset($context['permissions']) && is_array($context['permissions'])
+                ? $context['permissions']
+                : array()
+        );
+        if (is_wp_error($fresh_permissions) || is_wp_error($callback_permissions)) {
+            return false;
+        }
+        sort($fresh_permissions, SORT_STRING);
+        sort($callback_permissions, SORT_STRING);
+        return $fresh_permissions === $callback_permissions;
+    }
+
+    private static function collaboration_table_names() {
         global $wpdb;
         if (!isset($wpdb) || !isset($wpdb->prefix)) { return array(); }
         return array(
@@ -597,6 +844,11 @@ trait Shuzijun_App_Collaboration {
             'outbox' => $wpdb->prefix . 'yishu_collaboration_outbox',
             'audit' => $wpdb->prefix . 'yishu_collaboration_audit',
         );
+    }
+
+    private static function collaboration_tables() {
+        if (!self::collaboration_phase1_enabled()) { return null; }
+        return self::collaboration_table_names();
     }
 
     private static function collaboration_tables_exist() {
@@ -804,9 +1056,13 @@ trait Shuzijun_App_Collaboration {
                 array('status' => 409)
             );
         }
+        $status = (string) ($row['status'] ?? '');
+        if (!in_array($status, self::collaboration_request_statuses(), true)) {
+            return self::collaboration_storage_error();
+        }
         $response = new WP_REST_Response(array(
             'requestID' => (string) $row['public_id'],
-            'status' => (string) ($row['status'] ?? 'received'),
+            'status' => $status,
             'receivedAt' => self::collaboration_iso_time((string) ($row['created_at'] ?? '')),
             'duplicate' => (bool) $duplicate,
         ), $duplicate ? 200 : 201);
@@ -941,6 +1197,7 @@ trait Shuzijun_App_Collaboration {
 
     private static function schedule_collaboration_outbox_job($job_id, $timestamp) {
         if (!self::collaboration_phase1_enabled()
+            || !self::collaboration_mail_transport_ready()
             || (int) $job_id <= 0
             || !self::account_authority_enabled()) { return false; }
         $scheduled = wp_schedule_single_event(
@@ -1121,6 +1378,19 @@ trait Shuzijun_App_Collaboration {
         $configured = trim($configured);
         $configured = sanitize_email($configured);
         return $configured && is_email($configured) ? $configured : '';
+    }
+
+    private static function collaboration_mail_transport_ready() {
+        // A callable wp_mail() only proves that WordPress loaded its wrapper;
+        // it does not prove that an authenticated SMTP/transactional provider
+        // is configured. Operations must explicitly attest both the transport
+        // and recipient before either client capability can become visible.
+        return self::collaboration_phase1_enabled()
+            && defined('YISHU_COLLABORATION_MAIL_TRANSPORT_READY')
+            && constant('YISHU_COLLABORATION_MAIL_TRANSPORT_READY') === true
+            && defined('YISHU_COLLABORATION_EMAIL')
+            && function_exists('wp_mail')
+            && self::collaboration_work_email() !== '';
     }
 
     private static function collaboration_mail_body($job) {

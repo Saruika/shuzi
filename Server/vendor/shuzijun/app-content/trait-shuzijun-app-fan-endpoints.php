@@ -38,7 +38,7 @@ trait Shuzijun_App_Fan_Endpoints {
         if (is_wp_error($install_limit)) { return $install_limit; }
 
         $display_name = sanitize_text_field((string) $request->get_param('displayName'));
-        $douyin_id = self::normalize_optional_douyin_id($request->get_param('douyinID'));
+        $douyin_id = self::normalize_required_douyin_id($request->get_param('douyinID'));
         if (is_wp_error($douyin_id)) { return $douyin_id; }
         $password = (string) $request->get_param('password');
         $consent_version = $request->get_param('consentVersion');
@@ -608,6 +608,13 @@ trait Shuzijun_App_Fan_Endpoints {
                 array('status' => 403)
             );
         }
+        if (!self::fan_has_required_douyin_id($user_id)) {
+            return new WP_Error(
+                'fan_douyin_id_required',
+                '请先在账号页补全抖音 ID。',
+                array('status' => 403)
+            );
+        }
         self::$fan_session_context = $context;
         return true;
     }
@@ -665,11 +672,26 @@ trait Shuzijun_App_Fan_Endpoints {
         $context = self::authenticate_fan_session($request);
         if (is_wp_error($context)) { return $context; }
         $user_id = (int) ($context['userID'] ?? 0);
-        if (($context['scope'] ?? '') !== 'apple_onboarding'
-            || self::fan_account_source($user_id) !== 'apple') {
+        $scope = (string) ($context['scope'] ?? '');
+        $source = self::fan_account_source($user_id);
+        if ($scope === 'normal' && !self::fan_has_required_douyin_id($user_id)) {
+            if ($source === 'apple'
+                && (($context['authMethod'] ?? '') !== 'apple'
+                    || (int) ($context['recentAuthUntil'] ?? 0) < time())) {
+                return new WP_Error(
+                    'fan_apple_profile_required',
+                    '请重新使用 Apple ID 验证后补全抖音 ID。',
+                    array('status' => 403)
+                );
+            }
+            $context['douyinProfileUpgrade'] = true;
+            self::$fan_session_context = $context;
+            return true;
+        }
+        if ($scope !== 'apple_onboarding' || $source !== 'apple') {
             return new WP_Error(
                 'fan_apple_profile_required',
-                '请先使用 Apple ID 登录。',
+                '当前账号不需要补全抖音 ID。',
                 array('status' => 403)
             );
         }
@@ -709,19 +731,37 @@ trait Shuzijun_App_Fan_Endpoints {
 
     public static function complete_fan_apple_registration(WP_REST_Request $request) {
         $context = self::$fan_session_context;
-        if (!is_array($context) || ($context['scope'] ?? '') !== 'apple_onboarding') {
+        if (!is_array($context)) {
             return new WP_Error('fan_apple_profile_required', '请先使用 Apple ID 登录。', array('status' => 403));
         }
         $install_id = self::matching_request_install_id($request);
         if (is_wp_error($install_id)) { return $install_id; }
         $display_name = sanitize_text_field((string) $request->get_param('displayName'));
-        $douyin_id = self::normalize_optional_douyin_id($request->get_param('douyinID'));
+        $douyin_id = self::normalize_required_douyin_id($request->get_param('douyinID'));
         if (is_wp_error($douyin_id)) { return $douyin_id; }
         $display_error = self::validate_fan_display_name($display_name);
         if (is_wp_error($display_error)) { return $display_error; }
         $consent_version = $request->get_param('consentVersion');
         if (!self::fan_new_consent_version_is_accepted($consent_version)) {
             return new WP_Error('fan_consent_required', '请先阅读并确认账号资料的使用说明。', array('status' => 400));
+        }
+        if (!empty($context['douyinProfileUpgrade'])
+            && ($context['scope'] ?? '') === 'normal') {
+            return self::complete_fan_douyin_profile_upgrade(
+                $request,
+                $context,
+                $install_id,
+                $display_name,
+                $douyin_id,
+                $consent_version
+            );
+        }
+        if (($context['scope'] ?? '') !== 'apple_onboarding') {
+            return new WP_Error(
+                'fan_apple_profile_required',
+                '当前账号不需要补全抖音 ID。',
+                array('status' => 403)
+            );
         }
         $network_limit = self::rate_limit(
             'fan_apple_profile_net',
@@ -739,7 +779,7 @@ trait Shuzijun_App_Fan_Endpoints {
         if (is_wp_error($lock_owner)) { return $lock_owner; }
         $transaction_started = false;
         $transaction_committed = false;
-        $reservation = $douyin_id !== '' ? self::douyin_reservation_name($douyin_id) : '';
+        $reservation = self::douyin_reservation_name($douyin_id);
         try {
             if (!self::fan_session_context_is_current_from_database($context, 'apple_onboarding')) {
                 return new WP_Error('fan_apple_profile_required', 'Apple 登录会话已失效。', array('status' => 403));
@@ -776,25 +816,48 @@ trait Shuzijun_App_Fan_Endpoints {
                 || $source !== 'apple' || !self::valid_apple_sub_hash($sub_hash)) {
                 return new WP_Error('fan_apple_profile_required', 'Apple 账号状态已变更，请重新登录。', array('status' => 403));
             }
-            if ($douyin_id !== '') {
-                $duplicate_id = (int) $wpdb->get_var($wpdb->prepare(
-                    "SELECT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s AND user_id <> %d LIMIT 1",
-                    self::FAN_META_DOUYIN_ID,
-                    $douyin_id,
-                    $user_id
+            $is_douyin_migration = !empty($setup['douyinMigration']);
+            $permissions = array('gallery_full', 'video_view');
+            $status = 'pending';
+            if ($is_douyin_migration) {
+                $permissions = self::sanitize_fan_permissions(self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_PERMISSIONS,
+                    array(),
+                    true
                 ));
-                if ($duplicate_id > 0) {
-                    return new WP_Error('fan_douyin_id_exists', '该抖音 ID 已登记，请使用原账号或联系管理员。', array('status' => 409));
-                }
-                $inserted = $wpdb->query($wpdb->prepare(
-                    "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
-                    $reservation,
-                    (string) $user_id
+                $status = sanitize_key((string) self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_STATUS,
+                    '',
+                    true
                 ));
-                if ($inserted === false
-                    || self::reservation_owner_from_database($reservation) !== $user_id) {
-                    return new WP_Error('fan_douyin_id_exists', '该抖音 ID 已登记，请使用原账号或联系管理员。', array('status' => 409));
+                if (is_wp_error($permissions)
+                    || !in_array($status, array('pending', 'active', 'rejected', 'suspended'), true)) {
+                    return new WP_Error(
+                        'fan_apple_profile_required',
+                        'Apple 账号权限或状态无法安全迁移。',
+                        array('status' => 409)
+                    );
                 }
+            }
+            $duplicate_id = (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s AND user_id <> %d LIMIT 1",
+                self::FAN_META_DOUYIN_ID,
+                $douyin_id,
+                $user_id
+            ));
+            if ($duplicate_id > 0) {
+                return new WP_Error('fan_douyin_id_exists', '该抖音 ID 已登记，请使用原账号或联系管理员。', array('status' => 409));
+            }
+            $inserted = $wpdb->query($wpdb->prepare(
+                "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
+                $reservation,
+                (string) $user_id
+            ));
+            if ($inserted === false
+                || self::reservation_owner_from_database($reservation) !== $user_id) {
+                return new WP_Error('fan_douyin_id_exists', '该抖音 ID 已登记，请使用原账号或联系管理员。', array('status' => 409));
             }
             $current_epoch = (int) self::fan_meta_from_database(
                 $user_id,
@@ -818,8 +881,9 @@ trait Shuzijun_App_Fan_Endpoints {
                 && self::set_fan_meta_in_transaction(
                     $user_id,
                     self::FAN_META_PERMISSIONS,
-                    array('gallery_full', 'video_view')
+                    $permissions
                 )
+                && self::set_fan_meta_in_transaction($user_id, self::FAN_META_STATUS, $status)
                 && self::set_fan_meta_in_transaction($user_id, self::FAN_META_CONSENT, array(
                     'version' => $consent_version,
                     'acceptedAt' => gmdate('c'),
@@ -842,7 +906,7 @@ trait Shuzijun_App_Fan_Endpoints {
                 return new WP_Error('fan_apple_profile_failed', '暂时无法保存 Apple 账号资料。', array('status' => 503));
             }
             $transaction_committed = true;
-            self::clear_fan_option_caches($reservation !== '' ? array($reservation) : array());
+            self::clear_fan_option_caches(array($reservation));
             clean_user_cache($user_id);
             wp_cache_delete($user_id, 'user_meta');
             self::record_fan_auth_audit($user_id, 'apple_registration_completed');
@@ -862,7 +926,220 @@ trait Shuzijun_App_Fan_Endpoints {
             if ($transaction_started && !$transaction_committed && isset($wpdb)
                 && method_exists($wpdb, 'query')) {
                 $wpdb->query('ROLLBACK');
-                self::clear_fan_option_caches($reservation !== '' ? array($reservation) : array());
+                self::clear_fan_option_caches(array($reservation));
+                clean_user_cache($user_id);
+                wp_cache_delete($user_id, 'user_meta');
+            }
+            self::release_fan_lock($user_id, $lock_owner);
+        }
+    }
+
+    private static function complete_fan_douyin_profile_upgrade(
+        WP_REST_Request $request,
+        $context,
+        $install_id,
+        $display_name,
+        $douyin_id,
+        $consent_version
+    ) {
+        $network_limit = self::rate_limit(
+            'fan_douyin_upgrade_net',
+            self::request_network_fingerprint(),
+            20,
+            15 * MINUTE_IN_SECONDS
+        );
+        if (is_wp_error($network_limit)) { return $network_limit; }
+
+        $user_id = (int) ($context['userID'] ?? 0);
+        $source = self::fan_account_source($user_id);
+        $current_password = (string) $request->get_param('currentPassword');
+        if ($source !== 'apple' && (!$current_password || strlen($current_password) > 512)) {
+            return new WP_Error(
+                'fan_login_invalid',
+                '请输入当前密码后补全抖音 ID。',
+                array('status' => 401)
+            );
+        }
+
+        $lock_owner = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock_owner)) { return $lock_owner; }
+        $transaction_started = false;
+        $transaction_committed = false;
+        $reservation = self::douyin_reservation_name($douyin_id);
+        $previous_reservation = '';
+        try {
+            if (!self::fan_session_context_is_current_from_database($context, 'normal')
+                || !empty(self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_INVITATION,
+                    null,
+                    true
+                ))
+                || !empty(self::fan_meta_from_database(
+                    $user_id,
+                    self::FAN_META_PASSWORD_RECOVERY,
+                    null,
+                    true
+                ))) {
+                return new WP_Error(
+                    'fan_account_setup_required',
+                    '账号状态已变更，请重新登录后再补全资料。',
+                    array('status' => 409)
+                );
+            }
+            if ($source === 'apple') {
+                if (($context['authMethod'] ?? '') !== 'apple'
+                    || (int) ($context['recentAuthUntil'] ?? 0) < time()) {
+                    return new WP_Error(
+                        'fan_apple_profile_required',
+                        '请重新使用 Apple ID 验证后补全抖音 ID。',
+                        array('status' => 403)
+                    );
+                }
+            } elseif (!self::fan_password_matches_database(
+                $user_id,
+                $current_password,
+                true
+            )) {
+                return new WP_Error(
+                    'fan_login_invalid',
+                    '当前密码不正确。',
+                    array('status' => 401)
+                );
+            }
+
+            global $wpdb;
+            if (!isset($wpdb) || !method_exists($wpdb, 'query')
+                || $wpdb->query('START TRANSACTION') === false) {
+                return new WP_Error(
+                    'fan_douyin_upgrade_unavailable',
+                    '账号资料事务暂时不可用。',
+                    array('status' => 503)
+                );
+            }
+            $transaction_started = true;
+            $stored_douyin_id = (string) self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_DOUYIN_ID,
+                '',
+                true
+            );
+            $normalized_stored_douyin_id = self::normalize_douyin_id($stored_douyin_id);
+            if ($normalized_stored_douyin_id !== ''
+                && hash_equals($stored_douyin_id, $normalized_stored_douyin_id)
+                && !self::is_invitation_douyin_id($stored_douyin_id)) {
+                return new WP_Error(
+                    'fan_douyin_upgrade_not_required',
+                    '当前账号已绑定抖音 ID。',
+                    array('status' => 409)
+                );
+            }
+            if ($stored_douyin_id !== '') {
+                $previous_reservation = self::douyin_reservation_name($stored_douyin_id);
+            }
+            $duplicate_id = (int) $wpdb->get_var($wpdb->prepare(
+                "SELECT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s AND meta_value = %s AND user_id <> %d LIMIT 1",
+                self::FAN_META_DOUYIN_ID,
+                $douyin_id,
+                $user_id
+            ));
+            if ($duplicate_id > 0) {
+                return new WP_Error(
+                    'fan_douyin_id_exists',
+                    '该抖音 ID 已登记，请使用原账号或联系管理员。',
+                    array('status' => 409)
+                );
+            }
+            $inserted = $wpdb->query($wpdb->prepare(
+                "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'no')",
+                $reservation,
+                (string) $user_id
+            ));
+            if ($inserted === false
+                || self::reservation_owner_from_database($reservation) !== $user_id) {
+                return new WP_Error(
+                    'fan_douyin_id_exists',
+                    '该抖音 ID 已登记，请使用原账号或联系管理员。',
+                    array('status' => 409)
+                );
+            }
+            $current_epoch = (int) self::fan_meta_from_database(
+                $user_id,
+                self::FAN_META_CREDENTIAL_EPOCH,
+                0,
+                true
+            );
+            $saved = $current_epoch > 0
+                && self::set_fan_meta_in_transaction(
+                    $user_id,
+                    self::FAN_META_DOUYIN_ID,
+                    $douyin_id
+                )
+                && self::set_fan_meta_in_transaction(
+                    $user_id,
+                    self::FAN_META_CONSENT,
+                    array(
+                        'version' => $consent_version,
+                        'acceptedAt' => gmdate('c'),
+                        'source' => 'douyin_profile_upgrade',
+                    )
+                )
+                && self::set_fan_meta_in_transaction(
+                    $user_id,
+                    self::FAN_META_CREDENTIAL_EPOCH,
+                    $current_epoch + 1
+                );
+            $display_saved = $wpdb->update(
+                $wpdb->users,
+                array('display_name' => $display_name),
+                array('ID' => $user_id),
+                array('%s'),
+                array('%d')
+            );
+            if (!$saved || $display_saved === false || $wpdb->query('COMMIT') === false) {
+                return new WP_Error(
+                    'fan_douyin_upgrade_unavailable',
+                    '暂时无法保存抖音 ID，请稍后重试。',
+                    array('status' => 503)
+                );
+            }
+            $transaction_committed = true;
+            self::clear_fan_option_caches(array_filter(array(
+                $reservation,
+                $previous_reservation,
+            )));
+            clean_user_cache($user_id);
+            wp_cache_delete($user_id, 'user_meta');
+            if ($previous_reservation !== ''
+                && self::reservation_owner_from_database($previous_reservation) === $user_id) {
+                delete_option($previous_reservation);
+            }
+            self::revoke_all_fan_sessions($user_id);
+            $security_context = $source === 'apple'
+                ? array(
+                    'authMethod' => 'apple',
+                    'recentAuthUntil' => time() + self::FAN_APPLE_RECENT_AUTH_TTL,
+                )
+                : array('authMethod' => 'password');
+            $session = self::issue_fan_session(
+                $user_id,
+                $install_id,
+                'normal',
+                self::FAN_SESSION_TTL,
+                $security_context
+            );
+            if (is_wp_error($session)) { return $session; }
+            self::$fan_session_context = $session;
+            return self::fan_auth_response($user_id, $session);
+        } finally {
+            global $wpdb;
+            if ($transaction_started && !$transaction_committed && isset($wpdb)
+                && method_exists($wpdb, 'query')) {
+                $wpdb->query('ROLLBACK');
+                self::clear_fan_option_caches(array_filter(array(
+                    $reservation,
+                    $previous_reservation,
+                )));
                 clean_user_cache($user_id);
                 wp_cache_delete($user_id, 'user_meta');
             }
@@ -1321,6 +1598,13 @@ trait Shuzijun_App_Fan_Endpoints {
                 array('status' => 403)
             );
         }
+        if (!self::fan_has_required_douyin_id((int) $context['userID'])) {
+            return new WP_Error(
+                'fan_douyin_id_required',
+                '请先在账号页补全抖音 ID。',
+                array('status' => 403)
+            );
+        }
         $status = (string) get_user_meta((int) $context['userID'], self::FAN_META_STATUS, true);
         if ($status !== 'active') {
             $errors = array(
@@ -1344,15 +1628,12 @@ trait Shuzijun_App_Fan_Endpoints {
             return new WP_Error('fan_session_required', '请重新登录。', array('status' => 401));
         }
         if (($context['scope'] ?? '') === 'apple_onboarding') {
-            $setup = self::normalize_fan_apple_setup(self::fan_meta_from_database(
+            $registration = self::fan_apple_onboarding_payload(
                 (int) $context['userID'],
-                self::FAN_META_APPLE_SETUP,
-                null
-            ));
-            if (is_wp_error($setup)) { return $setup; }
-            $payload = array('appleRegistration' => array(
-                'expiresAt' => gmdate('c', (int) $context['expires']),
-            ));
+                $context
+            );
+            if (is_wp_error($registration)) { return $registration; }
+            $payload = array('appleRegistration' => $registration);
         } else {
             $payload = array('profile' => self::fan_profile((int) $context['userID'], $context));
         }
@@ -1555,7 +1836,7 @@ trait Shuzijun_App_Fan_Endpoints {
         }
 
         $display_name = sanitize_text_field((string) $request->get_param('displayName'));
-        $douyin_id = self::normalize_optional_douyin_id($request->get_param('douyinID'));
+        $douyin_id = self::normalize_required_douyin_id($request->get_param('douyinID'));
         if (is_wp_error($douyin_id)) { return $douyin_id; }
         $current_password = (string) $request->get_param('currentPassword');
         $new_password = (string) $request->get_param('newPassword');
@@ -2227,16 +2508,17 @@ trait Shuzijun_App_Fan_Endpoints {
                     self::FAN_META_DOUYIN_ID,
                     true
                 );
-                $normalized_douyin_id = self::normalize_optional_douyin_id($stored_douyin_id);
+                $normalized_douyin_id = self::normalize_required_douyin_id($stored_douyin_id);
                 $douyin_id_is_valid = !is_wp_error($normalized_douyin_id)
                     && $normalized_douyin_id === $stored_douyin_id;
                 $consent = get_user_meta((int) $user->ID, self::FAN_META_CONSENT, true);
                 if (!empty($apple_setup)
-                    || ($source === 'apple' && (!$douyin_id_is_valid
-                        || !self::fan_stored_consent_is_accepted($consent)))) {
+                    || !$douyin_id_is_valid
+                    || ($source === 'apple'
+                        && !self::fan_stored_consent_is_accepted($consent))) {
                     return new WP_Error(
                         'fan_account_setup_required',
-                        '用户必须先完成昵称和隐私同意设置。',
+                        '用户必须先完成昵称、抖音 ID 和隐私同意设置。',
                         array('status' => 409)
                     );
                 }

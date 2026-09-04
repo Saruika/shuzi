@@ -32,18 +32,29 @@ enum HomeHeroRenderPolicy {
     static func shouldLoadRemoteImage(
         at index: Int,
         selection: Int,
-        count: Int
+        count: Int,
+        presentation: HomeHeroPresentation = .fill
     ) -> Bool {
         guard count > 0,
               (0..<count).contains(index),
               (0..<count).contains(selection) else { return false }
+        // A landscape iPad shows the whole portrait photograph, so a blank
+        // neighbouring page is especially conspicuous. The hero is capped at
+        // five images; warming this small, bounded set in volatile memory
+        // keeps every swipe continuous without persisting protected media.
+        if presentation == .fit { return true }
         let directDistance = abs(index - selection)
         let circularDistance = min(directDistance, count - directDistance)
         return circularDistance <= 1
     }
 
-    static func prefetchIndices(selection: Int, count: Int) -> [Int] {
+    static func prefetchIndices(
+        selection: Int,
+        count: Int,
+        presentation: HomeHeroPresentation = .fill
+    ) -> [Int] {
         guard count > 0, (0..<count).contains(selection) else { return [] }
+        if presentation == .fit { return Array(0..<count) }
         return Array(Set([
             (selection - 1 + count) % count,
             selection,
@@ -96,6 +107,7 @@ private struct HeroPager: View {
     @Environment(\.displayScale) private var displayScale
     @State private var selection = HeroPager.visualTestInitialSelection
     @State private var isVisible = false
+    @State private var landscapeContinuityImage: UIImage?
 
     private var slides: [URL] {
         // Keep the adaptive-layout fixture independent from a stale manifest
@@ -131,12 +143,13 @@ private struct HeroPager: View {
                             && HomeHeroRenderPolicy.shouldLoadRemoteImage(
                                 at: index,
                                 selection: selection,
-                                count: slides.count
+                                count: slides.count,
+                                presentation: presentation
                             )
                         let visualTestIdentifier = exposesVisualTestState
                             && presentation == .fit
                             && index == selection
-                            ? "home-hero-actual-fitted-image"
+                            ? "home-hero-actual-fitted-image-\(index)"
                             : nil
 
                         HeroSlideImage(
@@ -144,7 +157,15 @@ private struct HeroPager: View {
                             loadsRemoteImage: loadsRemoteImage,
                             usesVisualTestArtwork: holdsRemoteImagesForVisualTesting,
                             presentation: presentation,
-                            visualTestIdentifier: visualTestIdentifier
+                            visualTestIdentifier: visualTestIdentifier,
+                            continuityImage: presentation == .fit
+                                ? landscapeContinuityImage
+                                : nil,
+                            onImageLoaded: { loadedImage in
+                                guard presentation == .fit,
+                                      index == selection else { return }
+                                landscapeContinuityImage = loadedImage
+                            }
                         )
                             .frame(width: proxy.size.width, height: proxy.size.height)
                             .clipped()
@@ -187,7 +208,7 @@ private struct HeroPager: View {
             .task(id: prefetchRequestID(for: proxy.size)) {
                 guard !holdsRemoteImagesForVisualTesting else { return }
                 await ArtworkImagePrefetcher.prefetch(
-                    urls: prefetchURLs,
+                    urls: prefetchURLs(for: presentation),
                     maxPixelSize: min(
                         1_800,
                         max(
@@ -451,16 +472,27 @@ private struct HeroPager: View {
         }
     }
 
-    private var prefetchURLs: [URL] {
+    private func prefetchURLs(for presentation: HomeHeroPresentation) -> [URL] {
         HomeHeroRenderPolicy.prefetchIndices(
             selection: selection,
-            count: slides.count
+            count: slides.count,
+            presentation: presentation
         ).map { slides[$0] }
     }
 
     private func prefetchRequestID(for size: CGSize) -> String {
-        let urls = prefetchURLs.map(\.absoluteString).joined(separator: "|")
-        return "\(selection)#\(Int(size.width.rounded()))x\(Int(size.height.rounded()))#\(urls)"
+        let presentation = HomeHeroRenderPolicy.presentation(
+            for: size,
+            idiom: UIDevice.current.userInterfaceIdiom
+        )
+        let urls = prefetchURLs(for: presentation)
+            .map(\.absoluteString)
+            .joined(separator: "|")
+        // In fit mode every bounded hero URL is already part of this request.
+        // Keeping the current page out of the identity prevents a swipe from
+        // cancelling and restarting the same preheat work mid-transition.
+        let selectionKey = presentation == .fit ? "all" : String(selection)
+        return "\(selectionKey)#\(Int(size.width.rounded()))x\(Int(size.height.rounded()))#\(urls)"
     }
 
     private var holdsRemoteImagesForVisualTesting: Bool {
@@ -566,6 +598,10 @@ private struct HeroSlideImage: View {
     let usesVisualTestArtwork: Bool
     let presentation: HomeHeroPresentation
     let visualTestIdentifier: String?
+    let continuityImage: UIImage?
+    let onImageLoaded: (UIImage) -> Void
+    @State private var measuredURL: URL?
+    @State private var measuredSourceSize: CGSize?
 
     var body: some View {
         GeometryReader { proxy in
@@ -665,7 +701,12 @@ private struct HeroSlideImage: View {
             DownsampledAsyncImage(
                 url: url,
                 targetSize: size,
-                maximumPixelSize: 1_800
+                maximumPixelSize: 1_800,
+                onImageLoaded: { loadedImage in
+                    measuredURL = url
+                    measuredSourceSize = loadedImage.size
+                    onImageLoaded(loadedImage)
+                }
             ) { phase in
                 switch phase {
                 case .success(let image):
@@ -675,8 +716,10 @@ private struct HeroSlideImage: View {
                             fittedForeground(
                                 image,
                                 in: size,
-                                sourceSize: nil,
-                                accessibilityIdentifier: nil
+                                sourceSize: measuredURL == url
+                                    ? measuredSourceSize
+                                    : nil,
+                                accessibilityIdentifier: visualTestIdentifier
                             )
                         }
                             .transition(.opacity)
@@ -685,7 +728,15 @@ private struct HeroSlideImage: View {
                             .transition(.opacity)
                     }
                 case .empty, .failure:
-                    Color.clear
+                    if let continuityImage {
+                        fittedContinuityArtwork(
+                            Image(uiImage: continuityImage),
+                            in: size,
+                            usesFittedPresentation: usesFittedPresentation
+                        )
+                    } else {
+                        Color.clear
+                    }
                 @unknown default:
                     Color.clear
                 }
@@ -695,7 +746,39 @@ private struct HeroSlideImage: View {
 
     @ViewBuilder
     private func fittedBackground(in size: CGSize) -> some View {
-        placeholder
+        ZStack {
+            AppTheme.elevatedInk
+            LinearGradient(
+                colors: [
+                    AppTheme.gold.opacity(0.16),
+                    Color(red: 0.10, green: 0.13, blue: 0.12),
+                    AppTheme.elevatedInk,
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func fittedContinuityArtwork(
+        _ image: Image,
+        in size: CGSize,
+        usesFittedPresentation: Bool
+    ) -> some View {
+        if usesFittedPresentation {
+            ZStack {
+                fittedBackground(image, in: size)
+                fittedForeground(
+                    image,
+                    in: size,
+                    sourceSize: continuityImage?.size,
+                    accessibilityIdentifier: nil
+                )
+            }
+        } else {
+            filledArtwork(image, in: size)
+        }
     }
 
     private func fittedBackground(_ image: Image, in size: CGSize) -> some View {
