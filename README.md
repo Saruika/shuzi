@@ -94,6 +94,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.5.md`](Server/releases/v1.3.30-build42.5.md)：以完整 crontab 字节校验取代过时的 stargate 行假设，兼容腾讯云 systemd TAT agent。
 - [`Server/releases/v1.3.30-build42.6.md`](Server/releases/v1.3.30-build42.6.md)：在生产 `/run` noexec 挂载上通过固定 Bash 解释器执行已校验的预检脚本。
 - [`Server/releases/v1.3.30-build42.7.md`](Server/releases/v1.3.30-build42.7.md)：清除生产 Swift URL 强制解包和测试密码字面量。
+- [`Server/releases/v1.5.10-build42.8.md`](Server/releases/v1.5.10-build42.8.md)：将 8,125 行 App Content 插件拆成入口与五个可审查模块，并完整固定发布、回滚和直连拦截信任链。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
@@ -136,6 +137,12 @@ Build 42 在录屏、投屏和切后台的公开保护之外，按产品方明�
 - 管理员替换关于页人物图后只发布该字段并立即应用服务器权威清单，不再要求额外点击“保存全部”，也不会连带发布尚未保存的其他草稿。
 - 管理员草稿保留服务器真实配置值，与客户端展示用的首页/相册备用图分离；保存其他内容时不会把临时备用图误发布为关于页人物图。
 - 自动化覆盖截图成品 OCR、触控连续性、整窗后台遮罩、关于页图片选择与单字段发布合同；开发者 `simctl io screenshot` 可绕过模拟器安全合成的边界已单独记录，不作为普通用户截图结果。
+
+### Build 42.8 服务端可维护性
+
+- App Content API 从 8,125 行单文件拆分为 13 行入口、核心类与合作、粉丝接口、粉丝身份、内容交付四个独立模块；重组结果与原类体逐字节一致。
+- Apple JWT 自动加载路径已按新模块层级修正，PHP 8.3 语法、动态插件合同和发布/回滚合同全部通过。
+- 生产旧清单只可作为已审核迁移源，新候选包必须精确匹配模块化清单；入口和所有模块的直接 PHP URL 均必须返回 404。
 
 ## v1.3.29-build41
 

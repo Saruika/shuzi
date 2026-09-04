@@ -165,6 +165,11 @@ assert_status 404 "/wp-content/mu-plugins/shuzijun-app-content.php"
 assert_status 404 "/wp-content/mu-plugins/shuzijun-app-content.PHP"
 assert_status 404 "/wp-content/mu-plugins/shuzijun-app-content.php/path-info"
 assert_status 404 "/wp-content/mu-plugins/shuzijun-app-content%2ephp"
+assert_status 404 "/wp-content/mu-plugins/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php"
+assert_status 404 "/wp-content/mu-plugins/vendor/shuzijun/app-content/trait-shuzijun-app-collaboration.php"
+assert_status 404 "/wp-content/mu-plugins/vendor/shuzijun/app-content/trait-shuzijun-app-fan-endpoints.php"
+assert_status 404 "/wp-content/mu-plugins/vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php"
+assert_status 404 "/wp-content/mu-plugins/vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php"
 
 # The pretty route is authoritative from the caller's perspective: on the
 # primary it reaches local WordPress and on the standby Nginx proxies it to the

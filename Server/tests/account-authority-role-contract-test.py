@@ -10,7 +10,9 @@ from pathlib import Path
 VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 CONFIGURATOR = Path("Server/operations/configure-account-authority.py")
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
-PLUGIN = Path("Server/shuzijun-app-content.php")
+PLUGIN = Path(
+    "Server/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php"
+)
 
 
 def load_module(name: str, path: Path):

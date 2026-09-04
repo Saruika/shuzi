@@ -96,6 +96,19 @@ def invoke(
 
 
 def main() -> None:
+    smoke_source = SMOKE.read_text(encoding="utf-8")
+    for module in (
+        "class-shuzijun-app-content-api.php",
+        "trait-shuzijun-app-collaboration.php",
+        "trait-shuzijun-app-fan-endpoints.php",
+        "trait-shuzijun-app-fan-identity.php",
+        "trait-shuzijun-app-content-delivery.php",
+    ):
+        assert (
+            f'assert_status 404 "/wp-content/mu-plugins/vendor/'
+            f'shuzijun/app-content/{module}"'
+        ) in smoke_source
+
     with tempfile.TemporaryDirectory(prefix="yishu-nginx-smoke-") as temp_dir:
         fake_bin = Path(temp_dir) / "bin"
         fake_bin.mkdir()

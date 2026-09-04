@@ -5,10 +5,33 @@ from pathlib import Path
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 STANDBY_SEEDER = Path("Server/operations/seed-standby-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
+RELEASE_RECORD = Path("Server/releases/v1.5.10-build42.8.md")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
+SERVER_ROOT = Path("Server")
+PLUGIN_ENTRY = SERVER_ROOT / "shuzijun-app-content.php"
+PLUGIN_IMPLEMENTATION = (
+    SERVER_ROOT
+    / "vendor/shuzijun/app-content/class-shuzijun-app-content-api.php"
+)
+PLUGIN_MODULES = (
+    SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-collaboration.php",
+    SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-fan-endpoints.php",
+    SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php",
+    SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php",
+    PLUGIN_IMPLEMENTATION,
+)
 LEGACY_MANIFEST_SHA256 = "64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134"
-TARGET_MANIFEST_SHA256 = "76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9"
+PREVIOUS_MANIFEST_SHA256 = "76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9"
+TARGET_MANIFEST_SHA256 = "b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1"
+TARGET_PLUGIN_SHA256 = "92a9eecc72a4b0b70475d2ea2c6fe27be682965211a14c471cf0cc5f6f75ac8f"
+TARGET_MODULE_SHA256S = (
+    "974b81d27bfbccd86d6b661f73254754e86d359e0260fce91df6509a348ccf24",
+    "ee18a1b6f3d0c92c31716c6232e120a601a8ffeacf36dec046ddd7cc87530db9",
+    "0f7d8248527e8f26ce827f75a378ef0cad59768721cc3950eb4151dbc8fe80ce",
+    "c0cec0d537c5612769a940d0fd93f388f735659376921b643de2448da84bf85b",
+    "0756464058f6428ba775533986e9848c3696d1f85d0939c375e6148f6e033b9c",
+)
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -68,7 +91,7 @@ def assert_manifest_lifecycle_regressions(text: str, lines: list[str]) -> None:
 
     # Rollback is presence-sensitive: a manifested baseline restores the exact
     # prior bytes, while the sole legacy transition restores manifest absence.
-    for previous_manifest in (LEGACY_MANIFEST_SHA256, None):
+    for previous_manifest in (PREVIOUS_MANIFEST_SHA256, LEGACY_MANIFEST_SHA256, None):
         before = {entry: "old" for entry in release_entries[:-1]}
         if previous_manifest is not None:
             before["release.sha256"] = previous_manifest
@@ -115,8 +138,65 @@ def main() -> None:
     text = DEPLOYER.read_text(encoding="utf-8")
     lines = text.splitlines()
     readme = OPERATIONS_README.read_text(encoding="utf-8")
+    release_record = RELEASE_RECORD.read_text(encoding="utf-8")
+    plugin_entry = PLUGIN_ENTRY.read_text(encoding="utf-8")
+    plugin_implementation = PLUGIN_IMPLEMENTATION.read_text(encoding="utf-8")
+    plugin_modules = [path.read_text(encoding="utf-8") for path in PLUGIN_MODULES]
     authority_verifier_sha256 = hashlib.sha256(AUTHORITY_VERIFIER.read_bytes()).hexdigest()
     webroot_verifier_sha256 = hashlib.sha256(WEBROOT_VERIFIER.read_bytes()).hexdigest()
+
+    loader = (
+        "require_once __DIR__ . "
+        "'/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php';"
+    )
+    assert plugin_entry.count(loader) == 1
+    assert plugin_entry.count("Shuzijun_App_Content_API::init();") == 1
+    assert "final class Shuzijun_App_Content_API" not in plugin_entry
+    assert "final class Shuzijun_App_Content_API" in plugin_implementation
+    assert "Shuzijun_App_Content_API::init();" not in plugin_implementation
+    assert len(plugin_entry.splitlines()) < 25
+    assert max(len(source.splitlines()) for source in plugin_modules) < 4_000
+    assert sum(len(source.splitlines()) for source in plugin_modules) > 8_000
+    assert plugin_implementation.count("require_once __DIR__ . '/trait-") == 4
+    assert plugin_implementation.count("    use Shuzijun_App_") == 4
+    for trait_source in plugin_modules[:4]:
+        assert trait_source.count("trait Shuzijun_App_") == 1
+        assert "final class Shuzijun_App_Content_API" not in trait_source
+        assert "Shuzijun_App_Content_API::init();" not in trait_source
+    assert hashlib.sha256(PLUGIN_ENTRY.read_bytes()).hexdigest() == TARGET_PLUGIN_SHA256
+    assert tuple(
+        hashlib.sha256(path.read_bytes()).hexdigest() for path in PLUGIN_MODULES
+    ) == TARGET_MODULE_SHA256S
+
+    release_trust_values = (
+        f"RELEASE_MANIFEST_SHA256={TARGET_MANIFEST_SHA256}",
+        f"PLUGIN_ENTRY_SHA256={TARGET_PLUGIN_SHA256}",
+        f"CORE_CLASS_SHA256={TARGET_MODULE_SHA256S[4]}",
+        f"COLLABORATION_TRAIT_SHA256={TARGET_MODULE_SHA256S[0]}",
+        f"FAN_ENDPOINTS_TRAIT_SHA256={TARGET_MODULE_SHA256S[1]}",
+        f"FAN_IDENTITY_TRAIT_SHA256={TARGET_MODULE_SHA256S[2]}",
+        f"CONTENT_DELIVERY_TRAIT_SHA256={TARGET_MODULE_SHA256S[3]}",
+        f"PREVIOUS_LIVE_MANIFEST_SHA256={PREVIOUS_MANIFEST_SHA256}",
+    )
+    for trust_value in release_trust_values:
+        assert release_record.count(trust_value) == 1
+
+    release_files = [
+        PLUGIN_ENTRY,
+        SERVER_ROOT / "composer.json",
+        SERVER_ROOT / "composer.lock",
+        *sorted(path for path in (SERVER_ROOT / "vendor").rglob("*") if path.is_file()),
+    ]
+    release_records = "".join(
+        f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
+        f"{path.relative_to(SERVER_ROOT).as_posix()}\n"
+        for path in sorted(release_files)
+    ).encode("ascii")
+    assert hashlib.sha256(release_records).hexdigest() == TARGET_MANIFEST_SHA256
+    deployer_sha256 = hashlib.sha256(DEPLOYER.read_bytes()).hexdigest()
+    seeder_sha256 = hashlib.sha256(STANDBY_SEEDER.read_bytes()).hexdigest()
+    assert release_record.count(f"DEPLOYER_SHA256={deployer_sha256}") == 1
+    assert release_record.count(f"STANDBY_SEEDER_SHA256={seeder_sha256}") == 1
 
     assert lines[:3] == ["#!/bin/bash", "set -Eeuo pipefail", "umask 077"]
     assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin" in lines
@@ -134,17 +214,49 @@ def main() -> None:
         f"readonly AUTHORITY_VERIFY_SHA256={authority_verifier_sha256}",
         "readonly VERIFY=/usr/local/sbin/verify-shuzijun-webroot-security",
         f"readonly VERIFY_SHA256={webroot_verifier_sha256}",
+        "readonly -a PLUGIN_MODULE_RELATIVES=(",
         'readonly LIVE_MANIFEST="$TARGET_DIR/$MANIFEST_NAME"',
         "readonly BACKUP_INTEGRITY_NAME=backup-integrity.sha256",
         "readonly BACKUP_MANIFEST_STATE_NAME=live-release-manifest.state",
         "readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134",
-        "readonly TARGET_RELEASE_MANIFEST_SHA256=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9",
+        "readonly PREVIOUS_RELEASE_MANIFEST_SHA256=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9",
+        "readonly TARGET_RELEASE_MANIFEST_SHA256=b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1",
         "readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a",
         "readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0",
-        "readonly TARGET_RELEASE_PHP_SHA256=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3",
+        "readonly TARGET_RELEASE_PHP_SHA256=92a9eecc72a4b0b70475d2ea2c6fe27be682965211a14c471cf0cc5f6f75ac8f",
+        "readonly -a TARGET_RELEASE_MODULE_SHA256S=(",
         "readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1",
     ):
         assert fixed_path in lines
+    for path in PLUGIN_MODULES:
+        assert f"    {path.relative_to(SERVER_ROOT).as_posix()}" in lines
+    for digest in TARGET_MODULE_SHA256S:
+        assert f"    {digest}" in lines
+    candidate_allowlist = function_body(
+        lines,
+        "validate_allowed_candidate_manifest_sha256",
+        "validate_allowed_live_manifest_sha256",
+    )
+    live_allowlist = function_body(
+        lines,
+        "validate_allowed_live_manifest_sha256",
+        "validate_manifest",
+    )
+    assert "PREVIOUS_RELEASE_MANIFEST_SHA256" not in candidate_allowlist
+    for reviewed_manifest in (
+        "LEGACY_BRIDGE_MANIFEST_SHA256",
+        "PREVIOUS_RELEASE_MANIFEST_SHA256",
+        "TARGET_RELEASE_MANIFEST_SHA256",
+    ):
+        assert reviewed_manifest in live_allowlist
+    validate_manifest_body = function_body(lines, "validate_manifest", "validate_secret_content")
+    assert 'validate_allowed_candidate_manifest_sha256 "$EXPECTED_MANIFEST_SHA256"' in validate_manifest_body
+    validate_live_body = function_body(
+        lines,
+        "validate_live_manifested_release",
+        "validate_unmanifested_legacy_bridge",
+    )
+    assert 'validate_allowed_live_manifest_sha256 "$actual_manifest_sha"' in validate_live_body
     assert "不得从 bootstrap 混合态\n直接跳到 1.5.10" in readme
     assert (
         "--manifest-sha256 "
@@ -249,6 +361,9 @@ def main() -> None:
         "vendor/autoload.php",
     ):
         assert required_path in manifest_body
+    assert 'for relative in "${PLUGIN_MODULE_RELATIVES[@]}"' in manifest_body
+    assert 'manifest_paths[$relative]' in manifest_body
+    assert "modular release manifest omits an API module" in manifest_body
 
     runtime_body = function_body(lines, "resolve_runtime_tools", "run_composer")
     for fixed_candidate in (
@@ -279,44 +394,68 @@ def main() -> None:
         lines, "probe_candidate_collaboration_release_fuse", "preflight_release"
     )
     for probe_guard in (
-        'cat -- "$BUNDLE/shuzijun-app-content.php" |',
+        'cat -- "${source_files[@]}" |',
+        'source_files=("$BUNDLE/shuzijun-app-content.php")',
+        'source_hashes=("$LEGACY_BRIDGE_PHP_SHA256")',
+        '"${#PLUGIN_MODULE_RELATIVES[@]}" -eq "${#TARGET_RELEASE_MODULE_SHA256S[@]}"',
+        'for index in "${!PLUGIN_MODULE_RELATIVES[@]}"',
+        'source_hashes+=("${TARGET_RELEASE_MODULE_SHA256S[$index]}")',
+        'source_sizes_csv=$(IFS=,;',
+        'source_hashes_csv=$(IFS=,;',
         "timeout --signal=KILL 20s runuser -u www-data -- env -i",
         '"$PHP_BIN" -n -d display_errors=0 -d log_errors=0',
         "allow_url_fopen=0 -d open_basedir=/nonexistent",
         "disable_functions=exec,passthru,shell_exec,system",
-        '$source = stream_get_contents(STDIN);',
-        '$sourceHash = hash("sha256", $source);',
-        '$legacyHash = $argv[1];',
-        '$targetHash = $argv[2];',
-        '$sentinel = $argv[3];',
-        '&& !hash_equals($targetHash, $sourceHash)',
+        '$payload = stream_get_contents(STDIN);',
+        '$sentinel = $argv[1];',
+        '$sourceMode = $argv[2];',
+        '$sizeValues = explode(",", $argv[3]);',
+        '$sourceHashes = explode(",", $argv[4]);',
+        '$sourceMode === "modular" && count($sizeValues) !== 6',
+        'hash_equals($sourceHashes[$index], hash("sha256", $source))',
+        '$traitSources = array_slice($sources, 0, 4);',
+        '$classSource = $sources[4];',
+        '$entrypoint = $sources[5];',
+        '$quote = chr(39);',
+        'substr_count($entrypoint, $entryLoader) !== 1',
+        'foreach ($classLoaders as $classLoader)',
         'exit(25);',
         'define("ABSPATH", "/nonexistent/");',
         'define("YISHU_ENABLE_COLLABORATION_PHASE1", true);',
-        'eval("?>" . $source);',
+        'foreach ($traitSources as $traitSource) { eval("?>" . $traitSource); }',
+        'eval("?>" . $classSource);',
+        'eval("?>" . $entrypoint);',
         'if (!class_exists($class, false)) { exit(19); }',
         'method_exists($class, $gate)',
         '$class . "::COLLABORATION_PHASE1_RELEASE_FUSE"',
         'constant("YISHU_ENABLE_COLLABORATION_PHASE1") !== true',
         'if (!$has_gate && !$has_fuse) {',
-        'if (!hash_equals($legacyHash, $sourceHash)) { exit(24); }',
+        'if ($sourceMode !== "legacy") { exit(24); }',
         'if (!$has_gate || !$has_fuse) { exit(21); }',
         'if (constant($fuse) !== false) { exit(22); }',
         'if ($class::$gate() !== false) { exit(23); }',
         'fwrite(STDOUT, $sentinel . "\\n");',
         'python3 -I -c',
         'sys.stdin.buffer.read(len(expected) + 1)',
-        '"$COLLABORATION_FUSE_PROBE_SENTINEL" 8<&- 9<&- |',
+        '"$COLLABORATION_FUSE_PROBE_SENTINEL" "$source_mode"',
+        '"$source_sizes_csv" "$source_hashes_csv" 8<&- 9<&- |',
         "candidate collaboration Phase 1 release fuse is not hard-disabled",
-        "candidate plugin source could not be read from the reviewed bundle",
+        "candidate plugin sources could not be read from the reviewed bundle",
         "candidate plugin could not be evaluated by the isolated PHP probe",
         "gate-free collaboration candidate is not the reviewed 1.5.8 bridge",
         "candidate plugin exited before the isolated fuse probe completed",
         "candidate plugin PHP is not in the reviewed release allowlist",
+        "candidate plugin source framing is invalid",
+        "candidate plugin loader graph is not exact",
     ):
         assert probe_guard in collaboration_probe, (
             f"missing candidate collaboration fuse probe: {probe_guard}"
         )
+    php_probe_start = collaboration_probe.index("        -r '\n") + len("        -r '")
+    php_probe_end = collaboration_probe.index(
+        '\n    \' "$COLLABORATION_FUSE_PROBE_SENTINEL"', php_probe_start
+    )
+    assert "'" not in collaboration_probe[php_probe_start:php_probe_end]
     for forbidden_probe_effect in (
         "$SITE",
         "$TARGET_DIR",
@@ -399,7 +538,7 @@ def main() -> None:
     for guard in (
         "live release manifest metadata is unsafe",
         'stat -c \'%u:%g:%h:%a\'',
-        "validate_allowed_release_manifest_sha256",
+        "validate_allowed_live_manifest_sha256",
         "live release manifest paths must be unique and bytewise sorted",
         "live release manifest does not allow every release file",
         "live release manifest contains a missing or extra file",
@@ -426,6 +565,10 @@ def main() -> None:
     )
     assert "wp-content/mu-plugins/shuzijun-app-content.php" in text
     assert "wp-content/mu-plugins/vendor/autoload.php" in text
+    assert "vendor/shuzijun/app-content/class-shuzijun-app-content-api.php" in text
+    assert 'for relative in "${PLUGIN_MODULE_RELATIVES[@]}"' in direct_probe_body
+    assert 'direct_php_urls+=("https://$HEALTH_HOST/wp-content/mu-plugins/$relative")' in direct_probe_body
+    assert 'for url in "${direct_php_urls[@]}"' in direct_probe_body
     for direct_guard in (
         '--resolve "$HEALTH_HOST:443:127.0.0.1"',
         '[[ "$status" == 404 ]]',

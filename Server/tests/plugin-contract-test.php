@@ -234,7 +234,23 @@ function rest_sanitize_boolean($value): bool {
 
 require dirname(__DIR__) . '/shuzijun-app-content.php';
 
-$plugin_source = file_get_contents(dirname(__DIR__) . '/shuzijun-app-content.php');
+$plugin_entry_source = file_get_contents(dirname(__DIR__) . '/shuzijun-app-content.php');
+$plugin_module_paths = array(
+    '/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php',
+    '/vendor/shuzijun/app-content/trait-shuzijun-app-collaboration.php',
+    '/vendor/shuzijun/app-content/trait-shuzijun-app-fan-endpoints.php',
+    '/vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php',
+    '/vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php',
+);
+$plugin_module_sources = array_map(
+    static fn (string $path) => file_get_contents(dirname(__DIR__) . $path),
+    $plugin_module_paths
+);
+$plugin_implementation_source = $plugin_module_sources[0];
+$plugin_source = (string) $plugin_entry_source . "\n" . implode(
+    "\n",
+    array_map('strval', $plugin_module_sources)
+);
 $fan_smoke_source = file_get_contents(__DIR__ . '/fan-api-smoke.sh');
 $backup_proxy_source = file_get_contents(
     dirname(__DIR__) . '/nginx/shuzijun-account-api-backup-proxy.conf'
@@ -274,6 +290,22 @@ function expect_true(bool $condition, string $message): void {
         exit(1);
     }
 }
+
+expect_true(
+    is_string($plugin_entry_source)
+        && is_string($plugin_implementation_source)
+        && count(array_filter($plugin_module_sources, 'is_string')) === 5
+        && strpos(
+            $plugin_entry_source,
+            "require_once __DIR__ . '/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php';"
+        ) !== false
+        && substr_count($plugin_entry_source, 'Shuzijun_App_Content_API::init();') === 1
+        && strpos($plugin_implementation_source, 'final class Shuzijun_App_Content_API') !== false
+        && substr_count($plugin_implementation_source, 'require_once __DIR__ . \'/trait-') === 4
+        && substr_count($plugin_implementation_source, '    use Shuzijun_App_') === 4
+        && strpos($plugin_implementation_source, 'Shuzijun_App_Content_API::init();') === false,
+    '插件入口必须只装配一次模块化 API 实现并只启动一次'
+);
 
 function expect_same($expected, $actual, string $message): void {
     expect_true($expected === $actual, $message);

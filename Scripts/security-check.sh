@@ -73,6 +73,9 @@ fi
 
 if command -v php >/dev/null 2>&1; then
   php -l Server/shuzijun-app-content.php >/dev/null
+  while IFS= read -r -d '' plugin_module; do
+    php -l "$plugin_module" >/dev/null
+  done < <(find Server/vendor/shuzijun/app-content -type f -name '*.php' -print0)
   php Server/tests/plugin-contract-test.php
 fi
 
@@ -149,10 +152,11 @@ if grep -qF 'location ^~ /images/' Server/nginx/shuzijun-legacy-images-alias.con
   fail '旧图片映射不得绕过敏感文件正则规则'
 fi
 grep -qF 'shuzijun-legacy-images-alias.conf' Server/nginx/README.md
+plugin_implementation=Server/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php
 grep -qF "const ACCOUNT_AUTHORITY_ROLE_PATH = '/etc/shuzijun/account-authority-role';" \
-  Server/shuzijun-app-content.php
-grep -qF '$payload === "authority\n"' Server/shuzijun-app-content.php
-grep -qF 'yishu_account_authority_unavailable' Server/shuzijun-app-content.php
+  "$plugin_implementation"
+grep -qF '$payload === "authority\n"' "$plugin_implementation"
+grep -qF 'yishu_account_authority_unavailable' "$plugin_implementation"
 legacy_authority_constant='YISHU_ACCOUNT_''AUTHORITY'
 if grep -R -I -q -F "$legacy_authority_constant" Server Scripts; then
   fail '检测到已废弃的 PHP authority 常量，必须只使用固定角色 marker'

@@ -107,7 +107,10 @@ def main() -> None:
     )
     assert 'define("YISHU_ENABLE_COLLABORATION_PHASE1", true);' in candidate_probe
     assert 'if (!$has_gate && !$has_fuse) {' in candidate_probe
-    assert 'if (!hash_equals($legacyHash, $sourceHash)) { exit(24); }' in candidate_probe
+    assert '$sourceMode === "legacy"' in candidate_probe
+    assert 'source_hashes=("$LEGACY_BRIDGE_PHP_SHA256")' in candidate_probe
+    assert 'hash_equals($sourceHashes[$index], hash("sha256", $source))' in candidate_probe
+    assert 'if ($sourceMode !== "legacy") { exit(24); }' in candidate_probe
     assert 'candidate plugin exited before the isolated fuse probe completed' in candidate_probe
     assert 'if (constant($fuse) !== false) { exit(22); }' in candidate_probe
     assert 'if ($class::$gate() !== false) { exit(23); }' in candidate_probe

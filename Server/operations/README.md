@@ -449,33 +449,35 @@ JWT autoloader 及真实 `wp-load.php`，对 `/index.php?...` 和 `/?...`
 路由和单写者验收，再在独立操作中显式决定是否 unmask/start FPM。
 
 完成 1.5.8 bridge 后，普通版本升级使用目标版本自己的发布包。下面是
-Build 41 / 服务端 1.5.10 的已记录调用；独立信任值见
-[`../releases/v1.5.10-build41.5.md`](../releases/v1.5.10-build41.5.md)。SHA-256
-不能替换成服务器现场重新计算后未经 Git 发布记录核对的值。备节点先用
-`standby` dry-run/apply，上海节点再用 `authority` dry-run/apply：
+Build 42.8 / 服务端 1.5.10 模块化发布的已记录调用；独立信任值见
+[`../releases/v1.5.10-build42.8.md`](../releases/v1.5.10-build42.8.md)。新发布器会把已上线的
+Build 41 清单 `76f159…` 仅作为可验证的迁移源，不接受它作为新候选包；
+候选包必须是本次 Git 发布记录中的模块化清单。SHA-256 不能替换成服务器
+现场重新计算后未经 Git 发布记录核对的值。备节点先用 `standby`
+dry-run/apply，上海节点再用 `authority` dry-run/apply：
 
 ```bash
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.29-build41.1-server-1.5.10 \
-  --manifest-sha256 76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.30-build42.8-server-1.5.10-modular \
+  --manifest-sha256 b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1 \
   --authority-role standby \
   --dry-run
 
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.29-build41.1-server-1.5.10 \
-  --manifest-sha256 76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.30-build42.8-server-1.5.10-modular \
+  --manifest-sha256 b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1 \
   --authority-role standby \
   --apply
 
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.29-build41.1-server-1.5.10 \
-  --manifest-sha256 76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.30-build42.8-server-1.5.10-modular \
+  --manifest-sha256 b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1 \
   --authority-role authority \
   --dry-run
 
 sudo /usr/local/sbin/deploy-app-content-release \
-  --bundle /var/lib/shuzijun-app-content/releases/v1.3.29-build41.1-server-1.5.10 \
-  --manifest-sha256 76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9 \
+  --bundle /var/lib/shuzijun-app-content/releases/v1.3.30-build42.8-server-1.5.10-modular \
+  --manifest-sha256 b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1 \
   --authority-role authority \
   --apply
 ```
@@ -500,7 +502,7 @@ Web 根目录、备份或服务状态。Composer 漏洞审计仍可能访问公�
 DNS/扩展网络出口且
 `open_basedir=/nonexistent` 的 PHP 进程。这样既保留 staging 的 root-only 边界，
 也能在与 PHP worker 相同的身份下验证内建熔断。整个探针只执行发布记录中精确
-审核的 1.5.8/1.5.10 入口哈希，未知入口在执行前失败关闭；无 gate/fuse 的兼容
+审核的 1.5.8/1.5.10 候选入口及模块哈希，未知清单或源码在执行前失败关闭；无 gate/fuse 的兼容
 路径还必须是精确审核的 1.5.8 PHP 哈希。PHP 必须在全部断言后输出唯一成功哨兵，所以候选
 顶层提前 `exit(0)` 也不能跳过门禁。源码读取失败、加载失败、超时和熔断不安全
 会分别失败关闭。

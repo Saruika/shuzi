@@ -35,6 +35,13 @@ readonly HEALTH_URL="https://$HEALTH_HOST/?rest_route=%2Fshuzijun%2Fv1%2Fapp-con
 readonly HEALTH_INDEX_URL="https://$HEALTH_HOST/index.php?rest_route=%2Fshuzijun%2Fv1%2Fapp-content"
 readonly DIRECT_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/shuzijun-app-content.php"
 readonly DIRECT_VENDOR_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/vendor/autoload.php"
+readonly -a PLUGIN_MODULE_RELATIVES=(
+    vendor/shuzijun/app-content/trait-shuzijun-app-collaboration.php
+    vendor/shuzijun/app-content/trait-shuzijun-app-fan-endpoints.php
+    vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php
+    vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php
+    vendor/shuzijun/app-content/class-shuzijun-app-content-api.php
+)
 readonly MANIFEST_NAME=release.sha256
 readonly LIVE_MANIFEST="$TARGET_DIR/$MANIFEST_NAME"
 readonly BACKUP_INTEGRITY_NAME=backup-integrity.sha256
@@ -42,10 +49,18 @@ readonly BACKUP_MANIFEST_STATE_NAME=live-release-manifest.state
 readonly JWT_README=vendor/firebase/php-jwt/README.md
 readonly JWT_README_SHA256=8e2392c48204a21ad0d73068fb273b7ec1f79ccf13eab3fe6f256382f741dc39
 readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134
-readonly TARGET_RELEASE_MANIFEST_SHA256=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
+readonly PREVIOUS_RELEASE_MANIFEST_SHA256=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
+readonly TARGET_RELEASE_MANIFEST_SHA256=b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1
 readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a
 readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0
-readonly TARGET_RELEASE_PHP_SHA256=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
+readonly TARGET_RELEASE_PHP_SHA256=92a9eecc72a4b0b70475d2ea2c6fe27be682965211a14c471cf0cc5f6f75ac8f
+readonly -a TARGET_RELEASE_MODULE_SHA256S=(
+    974b81d27bfbccd86d6b661f73254754e86d359e0260fce91df6509a348ccf24
+    ee18a1b6f3d0c92c31716c6232e120a601a8ffeacf36dec046ddd7cc87530db9
+    0f7d8248527e8f26ce827f75a378ef0cad59768721cc3950eb4151dbc8fe80ce
+    c0cec0d537c5612769a940d0fd93f388f735659376921b643de2448da84bf85b
+    0756464058f6428ba775533986e9848c3696d1f85d0939c375e6148f6e033b9c
+)
 readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1
 
 MODE=dry-run
@@ -90,6 +105,7 @@ and contain only these release entries plus release.sha256:
   composer.json
   composer.lock
   vendor/
+    shuzijun/app-content/ (five reviewed API modules)
 EOF
 }
 
@@ -457,10 +473,17 @@ validate_bundle_tree() {
         -o -name '*.save*' -o -name '*.swp*' -o -name '*.tmp*' \)
 }
 
-validate_allowed_release_manifest_sha256() {
+validate_allowed_candidate_manifest_sha256() {
     case "$1" in
         "$LEGACY_BRIDGE_MANIFEST_SHA256"|"$TARGET_RELEASE_MANIFEST_SHA256") ;;
-        *) fail 'release manifest SHA256 is not in the reviewed release allowlist' ;;
+        *) fail 'candidate release manifest SHA256 is not in the reviewed release allowlist' ;;
+    esac
+}
+
+validate_allowed_live_manifest_sha256() {
+    case "$1" in
+        "$LEGACY_BRIDGE_MANIFEST_SHA256"|"$PREVIOUS_RELEASE_MANIFEST_SHA256"|"$TARGET_RELEASE_MANIFEST_SHA256") ;;
+        *) fail 'live release manifest SHA256 is not in the reviewed transition allowlist' ;;
     esac
 }
 
@@ -471,7 +494,7 @@ validate_manifest() {
 
     [[ "$EXPECTED_MANIFEST_SHA256" =~ ^[a-f0-9]{64}$ ]] \
         || fail 'expected manifest SHA256 must be 64 lowercase hexadecimal characters'
-    validate_allowed_release_manifest_sha256 "$EXPECTED_MANIFEST_SHA256"
+    validate_allowed_candidate_manifest_sha256 "$EXPECTED_MANIFEST_SHA256"
     LC_ALL=C tail -c 1 -- "$MANIFEST" | grep -qx '' \
         || fail 'release manifest must be nonempty and end with one newline'
     actual_manifest_sha=$(sha256sum -- "$MANIFEST")
@@ -497,6 +520,12 @@ validate_manifest() {
         [[ -n "${manifest_paths[$relative]+present}" ]] \
             || fail 'release manifest omits a required file'
     done
+    if [[ "$EXPECTED_MANIFEST_SHA256" == "$TARGET_RELEASE_MANIFEST_SHA256" ]]; then
+        for relative in "${PLUGIN_MODULE_RELATIVES[@]}"; do
+            [[ -n "${manifest_paths[$relative]+present}" ]] \
+                || fail 'modular release manifest omits an API module'
+        done
+    fi
 
     while IFS= read -r -d '' file; do
         if [[ -z "$file" ]]; then
@@ -613,41 +642,127 @@ run_composer() {
 }
 
 probe_candidate_collaboration_release_fuse() {
-    local pipeline_status=()
+    local source_mode source_sizes_csv source_hashes_csv
+    local index relative file pipeline_status=()
+    local -a source_files=() source_sizes=() source_hashes=()
+
+    case "$EXPECTED_MANIFEST_SHA256" in
+        "$LEGACY_BRIDGE_MANIFEST_SHA256")
+            source_mode=legacy
+            source_files=("$BUNDLE/shuzijun-app-content.php")
+            source_hashes=("$LEGACY_BRIDGE_PHP_SHA256")
+            ;;
+        "$TARGET_RELEASE_MANIFEST_SHA256")
+            source_mode=modular
+            [[ "${#PLUGIN_MODULE_RELATIVES[@]}" -eq "${#TARGET_RELEASE_MODULE_SHA256S[@]}" ]] \
+                || { fail 'candidate API module allowlist is inconsistent'; return 1; }
+            for index in "${!PLUGIN_MODULE_RELATIVES[@]}"; do
+                relative=${PLUGIN_MODULE_RELATIVES[$index]}
+                file="$BUNDLE/$relative"
+                [[ -f "$file" && ! -L "$file" ]] \
+                    || { fail 'candidate API module is missing or unsafe'; return 1; }
+                source_files+=("$file")
+                source_hashes+=("${TARGET_RELEASE_MODULE_SHA256S[$index]}")
+            done
+            source_files+=("$BUNDLE/shuzijun-app-content.php")
+            source_hashes+=("$TARGET_RELEASE_PHP_SHA256")
+            ;;
+        *)
+            fail 'candidate collaboration probe received an unreviewed manifest'
+            return 1
+            ;;
+    esac
+
+    for file in "${source_files[@]}"; do
+        source_sizes+=("$(stat -c '%s' "$file")")
+    done
+    source_sizes_csv=$(IFS=,; printf '%s' "${source_sizes[*]}")
+    source_hashes_csv=$(IFS=,; printf '%s' "${source_hashes[*]}")
 
     # The staging root is intentionally root:root 0700, so the PHP worker must
-    # not traverse it. Root streams the already manifest-verified candidate
+    # not traverse it. Root streams the already manifest-verified sources
     # through stdin while PHP remains www-data with common stream, socket and
-    # DNS network entry points disabled and filesystem-confined. Exact source
-    # hashes below are the primary execution allowlist. This preserves
-    # the root-only release boundary instead of
-    # weakening it merely to make the probe readable. Defining the future
-    # external opt-in as strict true proves that a release carrying Phase 1
-    # still has its internal fuse hard false. The pinned 1.5.8 bootstrap/seed
-    # bundle predates every Phase 1 symbol, so an entirely absent gate is the
-    # only backward-compatible pass.
-    if cat -- "$BUNDLE/shuzijun-app-content.php" | \
+    # DNS network entry points disabled and filesystem-confined. Exact
+    # per-file hashes plus decimal byte framing prevent source-boundary
+    # ambiguity. The modular target is evaluated as four traits, its class,
+    # then the thin entrypoint. Reviewed require_once statements are removed
+    # only inside this evaluator because the root-only bundle deliberately sits
+    # outside the PHP worker's open_basedir. Runtime loading is unchanged.
+    if cat -- "${source_files[@]}" | \
         timeout --signal=KILL 20s runuser -u www-data -- env -i \
         PATH="$PATH" LC_ALL=C LANG=C HOME=/nonexistent \
         "$PHP_BIN" -n -d display_errors=0 -d log_errors=0 \
         -d allow_url_fopen=0 -d open_basedir=/nonexistent \
         -d 'disable_functions=exec,passthru,shell_exec,system,proc_open,popen,putenv,mail,pcntl_exec,dl,link,symlink,rename,unlink,rmdir,mkdir,chmod,chown,chgrp,touch,copy,file_put_contents,fsockopen,pfsockopen,stream_socket_client,stream_socket_server,stream_socket_sendto,stream_socket_recvfrom,stream_socket_accept,stream_socket_pair,stream_socket_shutdown,gethostbyname,gethostbynamel,gethostbyaddr,dns_check_record,checkdnsrr,dns_get_record,getmxrr,dns_get_mx,socket_create,socket_connect,socket_send,socket_sendto,socket_write,socket_create_listen,socket_create_pair,socket_import_stream,socket_addrinfo_lookup,socket_addrinfo_connect,socket_addrinfo_bind,curl_init,curl_exec,curl_multi_init,curl_multi_exec,curl_multi_add_handle,ftp_connect,ftp_ssl_connect' \
         -r '
-        $source = stream_get_contents(STDIN);
-        if (!is_string($source) || $source === "") { exit(18); }
-        $sourceHash = hash("sha256", $source);
-        $legacyHash = $argv[1];
-        $targetHash = $argv[2];
-        $sentinel = $argv[3];
-        if (!hash_equals($legacyHash, $sourceHash)
-            && !hash_equals($targetHash, $sourceHash)) {
-            exit(25);
+        $payload = stream_get_contents(STDIN);
+        if (!is_string($payload) || $payload === "") { exit(18); }
+        $sentinel = $argv[1];
+        $sourceMode = $argv[2];
+        $sizeValues = explode(",", $argv[3]);
+        $sourceHashes = explode(",", $argv[4]);
+        if (count($sizeValues) !== count($sourceHashes)
+            || ($sourceMode === "legacy" && count($sizeValues) !== 1)
+            || ($sourceMode === "modular" && count($sizeValues) !== 6)
+            || ($sourceMode !== "legacy" && $sourceMode !== "modular")) {
+            exit(26);
         }
+        $sources = array();
+        $offset = 0;
+        foreach ($sizeValues as $index => $sizeValue) {
+            if (!preg_match("/\\A[1-9][0-9]*\\z/D", $sizeValue)
+                || !preg_match("/\\A[a-f0-9]{64}\\z/D", $sourceHashes[$index])) {
+                exit(26);
+            }
+            $size = (int) $sizeValue;
+            if ((string) $size !== $sizeValue || $size > strlen($payload) - $offset) {
+                exit(26);
+            }
+            $source = substr($payload, $offset, $size);
+            if (strlen($source) !== $size
+                || !hash_equals($sourceHashes[$index], hash("sha256", $source))) {
+                exit(25);
+            }
+            $sources[] = $source;
+            $offset += $size;
+        }
+        if ($offset !== strlen($payload)) { exit(26); }
+
+        if ($sourceMode === "legacy") {
+            $traitSources = array();
+            $classSource = "";
+            $entrypoint = $sources[0];
+        } else {
+            $traitSources = array_slice($sources, 0, 4);
+            $classSource = $sources[4];
+            $entrypoint = $sources[5];
+            $quote = chr(39);
+            $entryLoader = "require_once __DIR__ . " . $quote
+                . "/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php"
+                . $quote . ";";
+            if (substr_count($entrypoint, $entryLoader) !== 1) { exit(27); }
+            $entrypoint = str_replace($entryLoader, "", $entrypoint);
+            $classLoaders = array(
+                "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-collaboration.php" . $quote . ";",
+                "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-fan-endpoints.php" . $quote . ";",
+                "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-fan-identity.php" . $quote . ";",
+                "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-content-delivery.php" . $quote . ";",
+            );
+            foreach ($classLoaders as $classLoader) {
+                if (substr_count($classSource, $classLoader) !== 1) { exit(27); }
+                $classSource = str_replace($classLoader, "", $classSource);
+            }
+            if (strpos($classSource, "require_once __DIR__") !== false) { exit(27); }
+        }
+        if ($entrypoint === "") { exit(25); }
+
         define("ABSPATH", "/nonexistent/");
         define("YISHU_ENABLE_COLLABORATION_PHASE1", true);
         function add_action(...$arguments): void {}
         function add_filter(...$arguments): void {}
-        eval("?>" . $source);
+        foreach ($traitSources as $traitSource) { eval("?>" . $traitSource); }
+        if ($classSource !== "") { eval("?>" . $classSource); }
+        eval("?>" . $entrypoint);
 
         $class = "Shuzijun_App_Content_API";
         $gate = "collaboration_phase1_enabled";
@@ -657,7 +772,7 @@ probe_candidate_collaboration_release_fuse() {
         $has_fuse = defined($fuse);
         if (constant("YISHU_ENABLE_COLLABORATION_PHASE1") !== true) { exit(20); }
         if (!$has_gate && !$has_fuse) {
-            if (!hash_equals($legacyHash, $sourceHash)) { exit(24); }
+            if ($sourceMode !== "legacy") { exit(24); }
             fwrite(STDOUT, $sentinel . "\n");
             exit(0);
         }
@@ -666,8 +781,8 @@ probe_candidate_collaboration_release_fuse() {
         if ($class::$gate() !== false) { exit(23); }
         fwrite(STDOUT, $sentinel . "\n");
         exit(0);
-    ' "$LEGACY_BRIDGE_PHP_SHA256" "$TARGET_RELEASE_PHP_SHA256" \
-        "$COLLABORATION_FUSE_PROBE_SENTINEL" 8<&- 9<&- | \
+    ' "$COLLABORATION_FUSE_PROBE_SENTINEL" "$source_mode" \
+        "$source_sizes_csv" "$source_hashes_csv" 8<&- 9<&- | \
         env -i PATH="$PATH" LC_ALL=C LANG=C \
         python3 -I -c '
 import sys
@@ -682,7 +797,7 @@ raise SystemExit(0 if payload == expected else 1)
 
     pipeline_status=("${PIPESTATUS[@]}")
     if [[ "${pipeline_status[0]:-1}" -ne 0 ]]; then
-        fail 'candidate plugin source could not be read from the reviewed bundle'
+        fail 'candidate plugin sources could not be read from the reviewed bundle'
         return 1
     fi
     case "${pipeline_status[1]:-1}" in
@@ -694,6 +809,8 @@ raise SystemExit(0 if payload == expected else 1)
         23) fail 'candidate collaboration gate became enabled' ;;
         24) fail 'gate-free collaboration candidate is not the reviewed 1.5.8 bridge' ;;
         25) fail 'candidate plugin PHP is not in the reviewed release allowlist' ;;
+        26) fail 'candidate plugin source framing is invalid' ;;
+        27) fail 'candidate plugin loader graph is not exact' ;;
         124|137) fail 'candidate collaboration release fuse probe timed out' ;;
         0)
             if [[ "${pipeline_status[2]:-1}" -ne 0 ]]; then
@@ -849,7 +966,7 @@ validate_live_manifested_release() {
 
     actual_manifest_sha=$(sha256sum -- "$LIVE_MANIFEST")
     actual_manifest_sha=${actual_manifest_sha%% *}
-    validate_allowed_release_manifest_sha256 "$actual_manifest_sha" || return 1
+    validate_allowed_live_manifest_sha256 "$actual_manifest_sha" || return 1
     LC_ALL=C tail -c 1 -- "$LIVE_MANIFEST" | grep -qx '' \
         || { fail 'live release manifest must be nonempty and end with one newline'; return 1; }
 
@@ -997,8 +1114,12 @@ verify_current_webroot() {
 }
 
 probe_direct_php_blocked() {
-    local attempt status headers url blocked
-    for url in "$DIRECT_PHP_URL" "$DIRECT_VENDOR_PHP_URL"; do
+    local attempt status headers url blocked relative
+    local -a direct_php_urls=("$DIRECT_PHP_URL" "$DIRECT_VENDOR_PHP_URL")
+    for relative in "${PLUGIN_MODULE_RELATIVES[@]}"; do
+        direct_php_urls+=("https://$HEALTH_HOST/wp-content/mu-plugins/$relative")
+    done
+    for url in "${direct_php_urls[@]}"; do
         blocked=0
         for attempt in 1 2 3 4 5; do
             headers=
