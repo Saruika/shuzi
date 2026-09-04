@@ -1169,7 +1169,7 @@ def test_control_stdout_byte_encoding(sender_text: str) -> None:
 
 def test_reconcile_wrapper_invokes_one_exact_remote_command(sender_text: str) -> None:
     function = shell_function(sender_text, "receiver_control_query")
-    timeout_prefix = "/usr/bin/timeout --signal=TERM --kill-after=5s 45s \\\n        "
+    timeout_prefix = "/usr/bin/timeout --signal=TERM --kill-after=5s 60s \\\n        "
     assert function.count(timeout_prefix) == 1
     function = function.replace(timeout_prefix, "", 1)
     with tempfile.TemporaryDirectory(prefix="sync-reconcile-wrapper-") as raw:

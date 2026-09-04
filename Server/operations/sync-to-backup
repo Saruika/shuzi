@@ -2214,14 +2214,15 @@ verify_authority_role authority
 SSH=(ssh -F /dev/null -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
     -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$SYNC_KNOWN_HOSTS" \
     -o GlobalKnownHostsFile=/dev/null -o HostKeyAlgorithms=ssh-ed25519 \
-    -o UpdateHostKeys=no -o ConnectTimeout=15 -o ServerAliveInterval=15 \
+    -o UpdateHostKeys=no -o ConnectionAttempts=3 -o ConnectTimeout=10 \
+    -o ServerAliveInterval=15 \
     -o ServerAliveCountMax=2 -o TCPKeepAlive=yes "$TRANSPORT_USER"@"$HOST")
 
 receiver_control_query() {
     local operation=$1
     [[ "$operation" == --attest || "$operation" == --protocol \
         || "$operation" == --reconcile-receipt ]] || return 1
-    /usr/bin/timeout --signal=TERM --kill-after=5s 45s \
+    /usr/bin/timeout --signal=TERM --kill-after=5s 60s \
         "${SSH[@]}" "sudo $REMOTE_RECEIVER $operation"
 }
 

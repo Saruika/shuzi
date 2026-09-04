@@ -98,6 +98,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.9.md`](Server/releases/v1.3.30-build42.9.md)：引入 SAST/SCA、全量 Python 哈希锁、CycloneDX/SPDX SBOM 与 GitHub runner 来源证明。
 - [`Server/releases/v1.3.30-build42.10.md`](Server/releases/v1.3.30-build42.10.md)：修复健康监控对签名同步 v4 三字段提交收据的兼容与误报。
 - [`Server/releases/v1.3.30-build42.11.md`](Server/releases/v1.3.30-build42.11.md)：为已提交的 generation 7 增加签名回执恢复、崩溃安全墓碑和受审一次性 systemd 迁移。
+- [`Server/releases/v1.3.30-build42.12.md`](Server/releases/v1.3.30-build42.12.md)：修复上海到新加坡签名同步被通用 SSH 限速误伤的问题，并增加只覆盖建连阶段的有界重试。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
@@ -158,6 +159,12 @@ Build 42 在录屏、投屏和切后台的公开保护之外，按产品方明�
 - 备节点健康监控改为读取签名同步 v4 的权威提交收据，避免同步真实成功后仍误报“提交代数无效”。
 - 三字段收据经格式、权限、所有权与稳定文件快照验证后，对外健康状态只保留整数代数。
 - 部署信任锚前移到已上线的 Build 42.5 健康运行时和 Build 42.8 模块化 App Content；生产必须在整站同步完成后按备节点优先顺序部署。
+
+### Build 42.12 同步传输重连
+
+- 新加坡节点对固定上海 authority 的 TCP/22 流量使用优先精确规则，其他来源继续使用通用 SSH 限速、密钥认证和 fail2ban。
+- 发布器和正式 sender 使用 OpenSSH 原生三次建连尝试；它不会重放已经开始的远端命令，协议、签名、主机公钥和回执异常仍立即失败关闭。
+- 第 7 代旧回执已完成一次性对账，定时器通过预置持久化时间戳恢复，未产生意外的 generation 8。
 
 ## v1.3.29-build41
 

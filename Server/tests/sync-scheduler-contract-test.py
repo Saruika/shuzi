@@ -747,19 +747,27 @@ def test_sender_condition_context_and_status_behavior(sender_text: str) -> None:
 
     for option in (
         "-o UpdateHostKeys=no",
-        "-o ConnectTimeout=15",
+        "-o ConnectionAttempts=3",
+        "-o ConnectTimeout=10",
         "-o ServerAliveInterval=15",
         "-o ServerAliveCountMax=2",
         "-o TCPKeepAlive=yes",
     ):
         assert option in sender_text
     receiver_query = shell_function(sender_text, "receiver_control_query")
-    assert "/usr/bin/timeout --signal=TERM --kill-after=5s 45s" in receiver_query
+    assert "/usr/bin/timeout --signal=TERM --kill-after=5s 60s" in receiver_query
     assert (
         '[[ "$operation" == --attest || "$operation" == --protocol \\\n'
         '        || "$operation" == --reconcile-receipt ]]'
         in receiver_query
     )
+    assert sender_text.count("-o ConnectionAttempts=3") == 1
+    assert "-o ConnectTimeout=15" not in sender_text
+    assert receiver_query.count(
+        '"${SSH[@]}" "sudo $REMOTE_RECEIVER $operation"'
+    ) == 1
+    for forbidden_retry in ("Connection refused", "for ", "while ", "sleep "):
+        assert forbidden_retry not in receiver_query
     assert sender_text.count("receiver_control_query --attest") == 2
     assert sender_text.count("receiver_control_query --protocol") == 2
     assert sender_text.count("receiver_control_query --reconcile-receipt") == 1
@@ -780,7 +788,7 @@ def test_sender_condition_context_and_status_behavior(sender_text: str) -> None:
             )
             helper.chmod(0o755)
             shortened = receiver_query.replace(
-                "--kill-after=5s 45s", "--kill-after=0.1s 0.2s"
+                "--kill-after=5s 60s", "--kill-after=0.1s 0.2s"
             )
             harness = (
                 "set -euo pipefail\n"

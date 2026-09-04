@@ -587,7 +587,7 @@ def test_static_fail_closed_contract() -> None:
     text = DEPLOYER.read_text(encoding="utf-8")
     frozen_assets = (
         ("receiver", "RECEIVER_SHA256", "apply-shuzijun-sync", "b4eaddf91676be3becb0eb1595fd7f6763aa872a51ff8a945d8e652e61db6ee4"),
-        ("sender", "SENDER_SHA256", "sync-to-backup", "f886ba64c3fb652751ec1e3929781993c438bb91541ceaf853932acd97f211c4"),
+        ("sender", "SENDER_SHA256", "sync-to-backup", "2403dd5f9dd1d5de99614456f902838e493ac3b44bc609662d785bba8bc3a188"),
         ("FPM guard", "FPM_GUARD_SHA256", "shuzijun-sync-fpm-guard.service", "8d5b40388450c112c1f0ee84456ee960ae6a204323e8137ea0ec4f1c7a1d620e"),
         ("SSH forced-command gate", "SSH_GATE_SHA256", "shuzijun-sync-ssh-gate", "1bdb7041b272a71b2884b8bdf247a55477d4bb0387a23c3b79c694e940189f01"),
         ("sudoers transport", "SUDOERS_SHA256", "shuzijun-sync-transport.sudoers", "8fdd66e0966f0f46ad0fc74db70148e67b0ea6e86228d694f6241d03b24409cd"),
@@ -637,6 +637,9 @@ def test_static_fail_closed_contract() -> None:
     assert "os.killpg(process.pid, signal.SIGKILL)" in text
     assert '"-o", "StrictHostKeyChecking=yes"' in text
     assert '"-o", "IdentitiesOnly=yes"' in text
+    assert text.count('"-o", "ConnectionAttempts=3"') == 1
+    assert text.count('"-o", "ConnectTimeout=10"') == 1
+    assert '"-o", "ConnectTimeout=15"' not in text
     assert "verify_remote_receiver_live()" in text
     assert "PRIMARY_FPM_FREEZE_MARKER" in text
     assert 'PRIMARY_RECOVERY_UNIT_GLOB = "shuzijun-primary-fpm-recovery-*.service"' in text
@@ -687,6 +690,27 @@ def test_static_fail_closed_contract() -> None:
         setattr(gated, attribute, expected)
     gated.ACTIVE_RELEASE_CONTRACT = "wrong-active-release-contract"
     expect_failure(gated.ensure_release_frozen, "active-release-v4")
+
+
+def test_remote_receiver_connection_attempts_do_not_replay_commands() -> None:
+    module = load_deployer()
+    known_hosts = Path("/run/shuzijun-sync-release/primary/shuzijun-sync-known-hosts")
+    remote_command = "sudo /usr/local/sbin/apply-shuzijun-sync --attest"
+    argv = module.remote_receiver_command(known_hosts, remote_command)
+
+    assert argv[-2] == "shuzijun-sync-transport@129.226.202.207"
+    assert argv[-1] == remote_command
+    assert argv.count(remote_command) == 1
+    assert argv.count("ConnectionAttempts=3") == 1
+    assert argv.count("ConnectTimeout=10") == 1
+    assert "ConnectTimeout=15" not in argv
+
+    source = DEPLOYER.read_text(encoding="utf-8")
+    start = source.index("def remote_receiver_command(")
+    end = source.index("\ndef verify_remote_receiver_live()", start)
+    builder = source[start:end]
+    for forbidden_retry in ("Connection refused", "for ", "while ", "sleep("):
+        assert forbidden_retry not in builder
 
 
 def test_metadata_symlink_hardlink_and_allowlists() -> None:
@@ -1859,6 +1883,7 @@ def test_primary_receipt_state_inventory_is_exact() -> None:
 
 def main() -> None:
     test_static_fail_closed_contract()
+    test_remote_receiver_connection_attempts_do_not_replay_commands()
     test_metadata_symlink_hardlink_and_allowlists()
     test_dry_run_is_read_only_and_timer_gate_is_dynamic()
     test_primary_stale_recovery_and_runtime_health_are_hard_gates()

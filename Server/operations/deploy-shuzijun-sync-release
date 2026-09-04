@@ -44,7 +44,7 @@ ROLE_VERIFY_PARENT_PATHS = (Path("/"), Path("/usr"), Path("/usr/local"), Path("/
 # Frozen coupled candidate.  Both --dry-run and --apply independently rehash
 # every staged byte before any backup or live mutation.
 RECEIVER_SHA256 = "b4eaddf91676be3becb0eb1595fd7f6763aa872a51ff8a945d8e652e61db6ee4"
-SENDER_SHA256 = "f886ba64c3fb652751ec1e3929781993c438bb91541ceaf853932acd97f211c4"
+SENDER_SHA256 = "2403dd5f9dd1d5de99614456f902838e493ac3b44bc609662d785bba8bc3a188"
 
 FPM_GUARD_SHA256 = "8d5b40388450c112c1f0ee84456ee960ae6a204323e8137ea0ec4f1c7a1d620e"
 SSH_GATE_SHA256 = "1bdb7041b272a71b2884b8bdf247a55477d4bb0387a23c3b79c694e940189f01"
@@ -1285,7 +1285,8 @@ def remote_receiver_command(known_hosts: Path, remote_command: str) -> list[str]
         "-o", f"UserKnownHostsFile={known_hosts}",
         "-o", "GlobalKnownHostsFile=/dev/null",
         "-o", "HostKeyAlgorithms=ssh-ed25519",
-        "-o", "ConnectTimeout=15",
+        "-o", "ConnectionAttempts=3",
+        "-o", "ConnectTimeout=10",
         f"{REMOTE_USER}@{REMOTE_HOST}",
         remote_command,
     ]
