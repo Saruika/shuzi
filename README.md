@@ -105,12 +105,13 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.5.11-build43.md`](Server/releases/v1.5.11-build43.md)：抖音 ID 必填、Apple 存量账号迁移、合作邀约持久化候选与数据删除/竞态复核发布清单。
 - [`Server/releases/v1.3.32-build44.md`](Server/releases/v1.3.32-build44.md)：合作邮箱与隐私联系邮箱分离、App/网页联系渠道一致性发布记录。
 - [`Server/releases/v1.3.33-build45.md`](Server/releases/v1.3.33-build45.md)：指定粉丝定向 APNs 推送、隐私默认、服务端安全配置与部署/真机验收前置条件。
+- [`Server/releases/v1.3.33-build45.1.md`](Server/releases/v1.3.33-build45.1.md)：MySQL 8 保留字导致通知表建表失败的 1.5.12.1 热修复、schema v3 迁移与精确部署顺序。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
 ### Build 45 指定用户通知（GitHub 候选）
 
-- App 1.3.33 Build 45 只在登录粉丝主动授权后登记设备，并允许管理员按单个用户、身份码或明确列表发送；服务端 1.5.12 使用独立最小权限、幂等 Outbox、有界重试及失效令牌清理，不提供无选择的全员广播入口。
+- App 1.3.33 Build 45 只在登录粉丝主动授权后登记设备，并允许管理员按单个用户、身份码或明确列表发送；服务端 1.5.12.1 使用独立最小权限、幂等 Outbox、有界重试及失效令牌清理，不提供无选择的全员广播入口。
 - APNs 设备令牌仅以 Secretbox 密文、独立 HMAC 索引和非秘密密钥指纹保存在服务器；设备最长保留 90 天，通知、收件关系和 Outbox 最长保留 30 天。数据密钥或加密依赖临时不可用时保留绑定、不消耗投递次数并在 60 秒后重试；退出、撤销会话、账号暂停/拒绝和永久删号都会阻止后续投递。
 - 通知默认视为敏感信息，锁屏只展示通用提示。管理员只有在确认正文适合公开后才可发送自定义文字；App 内详细内容仍由登录与审批门禁保护。
 - 生产只使用 `api.push.apple.com` 与 topic `cn.com.shuzijun.yishu`。两节点必须安全配置同一数据密钥和各自可读的 APNs 私钥环境，且仅 authority 消费任务；配置、签名发布、故障切换和 TestFlight 真机端到端验收完成前，不宣称推送已经上线。

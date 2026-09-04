@@ -5,7 +5,7 @@ from pathlib import Path
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 STANDBY_SEEDER = Path("Server/operations/seed-standby-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE_RECORD = Path("Server/releases/v1.3.33-build45.md")
+RELEASE_RECORD = Path("Server/releases/v1.3.33-build45.1.md")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
 SERVER_ROOT = Path("Server")
@@ -23,16 +23,16 @@ PLUGIN_MODULES = (
     PLUGIN_IMPLEMENTATION,
 )
 LEGACY_MANIFEST_SHA256 = "64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134"
-PREVIOUS_MANIFEST_SHA256 = "b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1"
-TARGET_MANIFEST_SHA256 = "e40dfd6c12788e332d996d6d2d1dd123dadeec877e0cc39f705d03a1bca63ec8"
-TARGET_PLUGIN_SHA256 = "55e5da72a1cbec1b1f5f0da6f05478756a88d61341fc4e2cb87ec2f67ae0852d"
+PREVIOUS_MANIFEST_SHA256 = "e40dfd6c12788e332d996d6d2d1dd123dadeec877e0cc39f705d03a1bca63ec8"
+TARGET_MANIFEST_SHA256 = "f4934cbab314142ec8a11e1b1d59aef9d9e986a19be5dda9db5ec42f24122447"
+TARGET_PLUGIN_SHA256 = "7fad0449c68734b2db0838faf8826a7fa1bc319732076e48803f2d50254dfe13"
 TARGET_MODULE_SHA256S = (
     "e4a4b04ec50434991446bf06d127c6604959378c70007bb4bc044a9e9916327d",
     "dc3e0af6a7ba309c94e71d65c82f5a928e171b9726f312f5db3fa9eec48ec7b0",
-    "14fcd92a12c49b297cea477fb446bc600b4165fbec48e62c6e14e72ac519e835",
+    "ad8ac8479ee4a9e9fca5fe12f6bf3c9839a322dd18d220c1987f39f452d15bae",
     "4064e1fb306c342ece72b6b0ef7117d056e0510fa206e153714f02577f2c58ea",
     "2383fc04dce1a208b5bc1d10ebdd15f3f3589b7c06aa914fb7c5417da0ccec80",
-    "e5eecc812e4fc956b16a19f376b449ebc4d0fd88ef1a55ff1e01d7ffb8b717ea",
+    "968d9e9661155390cac30600b50156523d02c29f212581d6c97a999c2e2c3ce8",
 )
 
 
@@ -224,11 +224,11 @@ def main() -> None:
         "readonly BACKUP_INTEGRITY_NAME=backup-integrity.sha256",
         "readonly BACKUP_MANIFEST_STATE_NAME=live-release-manifest.state",
         "readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134",
-        "readonly PREVIOUS_RELEASE_MANIFEST_SHA256=b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1",
-        "readonly TARGET_RELEASE_MANIFEST_SHA256=e40dfd6c12788e332d996d6d2d1dd123dadeec877e0cc39f705d03a1bca63ec8",
+        f"readonly PREVIOUS_RELEASE_MANIFEST_SHA256={PREVIOUS_MANIFEST_SHA256}",
+        f"readonly TARGET_RELEASE_MANIFEST_SHA256={TARGET_MANIFEST_SHA256}",
         "readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a",
         "readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0",
-        "readonly TARGET_RELEASE_PHP_SHA256=55e5da72a1cbec1b1f5f0da6f05478756a88d61341fc4e2cb87ec2f67ae0852d",
+        f"readonly TARGET_RELEASE_PHP_SHA256={TARGET_PLUGIN_SHA256}",
         "readonly -a TARGET_RELEASE_MODULE_SHA256S=(",
         "readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1",
     ):

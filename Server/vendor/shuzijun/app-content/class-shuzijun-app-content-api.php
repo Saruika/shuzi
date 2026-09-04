@@ -37,7 +37,7 @@ final class Shuzijun_App_Content_API {
     const FAN_META_APPLE_AUTH_IAT = '_yishu_fan_apple_auth_iat';
     const FAN_META_AUTH_AUDIT = '_yishu_fan_auth_audit';
     const FAN_CONSENT_VERSION = '2026-09-04-approval-v4';
-    // Server 1.5.12 is the fixed, reviewed consent-protocol bridge between
+    // Server 1.5.12.1 is the fixed, reviewed consent-protocol bridge between
     // Build 42 (v3) and Build 45 (v4). Remove v3 from new submissions in
     // server 1.5.13 after Build 42 is expired; never turn this into a remote
     // option or filter.
@@ -89,7 +89,7 @@ final class Shuzijun_App_Content_API {
     const COLLABORATION_OUTBOX_MAX_ATTEMPTS = 5;
     const COLLABORATION_OUTBOX_LEASE_SECONDS = 300;
     const PUSH_SCHEMA_OPTION = 'yishu_push_schema_version';
-    const PUSH_SCHEMA_VERSION = 2;
+    const PUSH_SCHEMA_VERSION = 3;
     const PUSH_TOPIC = 'cn.com.shuzijun.yishu';
     const PUSH_PRODUCTION_HOST = 'https://api.push.apple.com';
     const PUSH_OUTBOX_HOOK = 'yishu_process_push_outbox';

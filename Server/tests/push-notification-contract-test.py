@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -8,7 +9,7 @@ FAN = ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-fan-endpoints.php"
 PUSH = ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php"
 IDENTITY = ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php"
 DELIVERY = ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php"
-RELEASE = ROOT / "releases/v1.3.33-build45.md"
+RELEASE = ROOT / "releases/v1.3.33-build45.1.md"
 IOS_PUSH = ROOT.parent / "Yishu/Services/PushNotificationService.swift"
 
 
@@ -29,9 +30,9 @@ def main() -> None:
     ios_push = IOS_PUSH.read_text(encoding="utf-8")
     combined = "\n".join((core, fan, push, identity, delivery))
 
-    assert "Version: 1.5.12" in entry
+    assert "Version: 1.5.12.1" in entry
     assert "v1.3.33-build45" in release
-    assert "尚未部署" in release
+    assert "推送 Worker 尚未启用" in release
     for variable in (
         "YISHU_APNS_KEY_ID",
         "YISHU_APNS_TEAM_ID",
@@ -40,7 +41,7 @@ def main() -> None:
     ):
         assert variable in release
 
-    # Server 1.5.12 is an explicit source-level bridge: Build 42 submits v3,
+    # Server 1.5.12.1 is an explicit source-level bridge: Build 42 submits v3,
     # Build 45 submits v4, and no option/filter can broaden the exact pair.
     assert "FAN_ACCEPTED_TRANSITIONAL_NEW_CONSENT_VERSIONS" in core
     bridge_versions = section(
@@ -81,7 +82,9 @@ def main() -> None:
     assert "'/app-admin/push-notifications'" in core
     assert "'permission_callback' => array(__CLASS__, 'can_manage_push')" in core
     assert "const PUSH_CAPABILITY = 'manage_yishu_push_notifications';" in core
-    assert "const PUSH_SCHEMA_VERSION = 2;" in core
+    assert "const PUSH_SCHEMA_VERSION = 3;" in core
+    assert "is_sensitive tinyint(1) unsigned NOT NULL DEFAULT 1" in push
+    assert re.search(r"(?m)^\s*sensitive\s+tinyint", push) is None
     assert core.count("$role->add_cap(self::PUSH_CAPABILITY, true)") == 1
     assert core.count("$administrator->add_cap(self::PUSH_CAPABILITY, true)") == 1
     assert "user_can($user, self::PUSH_CAPABILITY)" in core
@@ -89,7 +92,7 @@ def main() -> None:
     assert "'pushNotificationsEnabled'" in core
     assert "'canSendPushNotifications'" in core
 
-    # Schema v2 makes installation ownership and binding order durable across
+    # Schema v3 makes installation ownership and binding order durable across
     # PHP workers, hosts and cache loss. Both device and outbox rows carry the
     # exact generation they were created for, while the notification stores one
     # immutable absolute APNs deadline.
@@ -98,6 +101,13 @@ def main() -> None:
         "public static function ensure_push_storage",
         "private static function push_table_names",
     )
+    assert "'version-3'" in storage
+    assert "migrate_push_notification_sensitivity_column" in storage
+    assert "schema_migration_failed" in storage
+    assert "schema_delta_failed" in storage
+    assert "SHOW TABLE STATUS LIKE %s" in push
+    assert "'InnoDB'" in push
+    assert "['Sub_part']" in push
     devices_schema = section(storage, '$devices_sql = "CREATE TABLE', '$notifications_sql =')
     notifications_schema = section(
         storage,
@@ -108,9 +118,9 @@ def main() -> None:
     install_states_schema = section(
         storage,
         '$install_states_sql = "CREATE TABLE',
-        "dbDelta($install_states_sql)",
+        "foreach (array(",
     )
-    assert "'push_schema', 'version-2'" in storage
+    assert "'push_schema', 'version-3'" in storage
     assert "session_option_id bigint(20) unsigned NOT NULL" in devices_schema
     assert "binding_generation bigint(20) unsigned NOT NULL" in devices_schema
     assert "deliver_before bigint(20) unsigned NOT NULL" in notifications_schema
@@ -126,7 +136,8 @@ def main() -> None:
         "PRIMARY KEY  (install_hash)",
     ):
         assert column in install_states_schema
-    assert storage.index("dbDelta($install_states_sql)") < storage.index("dbDelta($devices_sql)")
+    delta_order = section(storage, "foreach (array(", ") as $schema_sql")
+    assert delta_order.index("$install_states_sql") < delta_order.index("$devices_sql")
     table_names = section(push, "private static function push_table_names", "private static function push_tables_exist")
     assert "'install_states' => $wpdb->prefix . 'yishu_push_install_states'" in table_names
     schema_match = section(push, "private static function push_schema_matches", "private static function push_storage_ready")

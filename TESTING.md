@@ -76,8 +76,8 @@ GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服�
 
 ## Build 45 发布前验收
 
-1. 确认 App Debug/Release 均为 `1.3.33 (45)`，App Content API 插件头为 `1.5.12`，Bundle ID 与 APNs topic 均为 `cn.com.shuzijun.yishu`；执行推送合同、动态插件合同、iOS 单元/UI 回归、Release Analyze 和凭据扫描。
-2. 对新注册、Apple 首次/存量资料补全和邀请完成分别执行同意版本矩阵：1.5.12 只接受 Build 42 的 `2026-09-02-approval-v3` 与 Build 45 的 `2026-09-04-approval-v4`，并逐字保存实际提交值；v2、未知、缺失和非字符串均失败关闭。Build 42 v3 请求也必须携带合法抖音 ID，不得借过渡放宽必填政策。确认该过渡白名单没有 option、环境变量、过滤器或远程开关；Build 42 过期后另发 1.5.13 收紧新提交仅 v4，已存 v2/v3/v4 仍保持有效。
+1. 确认 App Debug/Release 均为 `1.3.33 (45)`，App Content API 插件头为 `1.5.12.1`，Bundle ID 与 APNs topic 均为 `cn.com.shuzijun.yishu`；执行推送合同、动态插件合同、iOS 单元/UI 回归、Release Analyze 和凭据扫描。
+2. 对新注册、Apple 首次/存量资料补全和邀请完成分别执行同意版本矩阵：1.5.12.1 只接受 Build 42 的 `2026-09-02-approval-v3` 与 Build 45 的 `2026-09-04-approval-v4`，并逐字保存实际提交值；v2、未知、缺失和非字符串均失败关闭。Build 42 v3 请求也必须携带合法抖音 ID，不得借过渡放宽必填政策。确认该过渡白名单没有 option、环境变量、过滤器或远程开关；Build 42 过期后另发 1.5.13 收紧新提交仅 v4，已存 v2/v3/v4 仍保持有效。
 3. 以普通粉丝、内容管理员和无推送权限的已认证账号分别调用接口：设备登记/解绑必须要求当前正常粉丝会话与相同安装记录；定向发送必须要求独立 `manage_yishu_push_notifications` capability，缺失权限返回 `push_capability_required`，不得锁死其他合法管理功能。
 4. 在管理员目录创建超过两页的同名测试用户，验证昵称模糊搜索、身份码/抖音 ID 精确搜索以及 `page`、`perPage`、`hasMore` 远程分页；不得只返回最近 100/201 个用户。每次发送只接受 1–100 个明确收件人，同一管理员和幂等键重试不得创建第二条通知。
 5. 不传 `sensitive` 或传 `true` 时，APNs 标题与正文必须降级为“Hi，梳子 / 有新消息，请登录查看”；只有显式传 `false` 时才发送经净化且不超过 60/240 字符的自定义标题和正文。数据库、PHP/FPM 日志、审计事件和接口响应不得出现设备令牌、Provider JWT 或私钥明文。

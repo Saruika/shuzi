@@ -10,7 +10,7 @@ trait Shuzijun_App_Push_Notifications {
             return true;
         }
 
-        $lock = self::acquire_named_fan_lock('push_schema', 'version-2');
+        $lock = self::acquire_named_fan_lock('push_schema', 'version-3');
         if (is_wp_error($lock)) {
             do_action('yishu_push_security_audit', 'schema_lock_unavailable');
             return false;
@@ -28,6 +28,10 @@ trait Shuzijun_App_Push_Notifications {
             if (!function_exists('dbDelta')) { return false; }
             $tables = self::push_table_names();
             if (!$tables) { return false; }
+            if (!self::migrate_push_notification_sensitivity_column($tables['notifications'])) {
+                do_action('yishu_push_security_audit', 'schema_migration_failed');
+                return false;
+            }
             $charset = $wpdb->get_charset_collate();
             $devices_sql = "CREATE TABLE {$tables['devices']} (
                 id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
@@ -54,7 +58,7 @@ trait Shuzijun_App_Push_Notifications {
                 payload_hash char(64) NOT NULL,
                 title varchar(240) NOT NULL,
                 body varchar(960) NOT NULL,
-                sensitive tinyint(1) unsigned NOT NULL DEFAULT 1,
+                is_sensitive tinyint(1) unsigned NOT NULL DEFAULT 1,
                 created_by bigint(20) unsigned NOT NULL,
                 recipient_count smallint(5) unsigned NOT NULL DEFAULT 0,
                 device_count smallint(5) unsigned NOT NULL DEFAULT 0,
@@ -112,11 +116,19 @@ trait Shuzijun_App_Push_Notifications {
                 KEY owner_session (fan_user_id, session_option_id),
                 KEY session_expires_at (session_expires_at)
             ) ENGINE=InnoDB {$charset};";
-            dbDelta($install_states_sql);
-            dbDelta($devices_sql);
-            dbDelta($notifications_sql);
-            dbDelta($recipients_sql);
-            dbDelta($outbox_sql);
+            foreach (array(
+                $install_states_sql,
+                $devices_sql,
+                $notifications_sql,
+                $recipients_sql,
+                $outbox_sql,
+            ) as $schema_sql) {
+                dbDelta($schema_sql);
+                if (!empty($wpdb->last_error)) {
+                    do_action('yishu_push_security_audit', 'schema_delta_failed');
+                    return false;
+                }
+            }
             self::$push_schema_verified = null;
             if (!self::push_tables_exist()) {
                 do_action('yishu_push_security_audit', 'schema_creation_failed');
@@ -146,6 +158,47 @@ trait Shuzijun_App_Push_Notifications {
         );
     }
 
+    private static function migrate_push_notification_sensitivity_column($table) {
+        global $wpdb;
+        if (!isset($wpdb) || !is_string($table)
+            || preg_match('/^[A-Za-z0-9_]+$/D', $table) !== 1
+            || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'esc_like')
+            || !method_exists($wpdb, 'get_var') || !method_exists($wpdb, 'get_col')
+            || !method_exists($wpdb, 'query')) {
+            return false;
+        }
+        $found = $wpdb->get_var($wpdb->prepare(
+            'SHOW TABLES LIKE %s',
+            $wpdb->esc_like($table)
+        ));
+        if (!empty($wpdb->last_error)) { return false; }
+        if ($found === null) { return true; }
+        if (!is_string($found) || !hash_equals($table, $found)) { return false; }
+
+        $columns = $wpdb->get_col("SHOW COLUMNS FROM {$table}");
+        if (!is_array($columns) || !empty($wpdb->last_error)) { return false; }
+        $has_legacy = in_array('sensitive', $columns, true);
+        $has_current = in_array('is_sensitive', $columns, true);
+        if ($has_legacy && !$has_current) {
+            $changed = $wpdb->query(
+                "ALTER TABLE {$table} CHANGE COLUMN `sensitive` is_sensitive "
+                . 'tinyint(1) unsigned NOT NULL DEFAULT 1'
+            );
+            if ($changed === false || !empty($wpdb->last_error)) { return false; }
+            $columns = $wpdb->get_col("SHOW COLUMNS FROM {$table}");
+            return is_array($columns) && empty($wpdb->last_error)
+                && in_array('is_sensitive', $columns, true)
+                && !in_array('sensitive', $columns, true);
+        }
+        if ($has_legacy && $has_current) {
+            $copied = $wpdb->query(
+                "UPDATE {$table} SET is_sensitive = `sensitive`"
+            );
+            return $copied !== false && empty($wpdb->last_error);
+        }
+        return true;
+    }
+
     private static function push_tables_exist() {
         global $wpdb;
         $tables = self::push_table_names();
@@ -170,7 +223,9 @@ trait Shuzijun_App_Push_Notifications {
         if (self::$push_schema_verified === true) { return true; }
         global $wpdb;
         if (!is_array($tables) || !isset($wpdb)
-            || !method_exists($wpdb, 'get_col') || !method_exists($wpdb, 'get_results')) {
+            || !method_exists($wpdb, 'get_col') || !method_exists($wpdb, 'get_results')
+            || !method_exists($wpdb, 'get_row') || !method_exists($wpdb, 'prepare')
+            || !method_exists($wpdb, 'esc_like')) {
             return false;
         }
         $expected_columns = array(
@@ -186,7 +241,7 @@ trait Shuzijun_App_Push_Notifications {
             ),
             'notifications' => array(
                 'id', 'public_id', 'idempotency_key', 'payload_hash', 'title',
-                'body', 'sensitive', 'created_by', 'recipient_count',
+                'body', 'is_sensitive', 'created_by', 'recipient_count',
                 'device_count', 'deliver_before', 'created_at', 'expires_at',
             ),
             'recipients' => array('id', 'notification_id', 'fan_user_id', 'created_at'),
@@ -198,6 +253,14 @@ trait Shuzijun_App_Push_Notifications {
             ),
         );
         foreach ($expected_columns as $name => $expected) {
+            $status = $wpdb->get_row($wpdb->prepare(
+                'SHOW TABLE STATUS LIKE %s',
+                $wpdb->esc_like($tables[$name])
+            ), ARRAY_A);
+            if (!is_array($status) || !empty($wpdb->last_error)
+                || strcasecmp((string) ($status['Engine'] ?? ''), 'InnoDB') !== 0) {
+                return false;
+            }
             $columns = $wpdb->get_col("SHOW COLUMNS FROM {$tables[$name]}");
             if (!is_array($columns) || !empty($wpdb->last_error)
                 || array_values(array_intersect($expected, $columns)) !== $expected) {
@@ -206,6 +269,7 @@ trait Shuzijun_App_Push_Notifications {
         }
         $expected_unique = array(
             'devices' => array(
+                'PRIMARY' => array('id'),
                 'token_hash' => array('token_hash'),
                 'install_hash' => array('install_hash'),
             ),
@@ -213,19 +277,25 @@ trait Shuzijun_App_Push_Notifications {
                 'PRIMARY' => array('install_hash'),
             ),
             'notifications' => array(
+                'PRIMARY' => array('id'),
                 'public_id' => array('public_id'),
                 'actor_idempotency' => array('created_by', 'idempotency_key'),
             ),
             'recipients' => array(
+                'PRIMARY' => array('id'),
                 'notification_user' => array('notification_id', 'fan_user_id'),
             ),
-            'outbox' => array('dedupe_key' => array('dedupe_key')),
+            'outbox' => array(
+                'PRIMARY' => array('id'),
+                'dedupe_key' => array('dedupe_key'),
+            ),
         );
         foreach ($expected_unique as $name => $required_indexes) {
             $indexes = $wpdb->get_results("SHOW INDEX FROM {$tables[$name]}", ARRAY_A);
             $unique = array();
             foreach ((array) $indexes as $index) {
-                if ((int) ($index['Non_unique'] ?? 1) === 0) {
+                if ((int) ($index['Non_unique'] ?? 1) === 0
+                    && ($index['Sub_part'] ?? null) === null) {
                     $unique[(string) ($index['Key_name'] ?? '')][(int) ($index['Seq_in_index'] ?? 1)]
                         = (string) ($index['Column_name'] ?? '');
                 }
@@ -1786,7 +1856,7 @@ trait Shuzijun_App_Push_Notifications {
                 'payload_hash' => (string) $input['payloadHash'],
                 'title' => (string) $input['title'],
                 'body' => (string) $input['body'],
-                'sensitive' => $input['sensitive'] ? 1 : 0,
+                'is_sensitive' => $input['sensitive'] ? 1 : 0,
                 'created_by' => $actor_id,
                 'recipient_count' => count($input['userIDs']),
                 'device_count' => 0,
