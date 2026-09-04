@@ -91,6 +91,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.2.md`](Server/releases/v1.3.30-build42.2.md)：真实 systemd 环境发现的健康发布门禁修复与新候选。
 - [`Server/releases/v1.3.30-build42.3.md`](Server/releases/v1.3.30-build42.3.md)：旧健康单元的精确 Python 启动合同修复。
 - [`Server/releases/v1.3.30-build42.4.md`](Server/releases/v1.3.30-build42.4.md)：移除对 `stat %F` 本地化文字的不稳定文件类型依赖。
+- [`Server/releases/v1.3.30-build42.5.md`](Server/releases/v1.3.30-build42.5.md)：以完整 crontab 字节校验取代过时的 stargate 行假设，兼容腾讯云 systemd TAT agent。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

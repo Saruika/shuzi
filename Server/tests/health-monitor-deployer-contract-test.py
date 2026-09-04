@@ -15,7 +15,7 @@ HEALTH_TIMER = Path("Server/operations/shuzijun-internal-health.timer")
 INTERNAL_HEALTH_TEST = Path("Server/tests/internal-health-contract-test.py")
 PRIVATE_LOG_CONFIG = Path("Server/operations/shuzijun-private-logs.conf")
 SNAPSHOT_CRON = Path("Server/operations/tencent-daily-snapshot.cron")
-RELEASE = Path("Server/releases/v1.3.30-build42.4.md")
+RELEASE = Path("Server/releases/v1.3.30-build42.5.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -807,9 +807,9 @@ def main() -> None:
     assert "SuccessExitStatus=2" in health_service_text
 
     for fixed_value in (
-        "RELEASE_ID=build42.4",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.4",
-        "STAGE=/run/shuzijun-health-build42.4-$NODE",
+        "RELEASE_ID=build42.5",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.5",
+        "STAGE=/run/shuzijun-health-build42.5-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -842,8 +842,8 @@ def main() -> None:
     assert f"NEW_TIMER_SHA={health_timer_sha256}" in lines
     assert f"NEW_PRIVATE_LOG_CONFIG_SHA={private_log_config_sha256}" in lines
     assert f"NEW_SNAPSHOT_CRON_SHA={snapshot_cron_sha256}" in lines
-    assert RELEASE == Path("Server/releases/v1.3.30-build42.4.md")
-    assert "Build 42.4" in release
+    assert RELEASE == Path("Server/releases/v1.3.30-build42.5.md")
+    assert "Build 42.5" in release
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
     assert "build41.12" not in text
@@ -1137,7 +1137,7 @@ def main() -> None:
         lines, "capture_root_crontab", "transform_root_crontab"
     )
     transform_crontab = function_body(
-        lines, "transform_root_crontab", "stargate_digest"
+        lines, "transform_root_crontab", "snapshot_producer_count"
     )
     producer_inventory = function_body(
         lines, "snapshot_producer_count", "require_snapshot_producer_count"
@@ -1175,7 +1175,8 @@ def main() -> None:
     assert "/usr/bin/systemd-tmpfiles --create \"$PRIVATE_LOG_CONFIG_TARGET\"" in text
     assert 'require_snapshot_producer_count "$BACKUP_DIR/root-crontab.old" 1' in text
     assert 'require_snapshot_producer_count "$verification" 1' in text
-    assert "OLD_STARGATE_SHA" in text
+    assert "stargate_digest" not in text
+    assert "OLD_STARGATE_SHA" not in text
     install_crontab = function_body(
         lines, "install_migrated_root_crontab", "restore_root_crontab"
     )
@@ -1184,6 +1185,13 @@ def main() -> None:
     )
     assert "sync || return 1" in install_crontab
     assert "sync || return 1" in restore_crontab
+    assert '[[ "$CAPTURED_CRONTAB_SHA" == "$TRANSFORMED_CRONTAB_SHA" ]]' in install_crontab
+    assert '[[ "$CAPTURED_CRONTAB_SHA" == "$ROOT_CRONTAB_SHA" ]]' in restore_crontab
+    verify_snapshot = function_body(
+        lines, "verify_current_snapshot_state", "require_new_support_assets"
+    )
+    assert '[[ "$CAPTURED_CRONTAB_STATE" == "$EXPECTED_CRONTAB_STATE" ]]' in verify_snapshot
+    assert '[[ "$CAPTURED_CRONTAB_SHA" == "$TRANSFORMED_CRONTAB_SHA" ]]' in verify_snapshot
     assert '[[ $- == *e* ]] && errexit_was_set=1' in capture_crontab
     assert "if (( errexit_was_set == 1 )); then" in capture_crontab
 

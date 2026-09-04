@@ -41,8 +41,8 @@ OLD_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc
 OLD_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e
 APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
 APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
-RELEASE_ID=build42.4
-DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.4
+RELEASE_ID=build42.5
+DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.5
 
 [[ $# -eq 2 ]] || { printf 'usage: %s <primary|backup> <authority|standby>\n' "$DEPLOYER_PATH" >&2; exit 2; }
 NODE=${1:-}
@@ -51,7 +51,7 @@ case "$NODE:$ROLE" in
     primary:authority|backup:standby) ;;
     *) printf 'invalid node/role\n' >&2; exit 2 ;;
 esac
-STAGE=/run/shuzijun-health-build42.4-$NODE
+STAGE=/run/shuzijun-health-build42.5-$NODE
 
 [[ $EUID -eq 0 ]] || { printf 'root required\n' >&2; exit 1; }
 [[ "$0" == "$DEPLOYER_PATH" ]] || { printf 'fixed deployer path required\n' >&2; exit 1; }
@@ -201,7 +201,6 @@ OLD_PRIVATE_LOG_CONFIG_SHA=
 OLD_SNAPSHOT_CRON_STATE=
 OLD_SNAPSHOT_CRON_SHA=
 OLD_PRIVATE_LOG_STATE=
-OLD_STARGATE_SHA=
 CRONTAB_CHECK_SERIAL=0
 VALIDATED_INVOCATION=
 VALIDATED_EXIT_STATUS=
@@ -530,7 +529,7 @@ atomic_install() {
     local source=$1 target=$2 mode=$3 expected_sha=$4 parent base tmp
     parent=$(dirname -- "$target") || return 1
     base=$(basename -- "$target") || return 1
-    tmp=$parent/.$base.build42.4.$$
+    tmp=$parent/.$base.build42.5.$$
     [[ ! -e "$tmp" ]] || return 1
     install -o root -g root -m "$mode" -- "$source" "$tmp" || return 1
     require_file "$tmp" "$mode" "$expected_sha" || return 1
@@ -726,19 +725,6 @@ PY
     require_file "$destination" 600 "$TRANSFORMED_CRONTAB_SHA" || return 1
 }
 
-stargate_digest() {
-    /usr/bin/python3 -I - "$1" "$NODE" <<'PY'
-import hashlib
-import pathlib
-import sys
-
-lines = [line for line in pathlib.Path(sys.argv[1]).read_bytes().splitlines(keepends=True) if b"stargate" in line.lower()]
-if sys.argv[2] == "primary" and not lines:
-    raise SystemExit("primary stargate producer missing")
-print(hashlib.sha256(b"".join(lines)).hexdigest())
-PY
-}
-
 snapshot_producer_count() {
     local root_crontab=$1
     require_safe_parent /etc || return 1
@@ -808,7 +794,8 @@ verify_current_snapshot_state() {
     CRONTAB_CHECK_SERIAL=$((CRONTAB_CHECK_SERIAL + 1))
     verification=$BACKUP_DIR/root-crontab.verify.$CRONTAB_CHECK_SERIAL
     capture_root_crontab "$verification" || return 1
-    [[ "$(stargate_digest "$verification")" == "$OLD_STARGATE_SHA" ]] || return 1
+    [[ "$CAPTURED_CRONTAB_STATE" == "$EXPECTED_CRONTAB_STATE" ]] || return 1
+    [[ "$CAPTURED_CRONTAB_SHA" == "$TRANSFORMED_CRONTAB_SHA" ]] || return 1
     require_snapshot_producer_count "$verification" 1 || return 1
     require_file "$SNAPSHOT_CRON_TARGET" 644 "$NEW_SNAPSHOT_CRON_SHA" || return 1
 }
@@ -832,7 +819,6 @@ install_migrated_root_crontab() {
     capture_root_crontab "$verification" || return 1
     [[ "$CAPTURED_CRONTAB_STATE" == "$EXPECTED_CRONTAB_STATE" ]] || return 1
     [[ "$CAPTURED_CRONTAB_SHA" == "$TRANSFORMED_CRONTAB_SHA" ]] || return 1
-    [[ "$(stargate_digest "$verification")" == "$OLD_STARGATE_SHA" ]] || return 1
     require_snapshot_producer_count "$verification" 1 || return 1
 }
 
@@ -847,7 +833,6 @@ restore_root_crontab() {
     capture_root_crontab "$verification" || return 1
     [[ "$CAPTURED_CRONTAB_STATE" == "$ROOT_CRONTAB_STATE" ]] || return 1
     [[ "$CAPTURED_CRONTAB_SHA" == "$ROOT_CRONTAB_SHA" ]] || return 1
-    [[ "$(stargate_digest "$verification")" == "$OLD_STARGATE_SHA" ]] || return 1
 }
 
 restore_private_log_state() {
@@ -1511,7 +1496,7 @@ else
 fi
 require_dir "$BACKUP_ROOT" 700
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build42.4
+BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build42.5
 [[ ! -e "$BACKUP_DIR" ]]
 install -d -o root -g root -m 700 "$BACKUP_DIR"
 write_marker PREPARED "node=$NODE role=$ROLE release=$RELEASE_ID deployer_sha=$DEPLOYER_SHA timer_enabled=enabled timer_active=active old_script=$OLD_SCRIPT_SHA old_service=$OLD_SERVICE_SHA old_timer=$OLD_TIMER_SHA"
@@ -1537,7 +1522,6 @@ backup_one "$STATUS_FILE" status.old "$OLD_STATUS_SHA" 600
 capture_root_crontab "$BACKUP_DIR/root-crontab.old"
 ROOT_CRONTAB_STATE=$CAPTURED_CRONTAB_STATE
 ROOT_CRONTAB_SHA=$CAPTURED_CRONTAB_SHA
-OLD_STARGATE_SHA=$(stargate_digest "$BACKUP_DIR/root-crontab.old")
 require_snapshot_producer_count "$BACKUP_DIR/root-crontab.old" 1
 transform_root_crontab "$BACKUP_DIR/root-crontab.old" "$BACKUP_DIR/root-crontab.migrated"
 [[ "$REMOVED_SNAPSHOT_LINES" == 1 ]]
@@ -1549,13 +1533,12 @@ require_file "$STATUS_FILE" 600 "$OLD_STATUS_SHA"
 [[ "$(stat -c '%i' -- "$STATUS_FILE")" == "$OLD_STATUS_INODE" ]]
 require_optional_asset_state "$PRIVATE_LOG_CONFIG_TARGET" "$OLD_PRIVATE_LOG_CONFIG_STATE" "$OLD_PRIVATE_LOG_CONFIG_SHA"
 require_optional_asset_state "$SNAPSHOT_CRON_TARGET" "$OLD_SNAPSHOT_CRON_STATE" "$OLD_SNAPSHOT_CRON_SHA"
-[[ "$(stargate_digest "$BACKUP_DIR/root-crontab.old")" == "$OLD_STARGATE_SHA" ]]
 {
     printf 'script\t%s\t%s\n' "$OLD_SCRIPT_SHA" "$(stat -c '%u:%g:%a:%h' "$SCRIPT_TARGET")"
     printf 'service\t%s\t%s\n' "$OLD_SERVICE_SHA" "$(stat -c '%u:%g:%a:%h' "$SERVICE_TARGET")"
     printf 'timer\t%s\t%s\n' "$OLD_TIMER_SHA" "$(stat -c '%u:%g:%a:%h' "$TIMER_TARGET")"
     printf 'status\t%s\t%s\tinode=%s\n' "$OLD_STATUS_SHA" "$(stat -c '%u:%g:%a:%h' "$STATUS_FILE")" "$OLD_STATUS_INODE"
-    printf 'root-crontab\t%s\tstate=%s\tstargate_sha=%s\n' "$ROOT_CRONTAB_SHA" "$ROOT_CRONTAB_STATE" "$OLD_STARGATE_SHA"
+    printf 'root-crontab\t%s\tstate=%s\tmigrated_sha=%s\n' "$ROOT_CRONTAB_SHA" "$ROOT_CRONTAB_STATE" "$TRANSFORMED_CRONTAB_SHA"
     printf 'private-log-config\t%s\tstate=%s\n' "$OLD_PRIVATE_LOG_CONFIG_SHA" "$OLD_PRIVATE_LOG_CONFIG_STATE"
     printf 'snapshot-cron\t%s\tstate=%s\n' "$OLD_SNAPSHOT_CRON_SHA" "$OLD_SNAPSHOT_CRON_STATE"
     printf 'private-log-directory\tstate=%s\n' "$OLD_PRIVATE_LOG_STATE"
@@ -1594,7 +1577,6 @@ create_private_logs
 capture_root_crontab "$BACKUP_DIR/root-crontab.before-mutation"
 [[ "$CAPTURED_CRONTAB_STATE" == "$ROOT_CRONTAB_STATE" ]]
 [[ "$CAPTURED_CRONTAB_SHA" == "$ROOT_CRONTAB_SHA" ]]
-[[ "$(stargate_digest "$BACKUP_DIR/root-crontab.before-mutation")" == "$OLD_STARGATE_SHA" ]]
 require_snapshot_producer_count "$BACKUP_DIR/root-crontab.before-mutation" 1
 atomic_install "$STAGE/tencent-daily-snapshot.cron" "$SNAPSHOT_CRON_TARGET" 644 "$NEW_SNAPSHOT_CRON_SHA"
 install_migrated_root_crontab "$BACKUP_DIR/root-crontab.migrated"
