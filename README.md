@@ -106,6 +106,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.32-build44.md`](Server/releases/v1.3.32-build44.md)：合作邮箱与隐私联系邮箱分离、App/网页联系渠道一致性发布记录。
 - [`Server/releases/v1.3.33-build45.md`](Server/releases/v1.3.33-build45.md)：指定粉丝定向 APNs 推送、隐私默认、服务端安全配置与部署/真机验收前置条件。
 - [`Server/releases/v1.3.33-build45.1.md`](Server/releases/v1.3.33-build45.1.md)：MySQL 8 保留字导致通知表建表失败的 1.5.12.1 热修复、schema v3 迁移与精确部署顺序。
+- [`Server/releases/v1.3.33-build45.2.md`](Server/releases/v1.3.33-build45.2.md)：`set -u` 拦截 Worker 部署器临时路径展开的最小热修复与重新安装顺序。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

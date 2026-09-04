@@ -158,6 +158,8 @@ for variable, path in pins.items():
     assert match, f"missing content pin: {variable}"
     assert match.group(1) == digest(path), f"stale content pin: {variable}"
 assert "installed target differs from the reviewed release" in deployer
+assert "temporary=$target.build45.$$" in deployer
+assert "expected=$4 temporary=$target" not in deployer
 
 # Release assets must not contain private-key material, actual secrets or shell
 # tracing. Identifiers are supplied only by the root-only external env file.

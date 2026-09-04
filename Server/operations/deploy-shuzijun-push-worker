@@ -223,7 +223,8 @@ installed_state() {
 }
 
 install_asset() {
-    local source=$1 target=$2 mode=$3 expected=$4 temporary=$target.build45.$$
+    local source=$1 target=$2 mode=$3 expected=$4 temporary
+    temporary=$target.build45.$$
     [[ ! -e "$temporary" && ! -L "$temporary" ]] || fail 'installation temporary path already exists'
     TEMP_FILES+=("$temporary")
     install -o root -g root -m "$mode" -- "$source" "$temporary"
