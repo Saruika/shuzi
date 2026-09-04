@@ -17,6 +17,8 @@ xcodebuild \
   -derivedDataPath "$temporary_root/DerivedData" \
   CODE_SIGNING_ALLOWED=NO \
   COMPILER_INDEX_STORE_ENABLE=NO \
+  GCC_TREAT_WARNINGS_AS_ERRORS=YES \
+  SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
   analyze
 
 xcodebuild \

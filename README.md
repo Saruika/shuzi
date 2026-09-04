@@ -95,6 +95,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.6.md`](Server/releases/v1.3.30-build42.6.md)：在生产 `/run` noexec 挂载上通过固定 Bash 解释器执行已校验的预检脚本。
 - [`Server/releases/v1.3.30-build42.7.md`](Server/releases/v1.3.30-build42.7.md)：清除生产 Swift URL 强制解包和测试密码字面量。
 - [`Server/releases/v1.5.10-build42.8.md`](Server/releases/v1.5.10-build42.8.md)：将 8,125 行 App Content 插件拆成入口与五个可审查模块，并完整固定发布、回滚和直连拦截信任链。
+- [`Server/releases/v1.3.30-build42.9.md`](Server/releases/v1.3.30-build42.9.md)：引入 SAST/SCA、全量 Python 哈希锁、CycloneDX/SPDX SBOM 与 GitHub runner 来源证明。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
@@ -143,6 +144,12 @@ Build 42 在录屏、投屏和切后台的公开保护之外，按产品方明�
 - App Content API 从 8,125 行单文件拆分为 13 行入口、核心类与合作、粉丝接口、粉丝身份、内容交付四个独立模块；重组结果与原类体逐字节一致。
 - Apple JWT 自动加载路径已按新模块层级修正，PHP 8.3 语法、动态插件合同和发布/回滚合同全部通过。
 - 生产旧清单只可作为已审核迁移源，新候选包必须精确匹配模块化清单；入口和所有模块的直接 PHP URL 均必须返回 404。
+
+### Build 42.9 构建供应链
+
+- CI 对生产与质量工具 Python 依赖执行完整传递锁定和逐分发包 SHA-256 校验，并在每次 main push 与 Pull Request 对 Python 和 Composer 完整锁运行 SCA。
+- Bandit 覆盖生产 Python 服务与运维脚本；Xcode compiler analysis 与 warnings-as-errors 继续对 Swift 构建失败关闭。
+- 每次 GitHub 构建都产出 CycloneDX 1.6、SPDX 2.3 与包含 runner/image/toolchain 真实版本及二进制哈希的 provenance 产物。
 
 ## v1.3.29-build41
 

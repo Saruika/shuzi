@@ -9,6 +9,15 @@ on:
 permissions:
   contents: read
 
+env:
+  # macos-26 and the PHP 8.3 formula are provider-managed rolling lines. CI
+  # records their exact resolved versions and binaries; fixed tools stay pinned.
+  DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+  CI_PYTHON_VERSION: '3.12.14'
+  CI_PHP_VERSION: '8.3'
+  CI_COMPOSER_VERSION: '2.9.8'
+  CI_RUNNER_LABEL: macos-26
+
 concurrency:
   group: ios-quality-${{ github.ref }}
   cancel-in-progress: true
@@ -23,12 +32,95 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up audited Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: ${{ env.CI_PYTHON_VERSION }}
+          check-latest: false
+
       - name: Set up PHP for WordPress contract tests
         uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
-          php-version: '8.3'
+          php-version: ${{ env.CI_PHP_VERSION }}
           coverage: none
-          tools: composer:v2
+          tools: composer:${{ env.CI_COMPOSER_VERSION }}
+
+      - name: Verify and record runner provenance
+        env:
+          CI_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/yishu-supply-chain"
+          python3 Scripts/ci-supply-chain.py provenance \
+            --output "$RUNNER_TEMP/yishu-supply-chain/runner-provenance.json"
+
+      - name: Install hash-locked quality tools
+        run: |
+          python3 -m venv "$RUNNER_TEMP/yishu-quality-venv"
+          "$RUNNER_TEMP/yishu-quality-venv/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --require-hashes \
+            --requirement .github/requirements-quality.txt
+
+      - name: Validate dependency and build-source policy
+        run: |
+          python3 Scripts/ci-supply-chain.py validate
+          "$RUNNER_TEMP/yishu-quality-venv/bin/python" \
+            Server/tests/ci-supply-chain-contract-test.py
+
+      - name: Run Python static analysis
+        run: |
+          "$RUNNER_TEMP/yishu-quality-venv/bin/python" -m ruff check \
+            --config Server/ruff.toml \
+            Server \
+            Scripts/ci-supply-chain.py
+          "$RUNNER_TEMP/yishu-quality-venv/bin/python" -m ruff check \
+            --config Server/ruff.toml \
+            --select I \
+            Server/entitlement-verifier \
+            Scripts/ci-supply-chain.py \
+            Server/tests/ci-supply-chain-contract-test.py
+
+      - name: Run Python SAST with Bandit
+        run: |
+          "$RUNNER_TEMP/yishu-quality-venv/bin/python" -m bandit \
+            --recursive \
+            --severity-level medium \
+            --confidence-level medium \
+            --exclude Server/tests,Server/vendor \
+            Server/entitlement-verifier \
+            Server/operations \
+            Scripts/ci-supply-chain.py
+
+      - name: Generate repository SBOMs
+        run: |
+          python3 Scripts/ci-supply-chain.py sbom \
+            --output-dir "$RUNNER_TEMP/yishu-supply-chain"
+
+      - name: Audit Python dependency components
+        run: |
+          "$RUNNER_TEMP/yishu-quality-venv/bin/python" -m pip_audit \
+            --requirement Server/entitlement-verifier/requirements.txt \
+            --strict \
+            --disable-pip \
+            --progress-spinner off \
+            --format cyclonedx-json \
+            --output "$RUNNER_TEMP/yishu-supply-chain/python-runtime-audit.cdx.json"
+          python3 Scripts/ci-supply-chain.py verify-audit \
+            --requirements Server/entitlement-verifier/requirements.txt \
+            --audit "$RUNNER_TEMP/yishu-supply-chain/python-runtime-audit.cdx.json"
+          "$RUNNER_TEMP/yishu-quality-venv/bin/python" -m pip_audit \
+            --requirement .github/requirements-quality.txt \
+            --strict \
+            --disable-pip \
+            --progress-spinner off \
+            --format cyclonedx-json \
+            --output "$RUNNER_TEMP/yishu-supply-chain/python-quality-audit.cdx.json"
+          python3 Scripts/ci-supply-chain.py verify-audit \
+            --requirements .github/requirements-quality.txt \
+            --audit "$RUNNER_TEMP/yishu-supply-chain/python-quality-audit.cdx.json"
+
+      - name: Audit Composer dependency components
+        run: composer audit --locked --working-dir=Server
 
       - name: Validate repository security boundary
         run: Scripts/security-check.sh
@@ -43,10 +135,19 @@ jobs:
           CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
         run: Scripts/ci-ios-tests.sh iPad
 
-      - name: Analyze and audit Release bundle
+      - name: Run Swift compiler analysis and audit Release bundle
         env:
           CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
         run: Scripts/ci-release-analyze.sh
+
+      - name: Preserve runner provenance and SBOMs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: yishu-supply-chain-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/yishu-supply-chain
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Preserve failure diagnostics
         if: failure()

@@ -1,0 +1,6 @@
+# CI-only tools. Keep direct tools exact; requirements-quality.txt is the
+# generated, hash-locked transitive installation set for the macos-26 runner.
+bandit==1.9.4
+jsonschema==4.26.0
+pip-audit==2.10.1
+ruff==0.16.5

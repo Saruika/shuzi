@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "repository": "Saruika/shuzi",
+  "runner_label": "macos-26",
+  "runner_environment": "github-hosted",
+  "runner_os": "macOS",
+  "runner_arch": "ARM64",
+  "image_os": "macos26",
+  "image_source": "https://github.com/actions/runner-images",
+  "image_definition": "images/macos/macos-26-arm64-Readme.md",
+  "image_revision_strategy": "record-and-attest-every-run",
+  "macos_product_major": 26,
+  "developer_dir": "/Applications/Xcode.app/Contents/Developer",
+  "xcode_version": "26.6",
+  "xcode_build": "17F113",
+  "python_version": "3.12.14",
+  "php_version_line": "8.3",
+  "php_version_strategy": "minor-line-record-and-attest-every-run",
+  "composer_version": "2.9.8"
+}

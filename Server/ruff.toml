@@ -1,0 +1,13 @@
+target-version = "py312"
+line-length = 100
+exclude = ["vendor"]
+
+[lint]
+select = ["E4", "E7", "E9", "F"]
+
+# These two pre-existing contract fixtures intentionally exercise values that
+# are only observed by generated shell/Python harnesses. Keep the exceptions
+# narrow so the remainder of Server stays under Pyflakes.
+[lint.per-file-ignores]
+"Server/tests/sync-release-deployer-contract-test.py" = ["F841"]
+"Server/tests/webroot-verifier-trust-contract-test.py" = ["F401"]
