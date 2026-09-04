@@ -97,6 +97,8 @@ python3 Server/tests/internal-health-contract-test.py
 python3 Server/tests/health-monitor-deployer-contract-test.py
 python3 Server/tests/webroot-verifier-trust-contract-test.py
 python3 Server/tests/sync-script-contract-test.py
+python3 Server/tests/sync-receipt-recovery-contract-test.py
+python3 Server/tests/sync-reconcile-generation7-service-contract-test.py
 python3 Server/tests/sync-scheduler-contract-test.py
 python3 Server/tests/sync-release-deployer-contract-test.py
 python3 Server/tests/nginx-server-block-contract-test.py
@@ -168,7 +170,7 @@ grep -qFx 'ExecStart=/usr/bin/flock -n /run/shuzijun-sync/sync.lock /usr/local/s
 grep -qFx 'Persistent=true' Server/operations/shuzijun-sync.timer
 grep -qFx '    ForceCommand /usr/local/sbin/shuzijun-sync-ssh-gate' \
   Server/operations/shuzijun-sync-transport.sshd
-grep -qFx 'shuzijun-sync-transport ALL=(root:root) NOPASSWD: /usr/local/sbin/apply-shuzijun-sync --attest, /usr/local/sbin/apply-shuzijun-sync --protocol, /usr/local/sbin/apply-shuzijun-sync --ingest' \
+grep -qFx 'shuzijun-sync-transport ALL=(root:root) NOPASSWD: /usr/local/sbin/apply-shuzijun-sync --attest, /usr/local/sbin/apply-shuzijun-sync --protocol, /usr/local/sbin/apply-shuzijun-sync --reconcile-receipt, /usr/local/sbin/apply-shuzijun-sync --ingest' \
   Server/operations/shuzijun-sync-transport.sudoers
 if grep -qF 'Cmnd_Alias' Server/operations/shuzijun-sync-transport.sudoers; then
   fail '同步 sudoers 不得使用在重复 includedir 环境中会冲突的别名'

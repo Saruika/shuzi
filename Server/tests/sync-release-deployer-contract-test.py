@@ -73,6 +73,8 @@ class Fixture:
         self.job_state.write_text("", encoding="ascii")
         self.bootstrap_crash = self.external / "bootstrap-crash"
         self.bootstrap_crash.write_text("", encoding="ascii")
+        self.receiver_calls = self.external / "receiver-calls.log"
+        self.receiver_calls.write_text("", encoding="ascii")
 
         self.run = self.root / "run"
         self.stage_root = self.run / "shuzijun-sync-release"
@@ -153,6 +155,7 @@ unit_targets = {{
     'shuzijun-sync.timer': pathlib.Path({str(self.systemd / 'shuzijun-sync.timer')!r}),
     'shuzijun-sync.service': pathlib.Path({str(self.systemd / 'shuzijun-sync.service')!r}),
     'shuzijun-sync-preflight.service': pathlib.Path({str(self.systemd / 'shuzijun-sync-preflight.service')!r}),
+    'shuzijun-sync-reconcile-generation7.service': pathlib.Path({str(self.systemd / 'shuzijun-sync-reconcile-generation7.service')!r}),
     'shuzijun-sync-fpm-guard.service': guard_target,
 }}
 if sys.argv[1:3] == ['is-enabled', 'shuzijun-sync-fpm-guard.service']:
@@ -229,10 +232,12 @@ raise SystemExit(8)
         full = b"#!/bin/sh\nexit 0\n"
         source_verify = b"#!/bin/sh\nexit 0\n"
         guard = b"[Unit]\nDescription=fixture guard\n"
+        ssh_gate = b"#!/bin/sh\nexit 0\n"
         sudoers = b"fixture ALL=(root:root) NOPASSWD: /bin/true\n"
         known_hosts = b"192.0.2.7 ssh-ed25519 AAAAFIXTURE\n"
         preflight_unit = b"[Service]\nType=oneshot\nExecStart=/bin/true\n"
         sync_unit = b"[Service]\nType=oneshot\nExecStart=/bin/true\n"
+        reconcile_unit = b"[Service]\nType=oneshot\nExecStart=/bin/true\n"
         sender = b"#!/bin/sh\nexit 0\n"
 
         receiver_target = self.bin / "apply-shuzijun-sync"
@@ -246,6 +251,8 @@ import signal
 import sys
 import time
 self_path = pathlib.Path(sys.argv[0])
+with pathlib.Path({str(self.receiver_calls)!r}).open('a', encoding='ascii') as stream:
+    stream.write(' '.join(sys.argv[1:]) + '\\n')
 if sys.argv[1:] == ['--bootstrap-state', '6']:
     release = pathlib.Path({str(self.sync_root / 'uploads-releases')!r})
     state = pathlib.Path({str(self.state)!r})
@@ -308,6 +315,25 @@ if sys.argv[1:] == ['--attest']:
 if sys.argv[1:] == ['--protocol']:
     print('shuzijun-sync-receiver-v4-transactional-uploads')
     raise SystemExit(0)
+if sys.argv[1:] == ['--reconcile-receipt']:
+    state = pathlib.Path({str(self.state)!r})
+    accepted = int((state / 'highest-accepted-generation').read_text(encoding='ascii'))
+    active = int((state / 'active-uploads-generation').read_text(encoding='ascii'))
+    committed_fields = (state / 'fpm-activation-guard-v4.committed').read_text(encoding='ascii').split()
+    active_release = json.loads((state / 'active-release-v4.json').read_text(encoding='ascii'))
+    if (len(committed_fields) != 3 or int(committed_fields[0]) != active
+            or accepted != active or active_release['generation'] != active
+            or active_release['release_id'] != committed_fields[1]):
+        raise SystemExit(8)
+    print(
+        f"sync-reconcile-v5 accepted={{accepted}} active={{active}} committed={{active}} "
+        f"evidence-sha256={{active_release['evidence_sha256']}} "
+        f"release-id={{active_release['release_id']}} "
+        f"receiver-sha256={{hashlib.sha256(self_path.read_bytes()).hexdigest()}} "
+        "protocol=shuzijun-sync-receiver-v4-transactional-uploads "
+        "transaction=none runtime=healthy"
+    )
+    raise SystemExit(0)
 raise SystemExit(7)
 """.encode("utf-8")
 
@@ -316,10 +342,12 @@ raise SystemExit(7)
             "shuzijun-sync-fpm-guard.service": (guard, 0o644),
             "shuzijun-sync-transport.sudoers": (sudoers, 0o440),
             "apply-shuzijun-sync": (receiver, 0o755),
+            "shuzijun-sync-ssh-gate": (ssh_gate, 0o755),
             "verify-shuzijun-sync-source": (source_verify, 0o755),
             "shuzijun-sync-known-hosts": (known_hosts, 0o600),
             "shuzijun-sync-preflight.service": (preflight_unit, 0o644),
             "shuzijun-sync.service": (sync_unit, 0o644),
+            "shuzijun-sync-reconcile-generation7.service": (reconcile_unit, 0o644),
             "sync-to-backup": (sender, 0o755),
         }
         for name, (payload, mode) in self.payloads.items():
@@ -328,6 +356,7 @@ raise SystemExit(7)
                 "shuzijun-sync-fpm-guard.service",
                 "shuzijun-sync-transport.sudoers",
                 "apply-shuzijun-sync",
+                "shuzijun-sync-ssh-gate",
             } else self.primary_stage
             write_file(stage / name, payload, mode)
         write_file(self.primary_stage / "verify-webroot-security", full, 0o755)
@@ -337,10 +366,12 @@ raise SystemExit(7)
             "shuzijun-sync-fpm-guard.service": self.systemd / "shuzijun-sync-fpm-guard.service",
             "shuzijun-sync-transport.sudoers": self.sudoers / "shuzijun-sync-transport",
             "apply-shuzijun-sync": receiver_target,
+            "shuzijun-sync-ssh-gate": self.bin / "shuzijun-sync-ssh-gate",
             "verify-shuzijun-sync-source": self.bin / "verify-shuzijun-sync-source",
             "shuzijun-sync-known-hosts": self.config / "sync-known-hosts",
             "shuzijun-sync-preflight.service": self.systemd / "shuzijun-sync-preflight.service",
             "shuzijun-sync.service": self.systemd / "shuzijun-sync.service",
+            "shuzijun-sync-reconcile-generation7.service": self.systemd / "shuzijun-sync-reconcile-generation7.service",
             "sync-to-backup": self.bin / "sync-to-backup",
         }
         for name, target in self.targets.items():
@@ -407,6 +438,8 @@ raise SystemExit(9)
         m.OPERATION_LOCK = self.operation_lock
         m.SENDER_STAGING_ROOT = self.sender_staging
         m.HIGHEST_ISSUED_GENERATION = self.highest_issued
+        m.PENDING_RECEIPT_STATE = self.sync_root / "pending-receipt-v5.json"
+        m.LAST_RECEIPT_RESOLUTION = self.sync_root / "last-resolution-v5.json"
         m.INCOMING_ROOT = self.incoming
         m.STATE_ROOT = self.state
         m.ACCEPTED_GENERATION = self.accepted
@@ -454,17 +487,22 @@ raise SystemExit(9)
         m.SENDER_SHA256 = digest(self.payloads["sync-to-backup"][0])
         m.FULL_VERIFY_SHA256 = digest(self.payloads["verify-webroot-security"][0])
         m.FPM_GUARD_SHA256 = digest(self.payloads["shuzijun-sync-fpm-guard.service"][0])
+        m.SSH_GATE_SHA256 = digest(self.payloads["shuzijun-sync-ssh-gate"][0])
         m.SUDOERS_SHA256 = digest(self.payloads["shuzijun-sync-transport.sudoers"][0])
         m.SOURCE_VERIFY_SHA256 = digest(self.payloads["verify-shuzijun-sync-source"][0])
         m.KNOWN_HOSTS_SHA256 = digest(self.payloads["shuzijun-sync-known-hosts"][0])
         m.PREFLIGHT_SERVICE_SHA256 = digest(self.payloads["shuzijun-sync-preflight.service"][0])
         m.SYNC_SERVICE_SHA256 = digest(self.payloads["shuzijun-sync.service"][0])
+        m.RECONCILE_SERVICE_SHA256 = digest(
+            self.payloads["shuzijun-sync-reconcile-generation7.service"][0]
+        )
         m.ASSETS = {
             "backup": (
                 m.Asset("verify-webroot-security", self.targets["verify-webroot-security"], 0o755, m.FULL_VERIFY_SHA256),
                 m.Asset("shuzijun-sync-fpm-guard.service", self.targets["shuzijun-sync-fpm-guard.service"], 0o644, m.FPM_GUARD_SHA256),
                 m.Asset("shuzijun-sync-transport.sudoers", self.targets["shuzijun-sync-transport.sudoers"], 0o440, m.SUDOERS_SHA256),
                 m.Asset("apply-shuzijun-sync", self.targets["apply-shuzijun-sync"], 0o755, m.RECEIVER_SHA256),
+                m.Asset("shuzijun-sync-ssh-gate", self.targets["shuzijun-sync-ssh-gate"], 0o755, m.SSH_GATE_SHA256),
             ),
             "primary": (
                 m.Asset("verify-webroot-security", self.targets["verify-webroot-security"], 0o755, m.FULL_VERIFY_SHA256),
@@ -472,11 +510,35 @@ raise SystemExit(9)
                 m.Asset("shuzijun-sync-known-hosts", self.targets["shuzijun-sync-known-hosts"], 0o600, m.KNOWN_HOSTS_SHA256),
                 m.Asset("shuzijun-sync-preflight.service", self.targets["shuzijun-sync-preflight.service"], 0o644, m.PREFLIGHT_SERVICE_SHA256),
                 m.Asset("shuzijun-sync.service", self.targets["shuzijun-sync.service"], 0o644, m.SYNC_SERVICE_SHA256),
+                m.Asset("shuzijun-sync-reconcile-generation7.service", self.targets["shuzijun-sync-reconcile-generation7.service"], 0o644, m.RECONCILE_SERVICE_SHA256),
                 m.Asset("sync-to-backup", self.targets["sync-to-backup"], 0o755, m.SENDER_SHA256),
             ),
         }
 
-    def write_primary_receipt(self, payload: bytes | None = None) -> None:
+    def standby_receipt_payload(self, generation: int = 6) -> bytes:
+        live = self.live_uploads.stat()
+        evidence = self.module.bootstrap_evidence_sha256(
+            generation, live.st_dev, live.st_ino
+        )
+        release_id = self.module.active_release_identifier(
+            generation, evidence, live.st_dev, live.st_ino
+        )
+        active_payload = self.module.canonical_json({
+            "evidence_sha256": evidence,
+            "generation": generation,
+            "release_id": release_id,
+            "uploads_dev": live.st_dev,
+            "uploads_ino": live.st_ino,
+            "version": 4,
+        })
+        state = self.module.BootstrapState(
+            "a" * 64, release_id, active_payload, {}
+        )
+        return self.module.standby_receipt_bytes(state, "b" * 64)
+
+    def write_primary_receipt(
+        self, payload: bytes | None = None, *, generation: int = 6
+    ) -> None:
         # A fixture represents one node role at a time.  Standby-only runtime
         # state is removed before exercising the authority inventory contract.
         for directory in (self.incoming, self.state, self.sync_root / "uploads-releases"):
@@ -487,27 +549,9 @@ raise SystemExit(9)
                     child.unlink()
                 directory.rmdir()
         if not self.highest_issued.exists():
-            write_file(self.highest_issued, b"6\n", 0o600)
+            write_file(self.highest_issued, f"{generation}\n".encode("ascii"), 0o600)
         if payload is None:
-            live = self.live_uploads.stat()
-            evidence = self.module.bootstrap_evidence_sha256(
-                6, live.st_dev, live.st_ino
-            )
-            release_id = self.module.active_release_identifier(
-                6, evidence, live.st_dev, live.st_ino
-            )
-            active_payload = self.module.canonical_json({
-                "evidence_sha256": evidence,
-                "generation": 6,
-                "release_id": release_id,
-                "uploads_dev": live.st_dev,
-                "uploads_ino": live.st_ino,
-                "version": 4,
-            })
-            state = self.module.BootstrapState(
-                "a" * 64, release_id, active_payload, {}
-            )
-            payload = self.module.standby_receipt_bytes(state, "b" * 64)
+            payload = self.standby_receipt_payload(generation)
         write_file(
             self.primary_stage / "standby-first.receipt",
             payload,
@@ -542,15 +586,17 @@ def expect_failure(callback, contains: str | None = None) -> Exception:
 def test_static_fail_closed_contract() -> None:
     text = DEPLOYER.read_text(encoding="utf-8")
     frozen_assets = (
-        ("receiver", "RECEIVER_SHA256", "apply-shuzijun-sync", "0a28c89ef1ac427f6ac72e5268cb5aa0ed28169493aab64d05dd687a40e67e03"),
-        ("sender", "SENDER_SHA256", "sync-to-backup", "a4e05f87426689673d5b741a88efcd6c8e35f856ab57f5b3ba78f56a004b4356"),
+        ("receiver", "RECEIVER_SHA256", "apply-shuzijun-sync", "b4eaddf91676be3becb0eb1595fd7f6763aa872a51ff8a945d8e652e61db6ee4"),
+        ("sender", "SENDER_SHA256", "sync-to-backup", "f886ba64c3fb652751ec1e3929781993c438bb91541ceaf853932acd97f211c4"),
         ("FPM guard", "FPM_GUARD_SHA256", "shuzijun-sync-fpm-guard.service", "8d5b40388450c112c1f0ee84456ee960ae6a204323e8137ea0ec4f1c7a1d620e"),
-        ("sudoers transport", "SUDOERS_SHA256", "shuzijun-sync-transport.sudoers", "7359fb403d227ffefe03e835deb73a03e5cfc720f70563be449a85d92267045e"),
+        ("SSH forced-command gate", "SSH_GATE_SHA256", "shuzijun-sync-ssh-gate", "1bdb7041b272a71b2884b8bdf247a55477d4bb0387a23c3b79c694e940189f01"),
+        ("sudoers transport", "SUDOERS_SHA256", "shuzijun-sync-transport.sudoers", "8fdd66e0966f0f46ad0fc74db70148e67b0ea6e86228d694f6241d03b24409cd"),
         ("full verifier", "FULL_VERIFY_SHA256", "verify-webroot-security", "7e7a95a1cc7bb05aa6810a9d644950ddedb0274ce247499d5828a9180dcae7f2"),
         ("source verifier", "SOURCE_VERIFY_SHA256", "verify-shuzijun-sync-source", "b5e3cdde9b4cdf0ab7acee66fab991bbb3815419bfb0bf97f0283e7cbcfa04af"),
         ("known-hosts", "KNOWN_HOSTS_SHA256", "shuzijun-sync-known-hosts", "b48cc29b7506423ba402b954cb8c0fedc748706549ed704e84647b70a517d6f3"),
         ("preflight service", "PREFLIGHT_SERVICE_SHA256", "shuzijun-sync-preflight.service", "7e072f70b44f8d466e163ec91d7af8a2fc316698fd9257edc29647395ee17146"),
         ("sync service", "SYNC_SERVICE_SHA256", "shuzijun-sync.service", "943419bf84ad35f6f9ac857cf626e1c44f68a09c85d0bf56cc0cdc79c8b0e8b2"),
+        ("generation 7 reconciliation service", "RECONCILE_SERVICE_SHA256", "shuzijun-sync-reconcile-generation7.service", "4d487b851cae2da7ad2ee7348a7b2e7ddfcb15395d904644e669d2e43eab0978"),
     )
     for _label, attribute, filename, expected in frozen_assets:
         assert f'{attribute} = "{expected}"' in text
@@ -872,6 +918,89 @@ def test_standby_first_commit_then_primary_and_integrity() -> None:
         )
 
 
+def test_generation_seven_standby_upgrade_preserves_committed_state() -> None:
+    module = load_deployer()
+    with tempfile.TemporaryDirectory(
+        prefix="sync-release-generation-seven-upgrade-"
+    ) as temporary:
+        fixture = Fixture(temporary, module)
+        initial_backup = module.deploy("backup", "standby", "apply")
+        assert initial_backup is not None
+        assert "--bootstrap-state 6" in fixture.receiver_calls.read_text(
+            encoding="ascii"
+        ).splitlines()
+
+        live = fixture.live_uploads.stat()
+        evidence = "7" * 64
+        release_id = module.active_release_identifier(
+            7, evidence, live.st_dev, live.st_ino
+        )
+        write_file(fixture.accepted, b"7\n", 0o600)
+        write_file(module.ACTIVE_UPLOADS_GENERATION, b"7\n", 0o600)
+        guard_payload = f"7 {release_id} {'9' * 64}\n".encode("ascii")
+        write_file(module.FPM_GUARD_COMMIT, guard_payload, 0o600)
+        write_file(module.FPM_GUARD_ARMED, guard_payload, 0o600)
+        write_file(
+            module.ACTIVE_RELEASE_RECORD,
+            module.canonical_json(
+                {
+                    "evidence_sha256": evidence,
+                    "generation": 7,
+                    "release_id": release_id,
+                    "uploads_dev": live.st_dev,
+                    "uploads_ino": live.st_ino,
+                    "version": 4,
+                }
+            ),
+            0o600,
+        )
+        retained = module.UPLOADS_RELEASE_ROOT / "previous-generation-6-for-7"
+        retained.mkdir(mode=0o755)
+        write_file(retained / "retained.jpg", b"generation-six-media\n", 0o644)
+
+        state_before = tree_snapshot(fixture.state)
+        retained_before = tree_snapshot(module.UPLOADS_RELEASE_ROOT)
+        live_before = tree_snapshot(fixture.live_uploads)
+        fixture.receiver_calls.write_text("", encoding="ascii")
+
+        upgraded_backup = module.deploy("backup", "standby", "apply")
+        assert upgraded_backup is not None
+        assert tree_snapshot(fixture.state) == state_before
+        assert tree_snapshot(module.UPLOADS_RELEASE_ROOT) == retained_before
+        assert tree_snapshot(fixture.live_uploads) == live_before
+        assert retained.is_dir()
+        assert fixture.receiver_calls.read_text(encoding="ascii").splitlines() == [
+            "--attest",
+            "--protocol",
+            "--reconcile-receipt",
+        ]
+        receipt = module.validate_standby_receipt(
+            (upgraded_backup / "standby-first.receipt").read_bytes()
+        )
+        assert receipt["generation"] == 7
+        assert receipt["release_id"] == release_id
+        assert receipt["active_release"]["generation"] == 7
+        assert receipt["active_release"]["evidence_sha256"] == evidence
+        terminal = json.loads(
+            (upgraded_backup / "transaction-terminal.json").read_text(
+                encoding="ascii"
+            )
+        )
+        assert terminal["status"] == "committed"
+
+        backups_before = {entry.name for entry in fixture.backup_root.iterdir()}
+        write_file(
+            module.FPM_GUARD_ARMED,
+            f"7 {release_id} {'8' * 64}\n".encode("ascii"),
+            0o600,
+        )
+        expect_failure(
+            lambda: module.deploy("backup", "standby", "dry-run"),
+            "armed marker differs from commit",
+        )
+        assert {entry.name for entry in fixture.backup_root.iterdir()} == backups_before
+
+
 def test_backup_manifest_node_is_strict() -> None:
     module = load_deployer()
     with tempfile.TemporaryDirectory(prefix="sync-release-node-manifest-") as temporary:
@@ -921,6 +1050,61 @@ def test_atomic_replace_failure_restores_present_and_absent_targets() -> None:
         terminals = list(fixture.backup_root.glob("*/transaction-terminal.json"))
         assert len(terminals) == 1
         assert json.loads(terminals[0].read_text(encoding="ascii"))["status"] == "rolled-back"
+
+
+def test_fresh_primary_reconciliation_unit_is_removed_on_later_failure() -> None:
+    module = load_deployer()
+    with tempfile.TemporaryDirectory(
+        prefix="sync-release-primary-reconcile-rollback-"
+    ) as temporary:
+        fixture = Fixture(temporary, module)
+        fixture.write_primary_receipt()
+        reconciliation_target = fixture.targets[
+            "shuzijun-sync-reconcile-generation7.service"
+        ]
+        reconciliation_target.unlink()
+        before_targets = fixture.original_target_snapshot("primary")
+        before_runtime = module.runtime_snapshot("primary")
+        original_replace = module.atomic_replace_from_input
+        attempted: list[str] = []
+
+        def fail_before_sender(asset, stage):
+            attempted.append(asset.source_name)
+            if asset.source_name == "sync-to-backup":
+                raise module.DeploymentError("injected later sender replacement failure")
+            original_replace(asset, stage)
+
+        module.atomic_replace_from_input = fail_before_sender
+        expect_failure(
+            lambda: module.deploy("primary", "authority", "apply"),
+            "rolled back",
+        )
+        assert attempted[-2:] == [
+            "shuzijun-sync-reconcile-generation7.service",
+            "sync-to-backup",
+        ]
+        assert fixture.original_target_snapshot("primary") == before_targets
+        assert not reconciliation_target.exists()
+        assert module.runtime_snapshot("primary") == before_runtime
+
+        backup_directories = [
+            path for path in fixture.backup_root.iterdir() if path.is_dir()
+        ]
+        assert len(backup_directories) == 1
+        backup_dir = backup_directories[0]
+        manifest = json.loads(
+            (backup_dir / "backup-originals.json").read_text(encoding="ascii")
+        )
+        reconciliation_records = [
+            record for record in manifest["records"]
+            if record["path"] == str(reconciliation_target)
+        ]
+        assert len(reconciliation_records) == 1
+        assert reconciliation_records[0]["kind"] == "absent"
+        terminal = json.loads(
+            (backup_dir / "transaction-terminal.json").read_text(encoding="ascii")
+        )
+        assert terminal["status"] == "rolled-back"
 
 
 def test_partial_bootstrap_failure_rolls_back_all_created_state() -> None:
@@ -1395,7 +1579,7 @@ def test_primary_generation_temp_inventory_is_exact_and_not_deleted() -> None:
             )
             assert not fixture.backup_root.exists()
 
-    for state in ("missing", "wrong-generation", "hardlink", "fifo"):
+    for state in ("missing", "below-lineage", "hardlink", "fifo"):
         module = load_deployer()
         with tempfile.TemporaryDirectory(
             prefix=f"sync-release-primary-generation-{state}-"
@@ -1404,8 +1588,8 @@ def test_primary_generation_temp_inventory_is_exact_and_not_deleted() -> None:
             fixture.write_primary_receipt()
             if state == "missing":
                 fixture.highest_issued.unlink()
-            elif state == "wrong-generation":
-                fixture.highest_issued.write_bytes(b"7\n")
+            elif state == "below-lineage":
+                fixture.highest_issued.write_bytes(b"5\n")
             else:
                 if state == "hardlink":
                     linked = fixture.external / "highest-issued-generation.link"
@@ -1416,7 +1600,7 @@ def test_primary_generation_temp_inventory_is_exact_and_not_deleted() -> None:
             expect_failure(
                 lambda: module.deploy("primary", "authority", "dry-run"),
                 "highest-issued-generation"
-                if state in {"missing", "wrong-generation"}
+                if state in {"missing", "below-lineage"}
                 else "unsafe regular file metadata",
             )
             assert not fixture.backup_root.exists()
@@ -1472,6 +1656,207 @@ def test_node_specific_runtime_inventory_is_exact() -> None:
         assert not fixture.backup_root.exists()
 
 
+def test_primary_generation_and_standby_receipt_are_exactly_bound() -> None:
+    module = load_deployer()
+    with tempfile.TemporaryDirectory(
+        prefix="sync-release-primary-generation-seven-"
+    ) as temporary:
+        fixture = Fixture(temporary, module)
+        fixture.write_primary_receipt(generation=7)
+        before = tree_snapshot(fixture.root)
+        assert module.deploy("primary", "authority", "dry-run") is None
+        assert tree_snapshot(fixture.root) == before
+
+    for issued_generation, receipt_generation in ((7, 6), (7, 8)):
+        module = load_deployer()
+        with tempfile.TemporaryDirectory(
+            prefix="sync-release-primary-generation-receipt-mismatch-"
+        ) as temporary:
+            fixture = Fixture(temporary, module)
+            fixture.write_primary_receipt(
+                fixture.standby_receipt_payload(receipt_generation),
+                generation=issued_generation,
+            )
+            receipt = fixture.primary_stage / "standby-first.receipt"
+            before_receipt = receipt.read_bytes()
+            expect_failure(
+                lambda: module.deploy("primary", "authority", "dry-run"),
+                "generation",
+            )
+            assert receipt.read_bytes() == before_receipt
+            assert not fixture.backup_root.exists()
+
+
+def test_primary_receipt_state_inventory_is_exact() -> None:
+    def resolution_document(**changes: object) -> dict[str, object]:
+        document: dict[str, object] = {
+            "accepted_generation": 6,
+            "active_evidence_sha256": "a" * 64,
+            "active_generation": 6,
+            "committed_generation": 6,
+            "generation": 6,
+            "ingest_receiver_sha256": "b" * 64,
+            "outcome": "committed",
+            "protocol": "shuzijun-sync-receiver-v4-transactional-uploads",
+            "query_receiver_sha256": "c" * 64,
+            "reason": "inline-ack",
+            "release_id": "d" * 64,
+            "runtime": "healthy",
+            "version": 5,
+        }
+        document.update(changes)
+        return document
+
+    module = load_deployer()
+    with tempfile.TemporaryDirectory(
+        prefix="sync-release-primary-receipt-valid-"
+    ) as temporary:
+        fixture = Fixture(temporary, module)
+        fixture.write_primary_receipt()
+        resolution = fixture.sync_root / "last-resolution-v5.json"
+        write_file(resolution, module.canonical_json(resolution_document()), 0o600)
+        before = tree_snapshot(fixture.root)
+        assert module.deploy("primary", "authority", "dry-run") is None
+        assert tree_snapshot(fixture.root) == before
+
+    valid_generation_seven = (
+        resolution_document(
+            accepted_generation=7,
+            active_generation=7,
+            committed_generation=7,
+            generation=7,
+            reason="startup-recovery",
+        ),
+        resolution_document(
+            generation=7,
+            outcome="not-committed",
+            reason="queried-after-ambiguous-ack",
+        ),
+        resolution_document(
+            accepted_generation=7,
+            generation=7,
+            outcome="not-committed",
+            reason="queried-after-ambiguous-ack",
+            runtime="isolated",
+        ),
+    )
+    for document in valid_generation_seven:
+        module = load_deployer()
+        with tempfile.TemporaryDirectory(
+            prefix="sync-release-primary-receipt-valid-seven-"
+        ) as temporary:
+            fixture = Fixture(temporary, module)
+            fixture.write_primary_receipt(generation=7)
+            resolution = fixture.sync_root / "last-resolution-v5.json"
+            write_file(resolution, module.canonical_json(document), 0o600)
+            before = tree_snapshot(fixture.root)
+            assert module.deploy("primary", "authority", "dry-run") is None
+            assert tree_snapshot(fixture.root) == before
+
+    invalid_documents = (
+        ("future", resolution_document(generation=7, accepted_generation=7,
+            active_generation=7, committed_generation=7)),
+        ("below-lineage", resolution_document(
+            accepted_generation=5,
+            active_generation=5,
+            committed_generation=5,
+            generation=5,
+        )),
+        ("extra-key", {**resolution_document(), "extra": True}),
+        ("committed-isolated", resolution_document(runtime="isolated")),
+        ("ambiguous-not-committed", resolution_document(
+            accepted_generation=5,
+            active_generation=4,
+            committed_generation=4,
+            outcome="not-committed",
+            runtime="isolated",
+        )),
+    )
+    for name, document in invalid_documents:
+        module = load_deployer()
+        with tempfile.TemporaryDirectory(
+            prefix=f"sync-release-primary-receipt-{name}-"
+        ) as temporary:
+            fixture = Fixture(temporary, module)
+            fixture.write_primary_receipt()
+            resolution = fixture.sync_root / "last-resolution-v5.json"
+            payload = module.canonical_json(document)
+            write_file(resolution, payload, 0o600)
+            expect_failure(
+                lambda: module.deploy("primary", "authority", "dry-run")
+            )
+            assert resolution.read_bytes() == payload
+            assert not fixture.backup_root.exists()
+
+    module = load_deployer()
+    with tempfile.TemporaryDirectory(
+        prefix="sync-release-primary-receipt-pending-"
+    ) as temporary:
+        fixture = Fixture(temporary, module)
+        fixture.write_primary_receipt()
+        pending = fixture.sync_root / "pending-receipt-v5.json"
+        payload = module.canonical_json({
+            "evidence_sha256": "a" * 64,
+            "expected_release_id": "",
+            "generation": 6,
+            "ingest_receiver_sha256": "b" * 64,
+            "protocol": "shuzijun-sync-receiver-v4-transactional-uploads",
+            "version": 5,
+        })
+        write_file(pending, payload, 0o600)
+        expect_failure(
+            lambda: module.deploy("primary", "authority", "dry-run"),
+            "path must be absent",
+        )
+        assert pending.read_bytes() == payload
+        assert not fixture.backup_root.exists()
+
+    for kind in ("wrong-mode", "symlink", "hardlink"):
+        module = load_deployer()
+        with tempfile.TemporaryDirectory(
+            prefix=f"sync-release-primary-receipt-{kind}-"
+        ) as temporary:
+            fixture = Fixture(temporary, module)
+            fixture.write_primary_receipt()
+            resolution = fixture.sync_root / "last-resolution-v5.json"
+            payload = module.canonical_json(resolution_document())
+            if kind == "wrong-mode":
+                write_file(resolution, payload, 0o644)
+            else:
+                outside = fixture.external / "resolution-state"
+                write_file(outside, payload, 0o600)
+                if kind == "symlink":
+                    resolution.symlink_to(outside)
+                else:
+                    os.link(outside, resolution)
+            expect_failure(
+                lambda: module.deploy("primary", "authority", "dry-run")
+            )
+            assert not fixture.backup_root.exists()
+
+    for filename, message in (
+        (".pending-receipt-v5." + "a" * 32, "unrecovered receipt-state temporary"),
+        (
+            ".clearing-pending-receipt-v5." + "b" * 32,
+            "unrecovered receipt clearing tombstone",
+        ),
+    ):
+        module = load_deployer()
+        with tempfile.TemporaryDirectory(
+            prefix="sync-release-primary-receipt-temporary-"
+        ) as temporary:
+            fixture = Fixture(temporary, module)
+            fixture.write_primary_receipt()
+            temporary_state = fixture.sync_root / filename
+            write_file(temporary_state, b"partial\n", 0o600)
+            expect_failure(
+                lambda: module.deploy("primary", "authority", "dry-run"),
+                message,
+            )
+            assert temporary_state.read_bytes() == b"partial\n"
+            assert not fixture.backup_root.exists()
+
+
 def main() -> None:
     test_static_fail_closed_contract()
     test_metadata_symlink_hardlink_and_allowlists()
@@ -1479,8 +1864,10 @@ def main() -> None:
     test_primary_stale_recovery_and_runtime_health_are_hard_gates()
     test_external_commands_have_a_real_timeout()
     test_standby_first_commit_then_primary_and_integrity()
+    test_generation_seven_standby_upgrade_preserves_committed_state()
     test_backup_manifest_node_is_strict()
     test_atomic_replace_failure_restores_present_and_absent_targets()
+    test_fresh_primary_reconciliation_unit_is_removed_on_later_failure()
     test_partial_bootstrap_failure_rolls_back_all_created_state()
     test_complete_bootstrap_prefix_then_error_rolls_back_exact_state()
     test_unknown_concurrent_postimage_is_never_overwritten()
@@ -1493,6 +1880,8 @@ def main() -> None:
     test_receiver_state_inventory_and_stale_temp_rollback()
     test_primary_generation_temp_inventory_is_exact_and_not_deleted()
     test_node_specific_runtime_inventory_is_exact()
+    test_primary_generation_and_standby_receipt_are_exactly_bound()
+    test_primary_receipt_state_inventory_is_exact()
     print("sync-release-deployer-contract-test: passed")
 
 

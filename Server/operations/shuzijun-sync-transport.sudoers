@@ -1,1 +1,1 @@
-shuzijun-sync-transport ALL=(root:root) NOPASSWD: /usr/local/sbin/apply-shuzijun-sync --attest, /usr/local/sbin/apply-shuzijun-sync --protocol, /usr/local/sbin/apply-shuzijun-sync --ingest
+shuzijun-sync-transport ALL=(root:root) NOPASSWD: /usr/local/sbin/apply-shuzijun-sync --attest, /usr/local/sbin/apply-shuzijun-sync --protocol, /usr/local/sbin/apply-shuzijun-sync --reconcile-receipt, /usr/local/sbin/apply-shuzijun-sync --ingest

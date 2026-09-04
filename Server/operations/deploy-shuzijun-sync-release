@@ -5,7 +5,8 @@ This file is intentionally installed root:root 0700 at the fixed /run path.
 Candidate bytes live below a fixed, root-only /run stage.  The standby must be
 committed first; its deterministic receipt is then copied by the operator into
 the primary stage.  Every coupled asset is bound to the independently frozen
-generation-6 candidate below.
+generation-6 lineage below.  A fully committed later generation is upgraded
+in place without replaying bootstrap or changing its media/database state.
 """
 
 from __future__ import annotations
@@ -42,18 +43,29 @@ ROLE_VERIFY_PARENT_PATHS = (Path("/"), Path("/usr"), Path("/usr/local"), Path("/
 
 # Frozen coupled candidate.  Both --dry-run and --apply independently rehash
 # every staged byte before any backup or live mutation.
-RECEIVER_SHA256 = "0a28c89ef1ac427f6ac72e5268cb5aa0ed28169493aab64d05dd687a40e67e03"
-SENDER_SHA256 = "a4e05f87426689673d5b741a88efcd6c8e35f856ab57f5b3ba78f56a004b4356"
+RECEIVER_SHA256 = "b4eaddf91676be3becb0eb1595fd7f6763aa872a51ff8a945d8e652e61db6ee4"
+SENDER_SHA256 = "f886ba64c3fb652751ec1e3929781993c438bb91541ceaf853932acd97f211c4"
 
 FPM_GUARD_SHA256 = "8d5b40388450c112c1f0ee84456ee960ae6a204323e8137ea0ec4f1c7a1d620e"
-SUDOERS_SHA256 = "7359fb403d227ffefe03e835deb73a03e5cfc720f70563be449a85d92267045e"
+SSH_GATE_SHA256 = "1bdb7041b272a71b2884b8bdf247a55477d4bb0387a23c3b79c694e940189f01"
+SUDOERS_SHA256 = "8fdd66e0966f0f46ad0fc74db70148e67b0ea6e86228d694f6241d03b24409cd"
 FULL_VERIFY_SHA256 = "7e7a95a1cc7bb05aa6810a9d644950ddedb0274ce247499d5828a9180dcae7f2"
 SOURCE_VERIFY_SHA256 = "b5e3cdde9b4cdf0ab7acee66fab991bbb3815419bfb0bf97f0283e7cbcfa04af"
 KNOWN_HOSTS_SHA256 = "b48cc29b7506423ba402b954cb8c0fedc748706549ed704e84647b70a517d6f3"
 PREFLIGHT_SERVICE_SHA256 = "7e072f70b44f8d466e163ec91d7af8a2fc316698fd9257edc29647395ee17146"
 SYNC_SERVICE_SHA256 = "943419bf84ad35f6f9ac857cf626e1c44f68a09c85d0bf56cc0cdc79c8b0e8b2"
+RECONCILE_SERVICE_SHA256 = "4d487b851cae2da7ad2ee7348a7b2e7ddfcb15395d904644e669d2e43eab0978"
 EXPECTED_PROTOCOL = "shuzijun-sync-receiver-v4-transactional-uploads"
 BOOTSTRAP_GENERATION = 6
+MAX_MEDIA_FILES = 100_000
+MAX_MEDIA_DIRECTORIES = 100_000
+MAX_MEDIA_FILE_BYTES = 8 * 1024 * 1024 * 1024
+MAX_MEDIA_TREE_BYTES = 64 * 1024 * 1024 * 1024
+FORBIDDEN_MEDIA_NAMES = {".htaccess", ".user.ini"}
+FORBIDDEN_MEDIA_SUFFIXES = {
+    ".php", ".php3", ".php4", ".php5", ".php7", ".php8", ".phtml",
+    ".phar", ".cgi", ".pl", ".py", ".sh", ".bash", ".zsh", ".rb",
+}
 
 SYSTEMCTL = Path("/usr/bin/systemctl")
 SYSTEMD_ANALYZE = Path("/usr/bin/systemd-analyze")
@@ -71,6 +83,8 @@ SYNC_ROOT = Path("/var/lib/shuzijun-sync")
 OPERATION_LOCK = SYNC_ROOT / "site-operation.lock"
 SENDER_STAGING_ROOT = SYNC_ROOT / "sender-staging"
 HIGHEST_ISSUED_GENERATION = SYNC_ROOT / "highest-issued-generation"
+PENDING_RECEIPT_STATE = SYNC_ROOT / "pending-receipt-v5.json"
+LAST_RECEIPT_RESOLUTION = SYNC_ROOT / "last-resolution-v5.json"
 INCOMING_ROOT = SYNC_ROOT / "incoming"
 STATE_ROOT = SYNC_ROOT / "state"
 ACCEPTED_GENERATION = STATE_ROOT / "highest-accepted-generation"
@@ -86,6 +100,7 @@ ACTIVE_RELEASE_CONTRACT = "shuzijun-active-release-v4-bootstrap-root-live-inode"
 SYNC_TIMER = "shuzijun-sync.timer"
 SYNC_SERVICE = "shuzijun-sync.service"
 PREFLIGHT_SERVICE = "shuzijun-sync-preflight.service"
+RECONCILE_SERVICE = "shuzijun-sync-reconcile-generation7.service"
 FPM_GUARD_SERVICE = "shuzijun-sync-fpm-guard.service"
 FPM_SERVICE = "php8.3-fpm.service"
 NGINX_SERVICE = "nginx.service"
@@ -158,6 +173,7 @@ def _asset_sets() -> dict[str, tuple[Asset, ...]]:
             Asset("shuzijun-sync-fpm-guard.service", Path("/etc/systemd/system/shuzijun-sync-fpm-guard.service"), 0o644, FPM_GUARD_SHA256),
             Asset("shuzijun-sync-transport.sudoers", Path("/etc/sudoers.d/shuzijun-sync-transport"), 0o440, SUDOERS_SHA256),
             Asset("apply-shuzijun-sync", Path("/usr/local/sbin/apply-shuzijun-sync"), 0o755, RECEIVER_SHA256),
+            Asset("shuzijun-sync-ssh-gate", Path("/usr/local/sbin/shuzijun-sync-ssh-gate"), 0o755, SSH_GATE_SHA256),
         ),
         "primary": (
             Asset("verify-webroot-security", Path("/usr/local/sbin/verify-shuzijun-webroot-security"), 0o755, FULL_VERIFY_SHA256),
@@ -165,6 +181,7 @@ def _asset_sets() -> dict[str, tuple[Asset, ...]]:
             Asset("shuzijun-sync-known-hosts", Path("/etc/shuzijun/sync-known-hosts"), 0o600, KNOWN_HOSTS_SHA256),
             Asset("shuzijun-sync-preflight.service", Path("/etc/systemd/system/shuzijun-sync-preflight.service"), 0o644, PREFLIGHT_SERVICE_SHA256),
             Asset("shuzijun-sync.service", Path("/etc/systemd/system/shuzijun-sync.service"), 0o644, SYNC_SERVICE_SHA256),
+            Asset("shuzijun-sync-reconcile-generation7.service", Path("/etc/systemd/system/shuzijun-sync-reconcile-generation7.service"), 0o644, RECONCILE_SERVICE_SHA256),
             Asset("sync-to-backup", Path("/usr/local/sbin/sync-to-backup"), 0o755, SENDER_SHA256),
         ),
     }
@@ -506,18 +523,20 @@ def validate_sync_subdirectory(path: Path) -> os.stat_result:
     return metadata
 
 
-def validate_primary_generation_state() -> None:
+def validate_primary_generation_state() -> int:
     root_metadata = validate_directory(SYNC_ROOT, 0o700)
     payload, _ = read_regular(
         HIGHEST_ISSUED_GENERATION, 0o600, device=root_metadata.st_dev
     )
-    # This release deliberately does not initialize or advance the primary
-    # anti-replay counter.  Only the already-audited generation-6 authority
-    # state may be upgraded; a fresh/mismatched primary needs the separate
-    # two-node disaster-recovery procedure so this installer cannot silently
-    # reuse a generation already accepted by the standby.
-    if payload != b"6\n":
-        fail("highest-issued-generation is not exactly 6")
+    match = re.fullmatch(rb"([1-9][0-9]{0,18})\n", payload)
+    if match is None:
+        fail("highest-issued-generation is not canonical")
+    generation = int(match.group(1))
+    # The deployer never initializes or advances this anti-replay counter.  It
+    # accepts the bootstrap generation and later monotonic values only when the
+    # standby receipt independently binds that exact generation.
+    if generation < BOOTSTRAP_GENERATION or generation >= 2**63:
+        fail("highest-issued-generation is outside the deployed lineage")
     managed = re.compile(r"\.highest-issued\.[0-9a-f]{32}")
     for entry in SYNC_ROOT.iterdir():
         if not entry.name.startswith(".highest-issued."):
@@ -527,6 +546,92 @@ def validate_primary_generation_state() -> None:
         temporary, _ = read_regular(entry, 0o600, device=root_metadata.st_dev)
         if re.fullmatch(rb"(?:[1-9][0-9]{0,18}\n?)?", temporary) is None:
             fail(f"unsafe highest-issued temporary: {entry.name}")
+    return generation
+
+
+def validate_primary_receipt_inventory(issued_generation: int) -> None:
+    validate_absent(PENDING_RECEIPT_STATE)
+    temporary = re.compile(
+        r"\.(?:pending-receipt-v5|last-resolution-v5)\.[0-9a-f]{32}"
+    )
+    clearing = re.compile(r"\.clearing-pending-receipt-v5\.[0-9a-f]{32}")
+    for entry in SYNC_ROOT.iterdir():
+        if (entry.name.startswith(".pending-receipt-v5.")
+                or entry.name.startswith(".last-resolution-v5.")):
+            if temporary.fullmatch(entry.name) is None:
+                fail(f"unknown receipt-state temporary: {entry.name}")
+            # An interrupted receipt-state publication must be recovered by the
+            # pinned sender before any sender release is replaced.
+            read_regular(entry, 0o600, device=validate_directory(SYNC_ROOT, 0o700).st_dev)
+            fail(f"unrecovered receipt-state temporary: {entry.name}")
+        if entry.name.startswith(".clearing-pending-receipt-v5."):
+            if clearing.fullmatch(entry.name) is None:
+                fail(f"unknown receipt clearing tombstone: {entry.name}")
+            read_regular(entry, 0o600, device=validate_directory(SYNC_ROOT, 0o700).st_dev)
+            fail(f"unrecovered receipt clearing tombstone: {entry.name}")
+    metadata = lstat_or_none(LAST_RECEIPT_RESOLUTION)
+    if metadata is None:
+        return
+    payload, _ = read_regular(
+        LAST_RECEIPT_RESOLUTION,
+        0o600,
+        device=validate_directory(SYNC_ROOT, 0o700).st_dev,
+    )
+    if len(payload) > 4096:
+        fail("last receipt resolution is oversized")
+    try:
+        document = json.loads(payload.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise DeploymentError("last receipt resolution is invalid JSON") from error
+    exact_keys = {
+        "accepted_generation", "active_evidence_sha256", "active_generation",
+        "committed_generation", "generation", "ingest_receiver_sha256",
+        "outcome", "protocol", "query_receiver_sha256", "reason",
+        "release_id", "runtime", "version",
+    }
+    if (not isinstance(document, dict) or set(document) != exact_keys
+            or canonical_json(document) != payload
+            or type(document.get("version")) is not int
+            or document.get("version") != 5
+            or document.get("protocol") != EXPECTED_PROTOCOL
+            or document.get("outcome") not in {"committed", "not-committed"}
+            or document.get("runtime") not in {"healthy", "isolated"}
+            or document.get("reason") not in {
+                "inline-ack", "legacy-v4-stdout-contamination",
+                "queried-after-ambiguous-ack", "startup-recovery",
+            }):
+        fail("last receipt resolution is not canonical")
+    numbers = (
+        document["accepted_generation"], document["active_generation"],
+        document["committed_generation"], document["generation"],
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in numbers):
+        fail("last receipt resolution has invalid generations")
+    accepted, active, committed, generation = numbers
+    if (not BOOTSTRAP_GENERATION <= committed == active <= accepted
+            <= generation <= issued_generation
+            or generation >= 2**63):
+        fail("last receipt resolution generation relationship mismatch")
+    for key in (
+        "active_evidence_sha256", "ingest_receiver_sha256",
+        "query_receiver_sha256", "release_id",
+    ):
+        value = document.get(key)
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            fail(f"last receipt resolution digest is invalid: {key}")
+    if document["outcome"] == "committed":
+        if accepted != generation or active != generation or document["runtime"] != "healthy":
+            fail("last committed receipt resolution is contradictory")
+    elif active >= generation:
+        fail("last non-commit receipt resolution is contradictory")
+    elif accepted == active:
+        if document["runtime"] != "healthy":
+            fail("last prior-base receipt resolution is contradictory")
+    elif accepted == generation:
+        if document["runtime"] != "isolated":
+            fail("last rollback receipt resolution is contradictory")
+    else:
+        fail("last non-commit receipt resolution is ambiguous")
 
 
 def validate_root_owned_tree(root: Path, *, device: int) -> None:
@@ -626,6 +731,95 @@ def validate_incoming_inventory() -> None:
         fail("incoming claims cross a filesystem boundary")
 
 
+def read_generation_record(path: Path, *, device: int) -> int:
+    payload, _ = read_regular(path, 0o600, device=device)
+    match = re.fullmatch(rb"([1-9][0-9]{0,18})\n", payload)
+    if match is None:
+        fail(f"generation record is not canonical: {path}")
+    generation = int(match.group(1))
+    if not BOOTSTRAP_GENERATION <= generation < 2**63:
+        fail(f"generation record is outside the deployed lineage: {path}")
+    return generation
+
+
+def validate_retained_media_tree(path: Path, *, device: int) -> None:
+    metadata = path.lstat()
+    if (
+        path.resolve(strict=True) != path
+        or not stat.S_ISDIR(metadata.st_mode)
+        or (metadata.st_uid, metadata.st_gid) != (WEB_UID, WEB_GID)
+        or stat.S_IMODE(metadata.st_mode) != 0o755
+        or metadata.st_dev != device
+    ):
+        fail(f"unsafe retained media root: {path}")
+    file_count = directory_count = total_bytes = 0
+    for _directory, directory_names, file_names, directory_fd in os.fwalk(
+        path, topdown=True, follow_symlinks=False
+    ):
+        current = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(current.st_mode)
+            or (current.st_uid, current.st_gid) != (WEB_UID, WEB_GID)
+            or stat.S_IMODE(current.st_mode) != 0o755
+            or current.st_dev != device
+        ):
+            fail(f"unsafe retained media directory: {path}")
+        directory_count += 1
+        if directory_count > MAX_MEDIA_DIRECTORIES:
+            fail("retained media directory limit exceeded")
+        for name in directory_names:
+            child = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(child.st_mode)
+                or (child.st_uid, child.st_gid) != (WEB_UID, WEB_GID)
+                or stat.S_IMODE(child.st_mode) != 0o755
+                or child.st_dev != device
+            ):
+                fail(f"unsafe retained media child directory: {path}")
+        for name in file_names:
+            child = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            lowered = name.lower()
+            if (
+                not stat.S_ISREG(child.st_mode)
+                or (child.st_uid, child.st_gid) != (WEB_UID, WEB_GID)
+                or stat.S_IMODE(child.st_mode) != 0o644
+                or child.st_nlink != 1
+                or child.st_dev != device
+                or child.st_size > MAX_MEDIA_FILE_BYTES
+                or (child.st_size > 0 and child.st_blocks * 512 < child.st_size)
+                or lowered in FORBIDDEN_MEDIA_NAMES
+                or ".php" in lowered
+                or ".phtml" in lowered
+                or ".phar" in lowered
+                or any(lowered.endswith(suffix) for suffix in FORBIDDEN_MEDIA_SUFFIXES)
+            ):
+                fail(f"unsafe retained media file: {path}")
+            file_count += 1
+            total_bytes += child.st_size
+            if file_count > MAX_MEDIA_FILES or total_bytes > MAX_MEDIA_TREE_BYTES:
+                fail("retained media tree limit exceeded")
+
+
+def validate_stable_uploads_release_inventory(active_generation: int) -> None:
+    release_metadata = validate_sync_subdirectory(UPLOADS_RELEASE_ROOT)
+    entries = list(UPLOADS_RELEASE_ROOT.iterdir())
+    if len(entries) > 1:
+        fail("too many retained media trees")
+    if not entries:
+        return
+    match = re.fullmatch(
+        r"previous-generation-([1-9][0-9]{0,18})-for-([1-9][0-9]{0,18})",
+        entries[0].name,
+    )
+    if match is None:
+        fail("unexpected stable uploads release entry")
+    previous = int(match.group(1))
+    target = int(match.group(2))
+    if not BOOTSTRAP_GENERATION <= previous < target == active_generation < 2**63:
+        fail("retained media generation relationship mismatch")
+    validate_retained_media_tree(entries[0], device=release_metadata.st_dev)
+
+
 def validate_sync_root_inventory(node: str, *, complete: bool) -> None:
     root_metadata = lstat_or_none(SYNC_ROOT)
     if root_metadata is None:
@@ -635,15 +829,26 @@ def validate_sync_root_inventory(node: str, *, complete: bool) -> None:
     checked_root = validate_directory(SYNC_ROOT, 0o700)
     names = {entry.name for entry in SYNC_ROOT.iterdir()}
     if node == "primary":
-        fixed = {"site-operation.lock", "highest-issued-generation", "sender-staging"}
+        fixed = {
+            "site-operation.lock", "highest-issued-generation", "sender-staging",
+            "pending-receipt-v5.json", "last-resolution-v5.json",
+        }
         unknown = {
             name for name in names
             if name not in fixed
             and re.fullmatch(r"\.highest-issued\.[0-9a-f]{32}", name) is None
+            and re.fullmatch(
+                r"\.(?:pending-receipt-v5|last-resolution-v5)\.[0-9a-f]{32}",
+                name,
+            ) is None
+            and re.fullmatch(
+                r"\.clearing-pending-receipt-v5\.[0-9a-f]{32}", name
+            ) is None
         }
         if unknown:
             fail("unknown primary sync-root inventory: " + ",".join(sorted(unknown)))
-        validate_primary_generation_state()
+        issued_generation = validate_primary_generation_state()
+        validate_primary_receipt_inventory(issued_generation)
         if "sender-staging" in names:
             validate_sender_staging_inventory()
         elif complete:
@@ -665,7 +870,11 @@ def validate_sync_root_inventory(node: str, *, complete: bool) -> None:
         if "uploads-releases" in names:
             validate_sync_subdirectory(UPLOADS_RELEASE_ROOT)
             if any(UPLOADS_RELEASE_ROOT.iterdir()):
-                fail("bootstrap uploads release root is not empty")
+                state_device = validate_sync_subdirectory(STATE_ROOT).st_dev
+                active_generation = read_generation_record(
+                    ACTIVE_UPLOADS_GENERATION, device=state_device
+                )
+                validate_stable_uploads_release_inventory(active_generation)
         if complete and not fixed.issubset(names):
             fail("standby sync-root inventory is incomplete")
     if "site-operation.lock" in names:
@@ -681,12 +890,14 @@ def ensure_release_frozen() -> None:
         ("receiver", RECEIVER_SHA256),
         ("sender", SENDER_SHA256),
         ("FPM guard", FPM_GUARD_SHA256),
+        ("SSH forced-command gate", SSH_GATE_SHA256),
         ("sudoers transport", SUDOERS_SHA256),
         ("full verifier", FULL_VERIFY_SHA256),
         ("source verifier", SOURCE_VERIFY_SHA256),
         ("known-hosts", KNOWN_HOSTS_SHA256),
         ("preflight service", PREFLIGHT_SERVICE_SHA256),
         ("sync service", SYNC_SERVICE_SHA256),
+        ("generation 7 reconciliation service", RECONCILE_SERVICE_SHA256),
         ("role verifier", ROLE_VERIFY_SHA256),
     ):
         if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
@@ -716,15 +927,16 @@ def standby_receipt_bytes(
         "backup_manifest_sha256": backup_manifest_sha256,
         "full_verifier_sha256": FULL_VERIFY_SHA256,
         "fpm_guard_sha256": FPM_GUARD_SHA256,
-        "generation": BOOTSTRAP_GENERATION,
+        "generation": active_release["generation"],
         "protocol": EXPECTED_PROTOCOL,
         "receiver_sha256": RECEIVER_SHA256,
         "release": RELEASE_ID,
         "release_id": bootstrap_state.release_id,
         "role": "standby",
+        "ssh_gate_sha256": SSH_GATE_SHA256,
         "status": "committed",
         "sudoers_sha256": SUDOERS_SHA256,
-        "version": 2,
+        "version": 3,
     })
 
 
@@ -748,6 +960,7 @@ def validate_standby_receipt(payload: bytes) -> dict[str, object]:
         "release",
         "release_id",
         "role",
+        "ssh_gate_sha256",
         "status",
         "sudoers_sha256",
         "version",
@@ -761,17 +974,23 @@ def validate_standby_receipt(payload: bytes) -> dict[str, object]:
     fixed = {
         "full_verifier_sha256": FULL_VERIFY_SHA256,
         "fpm_guard_sha256": FPM_GUARD_SHA256,
-        "generation": BOOTSTRAP_GENERATION,
         "protocol": EXPECTED_PROTOCOL,
         "receiver_sha256": RECEIVER_SHA256,
         "release": RELEASE_ID,
         "role": "standby",
+        "ssh_gate_sha256": SSH_GATE_SHA256,
         "status": "committed",
         "sudoers_sha256": SUDOERS_SHA256,
-        "version": 2,
+        "version": 3,
     }
     if any(document.get(key) != value for key, value in fixed.items()):
         fail("standby-first receipt fixed evidence mismatch")
+    if type(document.get("version")) is not int:
+        fail("standby-first receipt version type is invalid")
+    generation = document.get("generation")
+    if (isinstance(generation, bool) or not isinstance(generation, int)
+            or not BOOTSTRAP_GENERATION <= generation < 2**63):
+        fail("standby-first receipt generation is invalid")
     for key in (
         "activation_nonce",
         "active_release_sha256",
@@ -803,24 +1022,34 @@ def validate_standby_receipt(payload: bytes) -> dict[str, object]:
     uploads_ino = active_release["uploads_ino"]
     if (
         active_release["version"] != 4
-        or active_release["generation"] != BOOTSTRAP_GENERATION
+        or active_release["generation"] != generation
         or uploads_dev < 1
         or uploads_ino < 1
         or not isinstance(evidence, str)
         or re.fullmatch(r"[0-9a-f]{64}", evidence) is None
-        or evidence
-        != bootstrap_evidence_sha256(
-            BOOTSTRAP_GENERATION, uploads_dev, uploads_ino
-        )
         or not isinstance(release_id, str)
         or release_id != document["release_id"]
         or release_id
         != active_release_identifier(
-            BOOTSTRAP_GENERATION, evidence, uploads_dev, uploads_ino
+            generation, evidence, uploads_dev, uploads_ino
         )
     ):
         fail("standby-first active release relationship mismatch")
     return document
+
+
+def validate_primary_standby_generation_binding() -> int:
+    """Bind the authority anti-replay counter to this exact standby commit."""
+    issued_generation = validate_primary_generation_state()
+    receipt, _ = read_regular(
+        STAGES["primary"] / "standby-first.receipt",
+        0o600,
+        device=validate_directory(STAGES["primary"], 0o700).st_dev,
+    )
+    document = validate_standby_receipt(receipt)
+    if document["generation"] != issued_generation:
+        fail("standby receipt generation does not match highest-issued-generation")
+    return issued_generation
 
 
 def expected_stage_names(node: str) -> set[str]:
@@ -1113,7 +1342,10 @@ def runtime_snapshot(node: str) -> dict[str, object]:
         units.append(FPM_GUARD_SERVICE)
         paths.extend(GUARD_ENABLEMENT_PATHS)
     else:
-        units.extend((SYNC_SERVICE, PREFLIGHT_SERVICE, FPM_SERVICE, NGINX_SERVICE, MYSQL_SERVICE))
+        units.extend((
+            SYNC_SERVICE, PREFLIGHT_SERVICE, RECONCILE_SERVICE,
+            FPM_SERVICE, NGINX_SERVICE, MYSQL_SERVICE,
+        ))
     return {
         "paths": {str(path): observation(path) for path in paths},
         "units": {unit: unit_state(unit) for unit in units},
@@ -1151,7 +1383,7 @@ def require_primary_runtime_transition(
         if current["units"][unit] != before["units"][unit]:
             fail(f"core runtime state changed during primary deployment: {unit}")
         require_unit_active_healthy(unit)
-    for unit in (SYNC_SERVICE, PREFLIGHT_SERVICE):
+    for unit in (SYNC_SERVICE, PREFLIGHT_SERVICE, RECONCILE_SERVICE):
         before_state = before["units"][unit]
         current_state = current["units"][unit]
         classify_inactive_unit(before_state, unit)
@@ -1193,7 +1425,7 @@ def runtime_is_safe_for_rollback(node: str, before: dict[str, object]) -> bool:
                 if current["units"][unit] != before["units"][unit]:
                     return False
                 require_unit_active_healthy(unit)
-            for unit in (SYNC_SERVICE, PREFLIGHT_SERVICE):
+            for unit in (SYNC_SERVICE, PREFLIGHT_SERVICE, RECONCILE_SERVICE):
                 classify_inactive_unit(before["units"][unit], unit)
                 if classify_inactive_unit(current["units"][unit], unit) != "loaded":
                     return False
@@ -1226,9 +1458,16 @@ def preflight(node: str) -> None:
     require_unit_inactive(FPM_GUARD_SERVICE if node == "backup" else SYNC_SERVICE)
     require_timer_disabled_inactive()
     if node == "primary":
+        validate_primary_standby_generation_binding()
         require_unit_inactive(PREFLIGHT_SERVICE)
+        require_unit_inactive(RECONCILE_SERVICE)
         require_primary_recovery_clear()
-        run_command([str(SYSTEMD_ANALYZE), "verify", str(STAGES[node] / "shuzijun-sync-preflight.service"), str(STAGES[node] / "shuzijun-sync.service")])
+        run_command([
+            str(SYSTEMD_ANALYZE), "verify",
+            str(STAGES[node] / "shuzijun-sync-preflight.service"),
+            str(STAGES[node] / "shuzijun-sync.service"),
+            str(STAGES[node] / "shuzijun-sync-reconcile-generation7.service"),
+        ])
         run_command([str(BASH), str(STAGES[node] / "verify-webroot-security"), str(SITE)])
         verify_remote_receiver_live()
     else:
@@ -1573,7 +1812,12 @@ def active_release_identifier(
     )
 
 
-def validate_active_release_record(expected_release_id: str) -> bytes:
+def validate_active_release_record(
+    expected_release_id: str,
+    *,
+    expected_generation: int = BOOTSTRAP_GENERATION,
+    require_bootstrap_evidence: bool = True,
+) -> bytes:
     payload, _ = read_regular(
         ACTIVE_RELEASE_RECORD,
         0o600,
@@ -1603,7 +1847,11 @@ def validate_active_release_record(expected_release_id: str) -> bytes:
         value = document.get(key)
         if isinstance(value, bool) or not isinstance(value, int):
             fail(f"active-release-v4 integer field is invalid: {key}")
-    if document["version"] != 4 or document["generation"] != BOOTSTRAP_GENERATION:
+    if (
+        document["version"] != 4
+        or document["generation"] != expected_generation
+        or not BOOTSTRAP_GENERATION <= expected_generation < 2**63
+    ):
         fail("active-release-v4 version or generation mismatch")
     live_metadata = validate_live_uploads_directory()
     if (
@@ -1618,15 +1866,18 @@ def validate_active_release_record(expected_release_id: str) -> bytes:
     if (
         not isinstance(evidence, str)
         or re.fullmatch(r"[0-9a-f]{64}", evidence) is None
-        or evidence
-        != bootstrap_evidence_sha256(
-            BOOTSTRAP_GENERATION, live_metadata.st_dev, live_metadata.st_ino
+        or (
+            require_bootstrap_evidence
+            and evidence
+            != bootstrap_evidence_sha256(
+                expected_generation, live_metadata.st_dev, live_metadata.st_ino
+            )
         )
         or not isinstance(release_id, str)
         or re.fullmatch(r"[0-9a-f]{64}", release_id) is None
         or release_id
         != active_release_identifier(
-            BOOTSTRAP_GENERATION,
+            expected_generation,
             evidence,
             live_metadata.st_dev,
             live_metadata.st_ino,
@@ -1676,6 +1927,106 @@ def validate_bootstrap_result() -> BootstrapState:
         release_id,
         active_release_payload,
         trusted,
+    )
+
+
+def validate_stable_receiver_state() -> BootstrapState:
+    """Validate a committed post-bootstrap receiver without mutating it."""
+    sync_device = validate_directory(SYNC_ROOT, 0o700).st_dev
+    validate_sync_subdirectory(INCOMING_ROOT)
+    if any(INCOMING_ROOT.iterdir()):
+        fail("stable receiver has an incoming claim")
+    state_device = validate_sync_subdirectory(STATE_ROOT).st_dev
+    if sync_device != state_device:
+        fail("stable receiver state crosses a filesystem boundary")
+    temporaries = validate_receiver_state_inventory()
+    if temporaries:
+        fail("stable receiver has unrecovered state temporaries")
+    accepted = read_generation_record(ACCEPTED_GENERATION, device=state_device)
+    active = read_generation_record(ACTIVE_UPLOADS_GENERATION, device=state_device)
+    if accepted != active:
+        fail("stable receiver accepted/active generations differ")
+    validate_absent(UPLOADS_TRANSACTION)
+    lease, _ = read_regular(FPM_GUARD_LEASE, 0o600, device=state_device)
+    if lease != b"":
+        fail("stable receiver FPM guard lease is not empty")
+    commit_payload, _ = read_regular(
+        FPM_GUARD_COMMIT, 0o600, device=state_device
+    )
+    match = re.fullmatch(
+        rf"{active} ([0-9a-f]{{64}}) ([0-9a-f]{{64}})\n".encode("ascii"),
+        commit_payload,
+    )
+    if match is None:
+        fail("stable receiver FPM commit is not canonical")
+    armed_metadata = lstat_or_none(FPM_GUARD_ARMED)
+    if armed_metadata is not None:
+        armed_payload, _ = read_regular(
+            FPM_GUARD_ARMED, 0o600, device=state_device
+        )
+        # Successful runtime activation deliberately retains its armed marker
+        # until the next attempt.  It is stable only when it is the exact same
+        # generation/release/nonce record as the durable commit; a fresh nonce
+        # would describe an interrupted activation and must block deployment.
+        if armed_payload != commit_payload:
+            fail("stable receiver FPM armed marker differs from commit")
+    release_id = match.group(1).decode("ascii")
+    active_release_payload = validate_active_release_record(
+        release_id,
+        expected_generation=active,
+        require_bootstrap_evidence=(active == BOOTSTRAP_GENERATION),
+    )
+    validate_stable_uploads_release_inventory(active)
+    return BootstrapState(
+        match.group(2).decode("ascii"),
+        release_id,
+        active_release_payload,
+        {},
+    )
+
+
+def receiver_release_precondition() -> BootstrapState | None:
+    """Return stable state, or validate an exact recoverable bootstrap prefix."""
+    publication_paths = (
+        ACCEPTED_GENERATION,
+        UPLOADS_RELEASE_ROOT,
+        ACTIVE_UPLOADS_GENERATION,
+        FPM_GUARD_LEASE,
+        FPM_GUARD_COMMIT,
+        ACTIVE_RELEASE_RECORD,
+    )
+    present = tuple(lstat_or_none(path) is not None for path in publication_paths)
+    if all(present):
+        state = validate_stable_receiver_state()
+        # SIGKILL can land after the receiver's final fsync-backed publication
+        # and before systemctl creates the persistent RequiredBy link.  This
+        # exact disabled/absent enablement state is still a bootstrap prefix,
+        # not a stable release.  Re-enter the idempotent bootstrap path so the
+        # next apply validates the publications and completes guard enablement.
+        if (lstat_or_none(GUARD_ENABLEMENT_DIR) is None
+                and lstat_or_none(GUARD_ENABLEMENT_LINK) is None):
+            enabled = run_command(
+                [str(SYSTEMCTL), "is-enabled", FPM_GUARD_SERVICE],
+                accepted={1},
+            )
+            if enabled.stdout != "disabled\n":
+                fail("published bootstrap has ambiguous FPM guard enablement")
+            return None
+        validate_guard_enabled()
+        return state
+    require_bootstrap_precondition()
+    return None
+
+
+def expected_reconciliation_receipt(state: BootstrapState) -> str:
+    active_release = json.loads(state.active_release_payload.decode("ascii"))
+    generation = active_release["generation"]
+    return (
+        f"sync-reconcile-v5 accepted={generation} active={generation} "
+        f"committed={generation} "
+        f"evidence-sha256={active_release['evidence_sha256']} "
+        f"release-id={state.release_id} receiver-sha256={RECEIVER_SHA256} "
+        f"protocol={EXPECTED_PROTOCOL} transaction=none runtime=healthy\n"
     )
 
 
@@ -1996,6 +2347,7 @@ def post_install(
     node: str,
     operation_lock: "HeldOperationLock",
     trusted_postimages: dict[Path, tuple[bytes, int]],
+    existing_standby_state: BootstrapState | None,
 ) -> BootstrapState | None:
     run_command([str(SYSTEMCTL), "daemon-reload"])
     verify_installed_assets(node)
@@ -2003,11 +2355,18 @@ def post_install(
         require_timer_disabled_inactive()
         preflight_asset = asset_named(node, "shuzijun-sync-preflight.service")
         service_asset = asset_named(node, "shuzijun-sync.service")
+        reconcile_asset = asset_named(
+            node, "shuzijun-sync-reconcile-generation7.service"
+        )
         source_verifier = asset_named(node, "verify-shuzijun-sync-source")
-        run_command([str(SYSTEMD_ANALYZE), "verify", str(preflight_asset.target), str(service_asset.target)])
+        run_command([
+            str(SYSTEMD_ANALYZE), "verify", str(preflight_asset.target),
+            str(service_asset.target), str(reconcile_asset.target),
+        ])
         run_command([str(source_verifier.target), str(SITE)])
         require_unit_inactive(SYNC_SERVICE)
         require_unit_inactive(PREFLIGHT_SERVICE)
+        require_unit_inactive(RECONCILE_SERVICE)
         require_primary_recovery_clear()
         return None
 
@@ -2016,6 +2375,32 @@ def post_install(
     receiver_asset = asset_named(node, "apply-shuzijun-sync")
     run_command([str(VISUDO), "-cf", str(sudoers_asset.target)])
     run_command([str(SYSTEMD_ANALYZE), "verify", str(guard_asset.target)])
+    if existing_standby_state is not None:
+        # A stable upgrade replaces executable/configuration bytes only.  It
+        # must neither replay bootstrap nor advance/rewrite receiver state.
+        operation_lock.release_operation_file()
+        try:
+            attest = run_command([str(receiver_asset.target), "--attest"]).stdout
+            if attest != f"{RECEIVER_SHA256}  {receiver_asset.target}\n":
+                fail("receiver attestation mismatch after stable upgrade")
+            protocol = run_command([str(receiver_asset.target), "--protocol"]).stdout
+            if protocol != EXPECTED_PROTOCOL + "\n":
+                fail("receiver protocol mismatch after stable upgrade")
+            reconciliation = run_command(
+                [str(receiver_asset.target), "--reconcile-receipt"]
+            ).stdout
+            if reconciliation != expected_reconciliation_receipt(
+                existing_standby_state
+            ):
+                fail("receiver reconciliation mismatch after stable upgrade")
+        finally:
+            operation_lock.reacquire_operation_file()
+        stable_after = validate_stable_receiver_state()
+        if stable_after != existing_standby_state:
+            fail("receiver state changed during stable upgrade")
+        validate_guard_enabled()
+        return stable_after
+
     ensure_directory(SYNC_ROOT, 0o700)
     ensure_directory(INCOMING_ROOT, 0o700)
     ensure_directory(STATE_ROOT, 0o700)
@@ -2208,8 +2593,9 @@ def deploy(node: str, role: str, mode: str) -> Path | None:
             validate_role(node, role)
             validate_stage(node)
             preflight(node)
+            standby_state: BootstrapState | None = None
             if node == "backup":
-                require_bootstrap_precondition()
+                standby_state = receiver_release_precondition()
             before_runtime = runtime_snapshot(node)
             if mode == "dry-run":
                 if runtime_snapshot(node) != before_runtime:
@@ -2226,7 +2612,7 @@ def deploy(node: str, role: str, mode: str) -> Path | None:
             validate_stage(node)
             preflight(node)
             if node == "backup":
-                require_bootstrap_precondition()
+                standby_state = receiver_release_precondition()
             else:
                 ensure_directory(SENDER_STAGING_ROOT, 0o700)
                 validate_sender_staging_if_present()
@@ -2239,8 +2625,8 @@ def deploy(node: str, role: str, mode: str) -> Path | None:
             try:
                 for asset in ASSETS[node]:
                     atomic_replace_from_input(asset, STAGES[node])
-                bootstrap_state = post_install(
-                    node, operation_lock, trusted_postimages
+                release_state = post_install(
+                    node, operation_lock, trusted_postimages, standby_state
                 )
                 validate_sync_root_inventory(node, complete=True)
                 validate_runtime_transition(node, before_runtime)
@@ -2249,13 +2635,14 @@ def deploy(node: str, role: str, mode: str) -> Path | None:
                 if node == "primary":
                     require_unit_inactive(SYNC_SERVICE)
                     require_unit_inactive(PREFLIGHT_SERVICE)
+                    require_unit_inactive(RECONCILE_SERVICE)
                     require_primary_recovery_clear()
                 operation_lock.validate_stable()
                 if node == "backup":
-                    if bootstrap_state is None:
-                        fail("standby bootstrap evidence is missing")
+                    if release_state is None:
+                        fail("standby release evidence is missing")
                     uncommitted_receipt = standby_receipt_bytes(
-                        bootstrap_state, manifest_digest
+                        release_state, manifest_digest
                     )
                     atomic_write_bytes(
                         backup_dir / "standby-first.receipt",
@@ -2265,7 +2652,11 @@ def deploy(node: str, role: str, mode: str) -> Path | None:
                     )
                 fsync_directory(backup_dir)
             except BaseException as original_error:
-                if node == "backup" and operation_lock.held:
+                if (
+                    node == "backup"
+                    and standby_state is None
+                    and operation_lock.held
+                ):
                     try:
                         trusted_postimages.update(
                             collect_recoverable_bootstrap_postimages()

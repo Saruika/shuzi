@@ -20,12 +20,14 @@ VERIFY=/usr/local/sbin/verify-shuzijun-sync-source
 AUTHORITY_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
 AUTHORITY_VERIFY_SHA256=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
 REMOTE_RECEIVER=/usr/local/sbin/apply-shuzijun-sync
-REMOTE_RECEIVER_SHA256=0a28c89ef1ac427f6ac72e5268cb5aa0ed28169493aab64d05dd687a40e67e03
+REMOTE_RECEIVER_SHA256=b4eaddf91676be3becb0eb1595fd7f6763aa872a51ff8a945d8e652e61db6ee4
 SYNC_PROTOCOL=shuzijun-sync-receiver-v4-transactional-uploads
 GENERATION_ROOT=/var/lib/shuzijun-sync
 GENERATION_STATE="$GENERATION_ROOT/highest-issued-generation"
 SITE_OPERATION_LOCK="$GENERATION_ROOT/site-operation.lock"
 SENDER_STAGING_ROOT="$GENERATION_ROOT/sender-staging"
+PENDING_RECEIPT_STATE="$GENERATION_ROOT/pending-receipt-v5.json"
+LAST_RECEIPT_RESOLUTION="$GENERATION_ROOT/last-resolution-v5.json"
 FPM_SERVICE=php8.3-fpm.service
 FPM_FREEZE_ROOT=/run/shuzijun-sync
 FPM_FREEZE_MARKER="$FPM_FREEZE_ROOT/primary-fpm-freeze.json"
@@ -660,8 +662,19 @@ if [[ $# -eq 2 && "$1" == --watch-primary-fpm ]]; then
     primary_fpm_freeze_state watch "$2"
     exit 0
 fi
-if [[ $# -ne 0 ]]; then
-    printf 'usage: sync-to-backup [--recover-primary-fpm-if-marked|--watch-primary-fpm TOKEN]\n' >&2
+LEGACY_RECONCILE=0
+LEGACY_GENERATION=
+LEGACY_EVIDENCE=
+LEGACY_RELEASE_ID=
+LEGACY_INGEST_RECEIVER=
+if [[ $# -eq 5 && "$1" == --reconcile-legacy-v4 ]]; then
+    LEGACY_RECONCILE=1
+    LEGACY_GENERATION=$2
+    LEGACY_EVIDENCE=$3
+    LEGACY_RELEASE_ID=$4
+    LEGACY_INGEST_RECEIVER=$5
+elif [[ $# -ne 0 ]]; then
+    printf 'usage: sync-to-backup [--recover-primary-fpm-if-marked|--watch-primary-fpm TOKEN|--reconcile-legacy-v4 GENERATION EVIDENCE_SHA256 RELEASE_ID INGEST_RECEIVER_SHA256]\n' >&2
     exit 2
 fi
 
@@ -691,16 +704,19 @@ if event == "start":
     if generation:
         raise SystemExit(1)
     message = f"[{time.strftime('%F %T')}] incremental sync started\n"
-elif event == "completion":
+elif event in {"completion", "completion-reconciled", "not-committed"}:
     if not re.fullmatch(r"[1-9][0-9]{0,18}", generation):
         raise SystemExit(1)
     value = int(generation)
     if value >= 2**63:
         raise SystemExit(1)
-    message = (
-        f"[{time.strftime('%F %T')}] incremental sync completed "
-        f"generation={generation}\n"
-    )
+    if event == "completion":
+        description = "incremental sync completed"
+    elif event == "completion-reconciled":
+        description = "incremental sync completed via reconciliation"
+    else:
+        description = "incremental sync confirmed not committed"
+    message = f"[{time.strftime('%F %T')}] {description} generation={generation}\n"
 else:
     raise SystemExit(1)
 
@@ -772,6 +788,537 @@ try:
             raise SystemExit(1)
     finally:
         os.close(descriptor)
+finally:
+    os.close(directory)
+PY
+}
+
+manage_receipt_state() {
+    local action=$1
+    shift
+    /usr/bin/timeout --signal=TERM --kill-after=2s 15s \
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+        /usr/bin/python3 -I /proc/self/fd/9 \
+        "$action" "$GENERATION_ROOT" "$GENERATION_STATE" \
+        "$PENDING_RECEIPT_STATE" "$LAST_RECEIPT_RESOLUTION" "$@" 9<<'PY'
+import ctypes
+import json
+import os
+import re
+import secrets
+import stat
+import sys
+from pathlib import Path
+
+action = sys.argv[1]
+root = Path(sys.argv[2])
+issued_path = Path(sys.argv[3])
+pending_path = Path(sys.argv[4])
+resolution_path = Path(sys.argv[5])
+arguments = sys.argv[6:]
+protocol_value = "shuzijun-sync-receiver-v4-transactional-uploads"
+if (root != Path("/var/lib/shuzijun-sync")
+        or issued_path != root / "highest-issued-generation"
+        or pending_path != root / "pending-receipt-v5.json"
+        or resolution_path != root / "last-resolution-v5.json"):
+    raise SystemExit(1)
+root_meta = root.lstat()
+if (root.resolve(strict=True) != root or not stat.S_ISDIR(root_meta.st_mode)
+        or root_meta.st_uid != 0 or root_meta.st_gid != 0
+        or stat.S_IMODE(root_meta.st_mode) != 0o700):
+    raise SystemExit(1)
+directory = os.open(
+    root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+)
+
+def read_payload(path, *, allow_missing=False, limit=4096):
+    if path.parent != root:
+        raise RuntimeError("unsafe receipt state path")
+    try:
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=directory,
+        )
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise
+    try:
+        metadata = os.fstat(descriptor)
+        payload = os.read(descriptor, limit + 1)
+        if os.read(descriptor, 1):
+            raise RuntimeError("oversize receipt state")
+        named = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+    finally:
+        os.close(descriptor)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+            or (metadata.st_dev, metadata.st_ino) != (named.st_dev, named.st_ino)
+            or metadata.st_size != len(payload) or len(payload) > limit
+            or not payload.endswith(b"\n")):
+        raise RuntimeError("unsafe receipt state")
+    return payload
+
+def canonical(document):
+    return (
+        json.dumps(document, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("ascii")
+
+def read_json(path, *, allow_missing=False):
+    payload = read_payload(path, allow_missing=allow_missing)
+    if payload is None:
+        return None
+    try:
+        document = json.loads(payload.decode("ascii"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("invalid receipt JSON") from None
+    if canonical(document) != payload:
+        raise RuntimeError("non-canonical receipt JSON")
+    return document
+
+def validate_generation(value):
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not 1 <= value < 2**63):
+        raise RuntimeError("invalid receipt generation")
+    return value
+
+def validate_hash(value, *, allow_empty=False):
+    if allow_empty and value == "":
+        return value
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise RuntimeError("invalid receipt hash")
+    return value
+
+def validate_pending(document):
+    if not isinstance(document, dict) or set(document) != {
+        "evidence_sha256", "expected_release_id", "generation",
+        "ingest_receiver_sha256", "protocol", "version",
+    }:
+        raise RuntimeError("invalid pending receipt keys")
+    if (type(document["version"]) is not int or document["version"] != 5
+            or document["protocol"] != protocol_value):
+        raise RuntimeError("invalid pending receipt version")
+    validate_generation(document["generation"])
+    validate_hash(document["evidence_sha256"])
+    validate_hash(document["expected_release_id"], allow_empty=True)
+    validate_hash(document["ingest_receiver_sha256"])
+    return document
+
+def validate_resolution(document):
+    if not isinstance(document, dict) or set(document) != {
+        "accepted_generation", "active_evidence_sha256", "active_generation",
+        "committed_generation", "generation", "ingest_receiver_sha256",
+        "outcome", "protocol", "query_receiver_sha256", "reason",
+        "release_id", "runtime", "version",
+    }:
+        raise RuntimeError("invalid resolution keys")
+    if (type(document["version"]) is not int or document["version"] != 5
+            or document["protocol"] != protocol_value
+            or document["outcome"] not in {"committed", "not-committed"}
+            or document["reason"] not in {
+                "inline-ack", "legacy-v4-stdout-contamination",
+                "queried-after-ambiguous-ack", "startup-recovery",
+            }
+            or document["runtime"] not in {"healthy", "isolated"}):
+        raise RuntimeError("invalid resolution values")
+    for key in (
+        "accepted_generation", "active_generation", "committed_generation", "generation"
+    ):
+        validate_generation(document[key])
+    for key in (
+        "active_evidence_sha256", "ingest_receiver_sha256",
+        "query_receiver_sha256", "release_id",
+    ):
+        validate_hash(document[key])
+    generation = document["generation"]
+    accepted = document["accepted_generation"]
+    active = document["active_generation"]
+    committed = document["committed_generation"]
+    if committed != active or active > accepted or accepted > generation:
+        raise RuntimeError("invalid resolution generation ordering")
+    if document["outcome"] == "committed":
+        if (accepted != generation or active != generation
+                or document["runtime"] != "healthy"):
+            raise RuntimeError("invalid committed resolution")
+    elif active >= generation:
+        raise RuntimeError("invalid non-commit resolution")
+    elif accepted == active:
+        if document["runtime"] != "healthy":
+            raise RuntimeError("invalid healthy-base resolution")
+    elif accepted == generation:
+        if document["runtime"] != "isolated":
+            raise RuntimeError("invalid rolled-back resolution")
+    else:
+        raise RuntimeError("ambiguous non-commit resolution")
+    return document
+
+def authorize_pending_removal(pending, resolution, expected_query_receiver=None):
+    if resolution is None:
+        raise RuntimeError("pending receipt lacks durable resolution")
+    if expected_query_receiver is not None:
+        validate_hash(expected_query_receiver)
+    if (resolution["generation"] != pending["generation"]
+            or resolution["ingest_receiver_sha256"]
+                != pending["ingest_receiver_sha256"]
+            or resolution["protocol"] != pending["protocol"]
+            or (expected_query_receiver is not None
+                and resolution["query_receiver_sha256"]
+                    != expected_query_receiver)):
+        raise RuntimeError("resolution does not authorize pending removal")
+    if resolution["outcome"] == "committed":
+        if (resolution["active_evidence_sha256"]
+                != pending["evidence_sha256"]
+                or (pending["expected_release_id"]
+                    and resolution["release_id"]
+                        != pending["expected_release_id"])):
+            raise RuntimeError("resolution lost committed evidence")
+    elif pending["expected_release_id"]:
+        raise RuntimeError("legacy expected release was not committed")
+
+def read_issued():
+    payload = read_payload(issued_path, limit=31)
+    if re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", payload) is None:
+        raise RuntimeError("invalid issued generation")
+    value = int(payload)
+    if value >= 2**63:
+        raise RuntimeError("issued generation overflow")
+    return value
+
+def temporary_name(kind):
+    if kind not in {"pending-receipt-v5", "last-resolution-v5"}:
+        raise RuntimeError("invalid receipt temporary kind")
+    return f".{kind}.{secrets.token_hex(16)}"
+
+def rename_noreplace(source_name, destination_name):
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise RuntimeError("renameat2 unavailable")
+    renameat2.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    if renameat2(
+        directory, os.fsencode(source_name), directory,
+        os.fsencode(destination_name), 1,
+    ) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+
+def atomic_write(path, document, *, replace):
+    payload = canonical(document)
+    kind = path.name.removesuffix(".json")
+    temporary = temporary_name(kind)
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+        dir_fd=directory,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise RuntimeError("short receipt state write")
+            view = view[written:]
+        os.fsync(descriptor)
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+                or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+                or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+                or metadata.st_size != len(payload)):
+            raise RuntimeError("unsafe receipt temporary")
+    finally:
+        os.close(descriptor)
+    try:
+        if replace:
+            os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        else:
+            rename_noreplace(temporary, path.name)
+        os.fsync(directory)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=directory)
+            os.fsync(directory)
+        except FileNotFoundError:
+            pass
+
+def promote_existing(path, expected):
+    # A prior process may have died after rename but before the parent fsync.
+    # Re-fsync and reopen before treating an identical visible record as durable.
+    os.fsync(directory)
+    repeated = read_json(path)
+    if repeated != expected:
+        raise RuntimeError("receipt state changed during durability promotion")
+
+receipt_temporary_pattern = re.compile(
+    r"\.(?:pending-receipt-v5|last-resolution-v5)\.[0-9a-f]{32}"
+)
+clearing_tombstone_pattern = re.compile(
+    r"\.clearing-pending-receipt-v5\.[0-9a-f]{32}"
+)
+
+def receipt_inventory():
+    temporaries = []
+    tombstones = []
+    for name in os.listdir(directory):
+        if (name.startswith(".pending-receipt-v5.")
+                or name.startswith(".last-resolution-v5.")):
+            if receipt_temporary_pattern.fullmatch(name) is None:
+                raise RuntimeError("unknown receipt state temporary")
+            temporaries.append(name)
+        elif name.startswith(".clearing-pending-receipt-v5."):
+            if clearing_tombstone_pattern.fullmatch(name) is None:
+                raise RuntimeError("unknown receipt clearing tombstone")
+            tombstones.append(name)
+    if len(tombstones) > 1:
+        raise RuntimeError("multiple receipt clearing tombstones")
+    return temporaries, tombstones
+
+def validate_temporary_metadata(name):
+    metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_gid != 0 or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1 or metadata.st_dev != root_meta.st_dev
+            or metadata.st_size > 4096):
+        raise RuntimeError("unsafe receipt state temporary")
+
+def clean_stale_temporaries():
+    temporaries, tombstones = receipt_inventory()
+    for name in temporaries:
+        validate_temporary_metadata(name)
+
+    pending = read_json(pending_path, allow_missing=True)
+    if pending is not None:
+        validate_pending(pending)
+    resolution = read_json(resolution_path, allow_missing=True)
+    if resolution is not None:
+        validate_resolution(resolution)
+    issued = read_issued()
+    if pending is not None and pending["generation"] != issued:
+        raise RuntimeError("pending receipt is not highest issued generation")
+    if resolution is not None and resolution["generation"] > issued:
+        raise RuntimeError("resolution exceeds highest issued generation")
+
+    if tombstones:
+        tombstone_name = tombstones[0]
+        tombstone = read_json(root / tombstone_name)
+        validate_pending(tombstone)
+        if tombstone["generation"] != issued:
+            raise RuntimeError("clearing tombstone is not highest issued generation")
+        authorize_pending_removal(tombstone, resolution)
+        if pending is not None and pending != tombstone:
+            raise RuntimeError("pending receipt conflicts with clearing tombstone")
+        # With a visible pending record this completes a failed compensation;
+        # without one it completes an already-authorized interrupted removal.
+        os.unlink(tombstone_name, dir_fd=directory)
+        os.fsync(directory)
+
+    if temporaries:
+        for name in temporaries:
+            os.unlink(name, dir_fd=directory)
+        os.fsync(directory)
+
+def restore_pending_best_effort(expected):
+    try:
+        visible = read_json(pending_path, allow_missing=True)
+        if visible is None:
+            atomic_write(pending_path, expected, replace=False)
+        elif visible == expected:
+            promote_existing(pending_path, expected)
+    except BaseException:
+        # The caller still reports the original durability failure.  A visible
+        # clearing tombstone and/or the durable resolution lets startup finish
+        # recovery even when this compensation cannot itself be acknowledged.
+        pass
+
+def clear_pending_durably(expected):
+    _temporaries, tombstones = receipt_inventory()
+    if tombstones:
+        raise RuntimeError("receipt clearing recovery is required")
+    tombstone_name = (
+        ".clearing-pending-receipt-v5." + secrets.token_hex(16)
+    )
+    os.rename(
+        pending_path.name, tombstone_name,
+        src_dir_fd=directory, dst_dir_fd=directory,
+    )
+    try:
+        os.fsync(directory)
+    except BaseException:
+        # The rename was not acknowledged as durable.  Best effort restores
+        # the user-visible pending record so a retry cannot silently advance.
+        try:
+            rename_noreplace(tombstone_name, pending_path.name)
+            os.fsync(directory)
+        except BaseException:
+            pass
+        raise
+    try:
+        os.unlink(tombstone_name, dir_fd=directory)
+        os.fsync(directory)
+    except BaseException:
+        restore_pending_best_effort(expected)
+        raise
+
+try:
+    if action == "clean-stale":
+        if arguments:
+            raise RuntimeError("unexpected clean-stale arguments")
+        clean_stale_temporaries()
+        raise SystemExit(0)
+
+    pending = read_json(pending_path, allow_missing=True)
+    if pending is not None:
+        validate_pending(pending)
+    resolution = read_json(resolution_path, allow_missing=True)
+    if resolution is not None:
+        validate_resolution(resolution)
+    issued = read_issued()
+    if pending is not None and pending["generation"] != issued:
+        raise RuntimeError("pending receipt is not highest issued generation")
+    if resolution is not None and resolution["generation"] > issued:
+        raise RuntimeError("resolution exceeds highest issued generation")
+    if action == "pending":
+        if arguments:
+            raise RuntimeError("unexpected pending arguments")
+        if pending is None:
+            print("none")
+        else:
+            sys.stdout.buffer.write(canonical(pending))
+        raise SystemExit(0)
+
+    if action == "create":
+        if len(arguments) != 5:
+            raise RuntimeError("invalid create arguments")
+        generation_text, evidence, expected_release, ingest_receiver, protocol = arguments
+        if re.fullmatch(r"[1-9][0-9]{0,18}", generation_text) is None:
+            raise RuntimeError("invalid create generation")
+        generation = validate_generation(int(generation_text))
+        document = validate_pending({
+            "evidence_sha256": validate_hash(evidence),
+            "expected_release_id": validate_hash(expected_release, allow_empty=True),
+            "generation": generation,
+            "ingest_receiver_sha256": validate_hash(ingest_receiver),
+            "protocol": protocol,
+            "version": 5,
+        })
+        if issued != generation:
+            raise RuntimeError("pending generation is not highest issued")
+        if pending is None:
+            atomic_write(pending_path, document, replace=False)
+        elif pending != document:
+            raise RuntimeError("different pending receipt already exists")
+        else:
+            promote_existing(pending_path, document)
+        raise SystemExit(0)
+
+    if action == "resolve-hex":
+        if len(arguments) != 3 or pending is None:
+            raise RuntimeError("invalid resolve arguments")
+        encoded_line, reason, expected_query_receiver = arguments
+        if reason not in {
+            "inline-ack", "legacy-v4-stdout-contamination",
+            "queried-after-ambiguous-ack", "startup-recovery",
+        }:
+            raise RuntimeError("invalid resolution reason")
+        validate_hash(expected_query_receiver)
+        if (not isinstance(encoded_line, str)
+                or len(encoded_line) > 131_072
+                or len(encoded_line) % 2
+                or re.fullmatch(r"[0-9a-f]*", encoded_line) is None):
+            raise RuntimeError("invalid reconciliation receipt encoding")
+        try:
+            line = bytes.fromhex(encoded_line).decode("ascii")
+        except (ValueError, UnicodeDecodeError):
+            raise RuntimeError("invalid reconciliation receipt encoding") from None
+        match = re.fullmatch(
+            r"sync-reconcile-v5 accepted=([1-9][0-9]{0,18}) "
+            r"active=([1-9][0-9]{0,18}) committed=([1-9][0-9]{0,18}) "
+            r"evidence-sha256=([0-9a-f]{64}) release-id=([0-9a-f]{64}) "
+            r"receiver-sha256=([0-9a-f]{64}) "
+            r"protocol=(shuzijun-sync-receiver-v4-transactional-uploads) "
+            r"transaction=none runtime=(healthy|isolated)\n",
+            line,
+        )
+        if match is None:
+            raise RuntimeError("non-canonical reconciliation receipt")
+        accepted = validate_generation(int(match.group(1)))
+        active = validate_generation(int(match.group(2)))
+        committed = validate_generation(int(match.group(3)))
+        evidence = match.group(4)
+        release_id = match.group(5)
+        query_receiver = match.group(6)
+        protocol = match.group(7)
+        runtime = match.group(8)
+        generation = pending["generation"]
+        if (query_receiver != expected_query_receiver
+                or protocol != pending["protocol"] or committed != active
+                or active > accepted or accepted > generation):
+            raise RuntimeError("reconciliation receipt conflicts with pending state")
+        if active == generation:
+            if (accepted != generation or evidence != pending["evidence_sha256"]
+                    or runtime != "healthy"
+                    or (pending["expected_release_id"]
+                        and release_id != pending["expected_release_id"])):
+                raise RuntimeError("committed receipt evidence mismatch")
+            outcome = "committed"
+        elif active < generation:
+            if accepted == active:
+                if runtime != "healthy":
+                    raise RuntimeError("stable prior generation is not healthy")
+            elif accepted == generation:
+                if runtime != "isolated":
+                    raise RuntimeError("rolled-back generation is not isolated")
+            else:
+                raise RuntimeError("ambiguous accepted generation")
+            if pending["expected_release_id"]:
+                raise RuntimeError("expected legacy release was not committed")
+            outcome = "not-committed"
+        else:
+            raise RuntimeError("remote generation exceeds pending generation")
+        document = validate_resolution({
+            "accepted_generation": accepted,
+            "active_evidence_sha256": evidence,
+            "active_generation": active,
+            "committed_generation": committed,
+            "generation": generation,
+            "ingest_receiver_sha256": pending["ingest_receiver_sha256"],
+            "outcome": outcome,
+            "protocol": protocol,
+            "query_receiver_sha256": query_receiver,
+            "reason": reason,
+            "release_id": release_id,
+            "runtime": runtime,
+            "version": 5,
+        })
+        if resolution is not None and resolution["generation"] == generation:
+            comparable = dict(resolution)
+            comparable["reason"] = reason
+            if comparable != document:
+                raise RuntimeError("same-generation resolution changed")
+            document = resolution
+            promote_existing(resolution_path, document)
+        elif resolution is not None and resolution["generation"] > generation:
+            raise RuntimeError("future resolution cannot be replaced")
+        else:
+            atomic_write(resolution_path, document, replace=True)
+        print(f"{document['outcome']} {document['reason']} {generation}")
+        raise SystemExit(0)
+
+    if action == "clear":
+        if len(arguments) != 1 or pending is None:
+            raise RuntimeError("invalid clear operation")
+        expected_query_receiver = validate_hash(arguments[0])
+        authorize_pending_removal(pending, resolution, expected_query_receiver)
+        clear_pending_durably(pending)
+        raise SystemExit(0)
+
+    raise RuntimeError("unknown receipt state action")
 finally:
     os.close(directory)
 PY
@@ -1672,15 +2219,107 @@ SSH=(ssh -F /dev/null -i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
 
 receiver_control_query() {
     local operation=$1
-    [[ "$operation" == --attest || "$operation" == --protocol ]] || return 1
+    [[ "$operation" == --attest || "$operation" == --protocol \
+        || "$operation" == --reconcile-receipt ]] || return 1
     /usr/bin/timeout --signal=TERM --kill-after=5s 45s \
         "${SSH[@]}" "sudo $REMOTE_RECEIVER $operation"
+}
+
+capture_control_stdout_hex() {
+    # Shell variables cannot represent NUL bytes.  Encode the bounded raw
+    # stream before command substitution so no byte can disappear in Bash.
+    /usr/bin/python3 -I /proc/self/fd/9 9<<'PY'
+import sys
+
+payload = sys.stdin.buffer.read(65_537)
+if len(payload) > 65_536:
+    raise SystemExit(1)
+sys.stdout.write(payload.hex())
+PY
+}
+
+validate_resolution_stdout() {
+    # The local state helper is also treated as a byte producer: accept one
+    # canonical ASCII line and emit only its already-validated safe fields.
+    /usr/bin/python3 -I /proc/self/fd/9 9<<'PY'
+import re
+import sys
+
+payload = sys.stdin.buffer.read(512)
+if sys.stdin.buffer.read(1) or re.fullmatch(
+    rb"(committed|not-committed) "
+    rb"(inline-ack|legacy-v4-stdout-contamination|"
+    rb"queried-after-ambiguous-ack|startup-recovery) "
+    rb"([1-9][0-9]{0,18})\n",
+    payload,
+) is None:
+    raise SystemExit(1)
+sys.stdout.buffer.write(payload[:-1])
+PY
+}
+
+resolve_pending_receipt() {
+    local reason=$1 receipt_hex resolution
+    local outcome recorded_reason generation
+    case "$reason" in
+        inline-ack|legacy-v4-stdout-contamination|queried-after-ambiguous-ack|startup-recovery) ;;
+        *) return 1 ;;
+    esac
+    receipt_hex=$(receiver_control_query --reconcile-receipt \
+        | capture_control_stdout_hex) || return 1
+    resolution=$(manage_receipt_state resolve-hex \
+        "$receipt_hex" "$reason" "$REMOTE_RECEIVER_SHA256" \
+        | validate_resolution_stdout) || return 1
+    [[ "$resolution" =~ ^(committed|not-committed)\ (inline-ack|legacy-v4-stdout-contamination|queried-after-ambiguous-ack|startup-recovery)\ ([1-9][0-9]{0,18})$ ]] \
+        || return 1
+    outcome=${BASH_REMATCH[1]}
+    recorded_reason=${BASH_REMATCH[2]}
+    generation=${BASH_REMATCH[3]}
+    case "$outcome:$recorded_reason" in
+        committed:inline-ack)
+            append_sync_authority_event completion "$generation" || return 1
+            ;;
+        committed:legacy-v4-stdout-contamination|\
+        committed:queried-after-ambiguous-ack|\
+        committed:startup-recovery)
+            append_sync_authority_event completion-reconciled "$generation" || return 1
+            ;;
+        not-committed:inline-ack|\
+        not-committed:queried-after-ambiguous-ack|\
+        not-committed:startup-recovery)
+            append_sync_authority_event not-committed "$generation" || return 1
+            manage_receipt_state clear "$REMOTE_RECEIVER_SHA256" || return 1
+            return 2
+            ;;
+        *) return 1 ;;
+    esac
+    manage_receipt_state clear "$REMOTE_RECEIVER_SHA256" || return 1
 }
 
 receiver_attestation=$(receiver_control_query --attest) || exit 1
 test "$receiver_attestation" = "$REMOTE_RECEIVER_SHA256  $REMOTE_RECEIVER"
 receiver_protocol=$(receiver_control_query --protocol) || exit 1
 test "$receiver_protocol" = "$SYNC_PROTOCOL"
+
+manage_receipt_state clean-stale
+if [[ "$LEGACY_RECONCILE" -eq 1 ]]; then
+    [[ "$LEGACY_GENERATION" =~ ^[1-9][0-9]{0,18}$ \
+        && "$LEGACY_EVIDENCE" =~ ^[0-9a-f]{64}$ \
+        && "$LEGACY_RELEASE_ID" =~ ^[0-9a-f]{64}$ \
+        && "$LEGACY_INGEST_RECEIVER" =~ ^[0-9a-f]{64}$ ]]
+    manage_receipt_state create "$LEGACY_GENERATION" "$LEGACY_EVIDENCE" \
+        "$LEGACY_RELEASE_ID" "$LEGACY_INGEST_RECEIVER" "$SYNC_PROTOCOL"
+    resolve_pending_receipt legacy-v4-stdout-contamination
+    exit 0
+fi
+PENDING_RECEIPT=$(manage_receipt_state pending) || exit 1
+if [[ "$PENDING_RECEIPT" != none ]]; then
+    if resolve_pending_receipt startup-recovery; then
+        exit 0
+    else
+        exit 1
+    fi
+fi
 
 # Install cleanup before the first sender temporary-tree mutation. Signal exits
 # therefore recover FPM and remove an already-recorded tree on every path.
@@ -1877,11 +2516,20 @@ with os.fdopen(descriptor, "wb", closefd=True) as stream:
 PY
 ssh-keygen -Y sign -q -f "$KEY" -n shuzijun-sync \
     "$TMP/shuzijun-sync-manifest.json"
+MANIFEST_SHA256=$(sha256sum "$TMP/shuzijun-sync-manifest.json" | awk '{ print $1 }')
+[[ "$MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]
+# Persist the exact generation/evidence before the first remote payload byte.
+# If transport dies after the standby commits, the next run can prove that
+# commit without reusing the generation or retransmitting the full release.
+manage_receipt_state create "$GENERATION" "$MANIFEST_SHA256" "" \
+    "$REMOTE_RECEIVER_SHA256" "$SYNC_PROTOCOL"
 
-INGEST_RECEIPT=$(
-    if ! env -i PATH="$PATH" LC_ALL=C LANG=C \
+INGEST_STATUS=0
+if INGEST_RECEIPT_HEX=$(
+    env -i PATH="$PATH" LC_ALL=C LANG=C \
         /usr/bin/python3 -I - "$TMP" <<'PY' \
-        | "${SSH[@]}" "sudo $REMOTE_RECEIVER --ingest"; then
+        | "${SSH[@]}" "sudo $REMOTE_RECEIVER --ingest" \
+        | capture_control_stdout_hex
 import hashlib
 import json
 import os
@@ -1947,15 +2595,27 @@ for item in document["files"]:
     if digest.hexdigest() != expected_digest:
         raise SystemExit(1)
 PY
-        exit 1
-    fi
-    # Command substitution removes trailing newlines.  A non-newline sentinel
-    # preserves the receiver's exact stdout bytes for a fail-closed comparison.
-    printf '\036'
-)
+); then
+    :
+else
+    INGEST_STATUS=$?
+fi
 printf -v EXPECTED_INGEST_RECEIPT \
-    'sync-applied generation=%s receiver-sha256=%s protocol=%s cache=flushed signed=true uploads-only=true\n\036' \
+    'sync-applied generation=%s receiver-sha256=%s protocol=%s cache=flushed signed=true uploads-only=true\n' \
     "$GENERATION" "$REMOTE_RECEIVER_SHA256" "$SYNC_PROTOCOL"
-test "$INGEST_RECEIPT" = "$EXPECTED_INGEST_RECEIPT"
-
-append_sync_authority_event completion "$GENERATION"
+EXPECTED_INGEST_RECEIPT_HEX=$(printf '%s' "$EXPECTED_INGEST_RECEIPT" \
+    | capture_control_stdout_hex) || exit 1
+if [[ "$INGEST_STATUS" -eq 0 \
+    && "$INGEST_RECEIPT_HEX" == "$EXPECTED_INGEST_RECEIPT_HEX" ]]; then
+    RECEIPT_REASON=inline-ack
+else
+    # An absent, truncated or contaminated inline ACK is ambiguous.  Query the
+    # stable signed-release state through the same pinned forced-command path;
+    # never retransmit or infer success from the generation number alone.
+    RECEIPT_REASON=queried-after-ambiguous-ack
+fi
+if resolve_pending_receipt "$RECEIPT_REASON"; then
+    :
+else
+    exit 1
+fi

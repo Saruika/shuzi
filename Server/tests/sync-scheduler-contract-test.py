@@ -755,9 +755,14 @@ def test_sender_condition_context_and_status_behavior(sender_text: str) -> None:
         assert option in sender_text
     receiver_query = shell_function(sender_text, "receiver_control_query")
     assert "/usr/bin/timeout --signal=TERM --kill-after=5s 45s" in receiver_query
-    assert '[[ "$operation" == --attest || "$operation" == --protocol ]]' in receiver_query
+    assert (
+        '[[ "$operation" == --attest || "$operation" == --protocol \\\n'
+        '        || "$operation" == --reconcile-receipt ]]'
+        in receiver_query
+    )
     assert sender_text.count("receiver_control_query --attest") == 2
     assert sender_text.count("receiver_control_query --protocol") == 2
+    assert sender_text.count("receiver_control_query --reconcile-receipt") == 1
 
     if sys.platform == "linux" and Path("/usr/bin/timeout").is_file():
         with tempfile.TemporaryDirectory(prefix="sync-sender-control-timeout-") as raw:
@@ -918,10 +923,16 @@ def main() -> None:
     assert 'exec >>"$LOG"' not in sender_text
     assert sender_text.count("append_sync_authority_event start") == 1
     assert sender_text.count(
-        'append_sync_authority_event completion "$GENERATION"'
+        'append_sync_authority_event completion "$generation"'
+    ) == 1
+    assert sender_text.count(
+        'append_sync_authority_event completion-reconciled "$generation"'
+    ) == 1
+    assert sender_text.count(
+        'append_sync_authority_event not-committed "$generation"'
     ) == 1
     assert 'if event == "start":' in sender_text
-    assert 'elif event == "completion":' in sender_text
+    assert 'elif event in {"completion", "completion-reconciled", "not-committed"}:' in sender_text
     assert "os.O_APPEND" in sender_text
     assert "flags | os.O_CREAT | os.O_EXCL" in sender_text
     assert 'getattr(os, "O_NOFOLLOW", 0)' in sender_text
@@ -931,19 +942,29 @@ def main() -> None:
     assert "(index == 2 and mode != 0o700)" in sender_text
     assert "metadata.st_uid != 0" in sender_text
     assert "metadata.st_gid != 0" in sender_text
-    assert "INGEST_RECEIPT=$(" in sender_text
-    assert "printf '\\036'" in sender_text
+    assert 'PENDING_RECEIPT_STATE="$GENERATION_ROOT/pending-receipt-v5.json"' in sender_text
+    assert 'LAST_RECEIPT_RESOLUTION="$GENERATION_ROOT/last-resolution-v5.json"' in sender_text
+    assert '"evidence_sha256", "expected_release_id", "generation",' in sender_text
+    assert '"ingest_receiver_sha256", "protocol", "version",' in sender_text
+    assert "INGEST_RECEIPT_HEX=$(" in sender_text
+    assert "capture_control_stdout_hex" in sender_text
     assert "printf -v EXPECTED_INGEST_RECEIPT" in sender_text
     assert (
         "sync-applied generation=%s receiver-sha256=%s protocol=%s "
-        "cache=flushed signed=true uploads-only=true\\n\\036"
+        "cache=flushed signed=true uploads-only=true\\n"
         in sender_text
     )
     assert (
         '"$GENERATION" "$REMOTE_RECEIVER_SHA256" "$SYNC_PROTOCOL"'
         in sender_text
     )
-    assert 'test "$INGEST_RECEIPT" = "$EXPECTED_INGEST_RECEIPT"' in sender_text
+    assert (
+        'if [[ "$INGEST_STATUS" -eq 0 \\\n'
+        '    && "$INGEST_RECEIPT_HEX" == "$EXPECTED_INGEST_RECEIPT_HEX" ]]; then'
+        in sender_text
+    )
+    assert "sync-reconcile-v5 accepted=([1-9][0-9]{0,18})" in sender_text
+    assert r"transaction=none runtime=(healthy|isolated)\n" in sender_text
     assert "FPM_SERVICE=php8.3-fpm.service" in sender_text
     assert '"$1" == --recover-primary-fpm-if-marked' in sender_text
     assert '"$1" == --watch-primary-fpm' in sender_text
@@ -987,11 +1008,16 @@ def main() -> None:
     )
     recovered_mark = sender_text.index("FPM_FREEZE_TOKEN=", fpm_restore)
     generation_issue = sender_text.index("GENERATION=$(issue_generation)")
+    sender_sign = sender_text.index("ssh-keygen -Y sign", generation_issue)
+    pending_receipt = sender_text.index(
+        'manage_receipt_state create "$GENERATION" "$MANIFEST_SHA256"', sender_sign
+    )
     receiver_ingest = sender_text.index('"sudo $REMOTE_RECEIVER --ingest"')
     assert media_stage < frozen_mark < fpm_stop < frozen_deadline
     assert frozen_deadline < frozen_snapshot < snapshot_match
     assert snapshot_match < database_export < fpm_restore
-    assert fpm_restore < recovered_mark < generation_issue < receiver_ingest
+    assert fpm_restore < recovered_mark < generation_issue < sender_sign
+    assert sender_sign < pending_receipt < receiver_ingest
     assert r'store_staged_database \"\$2\" \"\$3\"' in sender_text
     assert "upload_bytes + total > MAX_BATCH_BYTES" in sender_text
     assert 'if mode not in {"preflight", "stage", "snapshot"}' in sender_text

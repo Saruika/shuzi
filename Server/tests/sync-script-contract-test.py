@@ -624,7 +624,10 @@ def test_fpm_guard_activation_is_constant_time(receiver_text: str) -> None:
         receiver_text.index("manage_uploads_transaction() {") :
         receiver_text.index(" 9<<'PY'", receiver_text.index("manage_uploads_transaction() {"))
     ]
-    assert "inspect|active-generation|validate-activation|validate-stable-base|" in manage_header
+    assert (
+        "inspect|active-generation|reconcile-state|validate-activation|"
+        "validate-stable-base|"
+    ) in manage_header
     assert "deadline=5s" in manage_header and "kill_after=2s" in manage_header
 
     exchange_start = program.index('elif action == "exchange":')
@@ -776,9 +779,22 @@ def test_secure_sync_logs(receiver_text: str, sender_text: str) -> None:
             localized_sender, str(sender_log), "completion", "7"
         )
         assert completed.returncode == 0, completed.stderr
+        reconciled = run_python_program(
+            localized_sender, str(sender_log), "completion-reconciled", "8"
+        )
+        assert reconciled.returncode == 0, reconciled.stderr
+        not_committed = run_python_program(
+            localized_sender, str(sender_log), "not-committed", "9"
+        )
+        assert not_committed.returncode == 0, not_committed.stderr
         sender_payload = sender_log.read_text(encoding="ascii")
         assert "incremental sync started" in sender_payload
         assert "incremental sync completed generation=7" in sender_payload
+        assert (
+            "incremental sync completed via reconciliation generation=8"
+            in sender_payload
+        )
+        assert "incremental sync confirmed not committed generation=9" in sender_payload
         assert stat_mode(sender_log) == 0o600 and sender_log.stat().st_nlink == 1
 
         sender_log.unlink()
@@ -799,12 +815,23 @@ def test_secure_sync_logs(receiver_text: str, sender_text: str) -> None:
 
 def test_ingest_receipt_exactness(sender_text: str) -> None:
     """The authenticated receiver acknowledgement is an exact byte contract."""
-    start = sender_text.index("printf -v EXPECTED_INGEST_RECEIPT")
-    end = sender_text.index(
-        'test "$INGEST_RECEIPT" = "$EXPECTED_INGEST_RECEIPT"', start
+    capture_function = (
+        "capture_control_stdout_hex() { "
+        "od -An -v -tx1 | tr -d ' \\n'; }\n"
     )
-    end = sender_text.index("\n", end) + 1
-    comparison = sender_text[start:end]
+    start = sender_text.index("printf -v EXPECTED_INGEST_RECEIPT")
+    condition_start = sender_text.index(
+        'if [[ "$INGEST_STATUS" -eq 0 '
+        '\\\n    && "$INGEST_RECEIPT_HEX" == "$EXPECTED_INGEST_RECEIPT_HEX" ]]; then',
+        start,
+    )
+    setup = sender_text[start:condition_start]
+    condition_end = sender_text.index("then\n", condition_start) + len("then\n")
+    condition = sender_text[condition_start:condition_end]
+    assert condition == (
+        'if [[ "$INGEST_STATUS" -eq 0 \\\n'
+        '    && "$INGEST_RECEIPT_HEX" == "$EXPECTED_INGEST_RECEIPT_HEX" ]]; then\n'
+    )
     receiver_hash = "a" * 64
     protocol = "shuzijun-sync-receiver-v4-transactional-uploads"
     line = (
@@ -812,31 +839,41 @@ def test_ingest_receipt_exactness(sender_text: str) -> None:
         f"protocol={protocol} cache=flushed signed=true uploads-only=true\n"
     )
 
-    def check(payload: str) -> int:
+    def check(payload: bytes, status: int = 0) -> int:
         harness = (
             "set -euo pipefail\n"
+            + capture_function
+            + "\n"
             "GENERATION=7\n"
             f"REMOTE_RECEIVER_SHA256={receiver_hash}\n"
             f"SYNC_PROTOCOL={protocol}\n"
-            "INGEST_RECEIPT=$1\n"
-            + comparison
+            f"INGEST_STATUS={status}\n"
+            "INGEST_RECEIPT_HEX=$PAYLOAD_HEX\n"
+            + setup
+            + condition
+            + "  exit 0\nelse\n  exit 1\nfi\n"
         )
         return subprocess.run(
-            ["/bin/bash", "-c", harness, "receipt-test", payload],
+            ["/bin/bash", "-c", harness, "receipt-test"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            env={"PATH": "/usr/bin:/bin", "PAYLOAD_HEX": payload.hex()},
             check=False,
         ).returncode
 
-    assert check(line + "\x1e") == 0
+    exact = line.encode("ascii")
+    assert check(exact) == 0
+    assert check(exact, status=7) != 0
     for invalid in (
-        line,
-        line.rstrip("\n") + "\x1e",
-        line + "extra\n\x1e",
-        "prefix\n" + line + "\x1e",
-        line[:-8] + "\x1e",
-        line + "\x1e\x1e",
+        exact.rstrip(b"\n"),
+        exact.replace(b"\n", b"\r\n"),
+        exact + b"extra\n",
+        b"prefix\n" + exact,
+        exact[:-8],
+        exact + b"\x1e",
+        exact + b"\0",
+        exact + exact,
     ):
         assert check(invalid) != 0
 
@@ -1468,6 +1505,9 @@ def test_uploads_transaction_linux(receiver_text: str) -> None:
         assert validated.returncode == 0 and validated.stdout == "7\n"
         assert run("set-phase", 7, Path("committed")).returncode == 0
         assert run("validate-commit", 7).returncode == 0
+        assert run("reconcile-state").returncode != 0, (
+            "a committed-but-not-finalized transaction is not a stable receipt state"
+        )
         committed_rollback = run("rollback-media", 7)
         assert committed_rollback.returncode == 0
         assert committed_rollback.stdout == "committed\n", (
@@ -1522,6 +1562,25 @@ def test_uploads_transaction_linux(receiver_text: str) -> None:
         assert b"generation-7" in (live / required[0]).read_bytes()
         assert run("validate-commit", 7).returncode == 0
         assert run("validate-activation", 7).returncode == 0
+        reconciled = run("reconcile-state")
+        assert reconciled.returncode == 0, reconciled.stderr
+        assert reconciled.stdout == (
+            f"7 7 7 {release_document['evidence_sha256']} {release_id7}\n"
+        )
+
+        write_generation(accepted, 6)
+        assert run("reconcile-state").returncode != 0, (
+            "active generation ahead of accepted must fail closed"
+        )
+        write_generation(accepted, 7)
+        committed_payload = committed.read_bytes()
+        committed.write_text(
+            f"7 {'0' * 64} {nonce7}\n", encoding="ascii"
+        )
+        assert run("reconcile-state").returncode != 0, (
+            "the durable commit release id must match the active release"
+        )
+        committed.write_bytes(committed_payload)
 
         # A stable same-generation restart keeps the immutable release id but
         # gets a fresh activation nonce. The old commit cannot replay the newly
@@ -1569,6 +1628,9 @@ def test_uploads_transaction_linux(receiver_text: str) -> None:
         assert accepted.read_text(encoding="ascii") == "8\n"
         assert b"generation-7" in (live / required[0]).read_bytes()
         assert run("validate-commit", 8).returncode != 0
+        assert run("reconcile-state").returncode != 0, (
+            "rollback remains unresolved while its transaction record exists"
+        )
         candidate8 = release_root / json.loads(
             transaction.read_text(encoding="ascii")
         )["candidate_name"]
@@ -1595,6 +1657,11 @@ def test_uploads_transaction_linux(receiver_text: str) -> None:
         assert transaction.exists()
         assert run("finish-rollback", 8).returncode == 0
         assert not transaction.exists()
+        reconciled = run("reconcile-state")
+        assert reconciled.returncode == 0, reconciled.stderr
+        assert reconciled.stdout == (
+            f"8 7 7 {release_document['evidence_sha256']} {release_id7}\n"
+        )
 
         # The exact crash window after transaction=commit-ready but before the
         # durable guard commit remains rollback-safe.  Once a valid commit is
@@ -3680,7 +3747,10 @@ def main() -> None:
     self_gate = line_number(lines, 'test "$0" = "$SELF"', standby_preflight)
     attest_exit = line_number(lines, '"$1" == --attest', self_gate)
     protocol_exit = line_number(lines, '"$1" == --protocol', attest_exit)
-    ingest_mode = line_number(lines, '"$1" == --ingest', protocol_exit)
+    reconcile_mode = line_number(
+        lines, '"$1" == --reconcile-receipt', protocol_exit
+    )
+    ingest_mode = line_number(lines, '"$1" == --ingest', reconcile_mode)
     supervision_trap = line_number(lines, "trap 'finish_receiver $?' EXIT", ingest_mode)
     pre_guard_validation = line_number(lines, "validate_fpm_guard_unit", supervision_trap)
     signer_preflight = line_number(lines, "validate_allowed_signers", pre_guard_validation)
@@ -3748,7 +3818,7 @@ def main() -> None:
     backup_retention = line_number(lines, 'retire_backup_history "$DEST"', success_flag)
 
     assert authority_root_gate < authority_lock < standby_preflight < self_gate < attest_exit
-    assert attest_exit < protocol_exit < ingest_mode < supervision_trap
+    assert attest_exit < protocol_exit < reconcile_mode < ingest_mode < supervision_trap
     assert supervision_trap < pre_guard_validation < signer_preflight
     assert signer_preflight < state_root_preflight < rollback_sql_cleanup < preflight
     assert preflight < recovery_gate < stale_claim_cleanup < claim
@@ -3782,7 +3852,16 @@ def main() -> None:
     sender_static_verify = line_number(sender_lines, '"$VERIFY" "$SITE"', sender_role)
     receiver_hash_gate = line_number(sender_lines, "receiver_attestation=", sender_static_verify)
     receiver_protocol_gate = line_number(sender_lines, "receiver_protocol=", receiver_hash_gate)
-    sender_trap = line_number(sender_lines, "trap cleanup_sender EXIT", receiver_protocol_gate)
+    receipt_state_cleanup = line_number(
+        sender_lines, "manage_receipt_state clean-stale", receiver_protocol_gate
+    )
+    pending_receipt_read = line_number(
+        sender_lines, "PENDING_RECEIPT=$(manage_receipt_state pending)", receipt_state_cleanup
+    )
+    startup_reconciliation = line_number(
+        sender_lines, "resolve_pending_receipt startup-recovery", pending_receipt_read
+    )
+    sender_trap = line_number(sender_lines, "trap cleanup_sender EXIT", startup_reconciliation)
     sender_stale_cleanup = line_number(
         sender_lines, "manage_sender_staging clean-stale", sender_trap
     )
@@ -3832,11 +3911,19 @@ def main() -> None:
         sender_lines, "GENERATION=$(issue_generation)", second_receiver_protocol_gate
     )
     sender_sign = line_number(sender_lines, "ssh-keygen -Y sign", generation_issue)
-    receiver_apply = line_number(sender_lines, '"sudo $REMOTE_RECEIVER --ingest"', sender_sign)
+    pending_receipt_create = line_number(
+        sender_lines,
+        'manage_receipt_state create "$GENERATION" "$MANIFEST_SHA256"',
+        sender_sign,
+    )
+    receiver_apply = line_number(
+        sender_lines, '"sudo $REMOTE_RECEIVER --ingest"', pending_receipt_create
+    )
     assert sender_root_gate < sender_lock < sender_role < sender_static_verify
     assert sender_static_verify < receiver_hash_gate
     assert sender_text.count('"$VERIFY" "$SITE"') == 1
-    assert receiver_hash_gate < receiver_protocol_gate < sender_trap
+    assert receiver_hash_gate < receiver_protocol_gate < receipt_state_cleanup
+    assert receipt_state_cleanup < pending_receipt_read < startup_reconciliation < sender_trap
     assert sender_trap < sender_stale_cleanup < sender_allocation
     assert sender_allocation < sender_database_size < sender_preflight
     assert sender_preflight < sender_media_stage < sender_freeze_marker < sender_watchdog
@@ -3844,7 +3931,7 @@ def main() -> None:
     assert sender_frozen_snapshot < sender_export < sender_database_bound < sender_database_store
     assert sender_database_store < sender_restore < second_receiver_hash_gate
     assert second_receiver_hash_gate < second_receiver_protocol_gate < generation_issue
-    assert generation_issue < sender_sign < receiver_apply
+    assert generation_issue < sender_sign < pending_receipt_create < receiver_apply
     assert sender_text.count("receiver_attestation=") == 2
     assert sender_text.count("receiver_protocol=") == 2
     receiver_sha256 = hashlib.sha256(RECEIVER.read_bytes()).hexdigest()
@@ -4128,14 +4215,59 @@ def main() -> None:
     assert "-iname '*.php*'" in verifier_text
     assert "executable or config payload remains in uploads" in verifier_text
     assert gate_text.startswith("#!/bin/sh\nset -eu\n")
-    assert gate_text.count("exec /usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync") == 3
+    assert gate_text.count("exec /usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync") == 4
+    assert re.findall(r"^    (.+)\)$", gate_text, re.MULTILINE) == [
+        "'sudo /usr/local/sbin/apply-shuzijun-sync --attest'",
+        "'sudo /usr/local/sbin/apply-shuzijun-sync --protocol'",
+        "'sudo /usr/local/sbin/apply-shuzijun-sync --reconcile-receipt'",
+        "'sudo /usr/local/sbin/apply-shuzijun-sync --ingest'",
+        "*",
+    ]
+    assert re.findall(
+        r"    '([^']+)'\)\n        exec ([^\n]+)", gate_text
+    ) == [
+        (
+            "sudo /usr/local/sbin/apply-shuzijun-sync --attest",
+            "/usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --attest",
+        ),
+        (
+            "sudo /usr/local/sbin/apply-shuzijun-sync --protocol",
+            "/usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --protocol",
+        ),
+        (
+            "sudo /usr/local/sbin/apply-shuzijun-sync --reconcile-receipt",
+            "/usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --reconcile-receipt",
+        ),
+        (
+            "sudo /usr/local/sbin/apply-shuzijun-sync --ingest",
+            "/usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --ingest",
+        ),
+    ]
     assert "SSH_ORIGINAL_COMMAND" in gate_text
     assert "command denied" in gate_text
     assert os.stat(SSH_GATE).st_mode & 0o777 == 0o755
+    for invalid_command in (
+        "",
+        "sudo /usr/local/sbin/apply-shuzijun-sync --reconcile-receipt extra",
+        "sudo /usr/local/sbin/apply-shuzijun-sync --reconcile-receipt\n",
+        "/usr/local/sbin/apply-shuzijun-sync --reconcile-receipt",
+        "sudo /usr/local/sbin/apply-shuzijun-sync --reconcile-*",
+    ):
+        denied = subprocess.run(
+            [str(SSH_GATE)],
+            env={"PATH": "/usr/bin:/bin", "SSH_ORIGINAL_COMMAND": invalid_command},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert denied.returncode == 126, invalid_command
+        assert denied.stdout == b""
+        assert denied.stderr == b"shuzijun-sync transport: command denied\n"
     assert sudoers_text == (
         "shuzijun-sync-transport ALL=(root:root) NOPASSWD: "
         "/usr/local/sbin/apply-shuzijun-sync --attest, "
         "/usr/local/sbin/apply-shuzijun-sync --protocol, "
+        "/usr/local/sbin/apply-shuzijun-sync --reconcile-receipt, "
         "/usr/local/sbin/apply-shuzijun-sync --ingest\n"
     )
     assert "Cmnd_Alias" not in sudoers_text

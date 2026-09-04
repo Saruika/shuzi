@@ -14,6 +14,9 @@ case "${SSH_ORIGINAL_COMMAND:-}" in
     'sudo /usr/local/sbin/apply-shuzijun-sync --protocol')
         exec /usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --protocol
         ;;
+    'sudo /usr/local/sbin/apply-shuzijun-sync --reconcile-receipt')
+        exec /usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --reconcile-receipt
+        ;;
     'sudo /usr/local/sbin/apply-shuzijun-sync --ingest')
         exec /usr/bin/sudo -n /usr/local/sbin/apply-shuzijun-sync --ingest
         ;;

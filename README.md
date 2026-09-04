@@ -97,6 +97,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.5.10-build42.8.md`](Server/releases/v1.5.10-build42.8.md)：将 8,125 行 App Content 插件拆成入口与五个可审查模块，并完整固定发布、回滚和直连拦截信任链。
 - [`Server/releases/v1.3.30-build42.9.md`](Server/releases/v1.3.30-build42.9.md)：引入 SAST/SCA、全量 Python 哈希锁、CycloneDX/SPDX SBOM 与 GitHub runner 来源证明。
 - [`Server/releases/v1.3.30-build42.10.md`](Server/releases/v1.3.30-build42.10.md)：修复健康监控对签名同步 v4 三字段提交收据的兼容与误报。
+- [`Server/releases/v1.3.30-build42.11.md`](Server/releases/v1.3.30-build42.11.md)：为已提交的 generation 7 增加签名回执恢复、崩溃安全墓碑和受审一次性 systemd 迁移。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

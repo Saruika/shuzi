@@ -1488,7 +1488,7 @@ manage_uploads_transaction() {
     local action=$1 generation=${2:-0} claim=${3:-/} backup=${4:-/}
     local deadline=30m kill_after=10s
     case "$action" in
-        inspect|active-generation|validate-activation|validate-stable-base|\
+        inspect|active-generation|reconcile-state|validate-activation|validate-stable-base|\
         activation-release-id|stable-release-id|bootstrap-release-id|\
         set-phase|exchange|validate-prepared|publish-active|publish-stable)
             # Guard boot and the masked publication path are both O(1). Give
@@ -2213,6 +2213,36 @@ if action == "active-generation":
                 != live_identity):
         raise RuntimeError("active release identity mismatch")
     print(generation)
+    raise SystemExit(0)
+
+if action == "reconcile-state":
+    # Return only a fully durable, transaction-free publication state.  The
+    # caller uses this after an ambiguous transport acknowledgement, so a
+    # generation number on its own is never sufficient evidence of commit.
+    accepted = read_generation(accepted_path)
+    active = read_generation(active_path)
+    if active > accepted:
+        raise RuntimeError("active generation exceeds accepted generation")
+    try:
+        transaction_path.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise RuntimeError("reconciliation cannot observe an open transaction")
+    live_identity = current_live_identity()
+    release = load_active_release()
+    commit_generation, commit_release_id, _commit_nonce = read_guard_marker(
+        "fpm-activation-guard-v4.committed"
+    )
+    if (release["generation"] != active
+            or (release["uploads_dev"], release["uploads_ino"]) != live_identity
+            or commit_generation != active
+            or commit_release_id != release["release_id"]):
+        raise RuntimeError("reconciliation release evidence mismatch")
+    print(
+        f"{accepted} {active} {commit_generation} "
+        f"{release['evidence_sha256']} {release['release_id']}"
+    )
     raise SystemExit(0)
 
 if action == "validate-stable-base":
@@ -4168,7 +4198,7 @@ rollback_incomplete_transaction() {
     disposition=$(manage_uploads_transaction rollback-media "$generation") || return 1
     if [[ "$disposition" == database ]]; then
         restore_database_from_backup "$backup" || return 1
-        verify_webroot_security || return 1
+        verify_webroot_security >/dev/null || return 1
         validate_database_markers || return 1
         manage_uploads_transaction finish-rollback "$generation" || return 1
     elif [[ "$disposition" != clean ]]; then
@@ -4453,6 +4483,25 @@ finish_receiver() {
     exit "$status"
 }
 
+validate_reconcile_state_stdout() {
+    # Never place unchecked helper bytes in a Bash variable: command
+    # substitution silently discards NUL.  Validate the raw bounded stream
+    # first, then emit only the proven ASCII fields without its final LF.
+    /usr/bin/python3 -I /proc/self/fd/9 9<<'PY'
+import re
+import sys
+
+payload = sys.stdin.buffer.read(512)
+if sys.stdin.buffer.read(1) or re.fullmatch(
+    rb"[1-9][0-9]{0,18} [1-9][0-9]{0,18} [1-9][0-9]{0,18} "
+    rb"[0-9a-f]{64} [0-9a-f]{64}\n",
+    payload,
+) is None:
+    raise SystemExit(1)
+sys.stdout.buffer.write(payload[:-1])
+PY
+}
+
 if [[ $# -eq 4 && "$1" == --guard-watch ]]; then
     watch_fpm_activation_guard "$2" "$3" "$4"
     exit $?
@@ -4488,6 +4537,46 @@ if [[ $# -eq 1 && "$1" == --protocol ]]; then
     printf '%s\n' "$SYNC_PROTOCOL"
     exit 0
 fi
+if [[ $# -eq 1 && "$1" == --reconcile-receipt ]]; then
+    # The query shares the exclusive site lock with ingest/deployment.  It may
+    # finish a provably committed interrupted transaction, but it never accepts
+    # new bytes or advances a generation.  Every successful response therefore
+    # describes one stable active release and its matching durable FPM commit.
+    trap 'finish_receiver $?' EXIT
+    trap 'exit 130' INT TERM HUP
+    validate_fpm_guard_unit
+    validate_allowed_signers
+    clean_stale_state_temporaries
+    clean_stale_rollback_sql
+    verify_webroot_security >/dev/null
+    run_receiver_recovery_and_baseline >/dev/null
+    clean_stale_claims >/dev/null
+    RECONCILE_LINE=$(manage_uploads_transaction reconcile-state \
+        | validate_reconcile_state_stdout) || exit 1
+    [[ "$RECONCILE_LINE" =~ ^([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})\ ([1-9][0-9]{0,18})\ ([0-9a-f]{64})\ ([0-9a-f]{64})$ ]] \
+        || exit 1
+    RECONCILE_ACCEPTED=${BASH_REMATCH[1]}
+    RECONCILE_ACTIVE=${BASH_REMATCH[2]}
+    RECONCILE_COMMITTED=${BASH_REMATCH[3]}
+    RECONCILE_EVIDENCE=${BASH_REMATCH[4]}
+    RECONCILE_RELEASE_ID=${BASH_REMATCH[5]}
+    [[ "$RECONCILE_COMMITTED" == "$RECONCILE_ACTIVE" ]]
+    if [[ "$RECONCILE_ACCEPTED" == "$RECONCILE_ACTIVE" ]]; then
+        validate_fpm_guard_commit_matches_accepted
+        verify_fpm_ready
+        probe_standby_runtime
+        RECONCILE_RUNTIME=healthy
+    else
+        generation_is_less "$RECONCILE_ACTIVE" "$RECONCILE_ACCEPTED"
+        isolate_failed_fpm
+        RECONCILE_RUNTIME=isolated
+    fi
+    printf 'sync-reconcile-v5 accepted=%s active=%s committed=%s evidence-sha256=%s release-id=%s receiver-sha256=%s protocol=%s transaction=none runtime=%s\n' \
+        "$RECONCILE_ACCEPTED" "$RECONCILE_ACTIVE" "$RECONCILE_COMMITTED" \
+        "$RECONCILE_EVIDENCE" "$RECONCILE_RELEASE_ID" "$SELF_SHA256" \
+        "$SYNC_PROTOCOL" "$RECONCILE_RUNTIME"
+    exit 0
+fi
 if [[ $# -eq 2 && "$1" == --bootstrap-state ]]; then
     BOOTSTRAP_RELEASE_ID=
     BOOTSTRAP_ACCEPTED=
@@ -4512,7 +4601,7 @@ if [[ $# -eq 2 && "$1" == --bootstrap-state ]]; then
     exit 0
 fi
 [[ $# -eq 1 && "$1" == --ingest ]] \
-    || { printf 'usage: apply-shuzijun-sync --attest|--protocol|--ingest|--bootstrap-state GENERATION\n' >&2; exit 2; }
+    || { printf 'usage: apply-shuzijun-sync --attest|--protocol|--reconcile-receipt|--ingest|--bootstrap-state GENERATION\n' >&2; exit 2; }
 
 # Install supervision before recovery, stale cleanup, incoming-claim creation,
 # or any service-manager mutation. SIGKILL cannot run a trap, so exact stale
@@ -4525,8 +4614,8 @@ validate_sync_state_roots
 clean_stale_state_temporaries
 clean_stale_rollback_sql
 verify_webroot_security >/dev/null
-run_receiver_recovery_and_baseline
-clean_stale_claims
+run_receiver_recovery_and_baseline >/dev/null
+clean_stale_claims >/dev/null
 
 # The SSH stream lands directly in a root-only claim. Only bounded control
 # records are accepted before signature verification; signed per-file sizes,
@@ -4638,7 +4727,7 @@ finalize_uploads_transaction "$GENERATION"
 # mutation successful before slow retention/claim cleanup so either can be
 # resumed without incorrectly rolling back or isolating the published runtime.
 APPLY_SUCCEEDED=1
-if ! retire_backup_history "$DEST"; then
+if ! retire_backup_history "$DEST" >/dev/null; then
     printf '%s\n' \
         'sync receiver: warning: committed backup retention will retry on a later run' >&2
 fi

@@ -680,9 +680,10 @@ SSH is not a general standby login. The sender connects only as the dedicated,
 password-locked `shuzijun-sync-transport` account with pinned host-key checking.
 Its root-owned authorized key uses `restrict`, the reviewed sshd Match block
 forces `shuzijun-sync-ssh-gate`, and that gate accepts only the exact receiver
-`--attest`, `--protocol` and `--ingest` commands. The matching sudoers file grants
-only those three root commands. Remove any prior sync-key access for `ubuntu` and
-any broad `NOPASSWD: ALL`; otherwise the transport boundary is not installed.
+`--attest`, `--protocol`, `--reconcile-receipt` and `--ingest` commands. The
+matching sudoers file grants only those four root commands. Remove any prior
+sync-key access for `ubuntu` and any broad `NOPASSWD: ALL`; otherwise the
+transport boundary is not installed.
 
 `shuzijun-sync.service` and `shuzijun-sync.timer` are installed only on the
 Shanghai primary. The timer runs once per day at 03:30 Asia/Shanghai with up
@@ -736,8 +737,18 @@ and is not part of this v4 transactional-activation recovery.
 Every scheduled or manual sync must start `shuzijun-sync.service`; never invoke
 `sync-to-backup` directly, even behind an operator-created `flock`, because that
 would bypass the required Nginx preflight. The service itself takes
-`/run/shuzijun-sync/sync.lock`. Before a two-node release, stop the timer first and
-do not interrupt a receiver/sender that is already applying a database dump:
+`/run/shuzijun-sync/sync.lock`.
+
+The sole migration exception is the reviewed, static
+`shuzijun-sync-reconcile-generation7.service`. It carries the frozen generation
+7 evidence from the already-committed legacy run, requires the same Nginx
+preflight, reuses the same runtime lock and sandbox, and cannot be enabled by a
+timer or install target. Start it once with `systemctl start` only after both
+nodes have the matching recovery release; do not reproduce its sender command
+manually.
+
+Before a two-node release, stop the timer first and do not interrupt a
+receiver/sender that is already applying a database dump:
 
 ```bash
 systemctl stop shuzijun-sync.timer

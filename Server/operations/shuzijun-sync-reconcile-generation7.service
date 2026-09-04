@@ -1,0 +1,52 @@
+[Unit]
+Description=Reconcile the committed Shuzijun generation 7 sync receipt
+Wants=network-online.target
+Requires=shuzijun-sync-preflight.service
+After=network-online.target mysql.service nginx.service shuzijun-sync-preflight.service
+RequiresMountsFor=/var/www/html/shuzijun.com.cn /var/lib/shuzijun-sync /var/lib/shuzijun-logs /run
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStartPre=/usr/bin/systemctl is-active --quiet mysql.service
+ExecStartPre=/usr/bin/systemctl is-active --quiet nginx.service
+ExecStartPre=/usr/bin/systemctl is-active --quiet php8.3-fpm.service
+ExecStartPre=/usr/bin/test -x /usr/local/sbin/sync-to-backup
+ExecStartPre=/usr/bin/test -x /usr/local/sbin/verify-shuzijun-sync-source
+ExecStartPre=/usr/bin/test -x /usr/local/sbin/verify-shuzijun-webroot-security
+ExecStartPre=/usr/bin/test -f /root/.ssh/shuzijun_sync_ed25519
+ExecStartPre=/usr/bin/test -f /var/lib/shuzijun-sync/highest-issued-generation
+RuntimeDirectory=shuzijun-sync
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+ExecStart=/usr/bin/flock -n /run/shuzijun-sync/sync.lock /usr/local/sbin/sync-to-backup --reconcile-legacy-v4 7 9cd4dd8ea9c5873aa2cc930d0bf17386a554069ec52eb2deacfc8b8b168871d8 fcbf252a03f2b2daaa798cb63f6fd76c2219d345e3fe81b9b26120d2542b24d6 0a28c89ef1ac427f6ac72e5268cb5aa0ed28169493aab64d05dd687a40e67e03
+TimeoutStartSec=8h
+TimeoutStopSec=1min
+KillMode=control-group
+Restart=no
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/shuzijun-sync /var/lib/shuzijun-logs /run/shuzijun-sync
+ReadOnlyPaths=/var/www/html/shuzijun.com.cn
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
