@@ -88,6 +88,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.5.10-build41.12.md`](Server/releases/v1.5.10-build41.12.md)：systemd 回收未加载 service 后的隔离归一化修复。
 - [`Server/releases/v1.5.10-build41.13.md`](Server/releases/v1.5.10-build41.13.md)：共享日志父链信任修复与零日志变更部署。
 - [`Server/releases/v1.3.30-build42.1.md`](Server/releases/v1.3.30-build42.1.md)：上海到新加坡签名同步、最小 capability 预检、系统安全更新与腾讯云告警记录。
+- [`Server/releases/v1.3.30-build42.2.md`](Server/releases/v1.3.30-build42.2.md)：真实 systemd 环境发现的健康发布门禁修复与新候选。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

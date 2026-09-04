@@ -15,7 +15,7 @@ HEALTH_TIMER = Path("Server/operations/shuzijun-internal-health.timer")
 INTERNAL_HEALTH_TEST = Path("Server/tests/internal-health-contract-test.py")
 PRIVATE_LOG_CONFIG = Path("Server/operations/shuzijun-private-logs.conf")
 SNAPSHOT_CRON = Path("Server/operations/tencent-daily-snapshot.cron")
-RELEASE = Path("Server/releases/v1.3.30-build42.1.md")
+RELEASE = Path("Server/releases/v1.3.30-build42.2.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -279,6 +279,7 @@ def assert_old_loaded_definition_negative_paths(old_loaded: str) -> None:
         ("flags", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", "strict", False),
         ("reload", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", "strict", False),
         ("timer-unit", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", "strict", False),
+        ("success-status", "active", "waiting", "failed", "failed", "active", "inactive-or-failed", "strict", False),
         ("none", "inactive", "dead", "inactive", "dead", "inactive", "inactive", "strict", True),
         ("none", "inactive", "dead", "failed", "failed", "inactive", "inactive", "strict", False),
     ):
@@ -316,8 +317,11 @@ unit_value() {{
         SubState)
             [[ "$unit" == *.timer ]] && printf '%s\\n' "$TIMER_SUBSTATE" || printf '%s\\n' "$SERVICE_SUBSTATE"
             ;;
-        Job|DropInPaths|ExecCondition|ExecStartPre|ExecStartPost|ExecReload|ExecStop|ExecStopPost|SuccessExitStatus)
+        Job|DropInPaths|ExecCondition|ExecStartPre|ExecStartPost|ExecReload|ExecStop|ExecStopPost)
             printf '\\n'
+            ;;
+        SuccessExitStatus)
+            [[ "$DRIFT" == success-status ]] && printf '0\\n' || printf '2\\n'
             ;;
         Unit)
             [[ "$DRIFT" == timer-unit ]] && printf '%s\\n' untrusted.service || printf '%s\\n' shuzijun-internal-health.service
@@ -800,9 +804,9 @@ def main() -> None:
     assert "unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true" in lines
 
     for fixed_value in (
-        "RELEASE_ID=build42.1",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.1",
-        "STAGE=/run/shuzijun-health-build42.1-$NODE",
+        "RELEASE_ID=build42.2",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.2",
+        "STAGE=/run/shuzijun-health-build42.2-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -835,8 +839,8 @@ def main() -> None:
     assert f"NEW_TIMER_SHA={health_timer_sha256}" in lines
     assert f"NEW_PRIVATE_LOG_CONFIG_SHA={private_log_config_sha256}" in lines
     assert f"NEW_SNAPSHOT_CRON_SHA={snapshot_cron_sha256}" in lines
-    assert RELEASE == Path("Server/releases/v1.3.30-build42.1.md")
-    assert "Build 42.1" in release
+    assert RELEASE == Path("Server/releases/v1.3.30-build42.2.md")
+    assert "Build 42.2" in release
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
     assert "build41.12" not in text
@@ -1009,6 +1013,7 @@ def main() -> None:
     assert '[[ "$timer_substate" == waiting || "$timer_substate" == elapsed ]] || return 1' in old_loaded
     assert "inactive:dead" in old_loaded and "failed:failed" in old_loaded
     assert '[[ "$service_result" == exit-code && "$service_main_status" == 1 ]] || return 1' in old_loaded
+    assert '[[ "$success_status" == 2 ]] || return 1' in old_loaded
     assert 'require_exact_exec_start "$SERVICE_OBJECT_PATH" /usr/local/sbin/shuzijun-internal-health /usr/local/sbin/shuzijun-internal-health || return 1' in old_loaded
     assert "require_service_execution_context shuzijun-internal-health.service || return 1" in old_loaded
     assert 'require_exact_exec_start "$SERVICE_OBJECT_PATH" /usr/bin/python3 /usr/bin/python3 -I /usr/local/sbin/shuzijun-internal-health || return 1' in new_units
