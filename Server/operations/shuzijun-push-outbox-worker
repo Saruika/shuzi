@@ -61,7 +61,15 @@ require_regular_file() {
 
 require_immutable_private_file() {
     local path=$1 label=$2 attributes
-    attributes=$(/usr/bin/lsattr -d -- "$path" 2>/dev/null) \
+    attributes=$(/usr/bin/setpriv \
+        --reuid=www-data \
+        --regid=www-data \
+        --clear-groups \
+        --no-new-privs \
+        --bounding-set=-all \
+        --inh-caps=-all \
+        --ambient-caps=-all \
+        /usr/bin/lsattr -d -- "$path" 2>/dev/null) \
         || { printf 'push-outbox-worker: %s attributes unavailable\n' "$label" >&2; exit 78; }
     attributes=${attributes%% *}
     [[ "$attributes" == *i* ]] \

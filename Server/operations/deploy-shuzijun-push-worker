@@ -36,7 +36,7 @@ readonly FPM_SYSTEMD_ROOT=/etc/systemd/system/php8.3-fpm.service.d
 readonly FPM_SYSTEMD_TARGET=$FPM_SYSTEMD_ROOT/50-shuzijun-push.conf
 readonly FPM_POOL_TARGET=/etc/php/8.3/fpm/pool.d/zz-shuzijun-push-env.conf
 
-readonly WORKER_SHA=f37ff119458af16ad26ee4961150613b18ab3b5c569b7e37d581b4561b140ffe
+readonly WORKER_SHA=25f87f6681c2d4e64db6b5ccfc9135b2750a4cbd5073dedb126cc23df1abbb4b
 readonly SERVICE_SHA=6341549970245226f3b506d2284999fcb7d5dac51759c6a229e43bb803791934
 readonly TIMER_SHA=7adf34cc6f17806842dca1acf35e554605a32ac3a7c17e795f4c7dbd80946bd8
 readonly FPM_SYSTEMD_SHA=6baab9ee1e36d019a45a43208b51301575d7929c1cbfa2456fa55062b5bdabde
