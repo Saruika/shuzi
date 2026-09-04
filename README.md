@@ -100,6 +100,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.11.md`](Server/releases/v1.3.30-build42.11.md)：为已提交的 generation 7 增加签名回执恢复、崩溃安全墓碑和受审一次性 systemd 迁移。
 - [`Server/releases/v1.3.30-build42.12.md`](Server/releases/v1.3.30-build42.12.md)：修复上海到新加坡签名同步被通用 SSH 限速误伤的问题，并增加只覆盖建连阶段的有界重试。
 - [`Server/releases/v1.3.30-build42.13.md`](Server/releases/v1.3.30-build42.13.md)：修复快照计划已迁移时的重复部署，并正确处理 systemd 回收 inactive oneshot 造成的假失败。
+- [`Server/releases/v1.3.30-build42.14.md`](Server/releases/v1.3.30-build42.14.md)：兼容备节点 `reset-failed` 对已回收 oneshot 的实际返回码，后置双采样仍保持失败关闭。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
@@ -172,6 +173,12 @@ Build 42 在录屏、投屏和切后台的公开保护之外，按产品方明�
 - 健康监控部署器同时兼容“尚未迁移”和“已精确迁移”的腾讯云快照计划，重复执行不再因删除数为零误回滚。
 - `stop` 或 `reset-failed` 遇到 systemd 已回收的 oneshot 时，仅容忍明确的返回码 5；重载后必须连续两次验证完整静止状态。
 - 正向部署与回滚共用同一个状态门禁；活动、失败、任务未清空、文件或 unit 属性漂移仍会立即停止。
+
+### Build 42.14 systemd 返回码兼容
+
+- 备节点实测表明，已回收 oneshot 的 `reset-failed` 返回 `1`；本版只对该动作增加这一精确兼容值，`stop=1` 仍拒绝。
+- 42.13 失败发生在任何运行时或快照文件替换前；备节点已按旧哈希恢复健康 timer 并复验角色与状态。
+- 返回码兼容不代替验收；重载后仍需连续两次完整静止状态才能发布。
 
 ## v1.3.29-build41
 

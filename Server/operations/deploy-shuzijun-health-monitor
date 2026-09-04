@@ -1011,8 +1011,8 @@ run_systemctl_unit_intent() {
     else
         rc=$?
     fi
-    case "$rc" in
-        0|5) return 0 ;;
+    case "$action:$rc" in
+        stop:0|stop:5|reset-failed:0|reset-failed:1|reset-failed:5) return 0 ;;
         *) printf 'systemctl %s returned unexpected status %s\n' "$action" "$rc" >&2; return 1 ;;
     esac
 }

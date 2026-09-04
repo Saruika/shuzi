@@ -16,7 +16,7 @@ HEALTH_TIMER = Path("Server/operations/shuzijun-internal-health.timer")
 INTERNAL_HEALTH_TEST = Path("Server/tests/internal-health-contract-test.py")
 PRIVATE_LOG_CONFIG = Path("Server/operations/shuzijun-private-logs.conf")
 SNAPSHOT_CRON = Path("Server/operations/tencent-daily-snapshot.cron")
-RELEASE = Path("Server/releases/v1.3.30-build42.13.md")
+RELEASE = Path("Server/releases/v1.3.30-build42.14.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -600,13 +600,23 @@ fi
 
 
 def assert_systemctl_unit_intent_contract(intent: str) -> None:
-    for action in ("stop", "reset-failed"):
-        for rc, should_pass in ((0, True), (5, True), (1, False), (4, False), (6, False)):
-            invocation = f"run_systemctl_unit_intent {action}"
-            expectation = (
-                invocation if should_pass else f"if {invocation}; then exit 97; fi"
-            )
-            harness = f"""
+    for action, rc, should_pass in (
+        ("stop", 0, True),
+        ("stop", 5, True),
+        ("stop", 1, False),
+        ("stop", 4, False),
+        ("stop", 6, False),
+        ("reset-failed", 0, True),
+        ("reset-failed", 1, True),
+        ("reset-failed", 5, True),
+        ("reset-failed", 4, False),
+        ("reset-failed", 6, False),
+    ):
+        invocation = f"run_systemctl_unit_intent {action}"
+        expectation = (
+            invocation if should_pass else f"if {invocation}; then exit 97; fi"
+        )
+        harness = f"""
 set -Eeuo pipefail
 SYSTEMCTL_RC={rc}
 systemctl() {{
@@ -616,13 +626,14 @@ systemctl() {{
 {intent}
 {expectation}
 """
-            subprocess.run(["/bin/bash", "-c", harness], check=True)
+        subprocess.run(["/bin/bash", "-c", harness], check=True)
 
 
 def assert_isolate_health_runtime_contract(
     isolate: str, intent: str
 ) -> None:
     for stop_rc, reset_rc, files_trusted, reload_rc, mode, sleep_rc, should_pass in (
+        (5, 1, True, 0, "transient", 0, True),
         (5, 5, True, 0, "transient", 0, True),
         (0, 0, True, 0, "loaded", 0, True),
         (1, 0, True, 0, "loaded", 0, False),
@@ -960,8 +971,8 @@ def main() -> None:
     assert f"NEW_TIMER_SHA={health_timer_sha256}" in lines
     assert f"NEW_PRIVATE_LOG_CONFIG_SHA={private_log_config_sha256}" in lines
     assert f"NEW_SNAPSHOT_CRON_SHA={snapshot_cron_sha256}" in lines
-    assert RELEASE == Path("Server/releases/v1.3.30-build42.13.md")
-    assert "Build 42.13" in release
+    assert RELEASE == Path("Server/releases/v1.3.30-build42.14.md")
+    assert "Build 42.14" in release
     for release_value in (
         f"HEALTH_DEPLOYER_SHA256={deployer_sha256}",
         f"HEALTH_DEPLOYER_CONTRACT_SHA256={deployer_contract_sha256}",
