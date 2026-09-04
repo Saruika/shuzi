@@ -539,14 +539,14 @@ private extension Portfolio {
         mediaID: Int,
         image: String
     ) -> Portfolio {
-        let imageURL = URL(string: image)!
+        let imageURL = AppURL.make(image)
         return Portfolio(
             id: id,
             title: title,
             subtitle: subtitle,
             eyebrow: eyebrow,
             slug: slug,
-            websiteURL: URL(string: "https://www.shuzijun.com.cn/portfolio/\(slug)/")!,
+            websiteURL: AppURL.make("https://www.shuzijun.com.cn/portfolio/\(slug)/"),
             coverURL: imageURL,
             images: [PortfolioImage(id: mediaID, url: imageURL, fullSizeURL: imageURL, altText: title)]
         )

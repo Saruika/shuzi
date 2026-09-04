@@ -1,5 +1,15 @@
 import Foundation
 
+enum AppURL {
+    private static let invalidURL = URL(fileURLWithPath: "/__invalid_app_url__")
+
+    /// Keeps static app URLs non-optional without turning a malformed value into a launch crash.
+    /// Network policies reject the local sentinel if a configured value ever becomes invalid.
+    static func make(_ rawValue: String) -> URL {
+        URL(string: rawValue) ?? invalidURL
+    }
+}
+
 /// Centralizes the transport boundary for content and administrator traffic.
 /// Credentials must never be allowed to follow an HTTP redirect, even when the
 /// destination appears to use the same host name.

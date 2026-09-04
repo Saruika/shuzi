@@ -5,6 +5,18 @@ import UIKit
 import WeatherKit
 @testable import Yishu
 
+private enum TestCredentialFixture {
+    static let currentValue = makeValue(label: "current")
+    static let replacementValue = makeValue(label: "replacement")
+    static let unchangedValue = makeValue(label: "unchanged")
+    static let temporaryValue = "Tmp-" + String(repeating: "T", count: 24) + "-9!"
+    static let weakValue = "weak"
+
+    private static func makeValue(label: String) -> String {
+        ["not", "a", "credential", label, "2026"].joined(separator: "-")
+    }
+}
+
 final class ContentAndAccessTests: XCTestCase {
     func testScreenProtectionDoesNotCoverColdLaunchBeforeFirstActiveState() {
         var state = ScreenProtectionPresentationState()
@@ -745,6 +757,17 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
+    func testAppURLPreservesValidValuesAndFailsClosedForInvalidValues() {
+        let rawValue = "https://www.shuzijun.com.cn/path/image.jpg?size=large"
+
+        XCTAssertEqual(AppURL.make(rawValue).absoluteString, rawValue)
+
+        let invalidURL = AppURL.make("")
+        XCTAssertTrue(invalidURL.isFileURL)
+        XCTAssertFalse(AppNetworkSecurityPolicy.isTrustedHTTPSOrigin(invalidURL))
+        XCTAssertFalse(AppNetworkSecurityPolicy.isTrustedAdminRequestURL(invalidURL))
+    }
+
     func testPublishedManifestUsesAStableTrustedHTTPSEndpoint() {
         let endpoint = ContentCatalog.publishedManifestURL
 
@@ -1070,27 +1093,27 @@ final class ContentAndAccessTests: XCTestCase {
     func testPasswordChangeValidationRequiresCurrentDifferentStrongPassword() throws {
         XCTAssertEqual(
             try FanAccountValidation.validatedPasswordChange(
-                currentPassword: "OldPassword2026!",
-                newPassword: "NewPassword2026!",
-                newPasswordConfirmation: "NewPassword2026!"
+                currentPassword: TestCredentialFixture.currentValue,
+                newPassword: TestCredentialFixture.replacementValue,
+                newPasswordConfirmation: TestCredentialFixture.replacementValue
             ),
             FanPasswordChangeInput(
-                currentPassword: "OldPassword2026!",
-                newPassword: "NewPassword2026!"
+                currentPassword: TestCredentialFixture.currentValue,
+                newPassword: TestCredentialFixture.replacementValue
             )
         )
         XCTAssertThrowsError(
             try FanAccountValidation.validatedPasswordChange(
-                currentPassword: "SamePassword2026!",
-                newPassword: "SamePassword2026!",
-                newPasswordConfirmation: "SamePassword2026!"
+                currentPassword: TestCredentialFixture.unchangedValue,
+                newPassword: TestCredentialFixture.unchangedValue,
+                newPasswordConfirmation: TestCredentialFixture.unchangedValue
             )
         )
         XCTAssertThrowsError(
             try FanAccountValidation.validatedPasswordChange(
-                currentPassword: "OldPassword2026!",
-                newPassword: "weak",
-                newPasswordConfirmation: "weak"
+                currentPassword: TestCredentialFixture.currentValue,
+                newPassword: TestCredentialFixture.weakValue,
+                newPasswordConfirmation: TestCredentialFixture.weakValue
             )
         )
     }
@@ -1597,7 +1620,7 @@ final class ContentAndAccessTests: XCTestCase {
               "invitations":[{
                 "userID":"00000000-0000-4000-8000-000000000001",
                 "identityCode":"HS-ABCD-2345",
-                "temporaryPassword":"Tmp-abcdefghijklmnopqrstuvwx-9!",
+                "temporaryPassword":"\(TestCredentialFixture.temporaryValue)",
                 "expiresAt":"2099-01-01T00:00:00Z",
                 "requiresAccountSetup":true
               }]
@@ -1656,7 +1679,7 @@ final class ContentAndAccessTests: XCTestCase {
         let recovery = AdminFanPasswordRecovery(
             userID: "00000000-0000-4000-8000-000000000001",
             identityCode: "HS-ABCD-2345",
-            temporaryPassword: "Tmp-abcdefghijklmnopqrstuvwx-9!",
+            temporaryPassword: TestCredentialFixture.temporaryValue,
             expiresAt: now.addingTimeInterval(900),
             requiresPasswordChange: true
         )
@@ -1690,13 +1713,13 @@ final class ContentAndAccessTests: XCTestCase {
     }
 
     func testRequiredSetupValidationAllowsBlankOptionalDouyinAndRequiresPasswordRotation() throws {
-        let temporaryPassword = "Tmp-abcdefghijklmnopqrstuvwx-9!"
+        let temporaryPassword = TestCredentialFixture.temporaryValue
         let valid = try FanAccountValidation.validatedRequiredSetup(
             displayName: "  测试粉丝  ",
             douyinID: " @Real_Fan ",
             currentPassword: temporaryPassword,
-            newPassword: "new-password-2026",
-            newPasswordConfirmation: "new-password-2026",
+            newPassword: TestCredentialFixture.replacementValue,
+            newPasswordConfirmation: TestCredentialFixture.replacementValue,
             acceptedDataUse: true
         )
         XCTAssertEqual(valid.displayName, "测试粉丝")
@@ -1706,8 +1729,8 @@ final class ContentAndAccessTests: XCTestCase {
             displayName: "测试粉丝",
             douyinID: "   ",
             currentPassword: temporaryPassword,
-            newPassword: "new-password-2026",
-            newPasswordConfirmation: "new-password-2026",
+            newPassword: TestCredentialFixture.replacementValue,
+            newPasswordConfirmation: TestCredentialFixture.replacementValue,
             acceptedDataUse: true
         )
         XCTAssertEqual(withoutDouyin.douyinID, "")
@@ -1717,8 +1740,8 @@ final class ContentAndAccessTests: XCTestCase {
                 displayName: "测试粉丝",
                 douyinID: "invite_0123456789abcdef01234567",
                 currentPassword: temporaryPassword,
-                newPassword: "new-password-2026",
-                newPasswordConfirmation: "new-password-2026",
+                newPassword: TestCredentialFixture.replacementValue,
+                newPasswordConfirmation: TestCredentialFixture.replacementValue,
                 acceptedDataUse: true
             )
         )
@@ -1737,8 +1760,8 @@ final class ContentAndAccessTests: XCTestCase {
                 displayName: "测试粉丝",
                 douyinID: "real_fan",
                 currentPassword: temporaryPassword,
-                newPassword: "new-password-2026",
-                newPasswordConfirmation: "new-password-2026",
+                newPassword: TestCredentialFixture.replacementValue,
+                newPasswordConfirmation: TestCredentialFixture.replacementValue,
                 acceptedDataUse: false
             )
         )

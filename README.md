@@ -93,6 +93,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.4.md`](Server/releases/v1.3.30-build42.4.md)：移除对 `stat %F` 本地化文字的不稳定文件类型依赖。
 - [`Server/releases/v1.3.30-build42.5.md`](Server/releases/v1.3.30-build42.5.md)：以完整 crontab 字节校验取代过时的 stargate 行假设，兼容腾讯云 systemd TAT agent。
 - [`Server/releases/v1.3.30-build42.6.md`](Server/releases/v1.3.30-build42.6.md)：在生产 `/run` noexec 挂载上通过固定 Bash 解释器执行已校验的预检脚本。
+- [`Server/releases/v1.3.30-build42.7.md`](Server/releases/v1.3.30-build42.7.md)：清除生产 Swift URL 强制解包和测试密码字面量。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

@@ -218,13 +218,15 @@ enum ContentManifestPolicy {
 enum ContentCatalog {
     /// The App consumes this versioned manifest contract rather than any CMS-specific models.
     /// The compatibility endpoint can move to a CDN without changing the client data model.
-    static let publishedManifestURL = URL(string: "https://shuzijun.com.cn/wp-json/shuzijun/v1/app-content")!
+    static let publishedManifestURL = AppURL.make(
+        "https://shuzijun.com.cn/wp-json/shuzijun/v1/app-content"
+    )
     static let heroImages = [
-        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-01-nas-1943-20260829.jpg")!,
-        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-02-nas-1938-20260829.jpg")!,
-        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-03-nas-1940-20260829.jpg")!,
-        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-04-nas-1942-20260829.jpg")!,
-        URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-05-nas-1939-20260829.jpg")!,
+        AppURL.make("https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-01-nas-1943-20260829.jpg"),
+        AppURL.make("https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-02-nas-1938-20260829.jpg"),
+        AppURL.make("https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-03-nas-1940-20260829.jpg"),
+        AppURL.make("https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-04-nas-1942-20260829.jpg"),
+        AppURL.make("https://www.shuzijun.com.cn/wp-content/uploads/2026/08/yishu-magnolia-hero-05-nas-1939-20260829.jpg"),
     ]
     static let aboutPortraitURL: URL? = nil
     private static let launchPosterBaseURL =
@@ -234,7 +236,9 @@ enum ContentCatalog {
         LaunchPosterContent(
             id: "hanfu-lantern-01",
             isEnabled: true,
-            imageURL: URL(string: "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-01-mobile-20260902b.jpg")!,
+            imageURL: AppURL.make(
+                "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-01-mobile-20260902b.jpg"
+            ),
             eyebrow: "东方美学",
             title: "易姝",
             subtitle: "镜头之内，自有叙事。",
@@ -245,7 +249,9 @@ enum ContentCatalog {
         LaunchPosterContent(
             id: "hanfu-lantern-02",
             isEnabled: true,
-            imageURL: URL(string: "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-02-mobile-20260902b.jpg")!,
+            imageURL: AppURL.make(
+                "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-02-mobile-20260902b.jpg"
+            ),
             eyebrow: "东方美学",
             title: "易姝",
             subtitle: "镜头之内，自有叙事。",
@@ -256,7 +262,9 @@ enum ContentCatalog {
         LaunchPosterContent(
             id: "hanfu-lantern-03",
             isEnabled: true,
-            imageURL: URL(string: "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-03-mobile-20260902b.jpg")!,
+            imageURL: AppURL.make(
+                "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-03-mobile-20260902b.jpg"
+            ),
             eyebrow: "东方美学",
             title: "易姝",
             subtitle: "镜头之内，自有叙事。",
@@ -270,52 +278,56 @@ enum ContentCatalog {
         title: "21 秒演员展映",
         summary: "温柔 · 克制 · 东方韵味",
         durationLabel: "00:21",
-        videoURL: URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/showreel/hls-20260826a/master.m3u8")!,
-        posterURL: URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/showreel/yishu-showreel-poster.jpg?v=20260825e")!,
+        videoURL: AppURL.make(
+            "https://www.shuzijun.com.cn/wp-content/uploads/showreel/hls-20260826a/master.m3u8"
+        ),
+        posterURL: AppURL.make(
+            "https://www.shuzijun.com.cn/wp-content/uploads/showreel/yishu-showreel-poster.jpg?v=20260825e"
+        ),
         tags: ["古装", "情绪表达", "镜头表现"]
     )
     static let showreelURL = showreel.videoURL
-    static let websiteURL = URL(string: "https://www.shuzijun.com.cn/")!
-    static let privacyPolicyURL = URL(string: "https://www.shuzijun.com.cn/app-privacy/")!
+    static let websiteURL = AppURL.make("https://www.shuzijun.com.cn/")
+    static let privacyPolicyURL = AppURL.make("https://www.shuzijun.com.cn/app-privacy/")
     static let collaborationEmailAddress = "369476120@qq.com"
-    static let emailURL = URL(string: "mailto:369476120@qq.com")!
-    static let collaborationEmailURL = URL(
-        string: "mailto:369476120@qq.com?subject=%E6%98%93%E5%A7%9D%E5%90%88%E4%BD%9C%E9%82%80%E7%BA%A6&body=%E6%82%A8%E5%A5%BD%EF%BC%8C%E6%88%91%E6%83%B3%E5%92%A8%E8%AF%A2%E6%98%93%E5%A7%9D%E7%9A%84%E6%BC%94%E5%87%BA%E6%88%96%E6%8B%8D%E6%91%84%E5%90%88%E4%BD%9C%E3%80%82"
-    )!
-    static let qqMailWebURL = URL(string: "https://mail.qq.com/")!
-    static let xiaohongshuURL = URL(string: "https://xhslink.com/m/API2hEV4WME")!
-    static let douyinURL = URL(string: "https://v.douyin.com/8T9JGm_WtwQ/")!
-    static let hongguoURL = URL(string: "https://novelquickapp.com/s/wHlfrwqog1g/")!
+    static let emailURL = AppURL.make("mailto:369476120@qq.com")
+    static let collaborationEmailURL = AppURL.make(
+        "mailto:369476120@qq.com?subject=%E6%98%93%E5%A7%9D%E5%90%88%E4%BD%9C%E9%82%80%E7%BA%A6&body=%E6%82%A8%E5%A5%BD%EF%BC%8C%E6%88%91%E6%83%B3%E5%92%A8%E8%AF%A2%E6%98%93%E5%A7%9D%E7%9A%84%E6%BC%94%E5%87%BA%E6%88%96%E6%8B%8D%E6%91%84%E5%90%88%E4%BD%9C%E3%80%82"
+    )
+    static let qqMailWebURL = AppURL.make("https://mail.qq.com/")
+    static let xiaohongshuURL = AppURL.make("https://xhslink.com/m/API2hEV4WME")
+    static let douyinURL = AppURL.make("https://v.douyin.com/8T9JGm_WtwQ/")
+    static let hongguoURL = AppURL.make("https://novelquickapp.com/s/wHlfrwqog1g/")
 
     static let dramas: [DramaWork] = [
         DramaWork(
             id: "jingchunye",
             title: "京春夜",
-            imageURL: URL(string: "https://img.shuzijun.com.cn/images/drama-jingchunye.webp")!,
+            imageURL: AppURL.make("https://img.shuzijun.com.cn/images/drama-jingchunye.webp"),
             destinationURL: hongguoURL
         ),
         DramaWork(
             id: "wangshengjiudian",
             title: "往生酒店",
-            imageURL: URL(string: "https://img.shuzijun.com.cn/images/drama-wangshengjiudian.webp")!,
+            imageURL: AppURL.make("https://img.shuzijun.com.cn/images/drama-wangshengjiudian.webp"),
             destinationURL: hongguoURL
         ),
         DramaWork(
             id: "nianxiadidi",
             title: "年下弟弟俯首称臣",
-            imageURL: URL(string: "https://img.shuzijun.com.cn/images/drama-nianxiadidi.webp")!,
+            imageURL: AppURL.make("https://img.shuzijun.com.cn/images/drama-nianxiadidi.webp"),
             destinationURL: hongguoURL
         ),
         DramaWork(
             id: "xinhunye",
             title: "新婚夜，我和姐姐上错婚车嫁对郎",
-            imageURL: URL(string: "https://img.shuzijun.com.cn/images/drama-xinhunye.webp")!,
+            imageURL: AppURL.make("https://img.shuzijun.com.cn/images/drama-xinhunye.webp"),
             destinationURL: hongguoURL
         ),
         DramaWork(
             id: "ouyangxiu",
             title: "遇见，我的欧阳修大人",
-            imageURL: URL(string: "https://img.shuzijun.com.cn/images/drama-ouyangxiu.webp")!,
+            imageURL: AppURL.make("https://img.shuzijun.com.cn/images/drama-ouyangxiu.webp"),
             destinationURL: hongguoURL
         )
     ]

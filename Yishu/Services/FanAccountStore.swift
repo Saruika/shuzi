@@ -569,7 +569,7 @@ final class FanAccountStore: ObservableObject {
     @Published var errorMessage: String?
     @Published var noticeMessage: String?
 
-    private let apiRoot = URL(string: "https://shuzijun.com.cn/wp-json")!
+    private let apiRoot = AppURL.make("https://shuzijun.com.cn/wp-json")
     private let session: URLSession
     private let installID: UUID
     private var token: String?

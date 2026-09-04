@@ -191,8 +191,8 @@ final class AdminSessionStore: ObservableObject {
     private var expirationTask: Task<Void, Never>?
     private var authenticationGeneration: UInt64 = 0
     private var signInOperationID: UUID?
-    private let apiRoot = URL(string: "https://shuzijun.com.cn/wp-json")!
-    private let mediaUploadRoot = URL(string: "https://www.shuzijun.com.cn/wp-json")!
+    private let apiRoot = AppURL.make("https://shuzijun.com.cn/wp-json")
+    private let mediaUploadRoot = AppURL.make("https://www.shuzijun.com.cn/wp-json")
     private let session: URLSession
 
     var isAuthenticated: Bool {
