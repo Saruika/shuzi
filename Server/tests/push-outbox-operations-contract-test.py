@@ -63,9 +63,9 @@ assert "/usr/bin/lsattr" in worker and "/usr/bin/lsattr" in deployer
 immutable_check = worker[
     worker.index("require_immutable_private_file") : worker.index("[[ $EUID -eq 0")
 ]
-assert "/usr/bin/setpriv" in immutable_check
-assert "--reuid=www-data" in immutable_check
-assert "--no-new-privs" in immutable_check
+assert "/usr/bin/lsattr -d" in immutable_check
+assert "/usr/bin/setpriv" not in immutable_check
+assert "root-managed deployment invariant" in immutable_check
 
 expected_fpm_variables = {
     "YISHU_APNS_KEY_ID",
