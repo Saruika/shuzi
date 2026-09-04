@@ -15,7 +15,7 @@ HEALTH_TIMER = Path("Server/operations/shuzijun-internal-health.timer")
 INTERNAL_HEALTH_TEST = Path("Server/tests/internal-health-contract-test.py")
 PRIVATE_LOG_CONFIG = Path("Server/operations/shuzijun-private-logs.conf")
 SNAPSHOT_CRON = Path("Server/operations/tencent-daily-snapshot.cron")
-RELEASE = Path("Server/releases/v1.3.30-build42.3.md")
+RELEASE = Path("Server/releases/v1.3.30-build42.4.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -807,9 +807,9 @@ def main() -> None:
     assert "SuccessExitStatus=2" in health_service_text
 
     for fixed_value in (
-        "RELEASE_ID=build42.3",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.3",
-        "STAGE=/run/shuzijun-health-build42.3-$NODE",
+        "RELEASE_ID=build42.4",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.4",
+        "STAGE=/run/shuzijun-health-build42.4-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -842,8 +842,8 @@ def main() -> None:
     assert f"NEW_TIMER_SHA={health_timer_sha256}" in lines
     assert f"NEW_PRIVATE_LOG_CONFIG_SHA={private_log_config_sha256}" in lines
     assert f"NEW_SNAPSHOT_CRON_SHA={snapshot_cron_sha256}" in lines
-    assert RELEASE == Path("Server/releases/v1.3.30-build42.3.md")
-    assert "Build 42.3" in release
+    assert RELEASE == Path("Server/releases/v1.3.30-build42.4.md")
+    assert "Build 42.4" in release
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
     assert "build41.12" not in text
@@ -880,7 +880,9 @@ def main() -> None:
     ):
         assert f"require_safe_parent {parent} || return 1" in frozen
     assert "(( (8#$RUN_MODE & 0022) == 0 ))" in text
-    assert "directory:0:0:700" in text
+    assert "stat -c '%F" not in text
+    assert "regular file:0:0" not in text
+    assert "symbolic link:0:0" not in text
     lock_prelude = "\n".join(lines[: line_number(lines, 'flock -n 9') + 1])
     assert 'if [[ -e "$LOCK_FILE" || -L "$LOCK_FILE" ]]' in lock_prelude
     assert lock_prelude.count('[[ ! -L "$LOCK_FILE" && -f "$LOCK_FILE" ]]') == 2
@@ -890,6 +892,13 @@ def main() -> None:
     assert lock_prelude.count("'0:0:600:1'") == 2
     assert "flock -n 9" in text
 
+    snapshot_lock_file = function_body(
+        lines,
+        "require_snapshot_execution_lock_file",
+        "acquire_snapshot_execution_lock",
+    )
+    assert "stat -c '%u:%g:%a:%h'" in snapshot_lock_file
+    assert '[[ "$metadata" == 0:0:*:1 ]]' in snapshot_lock_file
     snapshot_lock_start = line_number(lines, "acquire_snapshot_execution_lock() {")
     snapshot_lock_end = line_number(lines, "# Hold the same lock", snapshot_lock_start)
     snapshot_lock = "\n".join(lines[snapshot_lock_start:snapshot_lock_end])
@@ -932,7 +941,7 @@ def main() -> None:
         lines, "require_timer_disabled_link", "sync_timer_enable_state"
     )
     enable_sync = function_body(lines, "sync_timer_enable_state", "unit_value")
-    assert "symbolic link:0:0:777:1" in enabled_link
+    assert "0:0:777:1" in enabled_link
     assert '[[ "$target" == "$TIMER_TARGET" ]] || return 1' in enabled_link
     assert '[[ "$(realpath -e -- "$WANTS_LINK")" == "$TIMER_TARGET" ]]' in enabled_link
     assert '[[ ! -e "$WANTS_DIR" && ! -L "$WANTS_DIR" ]]' in disabled_link
@@ -1134,7 +1143,7 @@ def main() -> None:
         lines, "snapshot_producer_count", "require_snapshot_producer_count"
     )
     for guard in (
-        "regular file:0:0:600:1",
+        "0:0:600:1",
         "realpath -e",
         "! -L",
     ):

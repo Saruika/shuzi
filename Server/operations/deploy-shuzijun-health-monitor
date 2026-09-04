@@ -41,8 +41,8 @@ OLD_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc
 OLD_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e
 APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9
 APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3
-RELEASE_ID=build42.3
-DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.3
+RELEASE_ID=build42.4
+DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.4
 
 [[ $# -eq 2 ]] || { printf 'usage: %s <primary|backup> <authority|standby>\n' "$DEPLOYER_PATH" >&2; exit 2; }
 NODE=${1:-}
@@ -51,7 +51,7 @@ case "$NODE:$ROLE" in
     primary:authority|backup:standby) ;;
     *) printf 'invalid node/role\n' >&2; exit 2 ;;
 esac
-STAGE=/run/shuzijun-health-build42.3-$NODE
+STAGE=/run/shuzijun-health-build42.4-$NODE
 
 [[ $EUID -eq 0 ]] || { printf 'root required\n' >&2; exit 1; }
 [[ "$0" == "$DEPLOYER_PATH" ]] || { printf 'fixed deployer path required\n' >&2; exit 1; }
@@ -127,9 +127,8 @@ require_snapshot_execution_lock_file() {
         return 1
     }
     [[ "$(realpath -e -- "$SNAPSHOT_EXECUTION_LOCK")" == "$SNAPSHOT_EXECUTION_LOCK" ]] || return 1
-    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$SNAPSHOT_EXECUTION_LOCK") || return 1
-    [[ "${metadata%%:*}" == 'regular file' ]] || return 1
-    [[ "$metadata" == regular\ file:0:0:*:1 ]] || return 1
+    metadata=$(stat -c '%u:%g:%a:%h' -- "$SNAPSHOT_EXECUTION_LOCK") || return 1
+    [[ "$metadata" == 0:0:*:1 ]] || return 1
     mode=${metadata%:*}
     mode=${mode##*:}
     [[ "$mode" == 600 || "$mode" == 644 ]] || {
@@ -172,7 +171,7 @@ acquire_snapshot_execution_lock
 if [[ -e "$LOCK_DIR" ]]; then
     [[ ! -L "$LOCK_DIR" && -d "$LOCK_DIR" ]]
     [[ "$(realpath -e "$LOCK_DIR")" == "$LOCK_DIR" ]]
-    [[ "$(stat -c '%F:%u:%g:%a' "$LOCK_DIR")" == 'directory:0:0:700' ]]
+    [[ "$(stat -c '%u:%g:%a' "$LOCK_DIR")" == '0:0:700' ]]
 else
     install -d -o root -g root -m 700 "$LOCK_DIR"
     sync -f "$LOCK_DIR"
@@ -239,8 +238,8 @@ require_file() {
     local path=$1 mode=$2 expected_sha=$3 metadata
     [[ ! -L "$path" && -f "$path" ]] || { printf 'unsafe file: %s\n' "$path" >&2; return 1; }
     [[ "$(realpath -e -- "$path")" == "$path" ]] || { printf 'non-canonical file: %s\n' "$path" >&2; return 1; }
-    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$path") || return 1
-    [[ "$metadata" == "regular file:0:0:$mode:1" ]] || { printf 'file metadata mismatch: %s %s\n' "$path" "$metadata" >&2; return 1; }
+    metadata=$(stat -c '%u:%g:%a:%h' -- "$path") || return 1
+    [[ "$metadata" == "0:0:$mode:1" ]] || { printf 'file metadata mismatch: %s %s\n' "$path" "$metadata" >&2; return 1; }
     [[ "$(sha "$path")" == "$expected_sha" ]] || { printf 'file hash mismatch: %s\n' "$path" >&2; return 1; }
 }
 
@@ -250,16 +249,16 @@ require_status() {
     require_safe_parent /var/lib || return 1
     local metadata
     [[ ! -L "$STATUS_FILE" && -f "$STATUS_FILE" ]] || { printf 'unsafe status file\n' >&2; return 1; }
-    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$STATUS_FILE") || return 1
-    [[ "$metadata" == 'regular file:0:0:600:1' ]] || { printf 'status metadata mismatch: %s\n' "$metadata" >&2; return 1; }
+    metadata=$(stat -c '%u:%g:%a:%h' -- "$STATUS_FILE") || return 1
+    [[ "$metadata" == '0:0:600:1' ]] || { printf 'status metadata mismatch: %s\n' "$metadata" >&2; return 1; }
 }
 
 require_timer_enabled_link() {
     local metadata target
     require_safe_parent "$WANTS_DIR" || return 1
     [[ -L "$WANTS_LINK" ]] || return 1
-    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$WANTS_LINK") || return 1
-    [[ "$metadata" == 'symbolic link:0:0:777:1' ]] || return 1
+    metadata=$(stat -c '%u:%g:%a:%h' -- "$WANTS_LINK") || return 1
+    [[ "$metadata" == '0:0:777:1' ]] || return 1
     target=$(readlink -- "$WANTS_LINK") || return 1
     [[ "$target" == "$TIMER_TARGET" ]] || return 1
     [[ "$(realpath -e -- "$WANTS_LINK")" == "$TIMER_TARGET" ]] || return 1
@@ -531,7 +530,7 @@ atomic_install() {
     local source=$1 target=$2 mode=$3 expected_sha=$4 parent base tmp
     parent=$(dirname -- "$target") || return 1
     base=$(basename -- "$target") || return 1
-    tmp=$parent/.$base.build42.3.$$
+    tmp=$parent/.$base.build42.4.$$
     [[ ! -e "$tmp" ]] || return 1
     install -o root -g root -m "$mode" -- "$source" "$tmp" || return 1
     require_file "$tmp" "$mode" "$expected_sha" || return 1
@@ -559,8 +558,8 @@ require_private_log_file() {
     local path=$1 metadata
     [[ ! -L "$path" && -f "$path" ]] || { printf 'unsafe private log: %s\n' "$path" >&2; return 1; }
     [[ "$(realpath -e -- "$path")" == "$path" ]] || { printf 'non-canonical private log: %s\n' "$path" >&2; return 1; }
-    metadata=$(stat -c '%F:%u:%g:%a:%h' -- "$path") || return 1
-    [[ "$metadata" == 'regular file:0:0:600:1' ]] || { printf 'private log metadata mismatch: %s %s\n' "$path" "$metadata" >&2; return 1; }
+    metadata=$(stat -c '%u:%g:%a:%h' -- "$path") || return 1
+    [[ "$metadata" == '0:0:600:1' ]] || { printf 'private log metadata mismatch: %s %s\n' "$path" "$metadata" >&2; return 1; }
 }
 
 require_private_logs() {
@@ -602,7 +601,7 @@ record_optional_asset() {
     if [[ -e "$target" || -L "$target" ]]; then
         [[ ! -L "$target" && -f "$target" ]] || return 1
         [[ "$(realpath -e -- "$target")" == "$target" ]] || return 1
-        [[ "$(stat -c '%F:%u:%g:%a:%h' -- "$target")" == 'regular file:0:0:644:1' ]] || return 1
+        [[ "$(stat -c '%u:%g:%a:%h' -- "$target")" == '0:0:644:1' ]] || return 1
         current_sha=$(sha "$target") || return 1
         [[ "$current_sha" =~ ^[0-9a-f]{64}$ ]] || return 1
         backup_one "$target" "$backup_name" "$current_sha" 644 || return 1
@@ -1512,7 +1511,7 @@ else
 fi
 require_dir "$BACKUP_ROOT" 700
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build42.3
+BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build42.4
 [[ ! -e "$BACKUP_DIR" ]]
 install -d -o root -g root -m 700 "$BACKUP_DIR"
 write_marker PREPARED "node=$NODE role=$ROLE release=$RELEASE_ID deployer_sha=$DEPLOYER_SHA timer_enabled=enabled timer_active=active old_script=$OLD_SCRIPT_SHA old_service=$OLD_SERVICE_SHA old_timer=$OLD_TIMER_SHA"
