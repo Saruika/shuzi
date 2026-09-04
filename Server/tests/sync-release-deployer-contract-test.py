@@ -396,6 +396,7 @@ raise SystemExit(9)
             self.bin,
         )
         m.PYTHON = Path(sys.executable)
+        m.BASH = Path("/bin/bash")
         m.SYSTEMCTL = self.systemctl
         m.SYSTEMD_ANALYZE = self.analyze
         m.VISUDO = self.visudo
@@ -560,6 +561,11 @@ def test_static_fail_closed_contract() -> None:
     assert text.index("ensure_release_frozen()", text.index("def deploy(")) < text.index("create_backup(node)", text.index("def deploy("))
     assert 'Path("/run/deploy-shuzijun-sync-release")' in text
     assert 'Path("/run/shuzijun-sync-release")' in text
+    assert 'BASH = Path("/bin/bash")' in text
+    assert text.count(
+        'run_command([str(BASH), str(STAGES[node] / "verify-webroot-security"), str(SITE)])'
+    ) == 2
+    assert 'run_command([str(STAGES[node] / "verify-webroot-security")' not in text
     assert '"backup": "standby", "primary": "authority"' in text
     assert "fcntl.LOCK_EX | fcntl.LOCK_NB" in text
     assert "with HeldLock(STAGE_ROOT)" in text

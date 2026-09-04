@@ -59,6 +59,7 @@ SYSTEMCTL = Path("/usr/bin/systemctl")
 SYSTEMD_ANALYZE = Path("/usr/bin/systemd-analyze")
 VISUDO = Path("/usr/sbin/visudo")
 PYTHON = Path("/usr/bin/python3")
+BASH = Path("/bin/bash")
 SSH = Path("/usr/bin/ssh")
 SSH_KEY = Path("/root/.ssh/shuzijun_sync_ed25519")
 SSH_KEY_PARENT_PATHS = (Path("/root"), Path("/root/.ssh"))
@@ -1228,12 +1229,12 @@ def preflight(node: str) -> None:
         require_unit_inactive(PREFLIGHT_SERVICE)
         require_primary_recovery_clear()
         run_command([str(SYSTEMD_ANALYZE), "verify", str(STAGES[node] / "shuzijun-sync-preflight.service"), str(STAGES[node] / "shuzijun-sync.service")])
-        run_command([str(STAGES[node] / "verify-webroot-security"), str(SITE)])
+        run_command([str(BASH), str(STAGES[node] / "verify-webroot-security"), str(SITE)])
         verify_remote_receiver_live()
     else:
         run_command([str(VISUDO), "-cf", str(STAGES[node] / "shuzijun-sync-transport.sudoers")])
         run_command([str(SYSTEMD_ANALYZE), "verify", str(STAGES[node] / "shuzijun-sync-fpm-guard.service")])
-        run_command([str(STAGES[node] / "verify-webroot-security"), str(SITE)])
+        run_command([str(BASH), str(STAGES[node] / "verify-webroot-security"), str(SITE)])
 
 
 def state_target_paths() -> tuple[Path, ...]:
