@@ -38,6 +38,6 @@ LockPersonality=true
 RestrictRealtime=true
 RestrictNamespaces=true
 CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH
-AmbientCapabilities=
+AmbientCapabilities=CAP_SETUID
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadOnlyPaths=/etc/shuzijun/push /var/www/html/shuzijun.com.cn /var/lib/shuzijun-sync

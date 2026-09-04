@@ -93,7 +93,7 @@ assert "ProtectHome=true" in service
 assert "PrivateDevices=true" in service
 assert "CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_DAC_READ_SEARCH" in service
 assert "RestrictSUIDSGID=" not in service
-assert re.search(r"^AmbientCapabilities=\s*$", service, re.MULTILINE)
+assert re.search(r"^AmbientCapabilities=CAP_SETUID$", service, re.MULTILINE)
 assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in service
 
 # A non-persistent one-minute timer avoids catch-up storms after downtime.

@@ -112,6 +112,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.33-build45.5.md`](Server/releases/v1.3.33-build45.5.md)：移除会阻断 Worker 主动降权的 systemd `RestrictSUIDSGID`，保留其余最小权限边界。
 - [`Server/releases/v1.3.33-build45.6.md`](Server/releases/v1.3.33-build45.6.md)：将 immutable 元数据检查保留在 root 部署边界内，修复真实 systemd 沙箱中 `www-data` 无法执行 `lsattr` 的问题。
 - [`Server/releases/v1.3.33-build45.7.md`](Server/releases/v1.3.33-build45.7.md)：为 root 的 immutable 校验阶段补充最小只读 DAC 能力，并验证降权后的投递进程不保留有效 capability。
+- [`Server/releases/v1.3.33-build45.8.md`](Server/releases/v1.3.33-build45.8.md)：在保留 `PrivateDevices` 的同时恢复一次性 `CAP_SETUID` 启动能力，确保 Worker 可降权后执行空队列 sweep。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
