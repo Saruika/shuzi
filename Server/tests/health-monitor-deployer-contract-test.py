@@ -9,13 +9,14 @@ from pathlib import Path
 
 
 DEPLOYER = Path("Server/operations/deploy-shuzijun-health-monitor")
+DEPLOYER_CONTRACT = Path("Server/tests/health-monitor-deployer-contract-test.py")
 HEALTH_SCRIPT = Path("Server/operations/shuzijun-internal-health")
 HEALTH_SERVICE = Path("Server/operations/shuzijun-internal-health.service")
 HEALTH_TIMER = Path("Server/operations/shuzijun-internal-health.timer")
 INTERNAL_HEALTH_TEST = Path("Server/tests/internal-health-contract-test.py")
 PRIVATE_LOG_CONFIG = Path("Server/operations/shuzijun-private-logs.conf")
 SNAPSHOT_CRON = Path("Server/operations/tencent-daily-snapshot.cron")
-RELEASE = Path("Server/releases/v1.3.30-build42.5.md")
+RELEASE = Path("Server/releases/v1.3.30-build42.10.md")
 
 
 def line_number(lines: list[str], fragment: str, start: int = 0) -> int:
@@ -793,6 +794,11 @@ def main() -> None:
     health_timer_sha256 = hashlib.sha256(HEALTH_TIMER.read_bytes()).hexdigest()
     private_log_config_sha256 = hashlib.sha256(PRIVATE_LOG_CONFIG.read_bytes()).hexdigest()
     snapshot_cron_sha256 = hashlib.sha256(SNAPSHOT_CRON.read_bytes()).hexdigest()
+    deployer_sha256 = hashlib.sha256(deployer_bytes).hexdigest()
+    deployer_contract_sha256 = hashlib.sha256(DEPLOYER_CONTRACT.read_bytes()).hexdigest()
+    internal_health_test_sha256 = hashlib.sha256(
+        INTERNAL_HEALTH_TEST.read_bytes()
+    ).hexdigest()
 
     subprocess.run(["/bin/bash", "-n", str(DEPLOYER)], check=True)
     assert lines[:4] == [
@@ -807,9 +813,9 @@ def main() -> None:
     assert "SuccessExitStatus=2" in health_service_text
 
     for fixed_value in (
-        "RELEASE_ID=build42.5",
-        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.5",
-        "STAGE=/run/shuzijun-health-build42.5-$NODE",
+        "RELEASE_ID=build42.10",
+        "DEPLOYER_PATH=/run/deploy-shuzijun-health-build42.10",
+        "STAGE=/run/shuzijun-health-build42.10-$NODE",
         "SCRIPT_TARGET=/usr/local/sbin/shuzijun-internal-health",
         "SERVICE_TARGET=/etc/systemd/system/shuzijun-internal-health.service",
         "TIMER_TARGET=/etc/systemd/system/shuzijun-internal-health.timer",
@@ -825,16 +831,16 @@ def main() -> None:
         "SNAPSHOT_CRON_TARGET=/etc/cron.d/tencent-daily-snapshot",
         "SNAPSHOT_EXECUTION_LOCK=/run/tencent-snapshot.lock",
         "PRIVATE_LOG_DIR=/var/lib/shuzijun-logs",
-        "NEW_SCRIPT_SHA=34961aa2c05d8c326c5a244a373dd5fadbaf89c4bfffab0898d8f379bd50d0a1",
+        "NEW_SCRIPT_SHA=bd1f78f323346c04ed8b9e7a032baa1b11a6517cccfa4078e6914bd5d4c01cfe",
         "NEW_SERVICE_SHA=ebd20b9de5e145cec7f2a2ef3a036202449187f69686aad2dd5a3ca6202b765b",
         "NEW_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e",
         "NEW_PRIVATE_LOG_CONFIG_SHA=ba11676ee8c5d65faf72ae63bf7d80247860c73f33532e07e11371faff6c6f9f",
         "NEW_SNAPSHOT_CRON_SHA=3b9cd2994249180176c9220f617fc8ccf3f782322fd63943f0a3fddbd290ffe3",
-        "OLD_SCRIPT_SHA=c7630bdc54dc7d869c16cf0ba6856f341668a74689724c532a9058711837e945",
-        "OLD_SERVICE_SHA=0dd8ab87398735292e9edd64a9fc57d8edf5097d499c4ba5680d7a2d4c2c80dc",
+        "OLD_SCRIPT_SHA=34961aa2c05d8c326c5a244a373dd5fadbaf89c4bfffab0898d8f379bd50d0a1",
+        "OLD_SERVICE_SHA=ebd20b9de5e145cec7f2a2ef3a036202449187f69686aad2dd5a3ca6202b765b",
         "OLD_TIMER_SHA=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e",
-        "APP_MANIFEST_SHA=76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9",
-        "APP_PLUGIN_SHA=90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3",
+        "APP_MANIFEST_SHA=b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1",
+        "APP_PLUGIN_SHA=92a9eecc72a4b0b70475d2ea2c6fe27be682965211a14c471cf0cc5f6f75ac8f",
     ):
         assert fixed_value in lines, fixed_value
     assert f"NEW_SCRIPT_SHA={health_script_sha256}" in lines
@@ -842,8 +848,24 @@ def main() -> None:
     assert f"NEW_TIMER_SHA={health_timer_sha256}" in lines
     assert f"NEW_PRIVATE_LOG_CONFIG_SHA={private_log_config_sha256}" in lines
     assert f"NEW_SNAPSHOT_CRON_SHA={snapshot_cron_sha256}" in lines
-    assert RELEASE == Path("Server/releases/v1.3.30-build42.5.md")
-    assert "Build 42.5" in release
+    assert RELEASE == Path("Server/releases/v1.3.30-build42.10.md")
+    assert "Build 42.10" in release
+    for release_value in (
+        f"HEALTH_DEPLOYER_SHA256={deployer_sha256}",
+        f"HEALTH_DEPLOYER_CONTRACT_SHA256={deployer_contract_sha256}",
+        f"HEALTH_RUNTIME_SHA256={health_script_sha256}",
+        f"HEALTH_RUNTIME_CONTRACT_SHA256={internal_health_test_sha256}",
+        f"HEALTH_SERVICE_SHA256={health_service_sha256}",
+        f"HEALTH_TIMER_SHA256={health_timer_sha256}",
+        f"PRIVATE_LOG_CONFIG_SHA256={private_log_config_sha256}",
+        f"SNAPSHOT_CRON_SHA256={snapshot_cron_sha256}",
+        "APP_MANIFEST_SHA256=b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1",
+        "APP_PLUGIN_ENTRY_SHA256=92a9eecc72a4b0b70475d2ea2c6fe27be682965211a14c471cf0cc5f6f75ac8f",
+        "OLD_HEALTH_RUNTIME_SHA256=34961aa2c05d8c326c5a244a373dd5fadbaf89c4bfffab0898d8f379bd50d0a1",
+        "OLD_HEALTH_SERVICE_SHA256=ebd20b9de5e145cec7f2a2ef3a036202449187f69686aad2dd5a3ca6202b765b",
+        "OLD_HEALTH_TIMER_SHA256=c7e1137ffd0df3fb8a37df08bfe4876b33ec4d92078e9ea4b94ec646a4a9ce3e",
+    ):
+        assert release_value in release, release_value
     assert "DOC_COMMIT" not in text
     assert "SHORT_COMMIT" not in text
     assert "build41.12" not in text
@@ -852,6 +874,11 @@ def main() -> None:
     assert "build41.9" not in text
     assert "build41.8" not in text
     assert "build41.7" not in text
+    assert "build42.5" not in text
+    assert "76f1591503d2bb11005d50f0429171b638caac40246be10ab260c500a63cabe9" not in text
+    assert "90d50b197ad39e2efb45d2e394f6926c0c1f01d501ef95e4a21de18bd8581fa3" not in text
+    assert "tmp=$parent/.$base.build42.10.$$" in text
+    assert "BACKUP_DIR=$BACKUP_ROOT/$STAMP-$NODE-build42.10" in lines
     assert "[[ $# -eq 2 ]]" in text
     assert '[[ "$0" == "$DEPLOYER_PATH" ]]' in text
 

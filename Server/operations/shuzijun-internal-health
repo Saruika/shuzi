@@ -26,8 +26,9 @@ ACCEPTED_GENERATION = pathlib.Path(
     "/var/lib/shuzijun-sync/state/highest-accepted-generation"
 )
 COMMITTED_GENERATION = pathlib.Path(
-    "/var/lib/shuzijun-sync/state/fpm-activation-guard.committed"
+    "/var/lib/shuzijun-sync/state/fpm-activation-guard-v4.committed"
 )
+COMMITTED_GENERATION_PATTERN = rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n"
 SYNC_MAX_AGE_HOURS = 26
 SNAPSHOT_MAX_AGE_HOURS = 36
 FAILOVER_MAX_AGE_HOURS = 0.5
@@ -142,6 +143,15 @@ def secure_root_directory(path):
 
 
 def secure_private_log_directory_metadata(metadata):
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == 0
+        and metadata.st_gid == 0
+        and stat.S_IMODE(metadata.st_mode) == 0o700
+    )
+
+
+def secure_private_state_directory_metadata(metadata):
     return (
         stat.S_ISDIR(metadata.st_mode)
         and metadata.st_uid == 0
@@ -451,7 +461,7 @@ def validated_failover_payload(data):
     }
 
 
-def stable_generation_state(path):
+def stable_generation_state(path, committed_marker=False):
     item = pathlib.Path(path)
     result = {
         "present": False,
@@ -474,8 +484,8 @@ def stable_generation_state(path):
         parent_before_fd = os.fstat(directory_fd)
         parent_before_path = os.lstat(item.parent)
         if not (
-            secure_root_directory_metadata(parent_before_fd)
-            and secure_root_directory_metadata(parent_before_path)
+            secure_private_state_directory_metadata(parent_before_fd)
+            and secure_private_state_directory_metadata(parent_before_path)
             and (parent_before_fd.st_dev, parent_before_fd.st_ino)
             == (parent_before_path.st_dev, parent_before_path.st_ino)
         ):
@@ -493,12 +503,14 @@ def stable_generation_state(path):
         before_fd = os.fstat(file_fd)
         if not secure_private_regular_file_metadata(before_fd):
             return result
-        if (before_path.st_dev, before_path.st_ino) != (
-            before_fd.st_dev,
-            before_fd.st_ino,
+        if (
+            before_fd.st_dev != parent_before_fd.st_dev
+            or (before_path.st_dev, before_path.st_ino)
+            != (before_fd.st_dev, before_fd.st_ino)
         ):
             return result
-        if before_fd.st_size > 32:
+        maximum_size = 192 if committed_marker else 32
+        if before_fd.st_size > maximum_size:
             return result
         value = os.pread(file_fd, before_fd.st_size, 0)
         if len(value) != before_fd.st_size:
@@ -547,9 +559,13 @@ def stable_generation_state(path):
             except OSError:
                 pass
     result["trusted"] = True
-    result["valid"] = valid_generation_bytes(value)
+    result["valid"] = (
+        valid_committed_generation_bytes(value)
+        if committed_marker
+        else valid_generation_bytes(value)
+    )
     if result["valid"]:
-        result["value"] = int(value[:-1])
+        result["value"] = int(value.split(b" ", 1)[0].rstrip(b"\n"))
     return result
 
 
@@ -557,10 +573,19 @@ def generation_state(path):
     return stable_generation_state(path)
 
 
+def committed_generation_state(path):
+    return stable_generation_state(path, committed_marker=True)
+
+
 def valid_generation_bytes(value):
     if re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", value) is None:
         return False
     return int(value[:-1]) < 2**63
+
+
+def valid_committed_generation_bytes(value):
+    match = re.fullmatch(COMMITTED_GENERATION_PATTERN, value)
+    return match is not None and int(value.split(b" ", 1)[0]) < 2**63
 
 
 def valid_generation_state(summary):
@@ -774,7 +799,7 @@ def main():
         )
         failover = sanitized_failover()
         accepted_generation = generation_state(ACCEPTED_GENERATION)
-        committed_generation = generation_state(COMMITTED_GENERATION)
+        committed_generation = committed_generation_state(COMMITTED_GENERATION)
         operations.update(
             {
                 "sync_log": sync_log,

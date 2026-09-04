@@ -96,6 +96,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.7.md`](Server/releases/v1.3.30-build42.7.md)：清除生产 Swift URL 强制解包和测试密码字面量。
 - [`Server/releases/v1.5.10-build42.8.md`](Server/releases/v1.5.10-build42.8.md)：将 8,125 行 App Content 插件拆成入口与五个可审查模块，并完整固定发布、回滚和直连拦截信任链。
 - [`Server/releases/v1.3.30-build42.9.md`](Server/releases/v1.3.30-build42.9.md)：引入 SAST/SCA、全量 Python 哈希锁、CycloneDX/SPDX SBOM 与 GitHub runner 来源证明。
+- [`Server/releases/v1.3.30-build42.10.md`](Server/releases/v1.3.30-build42.10.md)：修复健康监控对签名同步 v4 三字段提交收据的兼容与误报。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
@@ -150,6 +151,12 @@ Build 42 在录屏、投屏和切后台的公开保护之外，按产品方明�
 - CI 对生产与质量工具 Python 依赖执行完整传递锁定和逐分发包 SHA-256 校验，并在每次 main push 与 Pull Request 对 Python 和 Composer 完整锁运行 SCA。
 - Bandit 覆盖生产 Python 服务与运维脚本；Xcode compiler analysis 与 warnings-as-errors 继续对 Swift 构建失败关闭。
 - 每次 GitHub 构建都产出 CycloneDX 1.6、SPDX 2.3 与包含 runner/image/toolchain 真实版本及二进制哈希的 provenance 产物。
+
+### Build 42.10 同步健康收据
+
+- 备节点健康监控改为读取签名同步 v4 的权威提交收据，避免同步真实成功后仍误报“提交代数无效”。
+- 三字段收据经格式、权限、所有权与稳定文件快照验证后，对外健康状态只保留整数代数。
+- 部署信任锚前移到已上线的 Build 42.5 健康运行时和 Build 42.8 模块化 App Content；生产必须在整站同步完成后按备节点优先顺序部署。
 
 ## v1.3.29-build41
 

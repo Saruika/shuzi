@@ -10,12 +10,14 @@ from unittest import mock
 SCRIPT = Path("Server/operations/shuzijun-internal-health")
 SERVICE = Path("Server/operations/shuzijun-internal-health.service")
 TIMER = Path("Server/operations/shuzijun-internal-health.timer")
+SYNC_APPLIER = Path("Server/operations/apply-shuzijun-sync")
 
 
 def main() -> None:
     source = SCRIPT.read_text(encoding="utf-8")
     service = SERVICE.read_text(encoding="utf-8")
     timer = TIMER.read_text(encoding="utf-8")
+    sync_applier = SYNC_APPLIER.read_text(encoding="utf-8")
     namespace = runpy.run_path(str(SCRIPT))
 
     assert source.startswith("#!/usr/bin/env python3\n")
@@ -52,7 +54,9 @@ def main() -> None:
     assert "standby_sync_generation_mismatch_applied_log" in source
     assert '"/var/lib/shuzijun-sync/highest-issued-generation"' in source
     assert '"/var/lib/shuzijun-sync/state/highest-accepted-generation"' in source
-    assert '"/var/lib/shuzijun-sync/state/fpm-activation-guard.committed"' in source
+    assert '"/var/lib/shuzijun-sync/state/fpm-activation-guard-v4.committed"' in source
+    assert '"/var/lib/shuzijun-sync/state/fpm-activation-guard.committed"' not in source
+    assert "committed_generation = committed_generation_state(COMMITTED_GENERATION)" in source
     assert 'rb"(?:0|[1-9][0-9]{0,18})\\n"' in source
     assert "int(value[:-1]) < 2**63" in source
     assert "stat.S_IMODE(metadata.st_mode) & 0o022 == 0" in source
@@ -97,6 +101,8 @@ def main() -> None:
         "O_NONBLOCK",
         "os.pread",
         "secure_private_regular_file_metadata",
+        "secure_private_state_directory_metadata",
+        "before_fd.st_dev != parent_before_fd.st_dev",
         "metadata.st_nlink",
         "metadata.st_mtime_ns",
         "metadata.st_ctime_ns",
@@ -134,7 +140,17 @@ def main() -> None:
     secure_private_log_directory_metadata = namespace[
         "secure_private_log_directory_metadata"
     ]
+    secure_private_state_directory_metadata = namespace[
+        "secure_private_state_directory_metadata"
+    ]
+    committed_generation_pattern = namespace["COMMITTED_GENERATION_PATTERN"]
+    assert committed_generation_pattern == (
+        rb"[1-9][0-9]{0,18} [0-9a-f]{64} [0-9a-f]{64}\n"
+    )
+    assert committed_generation_pattern.decode("ascii") in sync_applier
+    assert '"fpm-activation-guard-v4.committed"' in sync_applier
     generation_state = namespace["generation_state"]
+    committed_generation_state = namespace["committed_generation_state"]
     stable_log_tail = namespace["stable_log_tail"]
     log_summary = namespace["log_summary"]
     safe_directory = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
@@ -174,6 +190,16 @@ def main() -> None:
         SimpleNamespace(st_mode=stat.S_IFREG | 0o700, st_uid=0, st_gid=0),
     ):
         assert not secure_private_log_directory_metadata(unsafe_private_directory)
+    assert secure_private_state_directory_metadata(private_directory)
+    for unsafe_private_state_directory in (
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o750, st_uid=0, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=1, st_gid=0),
+        SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=0, st_gid=1),
+        SimpleNamespace(st_mode=stat.S_IFREG | 0o700, st_uid=0, st_gid=0),
+    ):
+        assert not secure_private_state_directory_metadata(
+            unsafe_private_state_directory
+        )
     private_file = SimpleNamespace(
         st_mode=stat.S_IFREG | 0o600, st_uid=0, st_gid=0, st_nlink=1
     )
@@ -337,18 +363,72 @@ def main() -> None:
             generation_globals,
             {
                 "secure_root_directory_chain": lambda _path: True,
-                "secure_root_directory_metadata": lambda _metadata: True,
+                "secure_private_state_directory_metadata": lambda _metadata: True,
                 "secure_private_regular_file_metadata": lambda _metadata: True,
             },
         ):
             state = generation_state(state_path)
         assert state == {"present": True, "trusted": True, "valid": True, "value": 42}
+
+        def metadata_on_other_device(metadata):
+            fields = (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_uid",
+                "st_gid",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+            values = {field: getattr(metadata, field) for field in fields}
+            values["st_dev"] += 1
+            return SimpleNamespace(**values)
+
+        real_fstat = os.fstat
+        real_lstat = os.lstat
+
+        def cross_device_fstat(descriptor):
+            metadata = real_fstat(descriptor)
+            return (
+                metadata_on_other_device(metadata)
+                if stat.S_ISDIR(metadata.st_mode)
+                else metadata
+            )
+
+        def cross_device_lstat(path):
+            metadata = real_lstat(path)
+            return (
+                metadata_on_other_device(metadata)
+                if Path(path) == state_path.parent
+                else metadata
+            )
+
+        with mock.patch.dict(
+            generation_globals,
+            {
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_private_state_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
+            },
+        ), mock.patch.object(os, "fstat", side_effect=cross_device_fstat), mock.patch.object(
+            os, "lstat", side_effect=cross_device_lstat
+        ):
+            cross_device_state = generation_state(state_path)
+        assert cross_device_state == {
+            "present": True,
+            "trusted": False,
+            "valid": False,
+            "value": None,
+        }
+
         state_path.write_bytes(b"01\n")
         with mock.patch.dict(
             generation_globals,
             {
                 "secure_root_directory_chain": lambda _path: True,
-                "secure_root_directory_metadata": lambda _metadata: True,
+                "secure_private_state_directory_metadata": lambda _metadata: True,
                 "secure_private_regular_file_metadata": lambda _metadata: True,
             },
         ):
@@ -356,6 +436,62 @@ def main() -> None:
         assert invalid_state == {
             "present": True,
             "trusted": True,
+            "valid": False,
+            "value": None,
+        }
+        commit_path = Path(temporary) / "fpm-activation-guard-v4.committed"
+        commit_path.write_bytes(b"42 " + b"a" * 64 + b" " + b"b" * 64 + b"\n")
+        with mock.patch.dict(
+            generation_globals,
+            {
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_private_state_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
+            },
+        ):
+            committed_state = committed_generation_state(commit_path)
+        assert committed_state == {
+            "present": True,
+            "trusted": True,
+            "valid": True,
+            "value": 42,
+        }
+        for invalid_commit in (
+            b"42\n",
+            b"0 " + b"a" * 64 + b" " + b"b" * 64 + b"\n",
+            b"9223372036854775808 " + b"a" * 64 + b" " + b"b" * 64 + b"\n",
+            b"42 " + b"A" * 64 + b" " + b"b" * 64 + b"\n",
+            b"42 " + b"a" * 64 + b" " + b"b" * 63 + b"\n",
+        ):
+            commit_path.write_bytes(invalid_commit)
+            with mock.patch.dict(
+                generation_globals,
+                {
+                    "secure_root_directory_chain": lambda _path: True,
+                    "secure_private_state_directory_metadata": lambda _metadata: True,
+                    "secure_private_regular_file_metadata": lambda _metadata: True,
+                },
+            ):
+                invalid_committed_state = committed_generation_state(commit_path)
+            assert invalid_committed_state == {
+                "present": True,
+                "trusted": True,
+                "valid": False,
+                "value": None,
+            }
+        commit_path.write_bytes(b"x" * 193)
+        with mock.patch.dict(
+            generation_globals,
+            {
+                "secure_root_directory_chain": lambda _path: True,
+                "secure_private_state_directory_metadata": lambda _metadata: True,
+                "secure_private_regular_file_metadata": lambda _metadata: True,
+            },
+        ):
+            oversized_committed_state = committed_generation_state(commit_path)
+        assert oversized_committed_state == {
+            "present": True,
+            "trusted": False,
             "valid": False,
             "value": None,
         }
