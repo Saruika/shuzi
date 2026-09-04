@@ -749,6 +749,13 @@ final class YishuUITests: XCTestCase {
 
         openTab("关于", in: app)
         assertExists("about-heading", in: app)
+        // On iPhone the first line of the biography initially sits behind the
+        // custom floating tab bar. iOS 26's audit reports that occlusion as a
+        // contrast failure, even though the rendered text/background contrast
+        // is sufficient. Audit after exposing the same content unobscured.
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            app.swipeUp()
+        }
         try auditPrimaryPageAccessibilityBaseline(pageNamed: "关于", in: app)
     }
 

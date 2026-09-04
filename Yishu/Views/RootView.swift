@@ -35,6 +35,7 @@ struct RootView: View {
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
     @EnvironmentObject private var adminSession: AdminSessionStore
     @EnvironmentObject private var fanAccount: FanAccountStore
+    @EnvironmentObject private var pushNotifications: PushNotificationCoordinator
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedTab: AppTab
@@ -104,12 +105,42 @@ struct RootView: View {
         .task(id: "\(fanAccount.profile?.status ?? "none"):\(fanAccount.profile?.requiresAccountSetup == true)") {
             await monitorApprovedAccess()
         }
+        .task(id: pushSynchronizationTaskID) {
+            await pushNotifications.synchronize(with: fanAccount)
+        }
+        .confirmationDialog(
+            "接收重要通知？",
+            isPresented: Binding(
+                get: { pushNotifications.shouldPresentAuthorizationRationale },
+                set: { presented in
+                    if !presented { pushNotifications.dismissAuthorizationRationale() }
+                }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("开启通知") {
+                Task {
+                    await pushNotifications.requestAuthorizationAfterRationale(for: fanAccount)
+                }
+            }
+            Button("暂不启用", role: .cancel) {
+                Task {
+                    await pushNotifications.setNotificationsEnabled(false, for: fanAccount)
+                }
+            }
+        } message: {
+            Text("用于接收账号审批、合作进度和作品动态。通知是可选功能，不影响浏览；之后可在账号页随时关闭。")
+        }
         .onChange(of: portfolioStore.portfolios) { _, portfolios in
             recentlyViewed.retainAvailablePortfolios(in: portfolios)
         }
         .onChange(of: fanAccount.profile?.userID, initial: true) { oldUserID, userID in
-            if oldUserID != userID {
+            if PushAccountTransitionPolicy.requiresRegistrationReset(
+                previousUserID: oldUserID,
+                currentUserID: userID
+            ) {
                 resetProtectedPresentation()
+                pushNotifications.accountContextDidChange(to: fanAccount.pushEligibleUserID)
             }
             switchLocalLibrary(to: userID)
             if userID != nil, fanAccount.isApproved || shouldBypassAccessGate {
@@ -188,6 +219,7 @@ struct RootView: View {
             }
             Task {
                 await fanAccount.revalidateAppleCredentialIfNeeded(resetRetrySchedule: true)
+                await pushNotifications.synchronize(with: fanAccount)
                 guard fanAccount.isApproved || shouldBypassAccessGate else {
                     resetProtectedPresentation()
                     return
@@ -207,6 +239,16 @@ struct RootView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)) { _ in
             Task { await ArtworkImagePrefetcher.purgeMemory() }
         }
+    }
+
+    private var pushSynchronizationTaskID: PushSynchronizationTaskID {
+        PushSynchronizationTaskID(
+            userID: fanAccount.pushEligibleUserID,
+            fanSessionGeneration: fanAccount.pushSessionGeneration,
+            deviceRegistrationGeneration: pushNotifications.registrationGeneration,
+            canUnbindPushDevice: fanAccount.hasPushUnbindingSession,
+            appleCredentialAccessState: fanAccount.appleCredentialAccessState
+        )
     }
 
     private var authorizedAppContent: some View {

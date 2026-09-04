@@ -175,7 +175,6 @@ struct FanProfile: Codable, Equatable {
     var isApproved: Bool {
         isApproved(at: Date())
     }
-
     func hasPermission(_ permission: FanPermission, at date: Date = Date()) -> Bool {
         isApproved(at: date) && permissions.contains(permission.rawValue)
     }
@@ -595,7 +594,7 @@ enum FanDeletionFailurePolicy {
     }
 }
 
-enum FanAppleCredentialAccessState: Equatable {
+enum FanAppleCredentialAccessState: Equatable, Hashable {
     case notRequired
     case checking
     case verified
@@ -609,6 +608,20 @@ enum FanAppleCredentialAccessPolicy {
     ) -> Bool {
         guard usesAppleSignIn else { return true }
         return state == .verified || state == .retryRequired
+    }
+}
+
+struct FanInstallationState: Codable, Equatable {
+    let installID: UUID
+    let bindingGeneration: UInt64
+}
+
+enum PushBindingGenerationPolicy {
+    static let maximum = UInt64(Int64.max)
+
+    static func next(after current: UInt64) -> UInt64? {
+        guard current < maximum else { return nil }
+        return current + 1
     }
 }
 
@@ -642,12 +655,14 @@ final class FanAccountStore: ObservableObject {
     @Published private(set) var removedAccountUserID: String?
     @Published private(set) var isWorking = false
     @Published private(set) var hasSavedSession = false
+    @Published private(set) var pushSessionGeneration: UInt64 = 0
     @Published var errorMessage: String?
     @Published var noticeMessage: String?
 
     private let apiRoot = AppURL.make("https://shuzijun.com.cn/wp-json")
     private let session: URLSession
     private let installID: UUID
+    private var pushBindingGeneration: UInt64
     private var token: String?
     private var lastSuccessfulRefresh: Date?
     private var sessionExpiryTask: Task<Void, Never>?
@@ -666,10 +681,26 @@ final class FanAccountStore: ObservableObject {
                 state: appleCredentialAccessState
             )
     }
+    var pushEligibleUserID: String? {
+        return PushSessionEligibility.userID(
+            profile: profile,
+            hasSessionToken: token != nil,
+            credentialAccessAllowed: FanAppleCredentialAccessPolicy.canUseValidServerSession(
+                usesAppleSignIn: usesAppleSignIn,
+                state: appleCredentialAccessState
+            )
+        )
+    }
+    var hasPushEligibleSession: Bool { pushEligibleUserID != nil }
+    var hasPushUnbindingSession: Bool {
+        token != nil && profile.map { $0.sessionExpiresAt > Date() } == true
+    }
 
     init() {
         session = SecureURLSessionFactory.make(requestTimeout: 30, resourceTimeout: 45)
-        installID = FanAccountKeychain.loadOrCreateInstallID()
+        let installationState = FanAccountKeychain.loadOrCreateInstallationState()
+        installID = installationState.installID
+        pushBindingGeneration = installationState.bindingGeneration
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-reset-fan-session-for-visual-testing") {
             FanAccountKeychain.deleteToken()
@@ -677,6 +708,7 @@ final class FanAccountStore: ObservableObject {
         }
 #endif
         token = FanAccountKeychain.loadToken()
+        if token != nil { pushSessionGeneration = 1 }
         usesAppleSignIn = FanAccountKeychain.loadAppleUserID() != nil
         appleCredentialAccessState = usesAppleSignIn ? .checking : .notRequired
         hasSavedSession = token != nil
@@ -692,6 +724,61 @@ final class FanAccountStore: ObservableObject {
 
     func hasPermission(_ permission: FanPermission) -> Bool {
         isApproved && profile?.hasPermission(permission, at: Date()) == true
+    }
+
+    func bindPushDevice(deviceToken: String) async throws {
+        guard hasPushEligibleSession,
+              PushDeviceTokenPolicy.isValid(deviceToken) else {
+            throw FanAccountError.invalidResponse
+        }
+        let bindingGeneration = try nextPushBindingGeneration()
+        let body = try JSONEncoder().encode(
+            FanPushDeviceBindingRequest(
+                installID: installID.uuidString.lowercased(),
+                deviceToken: deviceToken,
+                bindingGeneration: bindingGeneration
+            )
+        )
+        let response: FanLogoutResponse = try await perform(
+            path: "shuzijun/v1/fan/push-device",
+            method: "POST",
+            body: body,
+            authorized: true
+        )
+        guard response.ok else { throw FanAccountError.invalidResponse }
+    }
+
+    func unbindPushDevice() async throws {
+        guard hasPushUnbindingSession else { throw FanAccountError.sessionExpired }
+        let bindingGeneration = try nextPushBindingGeneration()
+        let body = try JSONEncoder().encode(
+            FanPushDeviceUnbindingRequest(
+                installID: installID.uuidString.lowercased(),
+                bindingGeneration: bindingGeneration
+            )
+        )
+        let response: FanLogoutResponse = try await perform(
+            path: "shuzijun/v1/fan/push-device",
+            method: "DELETE",
+            body: body,
+            authorized: true
+        )
+        guard response.ok else { throw FanAccountError.invalidResponse }
+    }
+
+    private func nextPushBindingGeneration() throws -> String {
+        guard let next = PushBindingGenerationPolicy.next(after: pushBindingGeneration) else {
+            throw FanAccountError.unavailable
+        }
+        let state = FanInstallationState(
+            installID: installID,
+            bindingGeneration: next
+        )
+        // Persist before starting the request. A terminated or reordered request
+        // can therefore never reuse an older operation number for this install.
+        try FanAccountKeychain.saveInstallationState(state)
+        pushBindingGeneration = next
+        return String(next)
     }
 
     /// Clears an expired session without waiting for a network round trip. This
@@ -1149,6 +1236,7 @@ final class FanAccountStore: ObservableObject {
 
     func handleAppleCredentialRevoked() {
         guard usesAppleSignIn else { return }
+        scheduleBestEffortPushUnbindBeforeClearingSession()
         clearLocalSession()
         errorMessage = FanAccountError.appleCredentialRevoked.errorDescription
         noticeMessage = nil
@@ -1161,6 +1249,7 @@ final class FanAccountStore: ObservableObject {
             return
         }
         guard let localUserID = FanAccountKeychain.loadAppleUserID() else {
+            scheduleBestEffortPushUnbindBeforeClearingSession()
             clearLocalSession()
             errorMessage = FanAccountError.appleCredentialUnavailable.errorDescription
             noticeMessage = nil
@@ -1209,10 +1298,12 @@ final class FanAccountStore: ObservableObject {
         case .revoke:
             handleAppleCredentialRevoked()
         case .transfer:
+            scheduleBestEffortPushUnbindBeforeClearingSession()
             clearLocalSession()
             errorMessage = FanAccountError.appleCredentialTransferred.errorDescription
             noticeMessage = nil
         case .unknown:
+            scheduleBestEffortPushUnbindBeforeClearingSession()
             clearLocalSession()
             errorMessage = FanAccountError.appleCredentialUnavailable.errorDescription
             noticeMessage = nil
@@ -1553,6 +1644,7 @@ final class FanAccountStore: ObservableObject {
         let operationGeneration = refreshGeneration
         let expectedToken = token
         if expectedToken != nil {
+            try? await unbindPushDevice()
             let _: FanLogoutResponse? = try? await perform(
                 path: "shuzijun/v1/fan/logout",
                 method: "POST",
@@ -1585,6 +1677,7 @@ final class FanAccountStore: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         do {
+            try? await unbindPushDevice()
             let body = try JSONEncoder().encode(
                 FanDeletionRequest(
                     confirmation: "DELETE_ACCOUNT",
@@ -1648,6 +1741,7 @@ final class FanAccountStore: ObservableObject {
         isWorking = true
         defer { isWorking = false }
         do {
+            try? await unbindPushDevice()
             let body = try JSONEncoder().encode(FanAppleDeletionRequest(
                 identityToken: submission.identityToken,
                 authorizationCode: submission.authorizationCode,
@@ -1751,6 +1845,7 @@ final class FanAccountStore: ObservableObject {
         let previousUserID = profile?.userID
         try FanAccountKeychain.saveToken(response.token)
         refreshGeneration &+= 1
+        pushSessionGeneration &+= 1
         token = response.token
         hasSavedSession = true
         profile = response.profile
@@ -1794,6 +1889,7 @@ final class FanAccountStore: ObservableObject {
             throw error
         }
         refreshGeneration &+= 1
+        pushSessionGeneration &+= 1
         token = response.token
         hasSavedSession = true
         usesAppleSignIn = true
@@ -1816,8 +1912,32 @@ final class FanAccountStore: ObservableObject {
         appleCredentialAccessState = .notRequired
     }
 
+    private func scheduleBestEffortPushUnbindBeforeClearingSession() {
+        guard let authorizationToken = token,
+              hasPushUnbindingSession,
+              let bindingGeneration = try? nextPushBindingGeneration(),
+              let body = try? JSONEncoder().encode(
+                FanPushDeviceUnbindingRequest(
+                    installID: installID.uuidString.lowercased(),
+                    bindingGeneration: bindingGeneration
+                )
+              ) else { return }
+
+        Task { [weak self] in
+            guard let self else { return }
+            let _: FanLogoutResponse? = try? await self.perform(
+                path: "shuzijun/v1/fan/push-device",
+                method: "DELETE",
+                body: body,
+                authorized: true,
+                authorizationToken: authorizationToken
+            )
+        }
+    }
+
     private func clearLocalSession() {
         refreshGeneration &+= 1
+        pushSessionGeneration &+= 1
         sessionExpiryTask?.cancel()
         sessionExpiryTask = nil
         FanAccountKeychain.deleteToken()
@@ -1876,11 +1996,14 @@ final class FanAccountStore: ObservableObject {
         path: String,
         method: String,
         body: Data? = nil,
-        authorized: Bool
+        authorized: Bool,
+        authorizationToken: String? = nil
     ) async throws -> T {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains(".."),
               !path.contains("?"), !path.contains("#"),
-              ["GET", "POST"].contains(method) else { throw FanAccountError.invalidResponse }
+              ["DELETE", "GET", "POST"].contains(method) else {
+            throw FanAccountError.invalidResponse
+        }
         let endpoint = apiRoot.appending(path: path)
         guard AppNetworkSecurityPolicy.isTrustedAdminAPIURL(endpoint) else {
             throw FanAccountError.invalidResponse
@@ -1899,8 +2022,13 @@ final class FanAccountStore: ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         if authorized {
-            guard let token else { throw FanAccountError.sessionExpired }
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            guard let authorizationToken = authorizationToken ?? token else {
+                throw FanAccountError.sessionExpired
+            }
+            request.setValue(
+                "Bearer \(authorizationToken)",
+                forHTTPHeaderField: "Authorization"
+            )
         }
 
         let data: Data
@@ -2108,9 +2236,91 @@ struct AdminFanPermissionDefinition: Codable, Identifiable, Equatable {
     var id: String { code }
 }
 
-struct AdminFanDirectory: Codable {
+struct AdminFanDirectory: Codable, Equatable {
     let users: [AdminFanUser]
     let permissionCatalog: [AdminFanPermissionDefinition]
+    let page: Int
+    let perPage: Int
+    let hasMore: Bool
+
+    init(
+        users: [AdminFanUser],
+        permissionCatalog: [AdminFanPermissionDefinition],
+        page: Int = 1,
+        perPage: Int = 100,
+        hasMore: Bool = false
+    ) {
+        self.users = users
+        self.permissionCatalog = permissionCatalog
+        self.page = page
+        self.perPage = perPage
+        self.hasMore = hasMore
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case users
+        case permissionCatalog
+        case page
+        case perPage
+        case hasMore
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        users = try container.decode([AdminFanUser].self, forKey: .users)
+        permissionCatalog = try container.decode(
+            [AdminFanPermissionDefinition].self,
+            forKey: .permissionCatalog
+        )
+        page = try container.decodeIfPresent(Int.self, forKey: .page) ?? 1
+        perPage = try container.decodeIfPresent(Int.self, forKey: .perPage) ?? 100
+        hasMore = try container.decodeIfPresent(Bool.self, forKey: .hasMore) ?? false
+    }
+}
+
+enum AdminFanDirectoryValidation {
+    static func isValid(
+        _ directory: AdminFanDirectory,
+        requestedPage: Int,
+        requestedPerPage: Int
+    ) -> Bool {
+        directory.page == requestedPage
+            && directory.perPage == requestedPerPage
+            && directory.users.count <= requestedPerPage
+            && directory.permissionCatalog.count <= 20
+            && Set(directory.users.map(\.userID)).count == directory.users.count
+            && Set(directory.permissionCatalog.map(\.code)).count
+                == directory.permissionCatalog.count
+            && directory.users.allSatisfy(FanAccountValidation.isValidAdminFanUser)
+            && (!directory.hasMore
+                || (!directory.users.isEmpty
+                    && directory.page < AdminFanDirectoryQuery.maximumPage))
+    }
+
+    static func appending(
+        _ nextPage: AdminFanDirectory,
+        to current: AdminFanDirectory
+    ) -> AdminFanDirectory? {
+        guard current.page >= 1,
+              current.page < AdminFanDirectoryQuery.maximumPage,
+              nextPage.page == current.page + 1,
+              nextPage.perPage == current.perPage,
+              nextPage.permissionCatalog == current.permissionCatalog,
+              Set(current.users.map(\.userID)).count == current.users.count else {
+            return nil
+        }
+        var userIDs = Set(current.users.map(\.userID))
+        let uniqueAdditionalUsers = nextPage.users.filter {
+            userIDs.insert($0.userID).inserted
+        }
+        return AdminFanDirectory(
+            users: current.users + uniqueAdditionalUsers,
+            permissionCatalog: current.permissionCatalog,
+            page: nextPage.page,
+            perPage: nextPage.perPage,
+            hasMore: nextPage.hasMore
+        )
+    }
 }
 
 private struct FanRegistrationRequest: Encodable {
@@ -2183,6 +2393,17 @@ private struct FanSessionRevokeRequest: Encodable {
     let sessionID: String
 }
 
+private struct FanPushDeviceBindingRequest: Encodable {
+    let installID: String
+    let deviceToken: String
+    let bindingGeneration: String
+}
+
+private struct FanPushDeviceUnbindingRequest: Encodable {
+    let installID: String
+    let bindingGeneration: String
+}
+
 private struct FanDeletionRequest: Encodable {
     let confirmation: String
     let currentPassword: String
@@ -2226,18 +2447,44 @@ private struct FanServerError: Decodable {
 private enum FanAccountKeychain {
     private static let service = "cn.com.shuzijun.yishu.fan-account"
     private static let installAccount = "installation-id"
+    private static let installationStateAccount = "installation-state-v2"
     private static let tokenAccount = "session-token"
     private static let appleUserAccount = "apple-user-id"
 
-    static func loadOrCreateInstallID() -> UUID {
+    static func loadOrCreateInstallationState() -> FanInstallationState {
+        if let data = load(account: installationStateAccount) {
+            if let state = try? JSONDecoder().decode(FanInstallationState.self, from: data),
+               state.bindingGeneration <= PushBindingGenerationPolicy.maximum {
+                return state
+            }
+            let replacement = FanInstallationState(
+                installID: UUID(),
+                bindingGeneration: 0
+            )
+            try? saveInstallationState(replacement)
+            return replacement
+        }
+
+        // Preserve existing installs while migrating from the former UUID-only
+        // record. A corrupt combined record starts a new install lifetime rather
+        // than ever resetting the operation counter on the old UUID.
+        let installID: UUID
         if let data = load(account: installAccount),
            let raw = String(data: data, encoding: .utf8),
            let value = UUID(uuidString: raw) {
-            return value
+            installID = value
+        } else {
+            installID = UUID()
         }
-        let value = UUID()
-        try? save(Data(value.uuidString.lowercased().utf8), account: installAccount)
-        return value
+        let state = FanInstallationState(installID: installID, bindingGeneration: 0)
+        try? saveInstallationState(state)
+        return state
+    }
+
+    static func saveInstallationState(_ state: FanInstallationState) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        try save(try encoder.encode(state), account: installationStateAccount)
     }
 
     static func loadToken() -> String? {

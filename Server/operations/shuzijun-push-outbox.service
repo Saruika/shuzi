@@ -1,0 +1,44 @@
+[Unit]
+Description=Shuzijun authority-only APNs outbox sweep
+Documentation=https://developer.apple.com/documentation/usernotifications/setting-up-a-remote-notification-server
+Wants=network-online.target
+After=network-online.target mysql.service php8.3-fpm.service
+ConditionPathIsDirectory=/var/www/html/shuzijun.com.cn
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/shuzijun/push/apns.env
+Environment=HOME=/tmp
+ExecCondition=/usr/local/sbin/verify-shuzijun-account-authority-role authority
+ExecStart=/usr/local/sbin/shuzijun-push-outbox-worker
+TimeoutStartSec=45s
+KillMode=mixed
+RuntimeDirectory=shuzijun-push-outbox
+RuntimeDirectoryMode=0700
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=shuzijun-push-outbox
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictNamespaces=true
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/etc/shuzijun/push /var/www/html/shuzijun.com.cn /var/lib/shuzijun-sync

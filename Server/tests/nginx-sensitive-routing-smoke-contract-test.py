@@ -101,6 +101,7 @@ def main() -> None:
         "class-shuzijun-app-content-api.php",
         "trait-shuzijun-app-collaboration.php",
         "trait-shuzijun-app-fan-endpoints.php",
+        "trait-shuzijun-app-push-notifications.php",
         "trait-shuzijun-app-fan-identity.php",
         "trait-shuzijun-app-content-delivery.php",
     ):

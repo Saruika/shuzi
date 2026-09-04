@@ -57,6 +57,7 @@ struct FanAccountView: View {
     @EnvironmentObject private var account: FanAccountStore
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var store: PortfolioStore
+    @EnvironmentObject private var pushNotifications: PushNotificationCoordinator
     @Environment(\.scenePhase) private var scenePhase
     let isAccessGate: Bool
     let externalAdminAccessPresented: Bool
@@ -179,7 +180,13 @@ struct FanAccountView: View {
             Button("删除账号与全部个人资料", role: .destructive) {
                 let password = deleteCurrentPassword
                 deleteCurrentPassword = ""
-                Task { await account.deleteAccount(currentPassword: password) }
+                pushNotifications.accountContextDidChange(to: nil)
+                Task {
+                    await account.deleteAccount(currentPassword: password)
+                    if account.isAuthenticated {
+                        await pushNotifications.synchronize(with: account)
+                    }
+                }
             }
             .disabled(deleteCurrentPassword.isEmpty)
             Button("取消", role: .cancel) { deleteCurrentPassword = "" }
@@ -414,6 +421,7 @@ struct FanAccountView: View {
 
             Button {
                 clearAppleRegistrationFields()
+                pushNotifications.accountContextDidChange(to: nil)
                 Task { await account.signOut() }
             } label: {
                 Text("退出登录")
@@ -657,6 +665,55 @@ struct FanAccountView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("fan-account-security")
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle(
+                            isOn: Binding(
+                                get: { pushNotifications.notificationsEnabled },
+                                set: { enabled in
+                                    Task {
+                                        await pushNotifications.setNotificationsEnabled(
+                                            enabled,
+                                            for: account
+                                        )
+                                    }
+                                }
+                            )
+                        ) {
+                            Label("消息通知", systemImage: "bell.badge")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        .tint(AppTheme.gold)
+                        .disabled(pushNotifications.isUpdatingPreference)
+                        .accessibilityIdentifier("fan-push-notification-toggle")
+
+                        Text(
+                            pushNotifications.notificationsEnabled
+                                ? "用于接收账号审批、合作进度和作品动态。可随时关闭；关闭后会从账号解绑此设备。"
+                                : "已关闭，此设备不再接收账号推送。"
+                        )
+                        .font(.caption)
+                        .lineSpacing(4)
+                        .foregroundStyle(AppTheme.muted)
+
+                        if pushNotifications.notificationsEnabled,
+                           pushNotifications.authorizationStatus == .denied {
+                            Button {
+                                guard let settingsURL = URL(
+                                    string: UIApplication.openSettingsURLString
+                                ) else { return }
+                                UIApplication.shared.open(settingsURL)
+                            } label: {
+                                Label("到系统设置开启通知", systemImage: "gearshape")
+                                    .font(.caption.weight(.semibold))
+                                    .frame(minHeight: 44)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(AppTheme.gold)
+                        }
+                    }
+                    .padding(14)
+                    .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
                 }
             }
 
@@ -1089,6 +1146,7 @@ struct FanAccountView: View {
     private var profileSignOutButton: some View {
         Button {
             clearAllPasswords()
+            pushNotifications.accountContextDidChange(to: nil)
             Task { await account.signOut() }
         } label: {
             Text("退出登录")
@@ -1147,7 +1205,11 @@ struct FanAccountView: View {
                 case .success(let submission):
                     Task {
                         if purpose == .deleteAccount {
+                            pushNotifications.accountContextDidChange(to: nil)
                             await account.deleteAppleAccount(submission)
+                            if account.isAuthenticated {
+                                await pushNotifications.synchronize(with: account)
+                            }
                             if account.appleRegistration == nil {
                                 clearAppleRegistrationFields()
                             }
@@ -1378,12 +1440,19 @@ private struct FanAccountSecurityView: View {
     }
 }
 
+private struct FanDirectorySearchTaskID: Hashable {
+    let searchText: String
+    let isAuthenticated: Bool
+}
+
 struct FanAccessAdminView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var directory: AdminFanDirectory?
     @State private var searchText = ""
+    @State private var appliedSearch = ""
     @State private var isLoading = false
+    @State private var isLoadingMore = false
     @State private var isCreatingInvitations = false
     @State private var invitationCount = 3
     @State private var invitations: [AdminFanInvitation] = []
@@ -1391,25 +1460,24 @@ struct FanAccessAdminView: View {
     @State private var temporaryPasteboardValue: String?
     @State private var pasteboardClearTask: Task<Void, Never>?
     @State private var directoryLoadGeneration: UInt64 = 0
+    @State private var canSendPushNotifications = false
+    @State private var hasResolvedPushCapability = false
     @State private var errorMessage: String?
 
-    private var filteredUsers: [AdminFanUser] {
-        guard let users = directory?.users else { return [] }
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return users }
-        return users.filter {
-            $0.displayName.localizedCaseInsensitiveContains(query)
-                || $0.identityCode.localizedCaseInsensitiveContains(query)
-                || $0.douyinID.localizedCaseInsensitiveContains(query)
-        }
+    private var visibleUsers: [AdminFanUser] {
+        directory?.users ?? []
+    }
+
+    private var hasSearchQuery: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var pendingUsers: [AdminFanUser] {
-        filteredUsers.filter { $0.status == FanAccountStatus.pending.rawValue }
+        visibleUsers.filter { $0.status == FanAccountStatus.pending.rawValue }
     }
 
     private var reviewedUsers: [AdminFanUser] {
-        filteredUsers.filter { $0.status != FanAccountStatus.pending.rawValue }
+        visibleUsers.filter { $0.status != FanAccountStatus.pending.rawValue }
     }
 
     var body: some View {
@@ -1430,10 +1498,14 @@ struct FanAccessAdminView: View {
                             .tint(AppTheme.gold)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 50)
-                    } else if filteredUsers.isEmpty {
+                    } else if visibleUsers.isEmpty {
                         ContentUnavailableView(
-                            searchText.isEmpty ? "还没有注册用户" : "没有匹配的用户",
-                            systemImage: "person.2.slash"
+                            errorMessage == nil
+                                ? (hasSearchQuery ? "没有匹配的用户" : "还没有注册用户")
+                                : "暂时无法读取用户",
+                            systemImage: errorMessage == nil
+                                ? "person.2.slash"
+                                : "wifi.exclamationmark"
                         )
                         .foregroundStyle(AppTheme.warmWhite)
                         .frame(maxWidth: .infinity)
@@ -1469,6 +1541,27 @@ struct FanAccessAdminView: View {
                                 userLink(user)
                             }
                         }
+
+                        if directory?.hasMore == true {
+                            Button {
+                                Task { await loadMore() }
+                            } label: {
+                                HStack(spacing: 9) {
+                                    if isLoadingMore {
+                                        ProgressView()
+                                            .tint(AppTheme.ink)
+                                    }
+                                    Text(isLoadingMore ? "正在加载更多用户" : "加载更多用户")
+                                }
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 46)
+                                .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
+                                .foregroundStyle(AppTheme.ink)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isLoading || isLoadingMore)
+                            .accessibilityIdentifier("admin-fan-load-more")
+                        }
                     }
 
                     if let errorMessage {
@@ -1483,7 +1576,12 @@ struct FanAccessAdminView: View {
                 .frame(maxWidth: 760, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
-            .refreshable { await load() }
+            .refreshable {
+                await loadFirstPage(
+                    search: searchText,
+                    debounce: false
+                )
+            }
 
             if !admin.isAuthenticated {
                 AdministratorLockedView()
@@ -1493,7 +1591,19 @@ struct FanAccessAdminView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .searchable(text: $searchText, prompt: "昵称、抖音 ID 或身份码")
-        .task { await monitorApplications() }
+        .task(
+            id: FanDirectorySearchTaskID(
+                searchText: searchText,
+                isAuthenticated: admin.isAuthenticated
+            )
+        ) {
+            await loadFirstPage(search: searchText, debounce: true)
+        }
+        .task(id: admin.isAuthenticated) { await monitorApplications() }
+        .onChange(of: searchText) { _, value in
+            let capped = String(value.prefix(AdminFanDirectoryQuery.maximumSearchLength))
+            if capped != value { searchText = capped }
+        }
         .onChange(of: admin.isAuthenticated) { _, authenticated in
             if !authenticated {
                 invalidateDirectoryLoad()
@@ -1603,7 +1713,8 @@ struct FanAccessAdminView: View {
         NavigationLink {
             FanAccessDetailView(
                 user: user,
-                catalog: directory?.permissionCatalog ?? []
+                catalog: directory?.permissionCatalog ?? [],
+                canSendPushNotifications: canSendPushNotifications
             ) { updated in
                 replace(updated)
             }
@@ -1613,34 +1724,134 @@ struct FanAccessAdminView: View {
         .buttonStyle(.plain)
     }
 
-    private func load() async {
+    private func loadFirstPage(search: String, debounce: Bool) async {
         guard admin.isAuthenticated else {
             invalidateDirectoryLoad()
             return
         }
+        let query: AdminFanDirectoryQuery
+        do {
+            query = try AdminFanDirectoryQuery(search: search)
+        } catch {
+            directoryLoadGeneration &+= 1
+            directory = nil
+            isLoading = false
+            isLoadingMore = false
+            errorMessage = "搜索内容不能超过 80 个字符。"
+            return
+        }
         directoryLoadGeneration &+= 1
         let generation = directoryLoadGeneration
+        if (query.search ?? "") != appliedSearch {
+            directory = nil
+        }
         isLoading = true
+        isLoadingMore = false
+        errorMessage = nil
         defer {
             if generation == directoryLoadGeneration { isLoading = false }
         }
         do {
-            let response = try await admin.fetchFanDirectory()
-            guard generation == directoryLoadGeneration,
-                  admin.isAuthenticated else { return }
+            if debounce {
+                try await Task.sleep(for: .milliseconds(300))
+            }
+            guard !Task.isCancelled else { return }
+            let response = try await admin.fetchFanDirectory(
+                search: query.search ?? "",
+                page: query.page,
+                perPage: query.perPage
+            )
+            let capabilities = hasResolvedPushCapability
+                ? nil
+                : try? await admin.fetchFeatureCapabilities()
+            guard isCurrentDirectoryRequest(query, generation: generation) else { return }
             directory = response
+            appliedSearch = query.search ?? ""
+            if let capabilities {
+                hasResolvedPushCapability = true
+                canSendPushNotifications = capabilities.canSendPushNotifications
+            }
             errorMessage = nil
+        } catch is CancellationError {
+            return
         } catch {
-            guard generation == directoryLoadGeneration,
-                  admin.isAuthenticated else { return }
+            guard isCurrentDirectoryRequest(query, generation: generation) else { return }
             errorMessage = (error as? AdminAPIError)?.errorDescription
                 ?? "暂时无法读取用户。"
+        }
+    }
+
+    private func loadMore() async {
+        guard admin.isAuthenticated,
+              !isLoading,
+              !isLoadingMore,
+              let current = directory,
+              current.hasMore,
+              current.page < AdminFanDirectoryQuery.maximumPage else { return }
+        let query: AdminFanDirectoryQuery
+        do {
+            query = try AdminFanDirectoryQuery(
+                search: appliedSearch,
+                page: current.page + 1,
+                perPage: current.perPage
+            )
+        } catch {
+            errorMessage = "无法继续读取下一页用户。"
+            return
+        }
+        directoryLoadGeneration &+= 1
+        let generation = directoryLoadGeneration
+        isLoadingMore = true
+        errorMessage = nil
+        defer {
+            if generation == directoryLoadGeneration { isLoadingMore = false }
+        }
+        do {
+            let response = try await admin.fetchFanDirectory(
+                search: query.search ?? "",
+                page: query.page,
+                perPage: query.perPage
+            )
+            guard isCurrentDirectoryRequest(query, generation: generation),
+                  appliedSearch == (query.search ?? ""),
+                  let latest = directory else { return }
+            guard let merged = AdminFanDirectoryValidation.appending(
+                response,
+                to: latest
+            ) else {
+                errorMessage = "用户列表已更新，请下拉刷新后重试。"
+                return
+            }
+            directory = merged
+            errorMessage = nil
+        } catch {
+            guard isCurrentDirectoryRequest(query, generation: generation) else { return }
+            errorMessage = (error as? AdminAPIError)?.errorDescription
+                ?? "暂时无法加载更多用户。"
         }
     }
 
     private func invalidateDirectoryLoad() {
         directoryLoadGeneration &+= 1
         isLoading = false
+        isLoadingMore = false
+        directory = nil
+        appliedSearch = ""
+        canSendPushNotifications = false
+        hasResolvedPushCapability = false
+    }
+
+    private func isCurrentDirectoryRequest(
+        _ query: AdminFanDirectoryQuery,
+        generation: UInt64
+    ) -> Bool {
+        guard generation == directoryLoadGeneration,
+              !Task.isCancelled,
+              admin.isAuthenticated,
+              let currentQuery = try? AdminFanDirectoryQuery(search: searchText) else {
+            return false
+        }
+        return currentQuery.search == query.search
     }
 
     private func createInvitations() async {
@@ -1656,7 +1867,7 @@ struct FanAccessAdminView: View {
             clearTemporaryPasteboardIfOwned()
             invitations = created
             errorMessage = nil
-            await load()
+            await loadFirstPage(search: searchText, debounce: false)
         } catch {
             clearTemporaryPasteboardIfOwned()
             invitations.removeAll()
@@ -1714,15 +1925,19 @@ struct FanAccessAdminView: View {
     }
 
     private func monitorApplications() async {
-        await load()
         while !Task.isCancelled, admin.isAuthenticated {
             do {
                 try await Task.sleep(for: .seconds(20))
             } catch {
                 return
             }
-            guard !Task.isCancelled else { return }
-            await load()
+            guard !Task.isCancelled,
+                  !isLoading,
+                  !isLoadingMore,
+                  directory?.page == 1,
+                  let query = try? AdminFanDirectoryQuery(search: searchText),
+                  (query.search ?? "") == appliedSearch else { continue }
+            await loadFirstPage(search: searchText, debounce: false)
         }
     }
 
@@ -1731,7 +1946,13 @@ struct FanAccessAdminView: View {
               let index = current.users.firstIndex(where: { $0.id == updated.id }) else { return }
         var users = current.users
         users[index] = updated
-        directory = AdminFanDirectory(users: users, permissionCatalog: current.permissionCatalog)
+        directory = AdminFanDirectory(
+            users: users,
+            permissionCatalog: current.permissionCatalog,
+            page: current.page,
+            perPage: current.perPage,
+            hasMore: current.hasMore
+        )
     }
 }
 
@@ -1742,19 +1963,23 @@ private struct FanAccessDetailView: View {
     @State private var isSaving = false
     @State private var isGeneratingRecovery = false
     @State private var showRecoveryConfirmation = false
+    @State private var showPushComposer = false
     @State private var passwordRecovery: AdminFanPasswordRecovery?
     @State private var recoveryPasteboardValue: String?
     @State private var errorMessage: String?
     let catalog: [AdminFanPermissionDefinition]
+    let canSendPushNotifications: Bool
     let onUpdate: (AdminFanUser) -> Void
 
     init(
         user: AdminFanUser,
         catalog: [AdminFanPermissionDefinition],
+        canSendPushNotifications: Bool,
         onUpdate: @escaping (AdminFanUser) -> Void
     ) {
         _user = State(initialValue: user)
         self.catalog = catalog
+        self.canSendPushNotifications = canSendPushNotifications
         self.onUpdate = onUpdate
     }
 
@@ -1922,6 +2147,39 @@ private struct FanAccessDetailView: View {
                         }
                     }
 
+                    if AdminTargetedPushRecipientPolicy.isEligible(user) {
+                        VStack(alignment: .leading, spacing: 13) {
+                            Text("定向通知")
+                                .font(.system(.title2, design: .serif))
+                                .accessibilityAddTraits(.isHeader)
+                            Text(
+                                canSendPushNotifications
+                                    ? "只向这个账号已绑定的设备发送通知；默认使用隐私模式，不在锁屏显示具体内容。"
+                                    : "推送服务尚未就绪，或当前管理员没有定向推送权限。"
+                            )
+                                .font(.caption)
+                                .lineSpacing(4)
+                                .foregroundStyle(AppTheme.muted)
+                            if canSendPushNotifications {
+                                Button {
+                                    showPushComposer = true
+                                } label: {
+                                    Label("向该用户发送通知", systemImage: "paperplane.fill")
+                                        .frame(maxWidth: .infinity, minHeight: 44)
+                                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!admin.isAuthenticated)
+                                .accessibilityIdentifier("admin-send-user-push")
+                            } else {
+                                Label("定向通知不可用", systemImage: "bell.slash")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(AppTheme.muted)
+                                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            }
+                        }
+                    }
+
                     if isSaving {
                         Label("正在远程更新", systemImage: "arrow.triangle.2.circlepath")
                             .font(.caption)
@@ -1973,6 +2231,10 @@ private struct FanAccessDetailView: View {
             Button("取消", role: .cancel) { }
         } message: {
             Text("生成后不能查看原密码，已登录设备会立即失效。")
+        }
+        .sheet(isPresented: $showPushComposer) {
+            FanPushComposerView(user: user)
+                .environmentObject(admin)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { clearPasswordRecoverySecret() }
@@ -2076,6 +2338,207 @@ private struct FanAccessDetailView: View {
             UIPasteboard.general.items = []
         }
         recoveryPasteboardValue = nil
+    }
+}
+
+private struct FanPushComposerView: View {
+    @EnvironmentObject private var admin: AdminSessionStore
+    @Environment(\.dismiss) private var dismiss
+    let user: AdminFanUser
+
+    @State private var title = "Hi，梳子"
+    @State private var message = "你有一条新消息，请打开 App 查看。"
+    @State private var privacyMode = true
+    @State private var idempotencyKey = UUID()
+    @State private var isSending = false
+    @State private var customConfirmationContent: AdminPushNotificationContent?
+    @State private var showCustomConfirmation = false
+    @State private var resultMessage: String?
+    @State private var errorMessage: String?
+
+    private var normalizedContent: AdminPushNotificationContent? {
+        AdminPushNotificationValidation.normalized(
+            title: title,
+            body: message,
+            sensitive: privacyMode
+        )
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("收件人", value: user.displayName)
+                    LabeledContent("身份码", value: user.identityCode)
+                        .fontDesign(.monospaced)
+                }
+
+                Section("通知内容") {
+                    if privacyMode {
+                        Label(
+                            "隐私模式使用固定安全文案；下方自定义内容不会上传。",
+                            systemImage: "lock.shield"
+                        )
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.muted)
+                    }
+                    TextField("标题", text: $title)
+                        .disabled(isSending || privacyMode)
+                        .onChange(of: title) { _, value in
+                            if value.count > AdminPushNotificationValidation.titleLimit {
+                                title = String(value.prefix(AdminPushNotificationValidation.titleLimit))
+                            }
+                            draftDidChange()
+                        }
+                    TextEditor(text: $message)
+                        .frame(minHeight: 110)
+                        .disabled(isSending || privacyMode)
+                        .onChange(of: message) { _, value in
+                            if value.count > AdminPushNotificationValidation.bodyLimit {
+                                message = String(value.prefix(AdminPushNotificationValidation.bodyLimit))
+                            }
+                            draftDidChange()
+                        }
+                    HStack {
+                        Spacer()
+                        Text("\(message.count)/\(AdminPushNotificationValidation.bodyLimit)")
+                            .font(.caption2)
+                            .foregroundStyle(AppTheme.muted)
+                    }
+                }
+
+                Section {
+                    Toggle("隐私模式", isOn: $privacyMode)
+                        .tint(AppTheme.gold)
+                        .disabled(isSending)
+                        .onChange(of: privacyMode) { _, _ in draftDidChange() }
+                    Text(
+                        privacyMode
+                            ? "已开启：锁屏仅显示“有新消息，请登录查看”，不发送上方具体文本。"
+                            : "已关闭：将按上方文本发送。请确保内容不含联系方式、账号、密码或其他敏感信息。"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(privacyMode ? AppTheme.muted : .orange)
+                } footer: {
+                    Text("推送会发往该账号已开启通知的设备，不会暴露设备令牌。")
+                }
+
+                if let resultMessage {
+                    Section {
+                        Label(resultMessage, systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(AppTheme.gold)
+                    }
+                }
+                if let errorMessage {
+                    Section {
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                Section {
+                    Button {
+                        beginSend()
+                    } label: {
+                        HStack {
+                            Spacer()
+                            if isSending { ProgressView() }
+                            Text(isSending ? "正在加入队列" : "发送给该用户")
+                                .fontWeight(.semibold)
+                            Spacer()
+                        }
+                    }
+                    .disabled(isSending || normalizedContent == nil || !admin.isAuthenticated)
+                    .accessibilityIdentifier("admin-confirm-user-push")
+                }
+            }
+            .navigationTitle("定向通知")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .interactiveDismissDisabled(isSending)
+        .alert("确认发送自定义通知？", isPresented: $showCustomConfirmation) {
+            Button("确认发送", role: .destructive) {
+                guard let content = customConfirmationContent else { return }
+                Task { await send(content) }
+            }
+            Button("取消", role: .cancel) {
+                customConfirmationContent = nil
+            }
+        } message: {
+            if let content = customConfirmationContent {
+                Text(
+                    AdminPushConfirmationPolicy.summary(
+                        recipient: "\(user.displayName)（\(user.identityCode)）",
+                        content: content
+                    )
+                )
+            }
+        }
+    }
+
+    private func beginSend() {
+        guard AdminTargetedPushRecipientPolicy.isEligible(user) else {
+            errorMessage = "该账号当前状态不允许发送定向通知。"
+            return
+        }
+        guard let content = normalizedContent, admin.isAuthenticated else {
+            errorMessage = "请完整填写标题和正文。"
+            return
+        }
+        if AdminPushConfirmationPolicy.requiresSecondConfirmation(for: content) {
+            customConfirmationContent = content
+            showCustomConfirmation = true
+        } else {
+            Task { await send(content) }
+        }
+    }
+
+    private func send(_ content: AdminPushNotificationContent) async {
+        guard AdminTargetedPushRecipientPolicy.isEligible(user) else {
+            errorMessage = "该账号当前状态不允许发送定向通知。"
+            return
+        }
+        guard admin.isAuthenticated,
+              !isSending else {
+            errorMessage = "请完整填写标题和正文。"
+            return
+        }
+        customConfirmationContent = nil
+        isSending = true
+        resultMessage = nil
+        errorMessage = nil
+        defer { isSending = false }
+        do {
+            let response = try await admin.sendPushNotification(
+                toUserID: user.userID,
+                title: content.title,
+                body: content.body,
+                sensitive: content.sensitive,
+                idempotencyKey: idempotencyKey
+            )
+            idempotencyKey = UUID()
+            resultMessage = response.deviceCount > 0
+                ? "已加入队列，将发送到 \(response.deviceCount) 台设备。"
+                : "通知已记录，但该用户暂无可用的推送设备。"
+        } catch {
+            errorMessage = (error as? AdminAPIError)?.errorDescription
+                ?? "暂时无法发送通知。"
+        }
+    }
+
+    private func draftDidChange() {
+        guard !isSending else { return }
+        idempotencyKey = UUID()
+        resultMessage = nil
+        errorMessage = nil
+        customConfirmationContent = nil
+        showCustomConfirmation = false
     }
 }
 

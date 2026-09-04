@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Shuzijun APNs outbox sweep every minute on the authority node
+
+[Timer]
+Unit=shuzijun-push-outbox.service
+OnBootSec=75s
+OnUnitActiveSec=60s
+AccuracySec=5s
+RandomizedDelaySec=0
+Persistent=false
+
+[Install]
+WantedBy=timers.target

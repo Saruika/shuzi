@@ -1979,6 +1979,562 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(ArtworkImageRetryPolicy.shouldRetry(ArtworkImageLoadError.decodeFailed))
     }
 
+    func testAPNsDeviceTokenEncodingIsCanonicalAndStrict() {
+        let bytes = Data((0..<32).map(UInt8.init))
+        let encoded = PushDeviceTokenPolicy.encodedToken(from: bytes)
+
+        XCTAssertEqual(encoded, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+        XCTAssertTrue(PushDeviceTokenPolicy.isValid(encoded ?? ""))
+        XCTAssertNotNil(PushDeviceTokenPolicy.encodedToken(from: Data(repeating: 1, count: 1)))
+        XCTAssertNotNil(PushDeviceTokenPolicy.encodedToken(from: Data(repeating: 1, count: 256)))
+        XCTAssertNil(PushDeviceTokenPolicy.encodedToken(from: Data()))
+        XCTAssertNil(PushDeviceTokenPolicy.encodedToken(from: Data(repeating: 1, count: 257)))
+        XCTAssertFalse(PushDeviceTokenPolicy.isValid(String(repeating: "A", count: 64)))
+        XCTAssertFalse(PushDeviceTokenPolicy.isValid(String(repeating: "a", count: 33)))
+    }
+
+    func testPushRegistrationRequiresCompletedDouyinProfileAndLiveSession() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let pendingProfile = FanProfile(
+            userID: "11111111-2222-4333-8444-555555555555",
+            identityCode: "HS-ABCD-2345",
+            displayName: "测试用户",
+            douyinID: "douyin-user",
+            installationCode: "HSI-1234-5678-ABCD",
+            permissions: [],
+            status: FanAccountStatus.pending.rawValue,
+            sessionExpiresAt: now.addingTimeInterval(600)
+        )
+
+        XCTAssertEqual(
+            PushSessionEligibility.userID(
+                profile: pendingProfile,
+                hasSessionToken: true,
+                now: now
+            ),
+            pendingProfile.userID
+        )
+        XCTAssertNil(
+            PushSessionEligibility.userID(
+                profile: pendingProfile,
+                hasSessionToken: false,
+                now: now
+            )
+        )
+        XCTAssertNil(
+            PushSessionEligibility.userID(
+                profile: pendingProfile,
+                hasSessionToken: true,
+                credentialAccessAllowed: false,
+                now: now
+            ),
+            "Apple 凭据尚未验证时不得继续绑定推送"
+        )
+
+        let incompleteProfile = FanProfile(
+            userID: pendingProfile.userID,
+            identityCode: pendingProfile.identityCode,
+            displayName: pendingProfile.displayName,
+            douyinID: "invite_0123456789abcdef01234567",
+            installationCode: pendingProfile.installationCode,
+            permissions: [],
+            status: pendingProfile.status,
+            sessionExpiresAt: pendingProfile.sessionExpiresAt,
+            requiresAccountSetup: true,
+            invitationExpiresAt: now.addingTimeInterval(300),
+            accountSource: FanAccountSource.invitation.rawValue
+        )
+        XCTAssertNil(
+            PushSessionEligibility.userID(
+                profile: incompleteProfile,
+                hasSessionToken: true,
+                now: now
+            )
+        )
+
+        for status in [FanAccountStatus.rejected, .suspended] {
+            let blockedProfile = FanProfile(
+                userID: pendingProfile.userID,
+                identityCode: pendingProfile.identityCode,
+                displayName: pendingProfile.displayName,
+                douyinID: pendingProfile.douyinID,
+                installationCode: pendingProfile.installationCode,
+                permissions: [],
+                status: status.rawValue,
+                sessionExpiresAt: pendingProfile.sessionExpiresAt
+            )
+            XCTAssertNil(
+                PushSessionEligibility.userID(
+                    profile: blockedProfile,
+                    hasSessionToken: true,
+                    now: now
+                )
+            )
+        }
+    }
+
+    func testPushSynchronizationRebindsAfterSameUserSessionRotation() {
+        let before = PushSynchronizationTaskID(
+            userID: "11111111-2222-4333-8444-555555555555",
+            fanSessionGeneration: 7,
+            deviceRegistrationGeneration: 3
+        )
+        let afterPasswordChange = PushSynchronizationTaskID(
+            userID: before.userID,
+            fanSessionGeneration: 8,
+            deviceRegistrationGeneration: 3
+        )
+
+        XCTAssertNotEqual(before, afterPasswordChange)
+        XCTAssertEqual(before, before)
+
+        let appleCredentialChecking = PushSynchronizationTaskID(
+            userID: nil,
+            fanSessionGeneration: 8,
+            deviceRegistrationGeneration: 3,
+            canUnbindPushDevice: true,
+            appleCredentialAccessState: .checking
+        )
+        let appleCredentialVerified = PushSynchronizationTaskID(
+            userID: before.userID,
+            fanSessionGeneration: 8,
+            deviceRegistrationGeneration: 3,
+            canUnbindPushDevice: true,
+            appleCredentialAccessState: .verified
+        )
+        XCTAssertNotEqual(appleCredentialChecking, appleCredentialVerified)
+    }
+
+    func testPushBindingGenerationIsStrictlyMonotonicAndBounded() {
+        XCTAssertEqual(PushBindingGenerationPolicy.next(after: 0), 1)
+        XCTAssertEqual(
+            PushBindingGenerationPolicy.next(after: PushBindingGenerationPolicy.maximum - 1),
+            PushBindingGenerationPolicy.maximum
+        )
+        XCTAssertNil(
+            PushBindingGenerationPolicy.next(after: PushBindingGenerationPolicy.maximum)
+        )
+
+        let state = FanInstallationState(
+            installID: UUID(),
+            bindingGeneration: PushBindingGenerationPolicy.maximum
+        )
+        let encoded = try? JSONEncoder().encode(state)
+        let decoded = encoded.flatMap {
+            try? JSONDecoder().decode(FanInstallationState.self, from: $0)
+        }
+        XCTAssertEqual(decoded, state)
+    }
+
+    func testPushBindingRefreshesAtFixedTwentyFourHourAge() {
+        let boundAt = Date(timeIntervalSince1970: 2_000_000_000)
+        XCTAssertFalse(
+            PushBindingRefreshPolicy.needsRefresh(
+                boundAt: boundAt,
+                now: boundAt.addingTimeInterval(24 * 60 * 60 - 1)
+            )
+        )
+        XCTAssertTrue(
+            PushBindingRefreshPolicy.needsRefresh(
+                boundAt: boundAt,
+                now: boundAt.addingTimeInterval(24 * 60 * 60)
+            )
+        )
+        XCTAssertEqual(
+            PushBindingRefreshPolicy.delayUntilRefresh(
+                boundAt: boundAt,
+                now: boundAt.addingTimeInterval(23 * 60 * 60)
+            ),
+            60 * 60
+        )
+    }
+
+    func testPushAccountTransitionsResetDeviceRegistration() {
+        let first = "11111111-2222-4333-8444-555555555555"
+        let second = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+        XCTAssertTrue(
+            PushAccountTransitionPolicy.requiresRegistrationReset(
+                previousUserID: first,
+                currentUserID: nil
+            )
+        )
+        XCTAssertTrue(
+            PushAccountTransitionPolicy.requiresRegistrationReset(
+                previousUserID: first,
+                currentUserID: second
+            )
+        )
+        XCTAssertFalse(
+            PushAccountTransitionPolicy.requiresRegistrationReset(
+                previousUserID: first,
+                currentUserID: first
+            )
+        )
+    }
+
+    func testPushNotificationsStayOffUntilTheUserExplicitlyOptsIn() {
+        let suiteName = "PushNotificationPreferenceTests-\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            return XCTFail("无法创建隔离的 UserDefaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let preferenceKey = "push-opt-in"
+        let associationKey = "push-opt-in-user"
+        let firstUserID = "11111111-2222-4333-8444-555555555555"
+        let secondUserID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+        XCTAssertFalse(
+            PushNotificationPreferencePolicy.isEnabled(
+                in: defaults,
+                preferenceKey: preferenceKey,
+                associationKey: associationKey,
+                userID: firstUserID
+            ),
+            "首次安装不能在用户操作前隐式开启通知"
+        )
+        PushNotificationPreferencePolicy.setEnabled(
+            true,
+            for: firstUserID,
+            in: defaults,
+            preferenceKey: preferenceKey,
+            associationKey: associationKey
+        )
+        XCTAssertTrue(
+            PushNotificationPreferencePolicy.isEnabled(
+                in: defaults,
+                preferenceKey: preferenceKey,
+                associationKey: associationKey,
+                userID: firstUserID
+            )
+        )
+        XCTAssertFalse(
+            PushNotificationPreferencePolicy.isEnabled(
+                in: defaults,
+                preferenceKey: preferenceKey,
+                associationKey: associationKey,
+                userID: secondUserID
+            ),
+            "B 账号不能继承 A 账号主动开启的通知偏好"
+        )
+        XCTAssertFalse(
+            PushNotificationPreferencePolicy.isEnabled(
+                in: defaults,
+                preferenceKey: preferenceKey,
+                associationKey: associationKey,
+                userID: nil
+            ),
+            "退出登录后必须立即关闭本地通知绑定状态"
+        )
+        PushNotificationPreferencePolicy.setEnabled(
+            true,
+            for: secondUserID,
+            in: defaults,
+            preferenceKey: preferenceKey,
+            associationKey: associationKey
+        )
+        XCTAssertFalse(
+            PushNotificationPreferencePolicy.isEnabled(
+                in: defaults,
+                preferenceKey: preferenceKey,
+                associationKey: associationKey,
+                userID: firstUserID
+            ),
+            "一台安装只恢复最近一次明确开启通知的账号"
+        )
+        XCTAssertTrue(
+            PushNotificationPreferencePolicy.isEnabled(
+                in: defaults,
+                preferenceKey: preferenceKey,
+                associationKey: associationKey,
+                userID: secondUserID
+            )
+        )
+        PushNotificationPreferencePolicy.setEnabled(
+            false,
+            for: secondUserID,
+            in: defaults,
+            preferenceKey: preferenceKey,
+            associationKey: associationKey
+        )
+        XCTAssertFalse(
+            PushNotificationPreferencePolicy.isEnabled(
+                in: defaults,
+                preferenceKey: preferenceKey,
+                associationKey: associationKey,
+                userID: secondUserID
+            )
+        )
+    }
+
+    func testAdminFanDirectoryQueryNormalizesRemoteSearchAndBoundsPagination() throws {
+        let query = try AdminFanDirectoryQuery(
+            search: "  易姝 HS-ABCD-1234  ",
+            page: 101,
+            perPage: 50
+        )
+
+        XCTAssertEqual(query.search, "易姝 HS-ABCD-1234")
+        XCTAssertEqual(query.page, 101)
+        XCTAssertEqual(query.perPage, 50)
+        XCTAssertTrue(AdminQueryItemPolicy.areValid(query.queryItems))
+        XCTAssertEqual(
+            Dictionary(uniqueKeysWithValues: query.queryItems.compactMap { item in
+                item.value.map { (item.name, $0) }
+            })["search"],
+            "易姝 HS-ABCD-1234"
+        )
+
+        XCTAssertNil(try AdminFanDirectoryQuery(search: "   ").search)
+        XCTAssertThrowsError(
+            try AdminFanDirectoryQuery(
+                search: String(repeating: "字", count: 81)
+            )
+        )
+        XCTAssertThrowsError(try AdminFanDirectoryQuery(search: "用户\n身份码"))
+        XCTAssertThrowsError(try AdminFanDirectoryQuery(page: 10_001))
+        XCTAssertThrowsError(try AdminFanDirectoryQuery(perPage: 101))
+        XCTAssertFalse(
+            AdminQueryItemPolicy.areValid([
+                URLQueryItem(name: "page", value: "1"),
+                URLQueryItem(name: "page", value: "2"),
+            ])
+        )
+    }
+
+    func testAdminFanDirectoryPaginationAppendsWithoutDuplicateUsers() {
+        let firstUser = AdminFanUser(
+            userID: "11111111-2222-4333-8444-555555555555",
+            identityCode: "HS-ABCD-2345",
+            displayName: "第一页用户",
+            douyinID: "douyin-first",
+            permissions: [],
+            status: FanAccountStatus.active.rawValue,
+            registeredAt: Date(timeIntervalSince1970: 1_700_000_000),
+            reviewedAt: nil
+        )
+        let secondUser = AdminFanUser(
+            userID: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            identityCode: "HS-BCDE-3456",
+            displayName: "第 101 名用户",
+            douyinID: "douyin-101",
+            permissions: [],
+            status: FanAccountStatus.pending.rawValue,
+            registeredAt: Date(timeIntervalSince1970: 1_700_000_100),
+            reviewedAt: nil
+        )
+        let catalog = [
+            AdminFanPermissionDefinition(
+                code: "gallery_full",
+                title: "全部相册",
+                description: "允许查看全部作品"
+            ),
+        ]
+        let firstPage = AdminFanDirectory(
+            users: [firstUser],
+            permissionCatalog: catalog,
+            page: 1,
+            perPage: 100,
+            hasMore: true
+        )
+        let secondPage = AdminFanDirectory(
+            users: [firstUser, secondUser],
+            permissionCatalog: catalog,
+            page: 2,
+            perPage: 100,
+            hasMore: false
+        )
+
+        XCTAssertTrue(
+            AdminFanDirectoryValidation.isValid(
+                secondPage,
+                requestedPage: 2,
+                requestedPerPage: 100
+            )
+        )
+        let merged = AdminFanDirectoryValidation.appending(secondPage, to: firstPage)
+        XCTAssertEqual(merged?.users.map(\.userID), [firstUser.userID, secondUser.userID])
+        XCTAssertEqual(merged?.page, 2)
+        XCTAssertEqual(merged?.hasMore, false)
+
+        let stalePage = AdminFanDirectory(
+            users: [secondUser],
+            permissionCatalog: catalog,
+            page: 3,
+            perPage: 100,
+            hasMore: false
+        )
+        XCTAssertNil(AdminFanDirectoryValidation.appending(stalePage, to: firstPage))
+    }
+
+    func testAdminFanDirectoryDecodesLegacyResponseAsSinglePage() throws {
+        let directory = try JSONDecoder().decode(
+            AdminFanDirectory.self,
+            from: Data(#"{"users":[],"permissionCatalog":[]}"#.utf8)
+        )
+
+        XCTAssertEqual(directory.page, 1)
+        XCTAssertEqual(directory.perPage, 100)
+        XCTAssertFalse(directory.hasMore)
+    }
+
+    func testAdminPushContentIsBoundedNormalizedAndPrivateByDefault() {
+        let content = AdminPushNotificationValidation.normalized(
+            title: "不应离开设备的标题",
+            body: "不应离开设备的敏感内容",
+            sensitive: true
+        )
+
+        XCTAssertEqual(content?.title, AdminPushNotificationValidation.privateTitle)
+        XCTAssertEqual(content?.body, AdminPushNotificationValidation.privateBody)
+        XCTAssertEqual(content?.sensitive, true)
+        XCTAssertNotNil(
+            AdminPushNotificationValidation.normalized(
+                title: String(repeating: "标", count: 60),
+                body: String(repeating: "文", count: 240),
+                sensitive: false
+            )
+        )
+        XCTAssertNil(
+            AdminPushNotificationValidation.normalized(
+                title: String(repeating: "标", count: 61),
+                body: "正文",
+                sensitive: false
+            )
+        )
+        XCTAssertNil(
+            AdminPushNotificationValidation.normalized(
+                title: "标题",
+                body: "不可见\u{0000}内容",
+                sensitive: false
+            )
+        )
+    }
+
+    func testCustomTargetedPushRequiresExplicitSecondConfirmation() throws {
+        let privateContent = try XCTUnwrap(
+            AdminPushNotificationValidation.normalized(
+                title: "不会发送",
+                body: "不会发送",
+                sensitive: true
+            )
+        )
+        let customContent = try XCTUnwrap(
+            AdminPushNotificationValidation.normalized(
+                title: "作品更新",
+                body: "今晚八点发布新作品。",
+                sensitive: false
+            )
+        )
+
+        XCTAssertFalse(
+            AdminPushConfirmationPolicy.requiresSecondConfirmation(for: privateContent)
+        )
+        XCTAssertTrue(
+            AdminPushConfirmationPolicy.requiresSecondConfirmation(for: customContent)
+        )
+        XCTAssertEqual(
+            AdminPushConfirmationPolicy.summary(
+                recipient: "测试用户",
+                content: customContent
+            ),
+            "收件人：测试用户\n标题：作品更新\n正文：今晚八点发布新作品。"
+        )
+    }
+
+    func testTargetedPushRecipientMustRemainPendingOrActive() {
+        XCTAssertTrue(
+            AdminTargetedPushRecipientPolicy.isEligible(
+                status: FanAccountStatus.pending.rawValue,
+                requiresIdentityCompletion: false
+            )
+        )
+        XCTAssertTrue(
+            AdminTargetedPushRecipientPolicy.isEligible(
+                status: FanAccountStatus.active.rawValue,
+                requiresIdentityCompletion: false
+            )
+        )
+        for status in [FanAccountStatus.rejected, .suspended] {
+            XCTAssertFalse(
+                AdminTargetedPushRecipientPolicy.isEligible(
+                    status: status.rawValue,
+                    requiresIdentityCompletion: false
+                )
+            )
+        }
+        XCTAssertFalse(
+            AdminTargetedPushRecipientPolicy.isEligible(
+                status: FanAccountStatus.pending.rawValue,
+                requiresIdentityCompletion: true
+            )
+        )
+        XCTAssertFalse(
+            AdminTargetedPushRecipientPolicy.isEligible(
+                status: "unknown",
+                requiresIdentityCompletion: false
+            )
+        )
+    }
+
+    func testAdminPushResponseMustMatchQueuedSingleRecipientContract() {
+        let response = AdminPushNotificationResponse(
+            notificationID: "11111111-2222-4333-8444-555555555555",
+            status: "queued",
+            recipientCount: 1,
+            deviceCount: 16
+        )
+        XCTAssertTrue(
+            AdminPushNotificationValidation.isValidResponse(
+                response,
+                expectedRecipientCount: 1
+            )
+        )
+        XCTAssertFalse(
+            AdminPushNotificationValidation.isValidResponse(
+                AdminPushNotificationResponse(
+                    notificationID: response.notificationID,
+                    status: "sent",
+                    recipientCount: 1,
+                    deviceCount: 1
+                ),
+                expectedRecipientCount: 1
+            )
+        )
+        XCTAssertFalse(
+            AdminPushNotificationValidation.isValidResponse(
+                AdminPushNotificationResponse(
+                    notificationID: response.notificationID.uppercased(),
+                    status: "queued",
+                    recipientCount: 1,
+                    deviceCount: 1_601
+                ),
+                expectedRecipientCount: 1
+            )
+        )
+    }
+
+    func testPushCapabilityDenialDoesNotLockAdministratorSession() {
+        XCTAssertFalse(
+            AdminAuthorizationFailurePolicy.shouldLock(
+                statusCode: 403,
+                serverErrorCode: "push_capability_required"
+            )
+        )
+        XCTAssertTrue(
+            AdminAuthorizationFailurePolicy.shouldLock(
+                statusCode: 403,
+                serverErrorCode: "rest_forbidden"
+            )
+        )
+        XCTAssertTrue(
+            AdminAuthorizationFailurePolicy.shouldLock(
+                statusCode: 401,
+                serverErrorCode: nil
+            )
+        )
+    }
+
     func testPurgedImageReloadsWhenTheAppBecomesActive() {
         let url = URL(string: "https://img.shuzijun.com.cn/images/test.jpg")
 
@@ -2145,6 +2701,36 @@ final class ContentAndAccessTests: XCTestCase {
                 collaborationInboxEnabled: true
             ).isConsistent
         )
+        XCTAssertTrue(
+            AppFeatureCapabilities(
+                collaborationSubmissionEnabled: true,
+                collaborationInboxEnabled: true,
+                pushNotificationsEnabled: true,
+                canSendPushNotifications: true
+            ).isConsistent
+        )
+        XCTAssertFalse(
+            AppFeatureCapabilities(
+                collaborationSubmissionEnabled: true,
+                collaborationInboxEnabled: true,
+                pushNotificationsEnabled: false,
+                canSendPushNotifications: true
+            ).isConsistent
+        )
+    }
+
+    func testLegacyCapabilitiesDecodeWithPushDisabled() throws {
+        let legacy = Data(
+            #"{"collaborationSubmissionEnabled":true,"collaborationInboxEnabled":true}"#.utf8
+        )
+        let capabilities = try JSONDecoder().decode(
+            AppFeatureCapabilities.self,
+            from: legacy
+        )
+
+        XCTAssertFalse(capabilities.pushNotificationsEnabled)
+        XCTAssertFalse(capabilities.canSendPushNotifications)
+        XCTAssertTrue(capabilities.isConsistent)
     }
 
     func testAdminCollaborationDirectoryValidatesMailAndStatusContracts() {

@@ -2534,7 +2534,9 @@ trait Shuzijun_App_Fan_Identity {
 
     private static function remove_fan_user($user_id, $douyin_reservation = '') {
         $user_id = (int) $user_id;
-        if ($user_id <= 0 || !self::purge_collaboration_data_for_fan_user($user_id)) {
+        if ($user_id <= 0
+            || !self::purge_collaboration_data_for_fan_user($user_id)
+            || !self::purge_push_data_for_fan_user($user_id)) {
             return false;
         }
         // The App deletion paths already hold the per-user lock. Mark the
@@ -2746,9 +2748,22 @@ trait Shuzijun_App_Fan_Identity {
             delete_option(self::FAN_SESSION_OPTION_PREFIX . $token_hash);
             return new WP_Error('fan_session_unavailable', '暂时无法创建安全会话，请稍后重试。', array('status' => 503));
         }
+        $context['tokenHash'] = $token_hash;
+        // A normal login is also an atomic push-ownership transition. This is
+        // deliberately done before the token is returned, so an App killed
+        // before registering APNs still cannot leave the previous account
+        // reachable on this installation.
+        if ($scope === 'normal'
+            && !self::advance_push_install_ownership_for_session($context)) {
+            self::revoke_fan_session((int) $user_id, $token_hash);
+            return new WP_Error(
+                'fan_session_unavailable',
+                '暂时无法创建安全会话，请稍后重试。',
+                array('status' => 503)
+            );
+        }
         wp_schedule_single_event($expires + 60, 'yishu_cleanup_fan_session', array($token_hash, (int) $user_id));
         $context['token'] = $token;
-        $context['tokenHash'] = $token_hash;
         return $context;
     }
 
@@ -2982,15 +2997,45 @@ trait Shuzijun_App_Fan_Identity {
     private static function revoke_fan_session($user_id, $token_hash) {
         $token_hash = strtolower((string) $token_hash);
         if (!preg_match('/^[a-f0-9]{64}$/', $token_hash)) { return; }
+        $revoked_context = get_option(self::FAN_SESSION_OPTION_PREFIX . $token_hash, null);
+        if (is_array($revoked_context)) {
+            $revoked_context['tokenHash'] = $token_hash;
+            self::tombstone_push_install_session($revoked_context);
+        }
         delete_option(self::FAN_SESSION_OPTION_PREFIX . $token_hash);
         $sessions = get_user_meta((int) $user_id, self::FAN_META_SESSIONS, true);
-        if (!is_array($sessions)) { return; }
+        $sessions = is_array($sessions) ? $sessions : array();
         $sessions = array_values(array_filter($sessions, function ($session) use ($token_hash) {
             return is_array($session) && isset($session['hash'])
                 && preg_match('/^[a-f0-9]{64}$/', (string) $session['hash'])
                 && !hash_equals((string) $session['hash'], $token_hash);
         }));
         update_user_meta((int) $user_id, self::FAN_META_SESSIONS, $sessions);
+        $install_hash = is_array($revoked_context)
+            ? strtolower((string) ($revoked_context['installHash'] ?? ''))
+            : '';
+        if (preg_match('/^[a-f0-9]{64}$/', $install_hash) !== 1) { return; }
+        // Do not unbind a device merely because an older session on the same
+        // installation expired while a newer normal session remains valid.
+        foreach ($sessions as $remaining) {
+            $remaining_hash = is_array($remaining)
+                ? strtolower((string) ($remaining['hash'] ?? ''))
+                : '';
+            if (preg_match('/^[a-f0-9]{64}$/', $remaining_hash) !== 1) { continue; }
+            $remaining_context = get_option(
+                self::FAN_SESSION_OPTION_PREFIX . $remaining_hash,
+                null
+            );
+            if (is_array($remaining_context)
+                && (int) ($remaining_context['expires'] ?? 0) > time()
+                && hash_equals(
+                    $install_hash,
+                    (string) ($remaining_context['installHash'] ?? '')
+                )) {
+                return;
+            }
+        }
+        self::remove_fan_push_device_for_install_hash((int) $user_id, $install_hash);
     }
 
     private static function revoke_fan_session_by_public_id($user_id, $session_id) {
@@ -3019,10 +3064,11 @@ trait Shuzijun_App_Fan_Identity {
             foreach ($sessions as $session) {
                 if (is_array($session) && isset($session['hash'])
                     && preg_match('/^[a-f0-9]{64}$/', (string) $session['hash'])) {
-                    delete_option(self::FAN_SESSION_OPTION_PREFIX . (string) $session['hash']);
+                    self::revoke_fan_session((int) $user_id, (string) $session['hash']);
                 }
             }
         }
+        self::remove_all_fan_push_devices((int) $user_id);
         delete_user_meta((int) $user_id, self::FAN_META_SESSIONS);
     }
 
@@ -3331,7 +3377,8 @@ trait Shuzijun_App_Fan_Identity {
             }
             self::$fan_user_deletion_locks[$user_id] = $lock_owner;
             self::register_fan_user_deletion_release_hooks();
-            if (!self::purge_collaboration_data_for_fan_user($user_id)) {
+            if (!self::purge_collaboration_data_for_fan_user($user_id)
+                || !self::purge_push_data_for_fan_user($user_id)) {
                 self::release_fan_user_deletion_lock($user_id);
                 self::abort_fan_user_deletion('account_deletion_cleanup_failed');
             }
@@ -3405,7 +3452,7 @@ trait Shuzijun_App_Fan_Identity {
 
     private static function abort_fan_user_deletion($audit_event) {
         do_action('yishu_fan_security_audit', sanitize_key((string) $audit_event));
-        $message = '为防止遗留合作邀约中的个人资料，本次删除已安全中止，请稍后重试。';
+        $message = '为防止遗留个人资料或设备推送记录，本次删除已安全中止，请稍后重试。';
         if (function_exists('wp_die')) {
             wp_die($message, '暂时无法删除用户', array('response' => 503));
         }

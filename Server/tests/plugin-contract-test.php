@@ -302,6 +302,7 @@ $plugin_module_paths = array(
     '/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-collaboration.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-fan-endpoints.php',
+    '/vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php',
 );
@@ -357,15 +358,15 @@ function expect_true(bool $condition, string $message): void {
 expect_true(
     is_string($plugin_entry_source)
         && is_string($plugin_implementation_source)
-        && count(array_filter($plugin_module_sources, 'is_string')) === 5
+        && count(array_filter($plugin_module_sources, 'is_string')) === 6
         && strpos(
             $plugin_entry_source,
             "require_once __DIR__ . '/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php';"
         ) !== false
         && substr_count($plugin_entry_source, 'Shuzijun_App_Content_API::init();') === 1
         && strpos($plugin_implementation_source, 'final class Shuzijun_App_Content_API') !== false
-        && substr_count($plugin_implementation_source, 'require_once __DIR__ . \'/trait-') === 4
-        && substr_count($plugin_implementation_source, '    use Shuzijun_App_') === 4
+        && substr_count($plugin_implementation_source, 'require_once __DIR__ . \'/trait-') === 5
+        && substr_count($plugin_implementation_source, '    use Shuzijun_App_') === 5
         && strpos($plugin_implementation_source, 'Shuzijun_App_Content_API::init();') === false,
     '插件入口必须只装配一次模块化 API 实现并只启动一次'
 );
@@ -378,6 +379,326 @@ function expect_error_code(string $code, $actual, string $message): void {
     expect_true($actual instanceof WP_Error, $message . '（未返回 WP_Error）');
     expect_same($code, $actual->get_error_code(), $message . '（错误代码不符）');
 }
+
+// Binding generations are decimal counters shared by Swift, PHP and MySQL.
+// The pure transition rule makes delayed lower generations harmless and treats
+// an equal generation with the opposite action as a protocol conflict.
+expect_same(
+    1,
+    invoke_plugin_method('normalize_push_binding_generation', array('1')),
+    '最小正绑定世代必须可被规范化'
+);
+expect_same(
+    PHP_INT_MAX,
+    invoke_plugin_method('normalize_push_binding_generation', array((string) PHP_INT_MAX)),
+    '绑定世代上界必须精确等于 PHP 整数上界'
+);
+foreach (array(null, 0, '0', '01', '-1', '1.0', array(), (string) PHP_INT_MAX . '0') as $invalid_generation) {
+    expect_same(
+        0,
+        invoke_plugin_method('normalize_push_binding_generation', array($invalid_generation)),
+        '非规范或超界绑定世代必须失败关闭'
+    );
+}
+
+foreach (array(
+    array('stale', 7, 'bound', 6, 'bound'),
+    array('stale', 7, 'bound', 6, 'unbound'),
+    array('idempotent', 7, 'bound', 7, 'bound'),
+    array('idempotent', 7, 'unbound', 7, 'unbound'),
+    array('conflict', 7, 'bound', 7, 'unbound'),
+    array('conflict', 7, 'unbound', 7, 'bound'),
+    array('apply', 7, 'bound', 8, 'unbound'),
+    array('apply', 7, 'unbound', 8, 'bound'),
+    array('invalid', -1, 'bound', 8, 'bound'),
+    array('invalid', 7, 'unknown', 8, 'bound'),
+    array('invalid', 7, 'bound', 0, 'bound'),
+    array('invalid', 7, 'bound', 8, 'unknown'),
+) as $transition_case) {
+    expect_same(
+        $transition_case[0],
+        invoke_plugin_method('push_binding_transition', array_slice($transition_case, 1)),
+        '持久绑定世代转移必须严格单调且失败关闭'
+    );
+}
+
+// Pre-Build-45 normal sessions can establish push ownership exactly once, but
+// only after their raw wp_options row passes the strict scalar-only decoder.
+$legacy_now = time();
+$legacy_install_hash = str_repeat('a', 64);
+$legacy_token_hash = str_repeat('b', 64);
+$legacy_session = array(
+    'userID' => 17,
+    'installHash' => $legacy_install_hash,
+    'installCode' => 'IN-ABC-234',
+    'sessionID' => str_repeat('c', 32),
+    'createdAt' => $legacy_now - 30,
+    'expires' => $legacy_now + 600,
+    'scope' => 'normal',
+    'credentialEpoch' => 3,
+    'authMethod' => 'apple',
+    'recentAuthUntil' => $legacy_now + 300,
+);
+$legacy_row = array(
+    'option_id' => '42',
+    'option_name' => Shuzijun_App_Content_API::FAN_SESSION_OPTION_PREFIX . $legacy_token_hash,
+    'option_value' => serialize($legacy_session),
+);
+$decoded_legacy = invoke_plugin_method(
+    'legacy_push_session_option_context',
+    array($legacy_row, $legacy_install_hash, $legacy_now)
+);
+expect_true(
+    is_array($decoded_legacy)
+        && ($decoded_legacy['optionID'] ?? null) === 42
+        && ($decoded_legacy['userID'] ?? null) === 17
+        && ($decoded_legacy['tokenHash'] ?? null) === $legacy_token_hash
+        && ($decoded_legacy['credentialEpoch'] ?? null) === 3,
+    '旧会话迁移只能从规范的原始 option 行恢复权威字段'
+);
+expect_true(
+    is_array(invoke_plugin_method(
+        'legacy_push_session_candidate_context',
+        array($legacy_row, 41, $legacy_install_hash, $legacy_now)
+    ))
+        && invoke_plugin_method(
+            'legacy_push_session_candidate_context',
+            array($legacy_row, 42, $legacy_install_hash, $legacy_now)
+        ) === null,
+    '仅 option_id 严格更新的同安装会话才能阻断旧所有者'
+);
+
+$legacy_nested = $legacy_session;
+$legacy_nested['unexpected'] = array('nested');
+$legacy_object = $legacy_session;
+$legacy_object['unexpected'] = new stdClass();
+$legacy_uppercase_hash = $legacy_session;
+$legacy_uppercase_hash['installHash'] = strtoupper($legacy_install_hash);
+$legacy_expired = $legacy_session;
+$legacy_expired['expires'] = $legacy_now - 1;
+$legacy_wrong_scope = $legacy_session;
+$legacy_wrong_scope['scope'] = 'onboarding';
+foreach (array(
+    serialize($legacy_nested),
+    serialize($legacy_object),
+    serialize($legacy_uppercase_hash),
+    serialize($legacy_expired),
+    serialize($legacy_wrong_scope),
+    str_repeat('x', 8193),
+) as $unsafe_serialized_session) {
+    $unsafe_row = $legacy_row;
+    $unsafe_row['option_value'] = $unsafe_serialized_session;
+    expect_same(
+        null,
+        invoke_plugin_method(
+            'legacy_push_session_option_context',
+            array($unsafe_row, $legacy_install_hash, $legacy_now)
+        ),
+        '对象、嵌套值、非规范字段、过期或超大旧会话必须失败关闭'
+    );
+}
+$legacy_password_session = $legacy_session;
+unset(
+    $legacy_password_session['credentialEpoch'],
+    $legacy_password_session['authMethod'],
+    $legacy_password_session['recentAuthUntil']
+);
+$legacy_password_row = $legacy_row;
+$legacy_password_row['option_value'] = serialize($legacy_password_session);
+$decoded_legacy_password = invoke_plugin_method(
+    'legacy_push_session_option_context',
+    array($legacy_password_row, $legacy_install_hash, $legacy_now)
+);
+expect_true(
+    is_array($decoded_legacy_password)
+        && ($decoded_legacy_password['credentialEpoch'] ?? null) === 1
+        && ($decoded_legacy_password['authMethod'] ?? null) === 'password'
+        && ($decoded_legacy_password['recentAuthUntil'] ?? null) === 0,
+    '部署前密码会话只能按既有验证规则映射到 epoch 1'
+);
+
+// The worker must honor the absolute deadline stored with the notification.
+// Test mode returns before network I/O but only after payload/deadline checks.
+$GLOBALS['yishu_test_filters']['yishu_apns_delivery_result'] = static function (): array {
+    return array('outcome' => 'sent', 'code' => '');
+};
+$push_notification = array(
+    'public_id' => '123e4567-e89b-42d3-a456-426614174000',
+    'title' => 'Contract',
+    'body' => 'Deadline',
+    'deliver_before' => time() + 60,
+);
+expect_same(
+    array('outcome' => 'sent', 'code' => ''),
+    invoke_plugin_method('send_push_to_apns', array(str_repeat('ab', 32), $push_notification)),
+    '未过期的固定投递截止时间必须传递给 APNs 路径'
+);
+$push_notification['deliver_before'] = time() - 1;
+expect_same(
+    array('outcome' => 'dead', 'code' => 'expired'),
+    invoke_plugin_method('send_push_to_apns', array(str_repeat('ab', 32), $push_notification)),
+    '已过期通知不得因工作者延迟而获得新的投递窗口'
+);
+$push_notification['deliver_before'] = 'invalid';
+expect_same(
+    array('outcome' => 'dead', 'code' => 'payload_invalid'),
+    invoke_plugin_method('send_push_to_apns', array(str_repeat('ab', 32), $push_notification)),
+    '非规范投递截止时间必须失败关闭'
+);
+unset($GLOBALS['yishu_test_filters']['yishu_apns_delivery_result']);
+
+// Device-token decryption has three outcomes: plaintext on success, an empty
+// string for an authenticated-record failure under the expected key, and a
+// fixed 503 error for temporary/mismatched deployment-key failures. A key
+// outage must never be mistaken for proof that the device row is invalid.
+if (function_exists('sodium_crypto_secretbox')
+    && function_exists('sodium_crypto_secretbox_open')
+    && function_exists('sodium_memzero') && function_exists('hash_hkdf')) {
+    $push_data_key_a = str_repeat("\x31", 32);
+    $push_data_key_b = str_repeat("\x32", 32);
+    $GLOBALS['yishu_test_filters']['yishu_push_data_key'] = static function () use (
+        $push_data_key_a
+    ): string {
+        return $push_data_key_a;
+    };
+    $opaque_device_token = str_repeat('ab', 256);
+    $encrypted_device = invoke_plugin_method(
+        'encrypt_push_device_token',
+        array($opaque_device_token)
+    );
+    expect_true(
+        is_array($encrypted_device)
+            && preg_match('/^[a-f0-9]{64}$/D', (string) ($encrypted_device['tokenHash'] ?? '')) === 1
+            && is_string($encrypted_device['ciphertext'] ?? null)
+            && strlen((string) $encrypted_device['ciphertext']) <= 1024,
+        '可变长设备令牌必须以有界密文和 HMAC 索引保存'
+    );
+    $encrypted_record = json_decode((string) $encrypted_device['ciphertext'], true);
+    expect_true(
+        is_array($encrypted_record)
+            && (int) ($encrypted_record['version'] ?? 0) === 1
+            && preg_match(
+                '/^[a-f0-9]{64}$/D',
+                (string) ($encrypted_record['keyFingerprint'] ?? '')
+            ) === 1,
+        '新密文必须携带非秘密数据密钥指纹'
+    );
+    expect_same(
+        $opaque_device_token,
+        invoke_plugin_method(
+            'decrypt_push_device_token',
+            array($encrypted_device['ciphertext'], $encrypted_device['tokenHash'])
+        ),
+        '当前数据密钥必须能解密已保存设备令牌'
+    );
+
+    $missing_fingerprint_record = $encrypted_record;
+    unset($missing_fingerprint_record['keyFingerprint']);
+    expect_same(
+        '',
+        invoke_plugin_method(
+            'decrypt_push_device_token',
+            array(
+                wp_json_encode($missing_fingerprint_record, JSON_UNESCAPED_SLASHES),
+                $encrypted_device['tokenHash'],
+            )
+        ),
+        '未部署的 v1 密文格式必须严格要求密钥指纹'
+    );
+
+    $GLOBALS['yishu_test_filters']['yishu_push_data_key'] = static function () use (
+        $push_data_key_b
+    ): string {
+        return $push_data_key_b;
+    };
+    $wrong_key_result = invoke_plugin_method(
+        'decrypt_push_device_token',
+        array($encrypted_device['ciphertext'], $encrypted_device['tokenHash'])
+    );
+    expect_error_code(
+        'push_device_crypto_unavailable',
+        $wrong_key_result,
+        '语法有效但与指纹不符的数据密钥必须视为配置故障'
+    );
+    expect_same(
+        503,
+        (int) ($wrong_key_result->get_error_data()['status'] ?? 0),
+        '设备数据密钥故障必须返回固定 503'
+    );
+
+    $GLOBALS['yishu_test_filters']['yishu_push_data_key'] = static function (): string {
+        throw new RuntimeException('simulated key reader outage');
+    };
+    $reader_outage_result = invoke_plugin_method(
+        'decrypt_push_device_token',
+        array($encrypted_device['ciphertext'], $encrypted_device['tokenHash'])
+    );
+    expect_error_code(
+        'push_device_crypto_unavailable',
+        $reader_outage_result,
+        '数据密钥读取异常不得被误判为损坏设备记录'
+    );
+
+    $GLOBALS['yishu_test_filters']['yishu_push_data_key'] = static function () use (
+        $push_data_key_a
+    ): string {
+        return $push_data_key_a;
+    };
+    $damaged_record = $encrypted_record;
+    $damaged_ciphertext = (string) $damaged_record['ciphertext'];
+    $damaged_ciphertext[0] = $damaged_ciphertext[0] === 'A' ? 'B' : 'A';
+    $damaged_record['ciphertext'] = $damaged_ciphertext;
+    expect_same(
+        '',
+        invoke_plugin_method(
+            'decrypt_push_device_token',
+            array(
+                wp_json_encode($damaged_record, JSON_UNESCAPED_SLASHES),
+                $encrypted_device['tokenHash'],
+            )
+        ),
+        '密钥可用时 Secretbox 认证失败必须标记设备记录无效'
+    );
+    unset($GLOBALS['yishu_test_filters']['yishu_push_data_key']);
+    sodium_memzero($push_data_key_a);
+    sodium_memzero($push_data_key_b);
+    sodium_memzero($opaque_device_token);
+}
+
+$push_query_count = count($GLOBALS['wpdb']->executed_queries);
+$push_schedule_count = count($GLOBALS['yishu_test_scheduled']);
+expect_true(
+    invoke_plugin_method(
+        'defer_push_outbox_without_attempt',
+        array(7, str_repeat('a', 32), 'device_crypto_unavailable')
+    ) === true,
+    '设备密钥故障必须能原子释放 Outbox 租约'
+);
+$push_defer_query = (string) ($GLOBALS['wpdb']->executed_queries[$push_query_count] ?? '');
+expect_true(
+    strpos(
+        $push_defer_query,
+        'attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END'
+    ) !== false
+        && strpos($push_defer_query, 'last_error_code = %s') !== false
+        && strpos($push_defer_query, "status = 'processing'") !== false
+        && count($GLOBALS['yishu_test_scheduled']) === $push_schedule_count + 1,
+    '暂时工作者故障退避必须不消耗尝试次数、保存错误码并计划下次 sweep'
+);
+expect_true(
+    invoke_plugin_method(
+        'defer_push_outbox_without_attempt',
+        array(7, str_repeat('g', 32), 'device_crypto_unavailable')
+    ) === false,
+    '非法租约标识不得更新 Outbox'
+);
+expect_true(
+    invoke_plugin_method(
+        'defer_push_outbox_without_attempt',
+        array(7, str_repeat('a', 32), '!!!')
+    ) === false,
+    '非规范退避原因不得更新 Outbox'
+);
 
 expect_true(
     defined('YISHU_ENABLE_COLLABORATION_PHASE1')
@@ -686,6 +1007,14 @@ expect_same(
 );
 expect_same(
     array(
+        '2026-09-02-approval-v3',
+        '2026-09-04-approval-v4',
+    ),
+    Shuzijun_App_Content_API::FAN_ACCEPTED_TRANSITIONAL_NEW_CONSENT_VERSIONS,
+    '1.5.12 新同意过渡只能精确接受 Build 42 v3 与 Build 45 v4'
+);
+expect_same(
+    array(
         '2026-08-31-approval-v2',
         '2026-09-02-approval-v3',
     ),
@@ -706,7 +1035,7 @@ expect_true(
     Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
         '2026-09-04-approval-v4'
     )
-        && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
+        && Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
             '2026-09-02-approval-v3'
         )
         && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(
@@ -719,7 +1048,7 @@ expect_true(
         && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(array(
             '2026-08-31-approval-v2',
         )),
-    '新同意只能精确接受 v4，v2、v3、未知、缺失或非字符串必须失败'
+    '1.5.12 新同意只能精确接受 v3/v4，v2、未知、缺失或非字符串必须失败'
 );
 expect_true(
     Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
@@ -756,7 +1085,7 @@ foreach (array(
             ) !== false
             && strpos($new_consent_source, "'version' => \$consent_version") !== false
             && strpos($new_consent_source, "'version' => self::FAN_CONSENT_VERSION") === false,
-        '每个新同意入口都必须验证当前 v4，并保存客户端实际提交的原版本'
+        '每个新同意入口都必须验证受审 v3/v4 过渡白名单，并保存客户端实际提交的原版本'
     );
 }
 
@@ -1788,7 +2117,7 @@ $invitation_meta_source = ($invitation_meta_start === false || $invitation_meta_
     ? ''
     : substr($plugin_source, $invitation_meta_start, $invitation_meta_end - $invitation_meta_start);
 expect_true(
-    strpos($plugin_source, 'Version: 1.5.11') !== false
+    strpos($plugin_source, 'Version: 1.5.12') !== false
         && Shuzijun_App_Content_API::FAN_CAPABILITY === 'manage_yishu_fan_accounts'
         && Shuzijun_App_Content_API::FAN_INVITATION_TTL === 86400
         && Shuzijun_App_Content_API::FAN_ONBOARDING_SESSION_TTL === 600
@@ -2021,7 +2350,7 @@ expect_true(
         && strpos($plugin_source, "'https://appleid.apple.com/auth/keys'") !== false
         && strpos($plugin_source, "JWK::parseKeySet(\$filtered, 'RS256')") !== false
         && strpos($plugin_source, "(string) (\$headers->alg ?? '') !== 'RS256'") !== false
-        && strpos($plugin_source, 'Version: 1.5.11') !== false,
+        && strpos($plugin_source, 'Version: 1.5.12') !== false,
     'Apple 认证必须强制 authorization code 交换并用 RS256/JWKS 严格验证'
 );
 $apple_jwks_start = strpos($plugin_source, 'private static function fetch_apple_jwk_keys');
@@ -2324,7 +2653,11 @@ expect_true(
         && strpos($privacy_policy_source, '最长 7 天后销毁') !== false
         && strpos($privacy_policy_source, '最长 30 天保留') !== false
         && strpos($privacy_policy_source, '旧授权并发重建账号') !== false
-        && strpos($privacy_policy_source, 'Apple 是 Apple ID 登录身份验证的处理方') !== false
+        && strpos($privacy_policy_source, 'Apple 是 Apple ID 登录身份验证与通知交付的处理方') !== false
+        && strpos($privacy_policy_source, 'Apple Push Notification service（APNs）') !== false
+        && strpos($privacy_policy_source, '推送设备绑定最长 90 天') !== false
+        && strpos($privacy_policy_source, '推送内容与投递状态最长保留 30 天') !== false
+        && strpos($privacy_policy_source, '消息通知是可选功能') !== false
         && strpos($privacy_policy_source, '抖音 ID 是注册') !== false
         && strpos($privacy_policy_source, '未填写时不能完成新账号申请或获得内容访问') !== false
         && strpos($privacy_policy_source, '尚未完成 Apple 账号申请的用户也可删除') !== false
@@ -2359,8 +2692,9 @@ expect_true(
         && strpos($plugin_source, 'self::FAN_META_UUID, true') !== false
         && strpos($plugin_source, 'user_can($user, self::CAPABILITY)') !== false
         && strpos($plugin_source, 'user_can($user, self::FAN_CAPABILITY)') !== false
+        && strpos($plugin_source, 'user_can($user, self::PUSH_CAPABILITY)') !== false
         && strpos($plugin_source, 'user_can($user, self::COLLABORATION_CAPABILITY)') !== false,
-    '粉丝账号不得使用 WordPress 常规登录，Application Password 只对三类专用管理 capability 开放'
+    '粉丝账号不得使用 WordPress 常规登录，Application Password 只对四类专用管理 capability 开放'
 );
 expect_true(
     $invitation_meta_source !== ''

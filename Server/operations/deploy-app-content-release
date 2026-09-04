@@ -38,6 +38,7 @@ readonly DIRECT_VENDOR_PHP_URL="https://$HEALTH_HOST/wp-content/mu-plugins/vendo
 readonly -a PLUGIN_MODULE_RELATIVES=(
     vendor/shuzijun/app-content/trait-shuzijun-app-collaboration.php
     vendor/shuzijun/app-content/trait-shuzijun-app-fan-endpoints.php
+    vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php
     vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php
     vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php
     vendor/shuzijun/app-content/class-shuzijun-app-content-api.php
@@ -50,16 +51,17 @@ readonly JWT_README=vendor/firebase/php-jwt/README.md
 readonly JWT_README_SHA256=8e2392c48204a21ad0d73068fb273b7ec1f79ccf13eab3fe6f256382f741dc39
 readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134
 readonly PREVIOUS_RELEASE_MANIFEST_SHA256=b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1
-readonly TARGET_RELEASE_MANIFEST_SHA256=8fd7a875525e8adc10fbeae03d0726db2a08f7042ea0abda7917ef2e6f513760
+readonly TARGET_RELEASE_MANIFEST_SHA256=e40dfd6c12788e332d996d6d2d1dd123dadeec877e0cc39f705d03a1bca63ec8
 readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a
 readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0
-readonly TARGET_RELEASE_PHP_SHA256=c0d7cc5e4252a567466090ff9a9e319fce8ea0c52c51271e489c9444dfcc8836
+readonly TARGET_RELEASE_PHP_SHA256=55e5da72a1cbec1b1f5f0da6f05478756a88d61341fc4e2cb87ec2f67ae0852d
 readonly -a TARGET_RELEASE_MODULE_SHA256S=(
     e4a4b04ec50434991446bf06d127c6604959378c70007bb4bc044a9e9916327d
-    84541b0b325efe4a52d0762fd85053c06e58d45cb7aa83881b1c97b34a46c7bb
-    444284d982934b5f1aecf763938f9e8f6ff9c919b3aa3c1e763d13c3913cff6f
-    c0cec0d537c5612769a940d0fd93f388f735659376921b643de2448da84bf85b
-    ed05e2f16924b3e431dcf734ae84d4306a83b7872bd57fa05e7cd02779a5f7dd
+    dc3e0af6a7ba309c94e71d65c82f5a928e171b9726f312f5db3fa9eec48ec7b0
+    14fcd92a12c49b297cea477fb446bc600b4165fbec48e62c6e14e72ac519e835
+    4064e1fb306c342ece72b6b0ef7117d056e0510fa206e153714f02577f2c58ea
+    2383fc04dce1a208b5bc1d10ebdd15f3f3589b7c06aa914fb7c5417da0ccec80
+    e5eecc812e4fc956b16a19f376b449ebc4d0fd88ef1a55ff1e01d7ffb8b717ea
 )
 readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1
 
@@ -105,7 +107,7 @@ and contain only these release entries plus release.sha256:
   composer.json
   composer.lock
   vendor/
-    shuzijun/app-content/ (five reviewed API modules)
+    shuzijun/app-content/ (six reviewed API modules)
 EOF
 }
 
@@ -684,7 +686,7 @@ probe_candidate_collaboration_release_fuse() {
     # through stdin while PHP remains www-data with common stream, socket and
     # DNS network entry points disabled and filesystem-confined. Exact
     # per-file hashes plus decimal byte framing prevent source-boundary
-    # ambiguity. The modular target is evaluated as four traits, its class,
+    # ambiguity. The modular target is evaluated as five traits, its class,
     # then the thin entrypoint. Reviewed require_once statements are removed
     # only inside this evaluator because the root-only bundle deliberately sits
     # outside the PHP worker's open_basedir. Runtime loading is unchanged.
@@ -703,7 +705,7 @@ probe_candidate_collaboration_release_fuse() {
         $sourceHashes = explode(",", $argv[4]);
         if (count($sizeValues) !== count($sourceHashes)
             || ($sourceMode === "legacy" && count($sizeValues) !== 1)
-            || ($sourceMode === "modular" && count($sizeValues) !== 6)
+            || ($sourceMode === "modular" && count($sizeValues) !== 7)
             || ($sourceMode !== "legacy" && $sourceMode !== "modular")) {
             exit(26);
         }
@@ -733,9 +735,9 @@ probe_candidate_collaboration_release_fuse() {
             $classSource = "";
             $entrypoint = $sources[0];
         } else {
-            $traitSources = array_slice($sources, 0, 4);
-            $classSource = $sources[4];
-            $entrypoint = $sources[5];
+            $traitSources = array_slice($sources, 0, 5);
+            $classSource = $sources[5];
+            $entrypoint = $sources[6];
             $quote = chr(39);
             $entryLoader = "require_once __DIR__ . " . $quote
                 . "/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php"
@@ -745,6 +747,7 @@ probe_candidate_collaboration_release_fuse() {
             $classLoaders = array(
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-collaboration.php" . $quote . ";",
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-fan-endpoints.php" . $quote . ";",
+                "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-push-notifications.php" . $quote . ";",
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-fan-identity.php" . $quote . ";",
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-content-delivery.php" . $quote . ";",
             );

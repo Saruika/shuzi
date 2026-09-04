@@ -5,7 +5,7 @@ from pathlib import Path
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 STANDBY_SEEDER = Path("Server/operations/seed-standby-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE_RECORD = Path("Server/releases/v1.5.11-build43.md")
+RELEASE_RECORD = Path("Server/releases/v1.3.33-build45.md")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
 SERVER_ROOT = Path("Server")
@@ -17,20 +17,22 @@ PLUGIN_IMPLEMENTATION = (
 PLUGIN_MODULES = (
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-collaboration.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-fan-endpoints.php",
+    SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php",
     PLUGIN_IMPLEMENTATION,
 )
 LEGACY_MANIFEST_SHA256 = "64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134"
 PREVIOUS_MANIFEST_SHA256 = "b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1"
-TARGET_MANIFEST_SHA256 = "8fd7a875525e8adc10fbeae03d0726db2a08f7042ea0abda7917ef2e6f513760"
-TARGET_PLUGIN_SHA256 = "c0d7cc5e4252a567466090ff9a9e319fce8ea0c52c51271e489c9444dfcc8836"
+TARGET_MANIFEST_SHA256 = "e40dfd6c12788e332d996d6d2d1dd123dadeec877e0cc39f705d03a1bca63ec8"
+TARGET_PLUGIN_SHA256 = "55e5da72a1cbec1b1f5f0da6f05478756a88d61341fc4e2cb87ec2f67ae0852d"
 TARGET_MODULE_SHA256S = (
     "e4a4b04ec50434991446bf06d127c6604959378c70007bb4bc044a9e9916327d",
-    "84541b0b325efe4a52d0762fd85053c06e58d45cb7aa83881b1c97b34a46c7bb",
-    "444284d982934b5f1aecf763938f9e8f6ff9c919b3aa3c1e763d13c3913cff6f",
-    "c0cec0d537c5612769a940d0fd93f388f735659376921b643de2448da84bf85b",
-    "ed05e2f16924b3e431dcf734ae84d4306a83b7872bd57fa05e7cd02779a5f7dd",
+    "dc3e0af6a7ba309c94e71d65c82f5a928e171b9726f312f5db3fa9eec48ec7b0",
+    "14fcd92a12c49b297cea477fb446bc600b4165fbec48e62c6e14e72ac519e835",
+    "4064e1fb306c342ece72b6b0ef7117d056e0510fa206e153714f02577f2c58ea",
+    "2383fc04dce1a208b5bc1d10ebdd15f3f3589b7c06aa914fb7c5417da0ccec80",
+    "e5eecc812e4fc956b16a19f376b449ebc4d0fd88ef1a55ff1e01d7ffb8b717ea",
 )
 
 
@@ -155,11 +157,13 @@ def main() -> None:
     assert "final class Shuzijun_App_Content_API" in plugin_implementation
     assert "Shuzijun_App_Content_API::init();" not in plugin_implementation
     assert len(plugin_entry.splitlines()) < 25
+    assert len(plugin_modules) == 6
+    assert len(plugin_modules[:-1]) == 5
     assert max(len(source.splitlines()) for source in plugin_modules) < 4_000
     assert sum(len(source.splitlines()) for source in plugin_modules) > 8_000
-    assert plugin_implementation.count("require_once __DIR__ . '/trait-") == 4
-    assert plugin_implementation.count("    use Shuzijun_App_") == 4
-    for trait_source in plugin_modules[:4]:
+    assert plugin_implementation.count("require_once __DIR__ . '/trait-") == 5
+    assert plugin_implementation.count("    use Shuzijun_App_") == 5
+    for trait_source in plugin_modules[:5]:
         assert trait_source.count("trait Shuzijun_App_") == 1
         assert "final class Shuzijun_App_Content_API" not in trait_source
         assert "Shuzijun_App_Content_API::init();" not in trait_source
@@ -171,11 +175,12 @@ def main() -> None:
     release_trust_values = (
         f"RELEASE_MANIFEST_SHA256={TARGET_MANIFEST_SHA256}",
         f"PLUGIN_ENTRY_SHA256={TARGET_PLUGIN_SHA256}",
-        f"CORE_CLASS_SHA256={TARGET_MODULE_SHA256S[4]}",
+        f"CORE_CLASS_SHA256={TARGET_MODULE_SHA256S[5]}",
         f"COLLABORATION_TRAIT_SHA256={TARGET_MODULE_SHA256S[0]}",
         f"FAN_ENDPOINTS_TRAIT_SHA256={TARGET_MODULE_SHA256S[1]}",
-        f"FAN_IDENTITY_TRAIT_SHA256={TARGET_MODULE_SHA256S[2]}",
-        f"CONTENT_DELIVERY_TRAIT_SHA256={TARGET_MODULE_SHA256S[3]}",
+        f"PUSH_NOTIFICATIONS_TRAIT_SHA256={TARGET_MODULE_SHA256S[2]}",
+        f"FAN_IDENTITY_TRAIT_SHA256={TARGET_MODULE_SHA256S[3]}",
+        f"CONTENT_DELIVERY_TRAIT_SHA256={TARGET_MODULE_SHA256S[4]}",
         f"PREVIOUS_LIVE_MANIFEST_SHA256={PREVIOUS_MANIFEST_SHA256}",
     )
     for trust_value in release_trust_values:
@@ -220,10 +225,10 @@ def main() -> None:
         "readonly BACKUP_MANIFEST_STATE_NAME=live-release-manifest.state",
         "readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134",
         "readonly PREVIOUS_RELEASE_MANIFEST_SHA256=b15fab2426d7fb7e11e40361c8a22933b5950e6e2e05406a576924cd9a56b9d1",
-        "readonly TARGET_RELEASE_MANIFEST_SHA256=8fd7a875525e8adc10fbeae03d0726db2a08f7042ea0abda7917ef2e6f513760",
+        "readonly TARGET_RELEASE_MANIFEST_SHA256=e40dfd6c12788e332d996d6d2d1dd123dadeec877e0cc39f705d03a1bca63ec8",
         "readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a",
         "readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0",
-        "readonly TARGET_RELEASE_PHP_SHA256=c0d7cc5e4252a567466090ff9a9e319fce8ea0c52c51271e489c9444dfcc8836",
+        "readonly TARGET_RELEASE_PHP_SHA256=55e5da72a1cbec1b1f5f0da6f05478756a88d61341fc4e2cb87ec2f67ae0852d",
         "readonly -a TARGET_RELEASE_MODULE_SHA256S=(",
         "readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1",
     ):
@@ -411,11 +416,11 @@ def main() -> None:
         '$sourceMode = $argv[2];',
         '$sizeValues = explode(",", $argv[3]);',
         '$sourceHashes = explode(",", $argv[4]);',
-        '$sourceMode === "modular" && count($sizeValues) !== 6',
+        '$sourceMode === "modular" && count($sizeValues) !== 7',
         'hash_equals($sourceHashes[$index], hash("sha256", $source))',
-        '$traitSources = array_slice($sources, 0, 4);',
-        '$classSource = $sources[4];',
-        '$entrypoint = $sources[5];',
+        '$traitSources = array_slice($sources, 0, 5);',
+        '$classSource = $sources[5];',
+        '$entrypoint = $sources[6];',
         '$quote = chr(39);',
         'substr_count($entrypoint, $entryLoader) !== 1',
         'foreach ($classLoaders as $classLoader)',

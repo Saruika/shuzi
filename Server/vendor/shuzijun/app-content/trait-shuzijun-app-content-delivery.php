@@ -789,4 +789,367 @@ trait Shuzijun_App_Content_Delivery {
     private static function text_length($value) {
         return function_exists('mb_strlen') ? mb_strlen((string) $value, 'UTF-8') : strlen((string) $value);
     }
+    private static function apns_provider_configuration() {
+        if (self::apple_test_mode_enabled()) {
+            $test = apply_filters('yishu_apns_provider_configuration', null);
+            if (is_array($test)
+                && preg_match('/^[A-Z0-9]{10}$/D', (string) ($test['keyID'] ?? '')) === 1
+                && preg_match('/^[A-Z0-9]{10}$/D', (string) ($test['teamID'] ?? '')) === 1
+                && !empty($test['test'])) {
+                return $test;
+            }
+        }
+        $key_id = getenv('YISHU_APNS_KEY_ID');
+        $team_id = getenv('YISHU_APNS_TEAM_ID');
+        $key_id = is_string($key_id) ? trim($key_id) : '';
+        $team_id = is_string($team_id) ? trim($team_id) : '';
+        if (preg_match('/^[A-Z0-9]{10}$/D', $key_id) !== 1
+            || preg_match('/^[A-Z0-9]{10}$/D', $team_id) !== 1) {
+            return new WP_Error(
+                'push_provider_unavailable',
+                'APNs 提供者配置尚未完成。',
+                array('status' => 503)
+            );
+        }
+        $private_key = self::push_read_secure_file('YISHU_APNS_PRIVATE_KEY_PATH', 8192);
+        if (is_wp_error($private_key)) {
+            return new WP_Error(
+                'push_provider_unavailable',
+                'APNs 提供者配置尚未完成。',
+                array('status' => 503)
+            );
+        }
+        $handle = function_exists('openssl_pkey_get_private')
+            ? @openssl_pkey_get_private($private_key)
+            : false;
+        $details = $handle ? @openssl_pkey_get_details($handle) : false;
+        if (function_exists('sodium_memzero')) { sodium_memzero($private_key); }
+        if (!$handle || !is_array($details)
+            || (int) ($details['type'] ?? -1) !== OPENSSL_KEYTYPE_EC
+            || (int) ($details['bits'] ?? 0) !== 256
+            || !in_array(
+                strtolower((string) ($details['ec']['curve_name'] ?? '')),
+                array('prime256v1', 'secp256r1'),
+                true
+            )) {
+            return new WP_Error(
+                'push_provider_unavailable',
+                'APNs 提供者密钥无效。',
+                array('status' => 503)
+            );
+        }
+        return array('keyID' => $key_id, 'teamID' => $team_id);
+    }
+
+    private static function apns_provider_token() {
+        $cached = self::$apns_provider_token_cache;
+        if (is_array($cached) && is_string($cached['token'] ?? null)
+            && (int) ($cached['expires'] ?? 0) > time() + 60) {
+            return (string) $cached['token'];
+        }
+        $configuration = self::apns_provider_configuration();
+        if (is_wp_error($configuration)) { return $configuration; }
+        if (!empty($configuration['test'])) { return 'test-provider-token'; }
+        $cache_name = 'yishu_apns_jwt_' . substr(hash(
+            'sha256',
+            (string) $configuration['keyID'] . '|' . (string) $configuration['teamID']
+        ), 0, 20);
+        $cached_token = self::read_encrypted_apns_provider_token_cache($cache_name);
+        if ($cached_token !== '') { return $cached_token; }
+        $lock = self::acquire_named_fan_lock('apns_jwt', $cache_name);
+        if (is_wp_error($lock)) {
+            return new WP_Error(
+                'push_provider_unavailable',
+                'APNs 提供者签名正在刷新，请稍后重试。',
+                array('status' => 503)
+            );
+        }
+        try {
+            $cached_token = self::read_encrypted_apns_provider_token_cache($cache_name);
+            if ($cached_token !== '') { return $cached_token; }
+            $token = self::generate_apns_provider_token($configuration);
+            if (is_wp_error($token)) { return $token; }
+            $expires = time() + 3000;
+            $encrypted = self::encrypt_apns_provider_token_cache($token);
+            if (is_wp_error($encrypted)
+                || !set_transient($cache_name, array(
+                    'version' => 1,
+                    'encryptedToken' => $encrypted,
+                    'expires' => $expires,
+                ), 3000)) {
+                return new WP_Error(
+                    'push_provider_unavailable',
+                    'APNs 提供者签名缓存暂时不可用。',
+                    array('status' => 503)
+                );
+            }
+            self::$apns_provider_token_cache = array(
+                'token' => $token,
+                'expires' => $expires,
+            );
+            return $token;
+        } finally {
+            self::release_named_fan_lock($lock);
+        }
+    }
+
+    private static function generate_apns_provider_token($configuration) {
+        if (!is_array($configuration)
+            || preg_match('/^[A-Z0-9]{10}$/D', (string) ($configuration['keyID'] ?? '')) !== 1
+            || preg_match('/^[A-Z0-9]{10}$/D', (string) ($configuration['teamID'] ?? '')) !== 1) {
+            return new WP_Error(
+                'push_provider_unavailable',
+                'APNs 提供者配置无效。',
+                array('status' => 503)
+            );
+        }
+        $private_key = self::push_read_secure_file('YISHU_APNS_PRIVATE_KEY_PATH', 8192);
+        if (is_wp_error($private_key)) { return $private_key; }
+        $header = self::base64url_encode(wp_json_encode(array(
+            'alg' => 'ES256',
+            'kid' => (string) $configuration['keyID'],
+        ), JSON_UNESCAPED_SLASHES));
+        $claims = self::base64url_encode(wp_json_encode(array(
+            'iss' => (string) $configuration['teamID'],
+            'iat' => time(),
+        ), JSON_UNESCAPED_SLASHES));
+        $signing_input = $header . '.' . $claims;
+        $key = @openssl_pkey_get_private($private_key);
+        if (function_exists('sodium_memzero')) { sodium_memzero($private_key); }
+        $signature = '';
+        $signed = $key && openssl_sign($signing_input, $signature, $key, OPENSSL_ALGO_SHA256);
+        $raw = $signed ? self::apns_der_signature_to_raw($signature) : '';
+        if (is_string($raw) && strlen($raw) === 64) {
+            return $signing_input . '.' . self::base64url_encode($raw);
+        }
+        return new WP_Error(
+            'push_provider_unavailable',
+            'APNs 提供者签名暂时不可用。',
+            array('status' => 503)
+        );
+    }
+
+    private static function apns_provider_cache_encryption_key() {
+        $master = self::push_data_master_key();
+        if (is_wp_error($master)) { return $master; }
+        $key = hash_hkdf(
+            'sha256',
+            $master,
+            SODIUM_CRYPTO_SECRETBOX_KEYBYTES,
+            'yishu/apns-provider-cache/v1',
+            hash('sha256', self::PUSH_TOPIC, true)
+        );
+        sodium_memzero($master);
+        return $key;
+    }
+
+    private static function encrypt_apns_provider_token_cache($token) {
+        $token = (string) $token;
+        if (strlen($token) < 32 || strlen($token) > 2048) {
+            return new WP_Error('push_provider_unavailable', 'APNs 提供者签名无效。', array('status' => 503));
+        }
+        $key = self::apns_provider_cache_encryption_key();
+        if (is_wp_error($key)) { return $key; }
+        try {
+            $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+            $ciphertext = sodium_crypto_secretbox($token, $nonce, $key);
+            $result = array(
+                'nonce' => self::base64url_encode($nonce),
+                'ciphertext' => self::base64url_encode($ciphertext),
+            );
+        } catch (Throwable $error) {
+            $result = new WP_Error('push_provider_unavailable', 'APNs 提供者签名缓存不可用。', array('status' => 503));
+        }
+        sodium_memzero($key);
+        return $result;
+    }
+
+    private static function read_encrypted_apns_provider_token_cache($cache_name) {
+        $record = get_transient((string) $cache_name);
+        if (!is_array($record) || (int) ($record['version'] ?? 0) !== 1
+            || (int) ($record['expires'] ?? 0) <= time() + 60
+            || !is_array($record['encryptedToken'] ?? null)) {
+            return '';
+        }
+        $encrypted = $record['encryptedToken'];
+        $decode = static function ($value) {
+            if (!is_string($value) || preg_match('/^[A-Za-z0-9_-]+$/D', $value) !== 1) {
+                return false;
+            }
+            $padding = (4 - (strlen($value) % 4)) % 4;
+            return base64_decode(strtr($value . str_repeat('=', $padding), '-_', '+/'), true);
+        };
+        $nonce = $decode($encrypted['nonce'] ?? '');
+        $ciphertext = $decode($encrypted['ciphertext'] ?? '');
+        $key = self::apns_provider_cache_encryption_key();
+        if (!is_string($nonce) || strlen($nonce) !== SODIUM_CRYPTO_SECRETBOX_NONCEBYTES
+            || !is_string($ciphertext)
+            || strlen($ciphertext) < 32 + SODIUM_CRYPTO_SECRETBOX_MACBYTES
+            || strlen($ciphertext) > 2048 + SODIUM_CRYPTO_SECRETBOX_MACBYTES
+            || is_wp_error($key)) {
+            if (is_string($key)) { sodium_memzero($key); }
+            return '';
+        }
+        try {
+            $token = sodium_crypto_secretbox_open($ciphertext, $nonce, $key);
+        } catch (Throwable $error) {
+            $token = false;
+        }
+        sodium_memzero($key);
+        if (!is_string($token) || strlen($token) < 32 || strlen($token) > 2048
+            || preg_match('/^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$/D', $token) !== 1) {
+            return '';
+        }
+        self::$apns_provider_token_cache = array(
+            'token' => $token,
+            'expires' => (int) $record['expires'],
+        );
+        return $token;
+    }
+
+    private static function base64url_encode($value) {
+        return rtrim(strtr(base64_encode((string) $value), '+/', '-_'), '=');
+    }
+
+    private static function apns_der_signature_to_raw($der) {
+        $der = (string) $der;
+        $offset = 0;
+        $read_length = static function () use (&$der, &$offset) {
+            if ($offset >= strlen($der)) { return false; }
+            $first = ord($der[$offset++]);
+            if (($first & 0x80) === 0) { return $first; }
+            $bytes = $first & 0x7f;
+            if ($bytes < 1 || $bytes > 2 || $offset + $bytes > strlen($der)) { return false; }
+            $length = 0;
+            for ($index = 0; $index < $bytes; $index++) {
+                $length = ($length << 8) | ord($der[$offset++]);
+            }
+            return $length;
+        };
+        if (strlen($der) < 8 || ord($der[$offset++]) !== 0x30) { return ''; }
+        $sequence_length = $read_length();
+        if ($sequence_length === false || $offset + $sequence_length !== strlen($der)) { return ''; }
+        $parts = array();
+        for ($part = 0; $part < 2; $part++) {
+            if ($offset >= strlen($der) || ord($der[$offset++]) !== 0x02) { return ''; }
+            $length = $read_length();
+            if ($length === false || $length < 1 || $length > 33
+                || $offset + $length > strlen($der)) { return ''; }
+            $integer = substr($der, $offset, $length);
+            $offset += $length;
+            $integer = ltrim($integer, "\x00");
+            if (strlen($integer) > 32) { return ''; }
+            $parts[] = str_pad($integer, 32, "\x00", STR_PAD_LEFT);
+        }
+        return $offset === strlen($der) ? implode('', $parts) : '';
+    }
+
+    private static function send_push_to_apns($device_token, $notification) {
+        $device_token = strtolower((string) $device_token);
+        $deliver_before = is_array($notification) && is_scalar($notification['deliver_before'] ?? null)
+            ? (string) $notification['deliver_before']
+            : '';
+        if (!self::valid_push_device_token($device_token)
+            || !is_array($notification) || !self::is_uuid_v4($notification['public_id'] ?? '')
+            || preg_match('/^[1-9][0-9]{0,9}$/D', $deliver_before) !== 1) {
+            return array('outcome' => 'dead', 'code' => 'payload_invalid');
+        }
+        $apns_expiration = (int) $deliver_before;
+        if ($apns_expiration <= time()) {
+            return array('outcome' => 'dead', 'code' => 'expired');
+        }
+        if (self::apple_test_mode_enabled()) {
+            $test = apply_filters(
+                'yishu_apns_delivery_result',
+                null,
+                array(
+                    'notificationID' => (string) $notification['public_id'],
+                    'topic' => self::PUSH_TOPIC,
+                )
+            );
+            if (is_array($test) && isset($test['outcome'], $test['code'])) { return $test; }
+        }
+        $provider_token = self::apns_provider_token();
+        if (is_wp_error($provider_token)) {
+            return array('outcome' => 'retry', 'code' => 'provider_unavailable');
+        }
+        if (!function_exists('curl_init') || !defined('CURL_HTTP_VERSION_2TLS')) {
+            return array('outcome' => 'retry', 'code' => 'http2_unavailable');
+        }
+        $payload = wp_json_encode(array('aps' => array(
+            'alert' => array(
+                'title' => (string) ($notification['title'] ?? ''),
+                'body' => (string) ($notification['body'] ?? ''),
+            ),
+            'sound' => 'default',
+        )), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if (!is_string($payload) || strlen($payload) > 4096) {
+            return array('outcome' => 'dead', 'code' => 'payload_too_large');
+        }
+        $handle = curl_init(self::PUSH_PRODUCTION_HOST . '/3/device/' . $device_token);
+        if (!$handle) { return array('outcome' => 'retry', 'code' => 'transport_unavailable'); }
+        // This absolute deadline was fixed when the notification was created.
+        // A delayed worker/provider recovery must not grant another 24 hours.
+        $options = array(
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $payload,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADER => false,
+            CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2TLS,
+            CURLOPT_CONNECTTIMEOUT => 8,
+            CURLOPT_TIMEOUT => 15,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_HTTPHEADER => array(
+                'authorization: bearer ' . $provider_token,
+                'apns-topic: ' . self::PUSH_TOPIC,
+                'apns-push-type: alert',
+                'apns-priority: 10',
+                'apns-expiration: ' . (string) $apns_expiration,
+                'apns-collapse-id: ' . (string) $notification['public_id'],
+                'content-type: application/json',
+            ),
+        );
+        if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTPS')) {
+            $options[CURLOPT_PROTOCOLS] = CURLPROTO_HTTPS;
+        }
+        curl_setopt_array($handle, $options);
+        $response_body = curl_exec($handle);
+        $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+        $transport_error = curl_errno($handle) !== 0;
+        curl_close($handle);
+        if ($transport_error) { return array('outcome' => 'retry', 'code' => 'transport_error'); }
+        $decoded = is_string($response_body) && strlen($response_body) <= 4096
+            ? json_decode($response_body, true)
+            : null;
+        $reason = is_array($decoded) ? sanitize_key((string) ($decoded['reason'] ?? '')) : '';
+        $reason = preg_match('/^[a-z0-9_-]{1,64}$/D', $reason) === 1 ? $reason : 'apns_error';
+        if ($status === 200) { return array('outcome' => 'sent', 'code' => ''); }
+        if ($status === 410 || ($status === 400
+            && in_array($reason, array('baddevicetoken', 'devicetokennotfortopic'), true))) {
+            return array('outcome' => 'invalid', 'code' => $reason);
+        }
+        if ($status === 403
+            && in_array($reason, array('expiredprovidertoken', 'invalidprovidertoken'), true)) {
+            self::clear_apns_provider_token_cache();
+            return array('outcome' => 'retry', 'code' => $reason);
+        }
+        if (in_array($status, array(408, 429, 500, 503), true)) {
+            return array('outcome' => 'retry', 'code' => $reason);
+        }
+        return array('outcome' => 'dead', 'code' => $reason);
+    }
+
+    private static function clear_apns_provider_token_cache() {
+        $configuration = self::apns_provider_configuration();
+        self::$apns_provider_token_cache = null;
+        if (is_wp_error($configuration) || !empty($configuration['test'])) { return; }
+        $cache_name = 'yishu_apns_jwt_' . substr(hash(
+            'sha256',
+            (string) $configuration['keyID'] . '|' . (string) $configuration['teamID']
+        ), 0, 20);
+        delete_transient($cache_name);
+    }
+
 }

@@ -471,9 +471,51 @@ enum CollaborationRequestStatus: String, Codable, CaseIterable, Identifiable {
 struct AppFeatureCapabilities: Decodable, Equatable {
     let collaborationSubmissionEnabled: Bool
     let collaborationInboxEnabled: Bool
+    let pushNotificationsEnabled: Bool
+    let canSendPushNotifications: Bool
+
+    init(
+        collaborationSubmissionEnabled: Bool,
+        collaborationInboxEnabled: Bool,
+        pushNotificationsEnabled: Bool = false,
+        canSendPushNotifications: Bool = false
+    ) {
+        self.collaborationSubmissionEnabled = collaborationSubmissionEnabled
+        self.collaborationInboxEnabled = collaborationInboxEnabled
+        self.pushNotificationsEnabled = pushNotificationsEnabled
+        self.canSendPushNotifications = canSendPushNotifications
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case collaborationSubmissionEnabled
+        case collaborationInboxEnabled
+        case pushNotificationsEnabled
+        case canSendPushNotifications
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        collaborationSubmissionEnabled = try container.decode(
+            Bool.self,
+            forKey: .collaborationSubmissionEnabled
+        )
+        collaborationInboxEnabled = try container.decode(
+            Bool.self,
+            forKey: .collaborationInboxEnabled
+        )
+        pushNotificationsEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .pushNotificationsEnabled
+        ) ?? false
+        canSendPushNotifications = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .canSendPushNotifications
+        ) ?? false
+    }
 
     var isConsistent: Bool {
         collaborationSubmissionEnabled == collaborationInboxEnabled
+            && (!canSendPushNotifications || pushNotificationsEnabled)
     }
 }
 

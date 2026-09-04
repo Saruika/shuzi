@@ -2,11 +2,13 @@ import SwiftUI
 
 @main
 struct YishuApp: App {
+    @UIApplicationDelegateAdaptor(YishuApplicationDelegate.self) private var applicationDelegate
     @StateObject private var portfolioStore = PortfolioStore()
     @StateObject private var favorites = FavoritesStore()
     @StateObject private var recentlyViewed = RecentlyViewedStore()
     @StateObject private var adminSession = AdminSessionStore()
     @StateObject private var fanAccount = FanAccountStore()
+    @StateObject private var pushNotifications = PushNotificationCoordinator.shared
     @State private var localWeather = LocalWeatherStore()
 
     init() {
@@ -57,6 +59,7 @@ struct YishuApp: App {
             .environmentObject(recentlyViewed)
             .environmentObject(adminSession)
             .environmentObject(fanAccount)
+            .environmentObject(pushNotifications)
             .environment(localWeather)
     }
 }

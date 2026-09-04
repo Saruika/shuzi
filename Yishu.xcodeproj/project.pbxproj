@@ -34,6 +34,7 @@
 		10000000000000000000001B /* FanAccountView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001B /* FanAccountView.swift */; };
 		10000000000000000000001C /* PrivacyPolicyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001C /* PrivacyPolicyView.swift */; };
 		10000000000000000000001D /* AppleSignInService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001D /* AppleSignInService.swift */; };
+		10000000000000000000001E /* PushNotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001E /* PushNotificationService.swift */; };
 		A10000000000000000000001 /* ContentAndAccessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* ContentAndAccessTests.swift */; };
 		A10000000000000000000002 /* UserScopedLibraryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* UserScopedLibraryTests.swift */; };
 		B10000000000000000000001 /* YishuUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* YishuUITests.swift */; };
@@ -84,6 +85,7 @@
 		20000000000000000000001B /* FanAccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FanAccountView.swift; sourceTree = "<group>"; };
 		20000000000000000000001C /* PrivacyPolicyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrivacyPolicyView.swift; sourceTree = "<group>"; };
 		20000000000000000000001D /* AppleSignInService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSignInService.swift; sourceTree = "<group>"; };
+		20000000000000000000001E /* PushNotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationService.swift; sourceTree = "<group>"; };
 		200000000000000000000099 /* Yishu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Yishu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000001 /* ContentAndAccessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentAndAccessTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* UserScopedLibraryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserScopedLibraryTests.swift; sourceTree = "<group>"; };
@@ -164,6 +166,7 @@
 				20000000000000000000000F /* AdminSessionStore.swift */,
 				20000000000000000000001A /* FanAccountStore.swift */,
 				20000000000000000000001D /* AppleSignInService.swift */,
+				20000000000000000000001E /* PushNotificationService.swift */,
 				200000000000000000000011 /* LocalWeatherStore.swift */,
 			);
 			path = Yishu/Services;
@@ -380,6 +383,7 @@
 				10000000000000000000001B /* FanAccountView.swift in Sources */,
 				10000000000000000000001C /* PrivacyPolicyView.swift in Sources */,
 				10000000000000000000001D /* AppleSignInService.swift in Sources */,
+				10000000000000000000001E /* PushNotificationService.swift in Sources */,
 				100000000000000000000001 /* YishuApp.swift in Sources */,
 				100000000000000000000002 /* AppTheme.swift in Sources */,
 				100000000000000000000003 /* Portfolio.swift in Sources */,
@@ -495,7 +499,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 44;
+				CURRENT_PROJECT_VERSION = 45;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -512,7 +516,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.32;
+				MARKETING_VERSION = 1.3.33;
 				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -529,7 +533,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 44;
+				CURRENT_PROJECT_VERSION = 45;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -546,7 +550,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.32;
+				MARKETING_VERSION = 1.3.33;
 				PRODUCT_BUNDLE_IDENTIFIER = cn.com.shuzijun.yishu;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

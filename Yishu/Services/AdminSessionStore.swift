@@ -19,6 +19,7 @@ struct UploadedMedia: Decodable {
 enum AdminAPIError: LocalizedError {
     case invalidCredentials
     case insufficientPermission
+    case pushPermissionRequired
     case invalidResponse
     case invalidFile
     case fileTooLarge
@@ -32,6 +33,8 @@ enum AdminAPIError: LocalizedError {
             return "管理员账号或访问码不正确。"
         case .insufficientPermission:
             return "账号已验证，但没有内容管理权限。"
+        case .pushPermissionRequired:
+            return "当前管理员没有定向推送权限。"
         case .invalidResponse:
             return "服务器返回了无法识别的数据。"
         case .invalidFile:
@@ -44,6 +47,72 @@ enum AdminAPIError: LocalizedError {
             return "无法安全连接内容服务器，请检查网络后重试。"
         case .server(let message):
             return message
+        }
+    }
+}
+
+struct AdminFanDirectoryQuery: Equatable {
+    static let maximumSearchLength = 80
+    static let maximumPage = 10_000
+    static let maximumPerPage = 100
+
+    let search: String?
+    let page: Int
+    let perPage: Int
+
+    init(search rawSearch: String = "", page: Int = 1, perPage: Int = 100) throws {
+        let search = rawSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...Self.maximumPage).contains(page),
+              (1...Self.maximumPerPage).contains(perPage),
+              search.count <= Self.maximumSearchLength,
+              !search.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw AdminAPIError.invalidResponse
+        }
+        self.search = search.isEmpty ? nil : search
+        self.page = page
+        self.perPage = perPage
+    }
+
+    var queryItems: [URLQueryItem] {
+        var items = [
+            URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "perPage", value: String(perPage)),
+        ]
+        if let search {
+            items.append(URLQueryItem(name: "search", value: search))
+        }
+        return items
+    }
+}
+
+enum AdminQueryItemPolicy {
+    static func areValid(_ items: [URLQueryItem]) -> Bool {
+        guard items.count <= 3,
+              Set(items.map(\.name)).count == items.count else { return false }
+        return items.allSatisfy { item in
+            guard let value = item.value else { return false }
+            switch item.name {
+            case "page":
+                return value.allSatisfy(\.isNumber)
+                    && (1...100_000).contains(Int(value) ?? 0)
+            case "perPage":
+                return value.allSatisfy(\.isNumber)
+                    && (1...100).contains(Int(value) ?? 0)
+            case "status":
+                return value.range(
+                    of: #"^[a-z0-9]{1,20}$"#,
+                    options: .regularExpression
+                ) != nil
+            case "search":
+                return !value.isEmpty
+                    && value == value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    && value.count <= AdminFanDirectoryQuery.maximumSearchLength
+                    && !value.unicodeScalars.contains(
+                        where: CharacterSet.controlCharacters.contains
+                    )
+            default:
+                return false
+            }
         }
     }
 }
@@ -281,6 +350,109 @@ enum AdminFanInvitationValidation {
             && Set(response.invitations.map(\.identityCode)).count == requestedCount
             && Set(response.invitations.map(\.temporaryPassword)).count == requestedCount
     }
+}
+
+struct AdminPushNotificationContent: Equatable {
+    let title: String
+    let body: String
+    let sensitive: Bool
+}
+
+enum AdminPushNotificationValidation {
+    static let titleLimit = 60
+    static let bodyLimit = 240
+    static let privateTitle = "Hi，梳子"
+    static let privateBody = "有新消息，请登录查看"
+
+    static func normalized(
+        title: String,
+        body: String,
+        sensitive: Bool
+    ) -> AdminPushNotificationContent? {
+        if sensitive {
+            return AdminPushNotificationContent(
+                title: privateTitle,
+                body: privateBody,
+                sensitive: true
+            )
+        }
+        guard containsOnlySafeText(title), containsOnlySafeText(body) else { return nil }
+        let cleanTitle = collapsedWhitespace(title)
+        let cleanBody = collapsedWhitespace(body)
+        guard (1...titleLimit).contains(cleanTitle.count),
+              (1...bodyLimit).contains(cleanBody.count) else { return nil }
+        return AdminPushNotificationContent(
+            title: cleanTitle,
+            body: cleanBody,
+            sensitive: sensitive
+        )
+    }
+
+    static func isValidResponse(
+        _ response: AdminPushNotificationResponse,
+        expectedRecipientCount: Int
+    ) -> Bool {
+        guard let uuid = UUID(uuidString: response.notificationID) else { return false }
+        return uuid.uuidString.lowercased() == response.notificationID
+            && response.status == "queued"
+            && response.recipientCount == expectedRecipientCount
+            && (0...1_600).contains(response.deviceCount)
+    }
+
+    private static func collapsedWhitespace(_ value: String) -> String {
+        value.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private static func containsOnlySafeText(_ value: String) -> Bool {
+        value.unicodeScalars.allSatisfy { scalar in
+            !CharacterSet.controlCharacters.contains(scalar)
+                || scalar.value == 10
+                || scalar.value == 13
+                || scalar.value == 9
+        }
+    }
+}
+
+enum AdminPushConfirmationPolicy {
+    static func requiresSecondConfirmation(
+        for content: AdminPushNotificationContent
+    ) -> Bool {
+        !content.sensitive
+    }
+
+    static func summary(
+        recipient: String,
+        content: AdminPushNotificationContent
+    ) -> String {
+        "收件人：\(recipient)\n标题：\(content.title)\n正文：\(content.body)"
+    }
+}
+
+enum AdminTargetedPushRecipientPolicy {
+    static func isEligible(
+        status: String,
+        requiresIdentityCompletion: Bool
+    ) -> Bool {
+        guard !requiresIdentityCompletion,
+              let status = FanAccountStatus(rawValue: status) else { return false }
+        return status == .pending || status == .active
+    }
+
+    static func isEligible(_ user: AdminFanUser) -> Bool {
+        isEligible(
+            status: user.status,
+            requiresIdentityCompletion: user.requiresIdentityCompletion
+        )
+    }
+}
+
+struct AdminPushNotificationResponse: Decodable, Equatable {
+    let notificationID: String
+    let status: String
+    let recipientCount: Int
+    let deviceCount: Int
 }
 
 @MainActor
@@ -534,17 +706,26 @@ final class AdminSessionStore: ObservableObject {
         return result
     }
 
-    func fetchFanDirectory() async throws -> AdminFanDirectory {
+    func fetchFanDirectory(
+        search: String = "",
+        page: Int = 1,
+        perPage: Int = 100
+    ) async throws -> AdminFanDirectory {
+        let query = try AdminFanDirectoryQuery(
+            search: search,
+            page: page,
+            perPage: perPage
+        )
         let directory: AdminFanDirectory = try await authorizedJSON(
             path: "shuzijun/v1/app-admin/fans",
-            method: "GET"
+            method: "GET",
+            queryItems: query.queryItems
         )
-        guard directory.users.count <= 100,
-              directory.permissionCatalog.count <= 20,
-              Set(directory.users.map(\.userID)).count == directory.users.count,
-              Set(directory.permissionCatalog.map(\.code)).count
-                == directory.permissionCatalog.count,
-              directory.users.allSatisfy(FanAccountValidation.isValidAdminFanUser) else {
+        guard AdminFanDirectoryValidation.isValid(
+            directory,
+            requestedPage: query.page,
+            requestedPerPage: query.perPage
+        ) else {
             throw AdminAPIError.invalidResponse
         }
         return directory
@@ -632,6 +813,43 @@ final class AdminSessionStore: ObservableObject {
             throw AdminAPIError.invalidResponse
         }
         return response.user
+    }
+
+    func sendPushNotification(
+        toUserID userID: String,
+        title: String,
+        body: String,
+        sensitive: Bool = true,
+        idempotencyKey: UUID = UUID()
+    ) async throws -> AdminPushNotificationResponse {
+        guard let canonicalUserID = UUID(uuidString: userID)?.uuidString.lowercased(),
+              canonicalUserID == userID.lowercased(),
+        let content = AdminPushNotificationValidation.normalized(
+                title: title,
+                body: body,
+                sensitive: sensitive
+              ) else {
+            throw AdminAPIError.invalidResponse
+        }
+        let request = AdminPushNotificationRequest(
+            recipients: [AdminPushNotificationRecipient(userID: canonicalUserID)],
+            title: content.title,
+            body: content.body,
+            sensitive: content.sensitive,
+            idempotencyKey: idempotencyKey.uuidString.lowercased()
+        )
+        let response: AdminPushNotificationResponse = try await authorizedJSON(
+            path: "shuzijun/v1/app-admin/push-notifications",
+            method: "POST",
+            body: try JSONEncoder().encode(request)
+        )
+        guard AdminPushNotificationValidation.isValidResponse(
+            response,
+            expectedRecipientCount: 1
+        ) else {
+            throw AdminAPIError.invalidResponse
+        }
+        return response
     }
 
     func fetchCollaborationRequests(
@@ -741,14 +959,7 @@ final class AdminSessionStore: ObservableObject {
               !path.contains(".."),
               !path.contains("?"),
               !path.contains("#"),
-              queryItems.count <= 3,
-              queryItems.allSatisfy({ item in
-                  ["page", "perPage", "status"].contains(item.name)
-                      && item.value?.range(
-                          of: #"^[a-z0-9]{1,20}$"#,
-                          options: .regularExpression
-                      ) != nil
-              }),
+              AdminQueryItemPolicy.areValid(queryItems),
               ["GET", "POST"].contains(method) else {
             throw AdminAPIError.invalidResponse
         }
@@ -789,18 +1000,29 @@ final class AdminSessionStore: ObservableObject {
             throw AdminAPIError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
+            let isJSON = AppNetworkSecurityPolicy.isJSONMIMEType(
+                http.value(forHTTPHeaderField: "Content-Type")
+            )
+            let serverError = isJSON
+                ? try? JSONDecoder().decode(WordPressError.self, from: data)
+                : nil
             if http.statusCode == 401 {
                 if lockOnAuthorizationFailure { lock() }
                 throw AdminAPIError.invalidCredentials
             }
             if http.statusCode == 403 {
-                if lockOnAuthorizationFailure { lock() }
+                if lockOnAuthorizationFailure,
+                   AdminAuthorizationFailurePolicy.shouldLock(
+                    statusCode: http.statusCode,
+                    serverErrorCode: serverError?.code
+                   ) {
+                    lock()
+                }
+                if serverError?.code == "push_capability_required" {
+                    throw AdminAPIError.pushPermissionRequired
+                }
                 throw AdminAPIError.insufficientPermission
             }
-            let isJSON = AppNetworkSecurityPolicy.isJSONMIMEType(
-                http.value(forHTTPHeaderField: "Content-Type")
-            )
-            let serverError = isJSON ? try? JSONDecoder().decode(WordPressError.self, from: data) : nil
             throw AdminAPIError.server(
                 safeServerMessage(serverError?.message, statusCode: http.statusCode)
             )
@@ -884,6 +1106,13 @@ enum AdminSessionSecurityPolicy {
     }
 }
 
+enum AdminAuthorizationFailurePolicy {
+    static func shouldLock(statusCode: Int, serverErrorCode: String?) -> Bool {
+        statusCode == 401
+            || (statusCode == 403 && serverErrorCode != "push_capability_required")
+    }
+}
+
 private struct AdminCredential: Codable, Equatable {
     let username: String
     let applicationPassword: String
@@ -937,6 +1166,18 @@ private struct AdminFanAccessUpdateResponse: Decodable {
     let user: AdminFanUser
 }
 
+private struct AdminPushNotificationRecipient: Encodable {
+    let userID: String
+}
+
+private struct AdminPushNotificationRequest: Encodable {
+    let recipients: [AdminPushNotificationRecipient]
+    let title: String
+    let body: String
+    let sensitive: Bool
+    let idempotencyKey: String
+}
+
 private struct AdminCollaborationStatusUpdate: Encodable {
     let status: String
     let version: Int
@@ -947,6 +1188,7 @@ private struct AdminCollaborationUpdateResponse: Decodable {
 }
 
 private struct WordPressError: Decodable {
+    let code: String?
     let message: String
 }
 

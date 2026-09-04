@@ -2,7 +2,7 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前候选版本：`1.3.32 (44)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前候选版本：`1.3.33 (45)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
@@ -16,6 +16,7 @@
 - **账号安全**：密码账号可自助改密，所有账号都可查看已登录设备并撤销其他会话；Apple 账号不在 App 内设置密码。忘记密码时由管理员为密码账号生成只显示一次的短时恢复凭据。
 - **内容工作台**：管理员可直接在手机内上传并替换开屏、首页轮播、关于页人物图、相册照片、Showreel 与影视海报，并调整轮播和相册顺序；发布后的图片只从云端按需加载。
 - **用户权限**：管理员可按昵称、抖音 ID 或身份码查找粉丝，远程分配白名单内的 App 权限或暂停账号。
+- **定向通知（Build 45 候选）**：管理员可向单个身份码或明确选择的用户列表发送通知；敏感正文默认只显示“有新消息，请登录查看”，用户可在系统设置中关闭通知并可通过退出或删号解除设备绑定。
 - **Apple 平台体验**：界面使用系统安全区、语义字体、44pt 主触控区和原生导航材质，支持 iPhone/iPad 横竖屏、Dynamic Type、VoiceOver、减少动态效果与减少透明度。
 
 ## 作品访问规则
@@ -103,8 +104,16 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.14.md`](Server/releases/v1.3.30-build42.14.md)：兼容备节点 `reset-failed` 对已回收 oneshot 的实际返回码，后置双采样仍保持失败关闭。
 - [`Server/releases/v1.5.11-build43.md`](Server/releases/v1.5.11-build43.md)：抖音 ID 必填、Apple 存量账号迁移、合作邀约持久化候选与数据删除/竞态复核发布清单。
 - [`Server/releases/v1.3.32-build44.md`](Server/releases/v1.3.32-build44.md)：合作邮箱与隐私联系邮箱分离、App/网页联系渠道一致性发布记录。
+- [`Server/releases/v1.3.33-build45.md`](Server/releases/v1.3.33-build45.md)：指定粉丝定向 APNs 推送、隐私默认、服务端安全配置与部署/真机验收前置条件。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
+
+### Build 45 指定用户通知（GitHub 候选）
+
+- App 1.3.33 Build 45 只在登录粉丝主动授权后登记设备，并允许管理员按单个用户、身份码或明确列表发送；服务端 1.5.12 使用独立最小权限、幂等 Outbox、有界重试及失效令牌清理，不提供无选择的全员广播入口。
+- APNs 设备令牌仅以 Secretbox 密文、独立 HMAC 索引和非秘密密钥指纹保存在服务器；设备最长保留 90 天，通知、收件关系和 Outbox 最长保留 30 天。数据密钥或加密依赖临时不可用时保留绑定、不消耗投递次数并在 60 秒后重试；退出、撤销会话、账号暂停/拒绝和永久删号都会阻止后续投递。
+- 通知默认视为敏感信息，锁屏只展示通用提示。管理员只有在确认正文适合公开后才可发送自定义文字；App 内详细内容仍由登录与审批门禁保护。
+- 生产只使用 `api.push.apple.com` 与 topic `cn.com.shuzijun.yishu`。两节点必须安全配置同一数据密钥和各自可读的 APNs 私钥环境，且仅 authority 消费任务；配置、签名发布、故障切换和 TestFlight 真机端到端验收完成前，不宣称推送已经上线。
 
 ### Build 43 账号、合作与 iPad 连续性（GitHub 候选）
 
@@ -118,7 +127,7 @@ xcodebuild -project Yishu.xcodeproj \
 - 商务合作、邀约发送与回复固定使用 `369476120@qq.com`；App 内“工作联系”和服务端合作收件人保持一致。
 - 个人信息查阅、更正、删除、账号资料更正和隐私政策反馈统一使用 `sariki@me.com`；App 内与网页版隐私政策同步更新。
 - 本次属于联系渠道澄清，不改变数据用途、处理范围或现有 `2026-09-04-approval-v4` 同意门禁。
-- Apple Developer 中已为 `cn.com.shuzijun.yishu` 开启 Push Notifications，工程同步加入 APNs entitlement；客户端授权、设备令牌注册和服务器推送提供方仍须在 APNs 私钥创建后单独实现并验收，当前版本不宣称已能推送。
+- Apple Developer 中已为 `cn.com.shuzijun.yishu` 开启 Push Notifications，工程已加入 APNs entitlement；Build 45 候选已实现客户端授权、设备绑定和服务器定向投递链路，但在完成签名部署与 TestFlight 真机端到端验收前不宣称已上线。
 
 ### Build 41 媒体策略
 

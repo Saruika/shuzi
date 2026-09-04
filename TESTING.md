@@ -74,6 +74,18 @@ Server/tests/fan-api-smoke.sh
 
 GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服务器密钥；外部 Action 固定到完整 commit SHA。失败时保留七天 `.xcresult` 供排查。
 
+## Build 45 发布前验收
+
+1. 确认 App Debug/Release 均为 `1.3.33 (45)`，App Content API 插件头为 `1.5.12`，Bundle ID 与 APNs topic 均为 `cn.com.shuzijun.yishu`；执行推送合同、动态插件合同、iOS 单元/UI 回归、Release Analyze 和凭据扫描。
+2. 对新注册、Apple 首次/存量资料补全和邀请完成分别执行同意版本矩阵：1.5.12 只接受 Build 42 的 `2026-09-02-approval-v3` 与 Build 45 的 `2026-09-04-approval-v4`，并逐字保存实际提交值；v2、未知、缺失和非字符串均失败关闭。Build 42 v3 请求也必须携带合法抖音 ID，不得借过渡放宽必填政策。确认该过渡白名单没有 option、环境变量、过滤器或远程开关；Build 42 过期后另发 1.5.13 收紧新提交仅 v4，已存 v2/v3/v4 仍保持有效。
+3. 以普通粉丝、内容管理员和无推送权限的已认证账号分别调用接口：设备登记/解绑必须要求当前正常粉丝会话与相同安装记录；定向发送必须要求独立 `manage_yishu_push_notifications` capability，缺失权限返回 `push_capability_required`，不得锁死其他合法管理功能。
+4. 在管理员目录创建超过两页的同名测试用户，验证昵称模糊搜索、身份码/抖音 ID 精确搜索以及 `page`、`perPage`、`hasMore` 远程分页；不得只返回最近 100/201 个用户。每次发送只接受 1–100 个明确收件人，同一管理员和幂等键重试不得创建第二条通知。
+5. 不传 `sensitive` 或传 `true` 时，APNs 标题与正文必须降级为“Hi，梳子 / 有新消息，请登录查看”；只有显式传 `false` 时才发送经净化且不超过 60/240 字符的自定义标题和正文。数据库、PHP/FPM 日志、审计事件和接口响应不得出现设备令牌、Provider JWT 或私钥明文。
+6. 在隔离预发布环境验证设备令牌按 1–256 字节不透明值处理、以 Secretbox 密文、HMAC 索引和非秘密密钥指纹保存，安装与令牌索引全局唯一；持久安装状态必须记录最新正常会话、单调 `bindingGeneration` 和期望绑定状态，Outbox 固定同一安装与代次。设备 TTL 为 90 天，通知/收件关系/Outbox TTL 为 30 天。退出、换号、撤销单个或全部会话、改密/恢复、拒绝/暂停和删号后都必须无法继续投递，迟到的低代次请求不得恢复绑定。
+7. 两台节点在仓库及 Web 根目录外配置权限不宽于 `0600` 的文件，并让 PHP-FPM 读取 `YISHU_APNS_KEY_ID`、`YISHU_APNS_TEAM_ID`、`YISHU_APNS_PRIVATE_KEY_PATH`、`YISHU_APNS_DATA_KEY_PATH`；数据密钥内容必须相同。确认仅 authority 建表、调度和消费，standby 不并发发送，WP-Cron 或受管系统定时器持续保活。
+8. 用 TestFlight 真机完成授权、拒绝后重试、令牌更新、单用户/明确列表、多设备、前后台、退出和删号；设备离线后在通知创建起 24 小时内恢复网络仍应收到通知，超时不得因 Worker 或密钥恢复而重新获得 24 小时。故障夹具覆盖 408/429/500/503 重试、410/BadDeviceToken 清理、最后一次处理崩溃后的租约终止、租约回收和 authority 切换；另外需注入数据密钥不可读、加密依赖不可用与密钥指纹不一致，验证设备行保留、任务回到 pending、`last_error_code=device_crypto_unavailable`、尝试次数不增长并在 60 秒后恢复。APNs 200 后数据库写回失败仍可能形成 at-least-once 重复窗口，验收时需核对 collapse-id 效果且不得承诺绝对单次送达。
+9. 上线前同步核对 App Store Connect 隐私标签、App/网页隐私政策与用户关闭通知、退出和永久删号路径；未完成哈希校验发布清单、双节点部署、主备切换演练和生产 APNs 真机端到端验收时，不得把 Build 45 描述为已上线。
+
 ## Build 44 发布前验收
 
 1. 确认 App Debug/Release 均为 `1.3.32 (44)`；“关于”页工作联系、合作邀约邮件回退和服务端合作收件人均为 `369476120@qq.com`。

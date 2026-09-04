@@ -1,0 +1,155 @@
+#!/bin/bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true
+
+readonly ROLE_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
+readonly ROLE_VERIFY_SHA=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
+readonly ROLE_LOCK_ROOT=/var/lib/shuzijun-sync
+readonly ROLE_LOCK=$ROLE_LOCK_ROOT/site-operation.lock
+readonly RUNTIME_ROOT=/run/shuzijun-push-outbox
+readonly WORKER_LOCK=$RUNTIME_ROOT/worker.lock
+readonly WORDPRESS_ROOT=/var/www/html/shuzijun.com.cn
+readonly WP_CLI=/usr/bin/wp
+readonly PHP_CLI=/usr/bin/php8.3
+readonly PRIVATE_ROOT=/etc/shuzijun/push
+readonly APNS_ENV=$PRIVATE_ROOT/apns.env
+readonly APNS_PRIVATE_KEY=$PRIVATE_ROOT/apns-private-key.p8
+readonly APNS_DATA_KEY=$PRIVATE_ROOT/apns-data-key
+readonly SWEEP_HOOK=yishu_sweep_push_outbox
+
+generic_failure() {
+    local status=${1:-1}
+    case "$status" in
+        124|137) printf 'push-outbox-worker: sweep timed out\n' >&2 ;;
+        *) printf 'push-outbox-worker: sweep failed status=%s\n' "$status" >&2 ;;
+    esac
+    exit "$status"
+}
+
+require_root_owned_directory() {
+    local path=$1 mode=$2 metadata
+    [[ ! -L "$path" && -d "$path" && "$(realpath -e -- "$path")" == "$path" ]] \
+        || { printf 'push-outbox-worker: private directory unavailable\n' >&2; exit 78; }
+    metadata=$(stat -c '%u:%g:%a' -- "$path") || exit 78
+    [[ "$metadata" == "0:0:$mode" ]] \
+        || { printf 'push-outbox-worker: private directory metadata invalid\n' >&2; exit 78; }
+}
+
+require_private_directory() {
+    local path=$1 metadata
+    [[ ! -L "$path" && -d "$path" && "$(realpath -e -- "$path")" == "$path" ]] \
+        || { printf 'push-outbox-worker: private directory unavailable\n' >&2; exit 78; }
+    metadata=$(stat -c '%U:%G:%a' -- "$path") || exit 78
+    [[ "$metadata" == root:www-data:710 ]] \
+        || { printf 'push-outbox-worker: private directory metadata invalid\n' >&2; exit 78; }
+}
+
+require_regular_file() {
+    local path=$1 owner=$2 group=$3 mode=$4 label=$5 metadata
+    [[ ! -L "$path" && -f "$path" && "$(realpath -e -- "$path")" == "$path" ]] \
+        || { printf 'push-outbox-worker: %s unavailable\n' "$label" >&2; exit 78; }
+    metadata=$(stat -c '%U:%G:%a:%h' -- "$path") || exit 78
+    [[ "$metadata" == "$owner:$group:$mode:1" ]] \
+        || { printf 'push-outbox-worker: %s metadata invalid\n' "$label" >&2; exit 78; }
+}
+
+require_immutable_private_file() {
+    local path=$1 label=$2 attributes
+    attributes=$(/usr/bin/lsattr -d -- "$path" 2>/dev/null) \
+        || { printf 'push-outbox-worker: %s attributes unavailable\n' "$label" >&2; exit 78; }
+    attributes=${attributes%% *}
+    [[ "$attributes" == *i* ]] \
+        || { printf 'push-outbox-worker: %s is not immutable\n' "$label" >&2; exit 78; }
+}
+
+[[ $EUID -eq 0 ]] \
+    || { printf 'push-outbox-worker: root required\n' >&2; exit 77; }
+[[ -x "$ROLE_VERIFY" && ! -L "$ROLE_VERIFY" \
+    && "$(stat -c '%U:%G:%a:%h' -- "$ROLE_VERIFY")" == root:root:755:1 \
+    && "$(sha256sum -- "$ROLE_VERIFY" | cut -d' ' -f1)" == "$ROLE_VERIFY_SHA" ]]
+[[ -x "$WP_CLI" && ! -L "$WP_CLI" ]]
+[[ -x "$PHP_CLI" && ! -L "$PHP_CLI" ]]
+[[ -d "$WORDPRESS_ROOT" && ! -L "$WORDPRESS_ROOT" ]]
+
+# The root-only environment file is consumed by both php8.3-fpm.service and
+# this oneshot service. Its values are never sourced as shell code or logged.
+require_root_owned_directory /etc 755
+require_root_owned_directory /etc/shuzijun 755
+require_private_directory "$PRIVATE_ROOT"
+require_regular_file "$APNS_ENV" root root 600 'APNs environment'
+
+[[ ${YISHU_APNS_PRIVATE_KEY_PATH:-} == "$APNS_PRIVATE_KEY" ]]
+[[ ${YISHU_APNS_DATA_KEY_PATH:-} == "$APNS_DATA_KEY" ]]
+[[ ${YISHU_APNS_KEY_ID:-} =~ ^[A-Z0-9]{10}$ ]]
+[[ ${YISHU_APNS_TEAM_ID:-} =~ ^[A-Z0-9]{10}$ ]]
+
+# The current PHP plugin requires mode 0400 and direct readability by its
+# unprivileged FPM identity. These files therefore remain in a root-owned,
+# non-writable directory and are owned by www-data with no write permission.
+require_regular_file "$APNS_PRIVATE_KEY" www-data www-data 400 'APNs private key'
+require_regular_file "$APNS_DATA_KEY" www-data www-data 400 'APNs data key'
+require_immutable_private_file "$APNS_PRIVATE_KEY" 'APNs private key'
+require_immutable_private_file "$APNS_DATA_KEY" 'APNs data key'
+
+# Hold the same lock as authority-role transitions for the whole sweep. This
+# prevents a verified authority process from continuing across a demotion.
+[[ ! -L "$ROLE_LOCK_ROOT" && -d "$ROLE_LOCK_ROOT" \
+    && "$(realpath -e -- "$ROLE_LOCK_ROOT")" == "$ROLE_LOCK_ROOT" \
+    && "$(stat -c '%u:%g:%a' -- "$ROLE_LOCK_ROOT")" == 0:0:700 ]]
+[[ ! -L "$ROLE_LOCK" && -f "$ROLE_LOCK" \
+    && "$(realpath -e -- "$ROLE_LOCK")" == "$ROLE_LOCK" \
+    && "$(stat -c '%u:%g:%a:%h' -- "$ROLE_LOCK")" == 0:0:600:1 ]]
+exec 8<"$ROLE_LOCK"
+/usr/bin/flock -s -w 3 8 \
+    || { printf 'push-outbox-worker: authority transition busy\n' >&2; exit 75; }
+"$ROLE_VERIFY" authority >/dev/null 2>&1 \
+    || { printf 'push-outbox-worker: authority verification failed\n' >&2; exit 69; }
+
+# systemd creates this directory, but validate it again before using its lock.
+[[ ! -L "$RUNTIME_ROOT" && -d "$RUNTIME_ROOT" \
+    && "$(realpath -e -- "$RUNTIME_ROOT")" == "$RUNTIME_ROOT" \
+    && "$(stat -c '%u:%g:%a' -- "$RUNTIME_ROOT")" == 0:0:700 ]]
+if [[ -e "$WORKER_LOCK" || -L "$WORKER_LOCK" ]]; then
+    [[ ! -L "$WORKER_LOCK" && -f "$WORKER_LOCK" \
+        && "$(realpath -e -- "$WORKER_LOCK")" == "$WORKER_LOCK" \
+        && "$(stat -c '%u:%g:%a:%h' -- "$WORKER_LOCK")" == 0:0:600:1 ]]
+fi
+exec 9>>"$WORKER_LOCK"
+chmod 600 "$WORKER_LOCK"
+[[ ! -L "$WORKER_LOCK" && "$(stat -c '%u:%g:%a:%h' -- "$WORKER_LOCK")" == 0:0:600:1 ]]
+if ! /usr/bin/flock -n 9; then
+    printf 'push-outbox-worker: prior sweep still active\n'
+    exit 0
+fi
+
+# Reverify after acquiring both locks. Discard WP-CLI output so neither PHP
+# diagnostics nor provider responses can place notification data in journald.
+"$ROLE_VERIFY" authority >/dev/null 2>&1 \
+    || { printf 'push-outbox-worker: authority verification failed\n' >&2; exit 69; }
+set +e
+/usr/bin/timeout --signal=TERM --kill-after=3s 40s \
+    /usr/bin/setpriv \
+    --reuid=www-data \
+    --regid=www-data \
+    --clear-groups \
+    --no-new-privs \
+    --bounding-set=-all \
+    --inh-caps=-all \
+    --ambient-caps=-all \
+    "$PHP_CLI" "$WP_CLI" \
+    --path="$WORDPRESS_ROOT" \
+    --skip-themes \
+    --skip-packages \
+    --quiet \
+    cron event run "$SWEEP_HOOK" \
+    >/dev/null 2>&1
+status=$?
+set -e
+(( status == 0 )) || generic_failure "$status"
+printf 'push-outbox-worker: sweep completed\n'

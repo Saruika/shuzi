@@ -1,0 +1,413 @@
+#!/bin/bash
+set -Eeuo pipefail
+IFS=$'\n\t'
+umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+LC_ALL=C
+LANG=C
+export PATH LC_ALL LANG
+unset CDPATH ENV BASH_ENV PYTHONPATH PYTHONHOME || true
+
+readonly DEPLOYER=/run/deploy-shuzijun-push-worker-build45
+readonly STAGE=/run/shuzijun-push-worker-build45
+readonly ROLE_VERIFY=/usr/local/sbin/verify-shuzijun-account-authority-role
+readonly ROLE_VERIFY_SHA=5fe67111642c53895e16afd0a9d6a341af881c3711736f9fe40a34b830e20a58
+readonly PHP_FPM_SERVICE=php8.3-fpm.service
+readonly PHP_FPM_BIN=/usr/sbin/php-fpm8.3
+readonly SYSTEMD=/usr/bin/systemctl
+readonly PRIVATE_ROOT=/etc/shuzijun/push
+readonly APNS_ENV=$PRIVATE_ROOT/apns.env
+readonly APNS_PRIVATE_KEY=$PRIVATE_ROOT/apns-private-key.p8
+readonly APNS_DATA_KEY=$PRIVATE_ROOT/apns-data-key
+readonly DEPLOY_LOCK=/run/shuzijun-push-worker-deploy.lock
+readonly ROLE_LOCK_ROOT=/var/lib/shuzijun-sync
+readonly ROLE_LOCK=$ROLE_LOCK_ROOT/site-operation.lock
+
+readonly WORKER_SOURCE=$STAGE/shuzijun-push-outbox-worker
+readonly SERVICE_SOURCE=$STAGE/shuzijun-push-outbox.service
+readonly TIMER_SOURCE=$STAGE/shuzijun-push-outbox.timer
+readonly FPM_SYSTEMD_SOURCE=$STAGE/shuzijun-push-fpm-systemd.conf
+readonly FPM_POOL_SOURCE=$STAGE/shuzijun-push-fpm-pool.conf
+
+readonly WORKER_TARGET=/usr/local/sbin/shuzijun-push-outbox-worker
+readonly SERVICE_TARGET=/etc/systemd/system/shuzijun-push-outbox.service
+readonly TIMER_TARGET=/etc/systemd/system/shuzijun-push-outbox.timer
+readonly FPM_SYSTEMD_ROOT=/etc/systemd/system/php8.3-fpm.service.d
+readonly FPM_SYSTEMD_TARGET=$FPM_SYSTEMD_ROOT/50-shuzijun-push.conf
+readonly FPM_POOL_TARGET=/etc/php/8.3/fpm/pool.d/zz-shuzijun-push-env.conf
+
+readonly WORKER_SHA=f37ff119458af16ad26ee4961150613b18ab3b5c569b7e37d581b4561b140ffe
+readonly SERVICE_SHA=6341549970245226f3b506d2284999fcb7d5dac51759c6a229e43bb803791934
+readonly TIMER_SHA=7adf34cc6f17806842dca1acf35e554605a32ac3a7c17e795f4c7dbd80946bd8
+readonly FPM_SYSTEMD_SHA=6baab9ee1e36d019a45a43208b51301575d7929c1cbfa2456fa55062b5bdabde
+readonly FPM_POOL_SHA=7647909856b5bb993fa15f950ca7e151d02e43f12507ba24b7ed72b6cf6f55af
+
+usage() {
+    printf 'usage: %s <primary|backup> <authority|standby> <--dry-run|--install|--status|--uninstall>\n' "$DEPLOYER" >&2
+    printf 'stage reviewed assets in %s; provision APNs values only in %s\n' "$STAGE" "$APNS_ENV" >&2
+    exit 2
+}
+
+fail() {
+    printf 'push-worker-deploy: %s\n' "$1" >&2
+    exit 1
+}
+
+sha() {
+    sha256sum -- "$1" | cut -d' ' -f1
+}
+
+require_dir() {
+    local path=$1 owner=$2 group=$3 mode=$4 metadata
+    [[ ! -L "$path" && -d "$path" && "$(realpath -e -- "$path")" == "$path" ]] \
+        || fail 'required directory is missing or unsafe'
+    metadata=$(stat -c '%U:%G:%a' -- "$path") || fail 'cannot inspect required directory'
+    [[ "$metadata" == "$owner:$group:$mode" ]] || fail 'required directory metadata is invalid'
+}
+
+require_file() {
+    local path=$1 owner=$2 group=$3 mode=$4 expected=$5 metadata
+    [[ ! -L "$path" && -f "$path" && "$(realpath -e -- "$path")" == "$path" ]] \
+        || fail 'required file is missing or unsafe'
+    metadata=$(stat -c '%U:%G:%a:%h' -- "$path") || fail 'cannot inspect required file'
+    [[ "$metadata" == "$owner:$group:$mode:1" ]] || fail 'required file metadata is invalid'
+    [[ "$(sha "$path")" == "$expected" ]] || fail 'required file hash is not reviewed'
+}
+
+require_private_file() {
+    local path=$1 owner=$2 group=$3 mode=$4 metadata
+    [[ ! -L "$path" && -f "$path" && "$(realpath -e -- "$path")" == "$path" ]] \
+        || fail 'private file is missing or unsafe'
+    metadata=$(stat -c '%U:%G:%a:%h' -- "$path") || fail 'cannot inspect private file'
+    [[ "$metadata" == "$owner:$group:$mode:1" ]] || fail 'private file metadata is invalid'
+}
+
+require_absent_or_reviewed() {
+    local path=$1 mode=$2 expected=$3 metadata
+    if [[ ! -e "$path" && ! -L "$path" ]]; then return 0; fi
+    [[ ! -L "$path" && -f "$path" && "$(realpath -e -- "$path")" == "$path" ]] \
+        || fail 'installed target is unsafe'
+    metadata=$(stat -c '%U:%G:%a:%h' -- "$path") || fail 'cannot inspect installed target'
+    [[ "$metadata" == "root:root:$mode:1" && "$(sha "$path")" == "$expected" ]] \
+        || fail 'installed target differs from the reviewed release'
+}
+
+require_immutable() {
+    local path=$1 attributes
+    attributes=$(/usr/bin/lsattr -d -- "$path" 2>/dev/null) \
+        || fail 'cannot inspect private-file attributes'
+    attributes=${attributes%% *}
+    [[ "$attributes" == *i* ]] || fail 'private file must have the immutable attribute'
+}
+
+acquire_operation_locks() {
+    require_dir /run root root 755
+    if [[ -e "$DEPLOY_LOCK" || -L "$DEPLOY_LOCK" ]]; then
+        require_private_file "$DEPLOY_LOCK" root root 600
+    fi
+    exec 7>>"$DEPLOY_LOCK"
+    chmod 600 "$DEPLOY_LOCK"
+    require_private_file "$DEPLOY_LOCK" root root 600
+    /usr/bin/flock -n 7 || fail 'push-worker deployment already in progress'
+
+    require_dir "$ROLE_LOCK_ROOT" root root 700
+    require_private_file "$ROLE_LOCK" root root 600
+    exec 8<"$ROLE_LOCK"
+    /usr/bin/flock -s -w 3 8 || fail 'authority transition in progress'
+}
+
+validate_apns_configuration() {
+    local line key value count=0
+    declare -A values=()
+    require_dir /etc root root 755
+    require_dir /etc/shuzijun root root 755
+    require_dir "$PRIVATE_ROOT" root www-data 710
+    require_private_file "$APNS_ENV" root root 600
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        (( count += 1 ))
+        [[ "$line" =~ ^([A-Z0-9_]+)=([^[:space:]]+)$ ]] \
+            || fail 'APNs environment has invalid syntax'
+        key=${BASH_REMATCH[1]}
+        value=${BASH_REMATCH[2]}
+        [[ -z ${values[$key]+present} ]] || fail 'APNs environment contains a duplicate key'
+        case "$key" in
+            YISHU_APNS_KEY_ID|YISHU_APNS_TEAM_ID|YISHU_APNS_PRIVATE_KEY_PATH|YISHU_APNS_DATA_KEY_PATH) ;;
+            *) fail 'APNs environment contains an unreviewed key' ;;
+        esac
+        values[$key]=$value
+    done <"$APNS_ENV"
+    (( count == 4 )) || fail 'APNs environment must contain exactly four assignments'
+    [[ ${values[YISHU_APNS_KEY_ID]:-} =~ ^[A-Z0-9]{10}$ ]] || fail 'APNs key identifier is invalid'
+    [[ ${values[YISHU_APNS_TEAM_ID]:-} =~ ^[A-Z0-9]{10}$ ]] || fail 'APNs team identifier is invalid'
+    [[ ${values[YISHU_APNS_PRIVATE_KEY_PATH]:-} == "$APNS_PRIVATE_KEY" ]] \
+        || fail 'APNs private-key path is not fixed'
+    [[ ${values[YISHU_APNS_DATA_KEY_PATH]:-} == "$APNS_DATA_KEY" ]] \
+        || fail 'APNs data-key path is not fixed'
+
+    require_private_file "$APNS_PRIVATE_KEY" www-data www-data 400
+    require_private_file "$APNS_DATA_KEY" www-data www-data 400
+    require_immutable "$APNS_PRIVATE_KEY"
+    require_immutable "$APNS_DATA_KEY"
+    /usr/bin/openssl pkey -in "$APNS_PRIVATE_KEY" -check -noout >/dev/null 2>&1 \
+        || fail 'APNs private key is invalid'
+    /usr/bin/python3 -I - "$APNS_DATA_KEY" <<'PY' >/dev/null \
+        || fail 'APNs data key is invalid'
+import base64
+import re
+import sys
+from pathlib import Path
+
+payload = Path(sys.argv[1]).read_bytes().strip()
+if re.fullmatch(rb"[A-Za-z0-9_-]{43}", payload) is None:
+    raise SystemExit(1)
+if len(base64.urlsafe_b64decode(payload + b"=")) != 32:
+    raise SystemExit(1)
+PY
+    export YISHU_APNS_KEY_ID=${values[YISHU_APNS_KEY_ID]}
+    export YISHU_APNS_TEAM_ID=${values[YISHU_APNS_TEAM_ID]}
+    export YISHU_APNS_PRIVATE_KEY_PATH=${values[YISHU_APNS_PRIVATE_KEY_PATH]}
+    export YISHU_APNS_DATA_KEY_PATH=${values[YISHU_APNS_DATA_KEY_PATH]}
+}
+
+validate_release_sources() {
+    require_dir /run root root 755
+    require_dir "$STAGE" root root 700
+    require_file "$WORKER_SOURCE" root root 700 "$WORKER_SHA"
+    require_file "$SERVICE_SOURCE" root root 600 "$SERVICE_SHA"
+    require_file "$TIMER_SOURCE" root root 600 "$TIMER_SHA"
+    require_file "$FPM_SYSTEMD_SOURCE" root root 600 "$FPM_SYSTEMD_SHA"
+    require_file "$FPM_POOL_SOURCE" root root 600 "$FPM_POOL_SHA"
+    /bin/bash -n "$WORKER_SOURCE" || fail 'worker syntax is invalid'
+}
+
+validate_target_parents() {
+    local path
+    for path in \
+        /usr \
+        /usr/local \
+        /usr/local/sbin \
+        /etc/systemd \
+        /etc/systemd/system \
+        /etc/php \
+        /etc/php/8.3 \
+        /etc/php/8.3/fpm \
+        /etc/php/8.3/fpm/pool.d
+    do
+        require_dir "$path" root root 755
+    done
+    if [[ -e "$FPM_SYSTEMD_ROOT" || -L "$FPM_SYSTEMD_ROOT" ]]; then
+        require_dir "$FPM_SYSTEMD_ROOT" root root 755
+    fi
+}
+
+validate_installed_state() {
+    require_absent_or_reviewed "$WORKER_TARGET" 755 "$WORKER_SHA"
+    require_absent_or_reviewed "$SERVICE_TARGET" 644 "$SERVICE_SHA"
+    require_absent_or_reviewed "$TIMER_TARGET" 644 "$TIMER_SHA"
+    require_absent_or_reviewed "$FPM_SYSTEMD_TARGET" 644 "$FPM_SYSTEMD_SHA"
+    require_absent_or_reviewed "$FPM_POOL_TARGET" 644 "$FPM_POOL_SHA"
+}
+
+installed_state() {
+    local present=0 path
+    for path in "$WORKER_TARGET" "$SERVICE_TARGET" "$TIMER_TARGET" \
+        "$FPM_SYSTEMD_TARGET" "$FPM_POOL_TARGET"
+    do
+        [[ ! -e "$path" && ! -L "$path" ]] || (( present += 1 ))
+    done
+    case "$present" in
+        0) printf 'absent\n' ;;
+        5) printf 'reviewed\n' ;;
+        *) fail 'installed push-worker release is partial' ;;
+    esac
+}
+
+install_asset() {
+    local source=$1 target=$2 mode=$3 expected=$4 temporary=$target.build45.$$
+    [[ ! -e "$temporary" && ! -L "$temporary" ]] || fail 'installation temporary path already exists'
+    TEMP_FILES+=("$temporary")
+    install -o root -g root -m "$mode" -- "$source" "$temporary"
+    [[ "$(sha "$temporary")" == "$expected" ]] || fail 'staged installation hash changed'
+    mv -T -- "$temporary" "$target"
+}
+
+remove_if_reviewed() {
+    local path=$1 mode=$2 expected=$3 metadata
+    [[ -e "$path" || -L "$path" ]] || return 0
+    [[ ! -L "$path" && -f "$path" ]] || return 1
+    metadata=$(stat -c '%U:%G:%a:%h' -- "$path") || return 1
+    [[ "$metadata" == "root:root:$mode:1" && "$(sha "$path")" == "$expected" ]] \
+        || return 1
+    rm -f -- "$path"
+}
+
+require_all_installed() {
+    require_file "$WORKER_TARGET" root root 755 "$WORKER_SHA"
+    require_file "$SERVICE_TARGET" root root 644 "$SERVICE_SHA"
+    require_file "$TIMER_TARGET" root root 644 "$TIMER_SHA"
+    require_file "$FPM_SYSTEMD_TARGET" root root 644 "$FPM_SYSTEMD_SHA"
+    require_file "$FPM_POOL_TARGET" root root 644 "$FPM_POOL_SHA"
+}
+
+timer_state_matches_role() {
+    local enabled active
+    enabled=$($SYSTEMD is-enabled shuzijun-push-outbox.timer 2>/dev/null || true)
+    active=$($SYSTEMD is-active shuzijun-push-outbox.timer 2>/dev/null || true)
+    if [[ $ROLE == authority ]]; then
+        [[ "$enabled" == enabled && "$active" == active ]] \
+            || fail 'authority timer is not enabled and active'
+    else
+        [[ "$enabled" != enabled && "$active" != active ]] \
+            || fail 'standby timer must remain disabled and inactive'
+    fi
+}
+
+(( $# == 3 )) || usage
+readonly NODE=$1
+readonly ROLE=$2
+readonly MODE=$3
+case "$NODE:$ROLE" in
+    primary:authority|backup:standby) ;;
+    *) fail 'node and authority role do not match the reviewed topology' ;;
+esac
+case "$MODE" in
+    --dry-run|--install|--status|--uninstall) ;;
+    *) usage ;;
+esac
+[[ $EUID -eq 0 ]] || fail 'root required'
+[[ "$0" == "$DEPLOYER" ]] || fail 'fixed deployer path required'
+[[ ! -L "$DEPLOYER" && "$(stat -c '%U:%G:%a:%h' -- "$DEPLOYER")" == root:root:700:1 ]] \
+    || fail 'deployer metadata is unsafe'
+require_file "$ROLE_VERIFY" root root 755 "$ROLE_VERIFY_SHA"
+acquire_operation_locks
+"$ROLE_VERIFY" "$ROLE" >/dev/null 2>&1 || fail 'fixed authority role does not match'
+validate_target_parents
+validate_installed_state
+readonly INSTALLED_STATE=$(installed_state)
+if [[ $MODE != --uninstall ]]; then
+    validate_apns_configuration
+fi
+
+declare -a TEMP_FILES=()
+ROLLBACK_NEW_INSTALL=0
+UNINSTALL_BACKUP=
+cleanup() {
+    local original_status=$? temporary cleanup_failed=0
+    trap - EXIT
+    for temporary in "${TEMP_FILES[@]}"; do
+        if [[ -e "$temporary" || -L "$temporary" ]]; then
+            [[ ! -L "$temporary" && -f "$temporary" \
+                && "$(stat -c '%U:%G:%h' -- "$temporary" 2>/dev/null)" == root:root:1 ]] \
+                && rm -f -- "$temporary" \
+                || cleanup_failed=1
+        fi
+    done
+    if (( ROLLBACK_NEW_INSTALL == 1 )); then
+        "$SYSTEMD" disable --now shuzijun-push-outbox.timer >/dev/null 2>&1 || true
+        remove_if_reviewed "$WORKER_TARGET" 755 "$WORKER_SHA" || cleanup_failed=1
+        remove_if_reviewed "$SERVICE_TARGET" 644 "$SERVICE_SHA" || cleanup_failed=1
+        remove_if_reviewed "$TIMER_TARGET" 644 "$TIMER_SHA" || cleanup_failed=1
+        remove_if_reviewed "$FPM_SYSTEMD_TARGET" 644 "$FPM_SYSTEMD_SHA" || cleanup_failed=1
+        remove_if_reviewed "$FPM_POOL_TARGET" 644 "$FPM_POOL_SHA" || cleanup_failed=1
+        "$SYSTEMD" daemon-reload >/dev/null 2>&1 || cleanup_failed=1
+        "$SYSTEMD" restart "$PHP_FPM_SERVICE" >/dev/null 2>&1 || cleanup_failed=1
+        if (( cleanup_failed == 0 )); then
+            printf 'push-worker-deploy: incomplete initial install rolled back\n' >&2
+        else
+            printf 'push-worker-deploy: rollback requires operator attention\n' >&2
+        fi
+    fi
+    if [[ -n "$UNINSTALL_BACKUP" && -d "$UNINSTALL_BACKUP" && ! -L "$UNINSTALL_BACKUP" ]]; then
+        [[ -e "$WORKER_TARGET" || ! -e "$UNINSTALL_BACKUP/worker" ]] \
+            || mv -T -- "$UNINSTALL_BACKUP/worker" "$WORKER_TARGET" || cleanup_failed=1
+        [[ -e "$SERVICE_TARGET" || ! -e "$UNINSTALL_BACKUP/service" ]] \
+            || mv -T -- "$UNINSTALL_BACKUP/service" "$SERVICE_TARGET" || cleanup_failed=1
+        [[ -e "$TIMER_TARGET" || ! -e "$UNINSTALL_BACKUP/timer" ]] \
+            || mv -T -- "$UNINSTALL_BACKUP/timer" "$TIMER_TARGET" || cleanup_failed=1
+        [[ -e "$FPM_SYSTEMD_TARGET" || ! -e "$UNINSTALL_BACKUP/fpm-systemd" ]] \
+            || mv -T -- "$UNINSTALL_BACKUP/fpm-systemd" "$FPM_SYSTEMD_TARGET" || cleanup_failed=1
+        [[ -e "$FPM_POOL_TARGET" || ! -e "$UNINSTALL_BACKUP/fpm-pool" ]] \
+            || mv -T -- "$UNINSTALL_BACKUP/fpm-pool" "$FPM_POOL_TARGET" || cleanup_failed=1
+        "$SYSTEMD" daemon-reload >/dev/null 2>&1 || cleanup_failed=1
+        "$SYSTEMD" restart "$PHP_FPM_SERVICE" >/dev/null 2>&1 || cleanup_failed=1
+        if [[ $ROLE == authority ]]; then
+            "$SYSTEMD" enable --now shuzijun-push-outbox.timer >/dev/null 2>&1 \
+                || cleanup_failed=1
+        fi
+        rmdir -- "$UNINSTALL_BACKUP" 2>/dev/null || cleanup_failed=1
+        if (( cleanup_failed == 0 )); then
+            printf 'push-worker-deploy: incomplete uninstall rolled back\n' >&2
+        else
+            printf 'push-worker-deploy: uninstall rollback requires operator attention\n' >&2
+        fi
+    elif (( cleanup_failed != 0 )); then
+        printf 'push-worker-deploy: temporary-file cleanup requires operator attention\n' >&2
+    fi
+    exit "$original_status"
+}
+trap cleanup EXIT
+
+case "$MODE" in
+    --dry-run)
+        validate_release_sources
+        "$PHP_FPM_BIN" -t >/dev/null 2>&1 || fail 'current PHP-FPM configuration is invalid'
+        printf 'push-worker-deploy: dry-run passed node=%s role=%s\n' "$NODE" "$ROLE"
+        ;;
+    --install)
+        validate_release_sources
+        if [[ "$INSTALLED_STATE" == absent ]]; then
+            ROLLBACK_NEW_INSTALL=1
+            install -d -o root -g root -m 755 "$FPM_SYSTEMD_ROOT"
+            install_asset "$WORKER_SOURCE" "$WORKER_TARGET" 755 "$WORKER_SHA"
+            install_asset "$SERVICE_SOURCE" "$SERVICE_TARGET" 644 "$SERVICE_SHA"
+            install_asset "$TIMER_SOURCE" "$TIMER_TARGET" 644 "$TIMER_SHA"
+            install_asset "$FPM_SYSTEMD_SOURCE" "$FPM_SYSTEMD_TARGET" 644 "$FPM_SYSTEMD_SHA"
+            install_asset "$FPM_POOL_SOURCE" "$FPM_POOL_TARGET" 644 "$FPM_POOL_SHA"
+        fi
+        require_all_installed
+        "$PHP_FPM_BIN" -t >/dev/null 2>&1 || fail 'candidate PHP-FPM configuration is invalid'
+        "$SYSTEMD" daemon-reload >/dev/null
+        "$SYSTEMD" restart "$PHP_FPM_SERVICE" >/dev/null
+        "$SYSTEMD" is-active --quiet "$PHP_FPM_SERVICE" || fail 'PHP-FPM did not return active'
+        if [[ $ROLE == authority ]]; then
+            "$SYSTEMD" enable --now shuzijun-push-outbox.timer >/dev/null
+        else
+            "$SYSTEMD" disable --now shuzijun-push-outbox.timer >/dev/null 2>&1 || true
+        fi
+        timer_state_matches_role
+        ROLLBACK_NEW_INSTALL=0
+        printf 'push-worker-deploy: install completed node=%s role=%s\n' "$NODE" "$ROLE"
+        ;;
+    --status)
+        require_all_installed
+        "$PHP_FPM_BIN" -t >/dev/null 2>&1 || fail 'PHP-FPM configuration is invalid'
+        "$SYSTEMD" is-active --quiet "$PHP_FPM_SERVICE" || fail 'PHP-FPM is not active'
+        timer_state_matches_role
+        printf 'push-worker-deploy: status healthy node=%s role=%s\n' "$NODE" "$ROLE"
+        ;;
+    --uninstall)
+        require_all_installed
+        UNINSTALL_BACKUP=/run/shuzijun-push-worker-uninstall.$$
+        [[ ! -e "$UNINSTALL_BACKUP" && ! -L "$UNINSTALL_BACKUP" ]] \
+            || fail 'uninstall backup path already exists'
+        install -d -o root -g root -m 700 "$UNINSTALL_BACKUP"
+        "$SYSTEMD" disable --now shuzijun-push-outbox.timer >/dev/null 2>&1 || true
+        mv -T -- "$WORKER_TARGET" "$UNINSTALL_BACKUP/worker"
+        mv -T -- "$SERVICE_TARGET" "$UNINSTALL_BACKUP/service"
+        mv -T -- "$TIMER_TARGET" "$UNINSTALL_BACKUP/timer"
+        mv -T -- "$FPM_SYSTEMD_TARGET" "$UNINSTALL_BACKUP/fpm-systemd"
+        mv -T -- "$FPM_POOL_TARGET" "$UNINSTALL_BACKUP/fpm-pool"
+        "$SYSTEMD" daemon-reload >/dev/null
+        "$SYSTEMD" restart "$PHP_FPM_SERVICE" >/dev/null
+        "$SYSTEMD" is-active --quiet "$PHP_FPM_SERVICE" || fail 'PHP-FPM did not return active'
+        UNINSTALL_BACKUP=
+        rm -f -- \
+            "/run/shuzijun-push-worker-uninstall.$$/worker" \
+            "/run/shuzijun-push-worker-uninstall.$$/service" \
+            "/run/shuzijun-push-worker-uninstall.$$/timer" \
+            "/run/shuzijun-push-worker-uninstall.$$/fpm-systemd" \
+            "/run/shuzijun-push-worker-uninstall.$$/fpm-pool"
+        rmdir -- "/run/shuzijun-push-worker-uninstall.$$"
+        printf 'push-worker-deploy: uninstall completed; APNs credential files were preserved\n'
+        ;;
+esac

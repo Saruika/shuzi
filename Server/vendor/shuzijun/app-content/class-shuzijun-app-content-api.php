@@ -4,6 +4,7 @@ defined('ABSPATH') || exit;
 
 require_once __DIR__ . '/trait-shuzijun-app-collaboration.php';
 require_once __DIR__ . '/trait-shuzijun-app-fan-endpoints.php';
+require_once __DIR__ . '/trait-shuzijun-app-push-notifications.php';
 require_once __DIR__ . '/trait-shuzijun-app-fan-identity.php';
 require_once __DIR__ . '/trait-shuzijun-app-content-delivery.php';
 
@@ -13,6 +14,7 @@ final class Shuzijun_App_Content_API {
     const CAPABILITY = 'manage_yishu_app_content';
     const FAN_CAPABILITY = 'manage_yishu_fan_accounts';
     const COLLABORATION_CAPABILITY = 'manage_yishu_collaboration_requests';
+    const PUSH_CAPABILITY = 'manage_yishu_push_notifications';
     const ROLE = 'yishu_content_manager';
     const FREE_PREVIEW_COUNT = 3;
     const FULL_GALLERY_FOR_APP = true;
@@ -35,6 +37,14 @@ final class Shuzijun_App_Content_API {
     const FAN_META_APPLE_AUTH_IAT = '_yishu_fan_apple_auth_iat';
     const FAN_META_AUTH_AUDIT = '_yishu_fan_auth_audit';
     const FAN_CONSENT_VERSION = '2026-09-04-approval-v4';
+    // Server 1.5.12 is the fixed, reviewed consent-protocol bridge between
+    // Build 42 (v3) and Build 45 (v4). Remove v3 from new submissions in
+    // server 1.5.13 after Build 42 is expired; never turn this into a remote
+    // option or filter.
+    const FAN_ACCEPTED_TRANSITIONAL_NEW_CONSENT_VERSIONS = array(
+        '2026-09-02-approval-v3',
+        '2026-09-04-approval-v4',
+    );
     const FAN_ACCEPTED_LEGACY_CONSENT_VERSIONS = array(
         '2026-08-31-approval-v2',
         '2026-09-02-approval-v3',
@@ -78,7 +88,24 @@ final class Shuzijun_App_Content_API {
     const COLLABORATION_SWEEP_HOOK = 'yishu_sweep_collaboration_outbox';
     const COLLABORATION_OUTBOX_MAX_ATTEMPTS = 5;
     const COLLABORATION_OUTBOX_LEASE_SECONDS = 300;
+    const PUSH_SCHEMA_OPTION = 'yishu_push_schema_version';
+    const PUSH_SCHEMA_VERSION = 2;
+    const PUSH_TOPIC = 'cn.com.shuzijun.yishu';
+    const PUSH_PRODUCTION_HOST = 'https://api.push.apple.com';
+    const PUSH_OUTBOX_HOOK = 'yishu_process_push_outbox';
+    const PUSH_SWEEP_HOOK = 'yishu_sweep_push_outbox';
+    const PUSH_OUTBOX_MAX_ATTEMPTS = 7;
+    const PUSH_OUTBOX_LEASE_SECONDS = 180;
+    const PUSH_APNS_EXPIRATION_SECONDS = 86400;
+    const PUSH_MAX_RECIPIENTS = 100;
+    const PUSH_MAX_DEVICES_PER_USER = 16;
+    const PUSH_LEGACY_SESSION_PAGE_SIZE = 128;
+    const PUSH_LEGACY_SESSION_SCAN_LIMIT = 4096;
+    const PUSH_RETENTION_SECONDS = 2592000;
+    const PUSH_DEVICE_TTL = 7776000;
     private static $fan_session_context = null;
+    private static $apns_provider_token_cache = null;
+    private static $push_schema_verified = null;
 
     /**
      * Phase 1 is intentionally unavailable in Build 41 even if an external
@@ -98,9 +125,14 @@ final class Shuzijun_App_Content_API {
             && hash_equals(self::FAN_CONSENT_VERSION, $version);
     }
 
-    /** New acknowledgements must exactly match the policy shown by this build. */
+    /** New acknowledgements must exactly match one reviewed bridge version. */
     public static function fan_new_consent_version_is_accepted($version) {
-        return self::fan_consent_version_is_current($version);
+        return is_string($version)
+            && in_array(
+                $version,
+                self::FAN_ACCEPTED_TRANSITIONAL_NEW_CONSENT_VERSIONS,
+                true
+            );
     }
 
     /**
@@ -140,6 +172,10 @@ final class Shuzijun_App_Content_API {
             add_action('init', array(__CLASS__, 'ensure_fan_apple_revocation_schedule'), 40);
             add_action('init', array(__CLASS__, 'ensure_fan_apple_event_schedule'), 41);
             add_action('init', array(__CLASS__, 'ensure_fan_apple_tombstone_schedule'), 42);
+            add_action('init', array(__CLASS__, 'ensure_push_storage'), 22);
+            add_action(self::PUSH_OUTBOX_HOOK, array(__CLASS__, 'process_push_outbox'), 10, 1);
+            add_action(self::PUSH_SWEEP_HOOK, array(__CLASS__, 'sweep_push_outbox'), 10, 0);
+            add_action('init', array(__CLASS__, 'ensure_push_outbox_schedule'), 44);
             if (self::collaboration_phase1_enabled()) {
                 add_action('init', array(__CLASS__, 'ensure_collaboration_storage'), 21);
                 add_action(self::COLLABORATION_OUTBOX_HOOK, array(__CLASS__, 'process_collaboration_outbox'), 10, 1);
@@ -178,6 +214,7 @@ final class Shuzijun_App_Content_API {
             if (!$role->has_cap('upload_files')) { $role->add_cap('upload_files', true); }
             if (!$role->has_cap(self::CAPABILITY)) { $role->add_cap(self::CAPABILITY, true); }
             if (!$role->has_cap(self::FAN_CAPABILITY)) { $role->add_cap(self::FAN_CAPABILITY, true); }
+            if (!$role->has_cap(self::PUSH_CAPABILITY)) { $role->add_cap(self::PUSH_CAPABILITY, true); }
             if (self::collaboration_phase1_enabled()
                 && !$role->has_cap(self::COLLABORATION_CAPABILITY)) {
                 $role->add_cap(self::COLLABORATION_CAPABILITY, true);
@@ -190,6 +227,9 @@ final class Shuzijun_App_Content_API {
         if ($administrator && !$administrator->has_cap(self::FAN_CAPABILITY)) {
             $administrator->add_cap(self::FAN_CAPABILITY, true);
         }
+        if ($administrator && !$administrator->has_cap(self::PUSH_CAPABILITY)) {
+            $administrator->add_cap(self::PUSH_CAPABILITY, true);
+        }
         if (self::collaboration_phase1_enabled()
             && $administrator
             && !$administrator->has_cap(self::COLLABORATION_CAPABILITY)) {
@@ -201,6 +241,7 @@ final class Shuzijun_App_Content_API {
         return $user instanceof WP_User
             && (user_can($user, self::CAPABILITY)
                 || user_can($user, self::FAN_CAPABILITY)
+                || user_can($user, self::PUSH_CAPABILITY)
                 || (self::collaboration_phase1_enabled()
                     && user_can($user, self::COLLABORATION_CAPABILITY)));
     }
@@ -418,6 +459,25 @@ final class Shuzijun_App_Content_API {
             'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session'),
         ));
 
+        register_rest_route('shuzijun/v1', '/fan/push-device', array(
+            array(
+                'methods' => WP_REST_Server::CREATABLE,
+                'callback' => array(__CLASS__, 'register_fan_push_device'),
+                'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session'),
+            ),
+            array(
+                'methods' => 'DELETE',
+                'callback' => array(__CLASS__, 'unregister_fan_push_device'),
+                'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session'),
+            ),
+        ));
+
+        register_rest_route('shuzijun/v1', '/app-admin/push-notifications', array(
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => array(__CLASS__, 'create_targeted_push_notification'),
+            'permission_callback' => array(__CLASS__, 'can_manage_push'),
+        ));
+
         if (self::collaboration_phase1_enabled()) {
             register_rest_route('shuzijun/v1', '/collaboration-requests', array(
                 'methods' => WP_REST_Server::CREATABLE,
@@ -500,12 +560,15 @@ final class Shuzijun_App_Content_API {
             return self::can_access_app_content($request);
         }
         if (preg_match('/^Basic\\s+[A-Za-z0-9+\\/=]{8,4096}$/', $authorization)) {
-            // Administrator clients use the dedicated collaboration capability;
-            // this read-only check does not grant submission or mutation rights.
-            return self::authenticate_manager_for_capability(
-                $request,
-                self::COLLABORATION_CAPABILITY
-            );
+            // This read-only endpoint may be used by any App administrator;
+            // each returned mutation capability is still calculated separately.
+            return self::authenticate_manager_for_capability($request, self::PUSH_CAPABILITY)
+                || self::authenticate_manager_for_capability($request, self::FAN_CAPABILITY)
+                || self::authenticate_manager_for_capability($request, self::CAPABILITY)
+                || self::authenticate_manager_for_capability(
+                    $request,
+                    self::COLLABORATION_CAPABILITY
+                );
         }
         return false;
     }
@@ -515,9 +578,13 @@ final class Shuzijun_App_Content_API {
             && self::account_authority_enabled()
             && self::collaboration_storage_ready()
             && self::collaboration_mail_transport_ready();
+        $push_enabled = self::push_service_ready();
         $response = rest_ensure_response(array(
             'collaborationSubmissionEnabled' => $collaboration_enabled,
             'collaborationInboxEnabled' => $collaboration_enabled,
+            'pushNotificationsEnabled' => $push_enabled,
+            'canSendPushNotifications' => $push_enabled
+                && current_user_can(self::PUSH_CAPABILITY),
         ));
         $response->header('Cache-Control', 'private, no-store, max-age=0');
         $response->header('Pragma', 'no-cache');
@@ -537,6 +604,23 @@ final class Shuzijun_App_Content_API {
             self::COLLABORATION_CAPABILITY,
             'yishu_collaboration_admin_rate_'
         );
+    }
+
+    public static function can_manage_push($request = null) {
+        $access = self::can_manage_capability(
+            $request,
+            self::PUSH_CAPABILITY,
+            'yishu_push_admin_rate_'
+        );
+        if ($access === true || is_wp_error($access)) { return $access; }
+        if (self::authenticate_manager_for_capability($request, self::FAN_CAPABILITY)) {
+            return new WP_Error(
+                'push_capability_required',
+                '当前管理员尚未获得推送权限。',
+                array('status' => 403)
+            );
+        }
+        return false;
     }
 
     public static function can_submit_collaboration(WP_REST_Request $request) {
@@ -582,6 +666,7 @@ final class Shuzijun_App_Content_API {
 
     use Shuzijun_App_Collaboration;
     use Shuzijun_App_Fan_Endpoints;
+    use Shuzijun_App_Push_Notifications;
     use Shuzijun_App_Fan_Identity;
     use Shuzijun_App_Content_Delivery;
 }

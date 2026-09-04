@@ -1645,6 +1645,10 @@ trait Shuzijun_App_Fan_Endpoints {
     public static function logout_fan() {
         $context = self::$fan_session_context;
         if (is_array($context) && !empty($context['tokenHash'])) {
+            // revoke_fan_session first writes the persistent unbound tombstone,
+            // cancels this binding generation and only then removes the device.
+            // A direct device-first delete here would invert the worker's lock
+            // order and could deadlock a concurrent delivery.
             self::revoke_fan_session((int) $context['userID'], (string) $context['tokenHash']);
         }
         self::$fan_session_context = null;
@@ -2433,29 +2437,104 @@ trait Shuzijun_App_Fan_Endpoints {
 
     public static function list_fans(WP_REST_Request $request) {
         $search = sanitize_text_field((string) $request->get_param('search'));
-        $search = self::text_length($search) > 80 ? '' : $search;
-        $users = get_users(array(
-            'number' => 100,
+        if (self::text_length($search) > 80) {
+            return new WP_Error(
+                'fan_search_invalid',
+                '搜索内容不能超过 80 个字符。',
+                array('status' => 400)
+            );
+        }
+        $raw_page = filter_var($request->get_param('page'), FILTER_VALIDATE_INT);
+        $raw_per_page = filter_var($request->get_param('perPage'), FILTER_VALIDATE_INT);
+        $page = $raw_page !== false && $raw_page >= 1 ? min(10000, (int) $raw_page) : 1;
+        $per_page = $raw_per_page !== false && $raw_per_page >= 1
+            ? min(100, (int) $raw_per_page)
+            : 100;
+        $query = array(
+            'number' => $per_page + 1,
+            'offset' => ($page - 1) * $per_page,
             'orderby' => 'registered',
             'order' => 'DESC',
             'fields' => 'all',
             'meta_key' => self::FAN_META_UUID,
-        ));
-        $result = array();
-        $normalized_search = self::normalize_identity_code($search);
-        foreach ($users as $user) {
-            if (!$user instanceof WP_User) { continue; }
-            $profile = self::fan_admin_profile($user);
-            if ($search && $normalized_search !== $profile['identityCode']
-                && stripos($profile['displayName'], $search) === false
-                && stripos($profile['douyinID'], $search) === false) {
-                continue;
+        );
+        if ($search !== '') {
+            global $wpdb;
+            if (!isset($wpdb->users, $wpdb->usermeta)
+                || !method_exists($wpdb, 'prepare')
+                || !method_exists($wpdb, 'esc_like')
+                || !method_exists($wpdb, 'get_col')) {
+                return new WP_Error(
+                    'fan_list_unavailable',
+                    '用户列表暂时不可用，请稍后重试。',
+                    array('status' => 503)
+                );
             }
+            $conditions = array('u.display_name LIKE %s');
+            $arguments = array(
+                self::FAN_META_UUID,
+                '%' . $wpdb->esc_like($search) . '%',
+            );
+            $identity = self::normalize_identity_code($search);
+            if ($identity !== '') {
+                $conditions[] = 'EXISTS (
+                    SELECT 1 FROM ' . $wpdb->usermeta . ' identity_meta
+                    WHERE identity_meta.user_id = u.ID
+                      AND identity_meta.meta_key = %s
+                      AND identity_meta.meta_value = %s
+                )';
+                $arguments[] = self::FAN_META_CODE;
+                $arguments[] = $identity;
+            }
+            $douyin = self::normalize_douyin_id($search);
+            if ($douyin !== '') {
+                $conditions[] = 'EXISTS (
+                    SELECT 1 FROM ' . $wpdb->usermeta . ' douyin_meta
+                    WHERE douyin_meta.user_id = u.ID
+                      AND douyin_meta.meta_key = %s
+                      AND douyin_meta.meta_value = %s
+                )';
+                $arguments[] = self::FAN_META_DOUYIN_ID;
+                $arguments[] = $douyin;
+            }
+            $arguments[] = $per_page + 1;
+            $arguments[] = ($page - 1) * $per_page;
+            $sql = 'SELECT u.ID FROM ' . $wpdb->users . ' u
+                WHERE EXISTS (
+                    SELECT 1 FROM ' . $wpdb->usermeta . ' fan_meta
+                    WHERE fan_meta.user_id = u.ID AND fan_meta.meta_key = %s
+                )
+                AND (' . implode(' OR ', $conditions) . ')
+                ORDER BY u.user_registered DESC, u.ID DESC
+                LIMIT %d OFFSET %d';
+            $ids = $wpdb->get_col($wpdb->prepare($sql, $arguments));
+            if (!is_array($ids) || !empty($wpdb->last_error)) {
+                return new WP_Error(
+                    'fan_list_unavailable',
+                    '用户列表暂时不可用，请稍后重试。',
+                    array('status' => 503)
+                );
+            }
+            $users = array_values(array_filter(array_map('get_userdata', $ids)));
+        } else {
+            $users = get_users($query);
+        }
+        $result = array();
+        $seen = array();
+        foreach ($users as $user) {
+            if (!$user instanceof WP_User || isset($seen[(int) $user->ID])) { continue; }
+            $profile = self::fan_admin_profile($user);
+            $seen[(int) $user->ID] = true;
             $result[] = $profile;
         }
+        $has_more = count($result) > $per_page;
+        $result = array_slice($result, 0, $per_page);
         $response = rest_ensure_response(array(
             'users' => $result,
             'permissionCatalog' => self::permission_catalog(),
+            'page' => $page,
+            'perPage' => $per_page,
+            'hasMore' => $has_more,
         ));
         $response->header('Cache-Control', 'private, no-store');
         return $response;
