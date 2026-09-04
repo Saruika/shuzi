@@ -290,7 +290,9 @@ enum ContentCatalog {
     static let websiteURL = AppURL.make("https://www.shuzijun.com.cn/")
     static let privacyPolicyURL = AppURL.make("https://www.shuzijun.com.cn/app-privacy/")
     static let collaborationEmailAddress = "369476120@qq.com"
+    static let privacyContactEmailAddress = "sariki@me.com"
     static let emailURL = AppURL.make("mailto:369476120@qq.com")
+    static let privacyEmailURL = AppURL.make("mailto:sariki@me.com")
     static let collaborationEmailURL = AppURL.make(
         "mailto:369476120@qq.com?subject=%E6%98%93%E5%A7%9D%E5%90%88%E4%BD%9C%E9%82%80%E7%BA%A6&body=%E6%82%A8%E5%A5%BD%EF%BC%8C%E6%88%91%E6%83%B3%E5%92%A8%E8%AF%A2%E6%98%93%E5%A7%9D%E7%9A%84%E6%BC%94%E5%87%BA%E6%88%96%E6%8B%8D%E6%91%84%E5%90%88%E4%BD%9C%E3%80%82"
     )

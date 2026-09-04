@@ -74,6 +74,14 @@ Server/tests/fan-api-smoke.sh
 
 GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服务器密钥；外部 Action 固定到完整 commit SHA。失败时保留七天 `.xcresult` 供排查。
 
+## Build 44 发布前验收
+
+1. 确认 App Debug/Release 均为 `1.3.32 (44)`；“关于”页工作联系、合作邀约邮件回退和服务端合作收件人均为 `369476120@qq.com`。
+2. App 内与网页版隐私政策都必须把个人信息查阅、更正、删除、账号资料更正及政策反馈指向 `sariki@me.com`，并保留 QQ 邮箱的商务合作用途；两类邮箱不得互换。
+3. App Store Connect API 重新读取 Bundle ID capability，确认 `PUSH_NOTIFICATIONS` 已启用；工程 entitlement 包含 `aps-environment`，且自动签名生成的新开发/分发描述文件包含相应环境值。
+4. APNs `.p8` 只能从 Apple Developer 门户下载一次，必须保存于仓库和 Web 根目录之外且权限不宽于 `0600`。在客户端授权、设备令牌注册、服务端提供方、失效令牌清理和真机端到端验收完成前，不得宣称推送已经上线。
+5. 执行邮箱职责单元测试、全量 iOS 单元测试、Release 构建与 `Scripts/security-check.sh`；扫描 Git 暂存区和最终 `.app`，确认没有 APNs 私钥、JWT、设备令牌或其他凭据。
+
 ## Build 43 发布前验收
 
 1. 确认 App 1.3.31 Build 43 对新注册、Apple 首次资料提交、邀请完成和存量空 ID 补全均提交 `2026-09-04-approval-v4`，客户端和服务器都拒绝空抖音 ID。

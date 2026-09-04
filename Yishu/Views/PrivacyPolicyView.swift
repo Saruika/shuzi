@@ -15,7 +15,7 @@ struct PrivacyPolicyView: View {
                             .font(.system(.largeTitle, design: .serif))
                             .accessibilityIdentifier("privacy-policy-heading")
                             .accessibilityAddTraits(.isHeader)
-                        Text("生效日期：2026 年 9 月 4 日")
+                        Text("生效日期：2026 年 9 月 5 日")
                             .font(.caption)
                             .foregroundStyle(AppTheme.muted)
                     }
@@ -44,17 +44,29 @@ struct PrivacyPolicyView: View {
                         "密码恢复凭据只在 15 分钟内有效；完成恢复、重新生成或删除账号时会移除恢复记录。未完成的过期状态可随账号保留至下次生成或删号，仅用于拒绝过期凭据，不能获得内容访问。",
                         "未完成设置的邀请在 24 小时后失效并删除临时记录；完成设置时会立即撤销临时凭据和旧会话。",
                         "管理员上传的照片、视频和封面保存至内容管理员替换或删除，并按服务器备份周期清理隔离副本。",
-                        "合作邀约信息仅用于回复和安排合作。邮件模式下由合作邮箱保留；若服务器提交功能未来启用，后台邀约、发件队列和关联审计会保留至事项处理完毕，但在你删除账号时会一并删除与该账号关联的在线记录。已经交给邮件服务的邮箱副本无法由 App 自动撤回，你可通过合作邮箱请求查阅、更正或删除；在备份中的剩余副本随服务器备份周期清理，依法必须保留的记录除外。",
+                        "合作邀约信息仅用于回复和安排合作。邮件模式下由合作邮箱保留；若服务器提交功能未来启用，后台邀约、发件队列和关联审计会保留至事项处理完毕，但在你删除账号时会一并删除与该账号关联的在线记录。已经交给邮件服务的邮箱副本无法由 App 自动撤回，你可通过隐私邮箱请求查阅、更正或删除；在备份中的剩余副本随服务器备份周期清理，依法必须保留的记录除外。",
                         "若删除 Apple 账号时 Apple 的授权撤销服务暂时不可用，账号资料仍会立即删除；仅无法回链用户或抖音 ID 的加密令牌进入最多 7 天、最多 8 次的有界重试队列，并在成功、到期或达到次数上限时销毁。",
                         "在登录后的账号页，或尚未获批的申请状态页点击“永久删除账号与个人资料”，密码账号通过近期密码验证，Apple 账号通过一次原生 Apple 重新授权后，即可由你自己发起完整删除，不需要联系客服或等待审批。",
-                        "删除会立即移除账号、昵称、已填写的抖音 ID、身份码、权限、恢复记录、安装记录、会话，以及服务器上与该账号关联的合作邀约、待发邮件记录和关联审计，并清除本机该账号的收藏与最近浏览。隔离备份中的残留数据随备份周期删除，且不用于日常业务。已经交给外部邮件服务的副本需通过合作邮箱申请删除；依法必须保留的记录除外。",
+                        "删除会立即移除账号、昵称、已填写的抖音 ID、身份码、权限、恢复记录、安装记录、会话，以及服务器上与该账号关联的合作邀约、待发邮件记录和关联审计，并清除本机该账号的收藏与最近浏览。隔离备份中的残留数据随备份周期删除，且不用于日常业务。已经交给外部邮件服务的副本需通过隐私邮箱申请删除；依法必须保留的记录除外。",
                     ])
 
                     policySection("你的选择", text: "抖音 ID 是完成账号申请和访问内容的必需资料；如你不愿提供，可不完成注册或邀请设置，并可随时删除已创建的申请或账号。你还可以不开启天气、退出账号、要求管理员更正不准确资料，或随时在首次设置页、申请页或账号页删除账号来撤回后续处理同意。待审批、被拒绝、被暂停或旧账号等待资料升级，均不影响主动删除。依法必须保留的安全或法律记录除外。")
 
                     policySection("安全", text: "App 使用 HTTPS、Keychain、有效期会话、令牌哈希、设备安装绑定、限流和最小权限管理来减少未授权访问风险。App 不读取硬件 UDID，也不使用 IDFA。")
 
-                    policySection("联系与政策更新", text: "如需查阅、更正或删除已发送的合作邀约，更正账号资料，或询问隐私事项，请联系合作邮箱 369476120@qq.com。政策发生实质变化时，会更新生效日期，并在适用时重新获取同意。")
+                    policySection(
+                        "联系与政策更新",
+                        text: "商务合作及邀约回复请联系合作邮箱 \(ContentCatalog.collaborationEmailAddress)。如需查阅、更正或删除个人信息、更正账号资料、询问隐私事项或反馈本政策，请联系隐私邮箱 \(ContentCatalog.privacyContactEmailAddress)。政策发生实质变化时，会更新生效日期，并在适用时重新获取同意。"
+                    )
+
+                    Link(destination: ContentCatalog.privacyEmailURL) {
+                        Label("联系隐私邮箱", systemImage: "envelope")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity, minHeight: 48)
+                            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+                            .foregroundStyle(.white)
+                    }
+                    .accessibilityIdentifier("privacy-contact-email")
 
                     Link(destination: ContentCatalog.privacyPolicyURL) {
                         Label("查看网页版隐私政策", systemImage: "arrow.up.right")

@@ -804,6 +804,17 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(ContentCatalog.privacyPolicyURL.path, "/app-privacy")
     }
 
+    func testBusinessAndPrivacyMailboxesAreExplicitlySeparated() {
+        XCTAssertEqual(ContentCatalog.collaborationEmailAddress, "369476120@qq.com")
+        XCTAssertEqual(ContentCatalog.emailURL.absoluteString, "mailto:369476120@qq.com")
+        XCTAssertEqual(ContentCatalog.privacyContactEmailAddress, "sariki@me.com")
+        XCTAssertEqual(ContentCatalog.privacyEmailURL.absoluteString, "mailto:sariki@me.com")
+        XCTAssertNotEqual(
+            ContentCatalog.collaborationEmailAddress,
+            ContentCatalog.privacyContactEmailAddress
+        )
+    }
+
     func testPublishedManifestResponseMustMatchTheExactConfiguredEndpoint() {
         let expected = ContentCatalog.publishedManifestURL
 

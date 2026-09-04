@@ -2,7 +2,7 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前候选版本：`1.3.31 (43)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前候选版本：`1.3.32 (44)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 ## 产品功能
 
@@ -102,6 +102,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.30-build42.13.md`](Server/releases/v1.3.30-build42.13.md)：修复快照计划已迁移时的重复部署，并正确处理 systemd 回收 inactive oneshot 造成的假失败。
 - [`Server/releases/v1.3.30-build42.14.md`](Server/releases/v1.3.30-build42.14.md)：兼容备节点 `reset-failed` 对已回收 oneshot 的实际返回码，后置双采样仍保持失败关闭。
 - [`Server/releases/v1.5.11-build43.md`](Server/releases/v1.5.11-build43.md)：抖音 ID 必填、Apple 存量账号迁移、合作邀约持久化候选与数据删除/竞态复核发布清单。
+- [`Server/releases/v1.3.32-build44.md`](Server/releases/v1.3.32-build44.md)：合作邮箱与隐私联系邮箱分离、App/网页联系渠道一致性发布记录。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
@@ -111,6 +112,13 @@ xcodebuild -project Yishu.xcodeproj \
 - 服务端 1.5.11 对新确认只接受 v4，但已存 v2/v3 记录仍有效。它不得在 Build 43 具备分发条件前部署，否则仍提交 v3 的 Build 42 新确认会被拒绝。当前变更只准备代码与 GitHub 版本，不部署生产服务。
 - iPad 横屏首页对竖版主视觉使用模糊铺底与 `fit` 完整前景；最多 5 张首页图只在运行时内存预热，切换未就绪时暂保留上一帧，不向本地文件或 URL 缓存写入图片。
 - 合作邀约的持久化收件箱、邮件 Outbox 与重试逻辑仅为已审候选，内建生产熔断仍保持关闭；在收件人、认证发信通道、退信监控和端到端验收完成前，不声明邮件已上线或必达。
+
+### Build 44 邮箱职责分离（GitHub 候选）
+
+- 商务合作、邀约发送与回复固定使用 `369476120@qq.com`；App 内“工作联系”和服务端合作收件人保持一致。
+- 个人信息查阅、更正、删除、账号资料更正和隐私政策反馈统一使用 `sariki@me.com`；App 内与网页版隐私政策同步更新。
+- 本次属于联系渠道澄清，不改变数据用途、处理范围或现有 `2026-09-04-approval-v4` 同意门禁。
+- Apple Developer 中已为 `cn.com.shuzijun.yishu` 开启 Push Notifications，工程同步加入 APNs entitlement；客户端授权、设备令牌注册和服务器推送提供方仍须在 APNs 私钥创建后单独实现并验收，当前版本不宣称已能推送。
 
 ### Build 41 媒体策略
 
