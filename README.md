@@ -108,6 +108,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.33-build45.1.md`](Server/releases/v1.3.33-build45.1.md)：MySQL 8 保留字导致通知表建表失败的 1.5.12.1 热修复、schema v3 迁移与精确部署顺序。
 - [`Server/releases/v1.3.33-build45.2.md`](Server/releases/v1.3.33-build45.2.md)：`set -u` 拦截 Worker 部署器临时路径展开的最小热修复与重新安装顺序。
 - [`Server/releases/v1.3.33-build45.3.md`](Server/releases/v1.3.33-build45.3.md)：systemd 最小权限下使用 `www-data` 降权校验密钥 immutable 属性的 Worker 热修复。
+- [`Server/releases/v1.3.33-build45.4.md`](Server/releases/v1.3.33-build45.4.md)：修正 `setpriv` 先清空 bounding set 导致 UID 切换失败的降权顺序。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 

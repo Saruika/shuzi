@@ -65,7 +65,7 @@ immutable_check = worker[
 ]
 assert "/usr/bin/setpriv" in immutable_check
 assert "--reuid=www-data" in immutable_check
-assert "--bounding-set=-all" in immutable_check
+assert "--no-new-privs" in immutable_check
 
 expected_fpm_variables = {
     "YISHU_APNS_KEY_ID",
@@ -118,7 +118,7 @@ assert "readonly SWEEP_HOOK=yishu_sweep_push_outbox" in worker
 assert "prior sweep still active" in worker
 assert "authority transition busy" in worker
 assert "--reuid=www-data" in worker and "--regid=www-data" in worker
-assert "--bounding-set=-all" in worker
+assert "--bounding-set=-all" not in worker
 assert ">/dev/null 2>&1" in worker
 assert "set -x" not in worker
 assert "printenv" not in worker and "env |" not in worker
