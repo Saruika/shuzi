@@ -42,4 +42,16 @@ assert "compact: true" not in preview and ".aspectRatio(9 / 16" not in preview
 upload = admin.split("private func uploadLaunchPoster", 1)[1].split("private func replaceLaunchPoster", 1)[0]
 assert ".newDraft(imageURL: media.sourceURL)" in upload
 assert "SEASONAL POSTER" not in upload and "镜头之内，自有叙事。" not in upload
-print("launch-poster-contract: shared canvas and copy, timer-free responsive preview passed")
+root_view = (root / "Yishu/Views/RootView.swift").read_text()
+prepare = root_view.split("private func prepareAuthorizedContentIfNeeded()", 1)[1].split("private func refreshApprovedContent", 1)[0]
+assert prepare.index("await refreshApprovedContent(forColdLaunch: true)") < prepare.index("prepareLaunchPosterIfNeeded(hasFreshContent:")
+assert "authorizedContentPreparationID == preparationID" in prepare
+assert "fanAccount.profile?.userID == userID" in prepare
+assert "LaunchPosterFreshContentLoader.load" in root_view
+assert "!hasFreshContent && !shouldBypassAccessGate" in root_view
+store = (root / "Yishu/Services/PortfolioStore.swift").read_text()
+assert "launchPosters = manifest.launchPosters ?? []" in store
+assert "contentOrigin == .network || allowsBundledPreview" in store
+assert "generation == cacheRestoreGeneration" in store
+assert "Task.detached" not in store, "Metadata reads/writes/deletes must share the ordered queue"
+print("launch-poster-contract: shared canvas, fresh published copy before selection, bounded fallback and ordered metadata passed")

@@ -1376,6 +1376,133 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(ContentCatalog.launchPosters[0], original)
     }
 
+    @MainActor
+    func testColdLaunchUsesFreshPublishedCopyInsteadOfBundledOrCachedCopy() async throws {
+        let store = PortfolioStore()
+        let defaults = try makePushStartupDefaults()
+        defer { store.discardProtectedContent() }
+        XCTAssertNil(store.selectLaunchPosterForColdLaunch(defaults: defaults))
+        let old = makeManifest(aboutPortraitURL: nil)
+        store.applyPublishedManifest(old)
+        // Simulate a cold start with a previously published metadata cache.
+        let restarted = PortfolioStore()
+        await restarted.restoreCachedContent(allowVideo: true)
+        XCTAssertEqual(restarted.contentOrigin, .cached)
+        XCTAssertNil(restarted.selectLaunchPosterForColdLaunch(defaults: defaults))
+
+        var edited = try XCTUnwrap(old.launchPosters?.first)
+        edited.eyebrow = "后台眉题"
+        edited.title = "后台标题"
+        edited.subtitle = "管理员已发布的新文案，保留原样。"
+        let published = makeManifest(aboutPortraitURL: nil, launchPosters: [edited])
+        let refreshID = restarted.beginContentRefresh()
+        let fresh = try await LaunchPosterFreshContentLoader.load {
+            try await Task.sleep(for: .milliseconds(20))
+            return published
+        }
+        XCTAssertTrue(restarted.completeContentRefresh(refreshID, with: fresh))
+        let selected = restarted.selectLaunchPosterForColdLaunch(defaults: defaults)
+        XCTAssertEqual(selected, edited, "第一次开屏即使用发布回执中的完整文案，不再慢一次启动")
+        XCTAssertEqual(selected, restarted.launchPosters.first, "后台预览和开屏使用同一份发布内容")
+    }
+
+    @MainActor
+    func testMissingEmptyDisabledAndExpiredPublishedPostersNeverReviveDefaults() throws {
+        let store = PortfolioStore()
+        defer { store.discardProtectedContent() }
+        let defaults = try makePushStartupDefaults()
+        var disabled = try XCTUnwrap(ContentCatalog.launchPosters.first)
+        disabled.isEnabled = false
+        var expired = disabled
+        expired.isEnabled = true
+        expired.endsAt = Date().addingTimeInterval(-60)
+        for posters: [LaunchPosterContent]? in [nil, [], [disabled], [expired]] {
+            store.applyPublishedManifest(makeManifest(aboutPortraitURL: nil))
+            store.applyPublishedManifest(makeManifest(aboutPortraitURL: nil, launchPosters: posters))
+            XCTAssertNil(store.selectLaunchPosterForColdLaunch(defaults: defaults))
+        }
+    }
+
+    @MainActor
+    func testColdLaunchTimeoutCancelsRequestWithoutSelectingStaleCopy() async throws {
+        let store = PortfolioStore()
+        defer { store.discardProtectedContent() }
+        let cancelled = expectation(description: "慢请求已取消")
+        let started = ContinuousClock.now
+        do {
+            _ = try await LaunchPosterFreshContentLoader.load(timeout: .milliseconds(30)) {
+                do { try await Task.sleep(for: .seconds(10)) }
+                catch { cancelled.fulfill(); throw error }
+                return self.makeManifest(aboutPortraitURL: nil)
+            }
+            XCTFail("超时不应返回旧内容")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .timedOut)
+        }
+        await fulfillment(of: [cancelled], timeout: 1)
+        XCTAssertLessThan(started.duration(to: .now), .seconds(2))
+        XCTAssertNil(store.selectLaunchPosterForColdLaunch())
+    }
+
+    @MainActor
+    func testColdLaunchFailureAndCancellationNeverProduceContent() async {
+        do {
+            _ = try await LaunchPosterFreshContentLoader.load {
+                throw URLError(.notConnectedToInternet)
+            }
+            XCTFail("断网不应恢复旧海报")
+        } catch { XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet) }
+        let task = Task {
+            try await LaunchPosterFreshContentLoader.load {
+                try await Task.sleep(for: .seconds(10))
+                return self.makeManifest(aboutPortraitURL: nil)
+            }
+        }
+        task.cancel()
+        do { _ = try await task.value; XCTFail("退出或换号后不能继续选片") }
+        catch { XCTAssertTrue(error is CancellationError) }
+    }
+
+    @MainActor
+    func testSupersededOrDiscardedContentRefreshCannotPublishOldPoster() {
+        let store = PortfolioStore()
+        defer { store.discardProtectedContent() }
+        let oldID = store.beginContentRefresh()
+        let newID = store.beginContentRefresh()
+        let empty = makeManifest(aboutPortraitURL: nil, launchPosters: [])
+        XCTAssertTrue(store.completeContentRefresh(newID, with: empty))
+        XCTAssertFalse(store.completeContentRefresh(oldID, with: makeManifest(aboutPortraitURL: nil)))
+        XCTAssertTrue(store.launchPosters.isEmpty)
+        let discardedID = store.beginContentRefresh()
+        store.discardProtectedContent()
+        XCTAssertFalse(store.completeContentRefresh(discardedID, with: makeManifest(aboutPortraitURL: nil)))
+        XCTAssertNil(store.selectLaunchPosterForColdLaunch())
+    }
+
+    @MainActor
+    func testMetadataCacheWritesAndDeletionKeepPublicationOrder() async throws {
+        let store = PortfolioStore()
+        defer { store.discardProtectedContent() }
+        var poster = try XCTUnwrap(ContentCatalog.launchPosters.first)
+        for index in 0..<20 {
+            poster.subtitle = "发布文案 \(index)"
+            store.applyPublishedManifest(makeManifest(aboutPortraitURL: nil, launchPosters: [poster]))
+        }
+        let reader = PortfolioStore()
+        await reader.restoreCachedContent(allowVideo: true)
+        XCTAssertEqual(reader.launchPosters.first?.subtitle, "发布文案 19")
+        store.discardProtectedContent()
+        let cleared = PortfolioStore()
+        await cleared.restoreCachedContent(allowVideo: true)
+        XCTAssertEqual(cleared.contentOrigin, .bundled)
+        XCTAssertNil(cleared.selectLaunchPosterForColdLaunch())
+        // A newer publication after cleanup must not be deleted by an old task.
+        store.applyPublishedManifest(makeManifest(aboutPortraitURL: nil, launchPosters: [poster]))
+        let afterRepublish = PortfolioStore()
+        await afterRepublish.restoreCachedContent(allowVideo: true)
+        XCTAssertEqual(afterRepublish.launchPosters.first?.subtitle, "发布文案 19")
+    }
+
     func testLaunchPosterPreviewUsesActualWindowAspectWithoutStretching() {
         for viewport in [CGSize(width: 440, height: 956), CGSize(width: 956, height: 440),
                          CGSize(width: 1032, height: 1376), CGSize(width: 1376, height: 1032)] {
@@ -4004,13 +4131,16 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
-    private func makeManifest(aboutPortraitURL: URL?, imageCount: Int = 3) -> AppContentManifest {
+    private func makeManifest(
+        aboutPortraitURL: URL?, imageCount: Int = 3,
+        launchPosters: [LaunchPosterContent]? = ContentCatalog.launchPosters
+    ) -> AppContentManifest {
         AppContentManifest(
             schemaVersion: 1,
             updatedAt: .now,
             heroImages: [ContentCatalog.heroImages[0]],
             aboutPortraitURL: aboutPortraitURL,
-            launchPosters: ContentCatalog.launchPosters,
+            launchPosters: launchPosters,
             showreel: ContentCatalog.showreel,
             dramas: ContentCatalog.dramas,
             portfolios: [makePortfolio(imageCount: imageCount)]

@@ -4,6 +4,8 @@
 
 > 当前 TestFlight 内部测试版本：`1.3.39 (51)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
+进行中的修复：[Build 52](Server/releases/v1.3.40-build52.md) 修正开屏先取旧缓存、后台已取新发布内容的时序问题。实际开屏以后台已发布文案为准；网络超时则跳过，不拿旧文案替代。尚在测试与发行验证，不代表已上传 TestFlight。
+
 最新客户端发布：[v1.3.39-build51](Server/releases/v1.3.39-build51.md)：修正 App 内管理员海报预览与实际开屏不一致的问题，共用图片布局、字体、渐变和安全区；统一新增海报的默认文案，保留已有手动内容。2026-09-05 18:07 上传成功，随后确认 Apple `VALID`、内部 `IN_BETA_TESTING`；完整枚举 42 个构建，仅 Build 51 未过期，全部 41 个旧构建已过期。请在 TestFlight 更新至 Build 51，检查后台海报预览及相册放大拖动。
 
 本版继续包含 [Build 50](Server/releases/v1.3.38-build50.md) 的相册修复：将缩放/拖动交给原生滚动视图，减少拖动期间的 SwiftUI 更新和重复图片合成。该专项曾通过 168 项独立 iPhone 单元测试、iPhone/iPad 共 8 组操作配置；没有真机前后 FPS 对比，不承诺所有设备零卡顿。

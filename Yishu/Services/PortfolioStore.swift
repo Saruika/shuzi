@@ -6,6 +6,28 @@ enum ContentOrigin: Equatable {
     case network
 }
 
+/// Only fresh, authenticated metadata may introduce a launch poster. A slow
+/// connection skips the poster instead of showing retired/cached copy. The
+/// cancelled request cannot later replace an already presented poster.
+enum LaunchPosterFreshContentLoader {
+    static func load(
+        timeout: Duration = .seconds(4),
+        fetch: @escaping @MainActor () async throws -> AppContentManifest
+    ) async throws -> AppContentManifest {
+        try await withThrowingTaskGroup(of: AppContentManifest.self) { group in
+            group.addTask { try await fetch() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            guard let manifest = try await group.next() else { throw CancellationError() }
+            try Task.checkCancellation()
+            return manifest
+        }
+    }
+}
+
 /// Keeps the About page useful when an older or partially configured content
 /// manifest does not yet provide a dedicated portrait. Every candidate remains
 /// a remote URL, so this fallback does not reintroduce protected photo assets
@@ -57,6 +79,9 @@ enum LaunchPosterSelectionPolicy {
 
 @MainActor
 final class PortfolioStore: ObservableObject {
+    nonisolated private static let cacheQueue = DispatchQueue(
+        label: "cn.com.shuzijun.yishu.content-metadata", qos: .utility
+    )
     nonisolated private static let cachedManifestPreviewImageCount = 3
     nonisolated private static let lastLaunchPosterIDKey = "cn.com.shuzijun.yishu.last-launch-poster-id"
     @Published private(set) var portfolios: [Portfolio] = Portfolio.fallback
@@ -78,6 +103,7 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var statusMessage: String?
     @Published private(set) var contentOrigin: ContentOrigin = .bundled
     private var contentRefreshID: UUID?
+    private var cacheRestoreGeneration = UUID()
 
     @discardableResult
     func beginContentRefresh() -> UUID {
@@ -88,8 +114,13 @@ final class PortfolioStore: ObservableObject {
         return refreshID
     }
 
-    func completeContentRefresh(_ refreshID: UUID, with manifest: AppContentManifest) {
-        guard contentRefreshID == refreshID else { return }
+    @discardableResult
+    func completeContentRefresh(_ refreshID: UUID, with manifest: AppContentManifest) -> Bool {
+        guard contentRefreshID == refreshID else { return false }
+        guard ContentSecurityPolicy.isTrusted(manifest) else {
+            failContentRefresh(refreshID)
+            return false
+        }
         contentRefreshID = nil
         isRefreshing = false
         applyPublishedManifest(manifest)
@@ -98,6 +129,7 @@ final class PortfolioStore: ObservableObject {
             portfolioCount: manifest.portfolios.count,
             imageCount: manifest.portfolios.reduce(0) { $0 + $1.images.count }
         )
+        return true
     }
 
     func failContentRefresh(_ refreshID: UUID) {
@@ -120,10 +152,12 @@ final class PortfolioStore: ObservableObject {
     /// authenticated refresh replaces this snapshot with the latest approved content.
     func restoreCachedContent(allowVideo: Bool) async {
         guard contentOrigin == .bundled else { return }
-        let cache = await Task.detached(priority: .userInitiated) {
-            Self.loadCache()
-        }.value
-        guard contentOrigin == .bundled,
+        let generation = cacheRestoreGeneration
+        let cache = await withCheckedContinuation { continuation in
+            Self.cacheQueue.async { continuation.resume(returning: Self.loadCache()) }
+        }
+        guard !Task.isCancelled, generation == cacheRestoreGeneration,
+              contentOrigin == .bundled,
               let cache,
               !cache.portfolios.isEmpty else { return }
         portfolios = cache.portfolios
@@ -134,7 +168,7 @@ final class PortfolioStore: ObservableObject {
             heroImages: heroImages,
             portfolios: portfolios
         )
-        launchPosters = cache.launchPosters ?? ContentCatalog.launchPosters
+        launchPosters = cache.launchPosters ?? []
         showreel = allowVideo ? cache.showreel : nil
         dramas = allowVideo ? (cache.dramas ?? []) : []
         lastUpdated = cache.updatedAt
@@ -155,8 +189,10 @@ final class PortfolioStore: ObservableObject {
 
     func selectLaunchPosterForColdLaunch(
         at date: Date = .now,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        allowsBundledPreview: Bool = false
     ) -> LaunchPosterContent? {
+        guard contentOrigin == .network || allowsBundledPreview else { return nil }
         let selected = LaunchPosterSelectionPolicy.select(
             from: launchPosters,
             at: date,
@@ -172,6 +208,7 @@ final class PortfolioStore: ObservableObject {
         guard manifest.schemaVersion == 1,
               !manifest.portfolios.isEmpty,
               ContentSecurityPolicy.isTrusted(manifest) else { return }
+        cacheRestoreGeneration = UUID()
         portfolios = manifest.portfolios
         heroImages = manifest.heroImages
         configuredAboutPortraitURL = manifest.aboutPortraitURL
@@ -180,7 +217,8 @@ final class PortfolioStore: ObservableObject {
             heroImages: manifest.heroImages,
             portfolios: manifest.portfolios
         )
-        launchPosters = manifest.launchPosters ?? launchPosters
+        // Missing/empty managed posters must never revive bundled or retired copy.
+        launchPosters = manifest.launchPosters ?? []
         showreel = manifest.showreel
         dramas = manifest.dramas
         lastUpdated = manifest.updatedAt
@@ -190,7 +228,7 @@ final class PortfolioStore: ObservableObject {
             portfolios: manifest.portfolios,
             heroImages: manifest.heroImages,
             aboutPortraitURL: configuredAboutPortraitURL,
-            launchPosters: manifest.launchPosters ?? launchPosters,
+            launchPosters: launchPosters,
             showreel: manifest.showreel,
             dramas: manifest.dramas,
             updatedAt: manifest.updatedAt
@@ -225,6 +263,7 @@ final class PortfolioStore: ObservableObject {
     }
 
     func discardProtectedContent() {
+        cacheRestoreGeneration = UUID()
         contentRefreshID = nil
         isRefreshing = false
         portfolios = Portfolio.fallback
@@ -270,7 +309,7 @@ final class PortfolioStore: ObservableObject {
 #endif
 
     private static func removeCacheInBackground() {
-        Task.detached(priority: .utility) {
+        Self.cacheQueue.async {
             guard let url = Self.cacheFileURL(createDirectory: false) else { return }
             try? FileManager.default.removeItem(at: url)
         }
@@ -295,7 +334,7 @@ final class PortfolioStore: ObservableObject {
         dramas: [DramaWork],
         updatedAt: Date
     ) {
-        Task.detached(priority: .utility) {
+        Self.cacheQueue.async {
             Self.persistCache(
                 portfolios: portfolios,
                 heroImages: heroImages,

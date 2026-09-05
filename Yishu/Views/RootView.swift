@@ -46,7 +46,7 @@ struct RootView: View {
     @State private var isLaunchPosterVisible = false
     @State private var hasResolvedAccess = false
     @State private var hasPreparedAuthorizedContent = false
-    @State private var isPreparingAuthorizedContent = false
+    @State private var authorizedContentPreparationID: UUID?
     @State private var approvedContentRefreshID = UUID()
     private let visualPortfolioTitle: String?
     private let visualTestingDestination: VisualTestingDestination?
@@ -418,9 +418,9 @@ struct RootView: View {
         return skipsPosterForTesting || visualPortfolioTitle != nil || selectedTab != .home
     }
 
-    private func prepareLaunchPosterIfNeeded() {
+    private func prepareLaunchPosterIfNeeded(hasFreshContent: Bool) {
         guard !hasPreparedLaunchPoster else { return }
-        if shouldSkipLaunchPoster {
+        if shouldSkipLaunchPoster || (!hasFreshContent && !shouldBypassAccessGate) {
             launchPosterSnapshot = nil
             isLaunchPosterVisible = false
             hasPreparedLaunchPoster = true
@@ -428,7 +428,9 @@ struct RootView: View {
         }
         if !coldLaunchPosterSelection.hasSelected {
             coldLaunchPosterSelection.record(
-                portfolioStore.selectLaunchPosterForColdLaunch()
+                portfolioStore.selectLaunchPosterForColdLaunch(
+                    allowsBundledPreview: shouldBypassAccessGate
+                )
             )
         }
         launchPosterSnapshot = coldLaunchPosterSelection.snapshot
@@ -455,9 +457,15 @@ struct RootView: View {
         guard canAccessAppContent,
               !adminSession.isAuthenticated,
               !hasPreparedAuthorizedContent,
-              !isPreparingAuthorizedContent else { return }
-        isPreparingAuthorizedContent = true
-        defer { isPreparingAuthorizedContent = false }
+              authorizedContentPreparationID == nil else { return }
+        let preparationID = UUID()
+        let userID = fanAccount.profile?.userID
+        authorizedContentPreparationID = preparationID
+        defer {
+            if authorizedContentPreparationID == preparationID {
+                authorizedContentPreparationID = nil
+            }
+        }
 
         enforceCurrentFanPermissionScope()
 #if DEBUG
@@ -472,43 +480,68 @@ struct RootView: View {
 #else
         await portfolioStore.restoreCachedContent(allowVideo: canViewVideo)
 #endif
+        guard authorizedContentPreparationID == preparationID,
+              fanAccount.profile?.userID == userID,
+              canAccessAppContent, !adminSession.isAuthenticated,
+              !Task.isCancelled else { return }
         enforceCurrentFanPermissionScope()
 #if DEBUG
         portfolioStore.configureMultiImageGalleryForVisualTestingIfNeeded()
 #endif
-        prepareLaunchPosterIfNeeded()
+        // Select AFTER the authenticated refresh, never from the initial cache.
+        // The bounded cold-launch request skips the poster on failure; normal
+        // catalog retry continues without holding the user on a blank launch.
+        let hasFreshContent = fanAccount.isApproved
+            ? await refreshApprovedContent(forColdLaunch: true) : false
+        guard authorizedContentPreparationID == preparationID,
+              fanAccount.profile?.userID == userID,
+              canAccessAppContent, !adminSession.isAuthenticated,
+              !Task.isCancelled else { return }
+        prepareLaunchPosterIfNeeded(hasFreshContent: hasFreshContent)
         hasPreparedAuthorizedContent = true
         recentlyViewed.retainAvailablePortfolios(in: portfolioStore.portfolios)
         if let visualPortfolioTitle,
            let portfolio = portfolioStore.portfolios.first(where: { $0.title == visualPortfolioTitle }) {
             portfolioPath = [portfolio]
         }
-        if fanAccount.isApproved { await refreshApprovedContent() }
+        if fanAccount.isApproved, !hasFreshContent { await refreshApprovedContent() }
     }
 
-    private func refreshApprovedContent() async {
+    @discardableResult
+    private func refreshApprovedContent(forColdLaunch: Bool = false) async -> Bool {
+        guard forColdLaunch || hasPreparedAuthorizedContent else { return false }
         let refreshID = UUID()
         approvedContentRefreshID = refreshID
-        guard fanAccount.isApproved, !adminSession.isAuthenticated else { return }
+        guard fanAccount.isApproved, !adminSession.isAuthenticated else { return false }
         let storeRefreshID = portfolioStore.beginContentRefresh()
         do {
-            let manifest = try await fanAccount.fetchApprovedContent()
+            let manifest: AppContentManifest
+            if forColdLaunch {
+                manifest = try await LaunchPosterFreshContentLoader.load {
+                    try await fanAccount.fetchApprovedContent()
+                }
+            } else {
+                manifest = try await fanAccount.fetchApprovedContent()
+            }
             guard approvedContentRefreshID == refreshID,
+                  !Task.isCancelled,
                   fanAccount.isApproved,
                   !adminSession.isAuthenticated else {
                 portfolioStore.cancelContentRefresh(storeRefreshID)
-                return
+                return false
             }
-            portfolioStore.completeContentRefresh(storeRefreshID, with: manifest)
+            let applied = portfolioStore.completeContentRefresh(storeRefreshID, with: manifest)
             enforceCurrentFanPermissionScope()
+            return applied
         } catch {
             guard approvedContentRefreshID == refreshID,
                   fanAccount.isApproved,
                   !adminSession.isAuthenticated else {
                 portfolioStore.cancelContentRefresh(storeRefreshID)
-                return
+                return false
             }
             portfolioStore.failContentRefresh(storeRefreshID)
+            return false
         }
     }
 
@@ -538,6 +571,7 @@ struct RootView: View {
     }
 
     private func resetProtectedPresentation() {
+        authorizedContentPreparationID = nil
         Task { await ArtworkImagePrefetcher.purgeMemory() }
         invalidateApprovedContentRefresh()
         portfolioStore.discardProtectedContent()
