@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static release contract for the authority-only Build45 push worker."""
+"""Release contract for authority-only, completion-relative push polling."""
 
 from __future__ import annotations
 
@@ -96,10 +96,13 @@ assert "RestrictSUIDSGID=" not in service
 assert re.search(r"^AmbientCapabilities=CAP_SETUID$", service, re.MULTILINE)
 assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" in service
 
-# A non-persistent one-minute timer avoids catch-up storms after downtime.
+# Reschedule after the oneshot finishes, not after it starts. A slow run must
+# not consume its own next activation while the service is still active.
 assert "Unit=shuzijun-push-outbox.service" in timer
-assert "OnUnitActiveSec=60s" in timer
-assert "AccuracySec=5s" in timer
+assert "OnBootSec=75s" in timer
+assert "OnUnitInactiveSec=5s" in timer
+assert "OnUnitActiveSec=" not in timer
+assert "AccuracySec=1s" in timer
 assert "RandomizedDelaySec=0" in timer
 assert "Persistent=false" in timer
 
@@ -150,6 +153,11 @@ assert "incomplete uninstall rolled back" in deployer
 assert "UNINSTALL_BACKUP=/run/shuzijun-push-worker-uninstall.$$" in deployer
 assert "fixed deployer path required" in deployer
 assert "APNs credential files were preserved" in deployer
+assert "ROLLBACK_TIMER_UPGRADE=1" in deployer
+assert "incomplete timer upgrade rolled back" in deployer
+assert "previous timer preserved" in deployer
+assert 'elif [[ "$INSTALLED_STATE" == reviewed ]]' in deployer
+assert "reviewed release already installed" in deployer
 
 # Each staged asset is content-addressed. A deployer can neither substitute nor
 # silently overwrite an unreviewed installed target.
@@ -167,6 +175,18 @@ for variable, path in pins.items():
 assert "installed target differs from the reviewed release" in deployer
 assert "temporary=$target.build45.$$" in deployer
 assert "expected=$4 temporary=$target" not in deployer
+assert "readonly PREVIOUS_TIMER_SHA=7adf34cc6f17806842dca1acf35e554605a32ac3a7c17e795f4c7dbd80946bd8" in deployer
+assert "installed timer differs from both reviewed releases" in deployer
+
+upgrade = deployer[deployer.index("upgrade_reviewed_timer() {"):deployer.index("rollback_reviewed_timer() {")]
+assert '"$SYSTEMD" stop shuzijun-push-outbox.timer' in upgrade
+assert 'install_asset "$TIMER_SOURCE" "$TIMER_TARGET" 644 "$TIMER_SHA"' in upgrade
+assert '"$SYSTEMD" restart' not in upgrade
+assert "WORKER_SOURCE" not in upgrade and "SERVICE_SOURCE" not in upgrade
+assert "FPM_SYSTEMD_SOURCE" not in upgrade and "FPM_POOL_SOURCE" not in upgrade
+assert position(upgrade, '"$TIMER_UPGRADE_BACKUP/timer"') < position(upgrade, "ROLLBACK_TIMER_UPGRADE=1")
+assert position(upgrade, "ROLLBACK_TIMER_UPGRADE=1") < position(upgrade, '"$SYSTEMD" stop')
+assert position(upgrade, "timer_state_matches_role", position(upgrade, '"$SYSTEMD" daemon-reload')) < position(upgrade, "ROLLBACK_TIMER_UPGRADE=0")
 
 # Release assets must not contain private-key material, actual secrets or shell
 # tracing. Identifiers are supplied only by the root-only external env file.
@@ -178,4 +198,5 @@ assert re.search(r"(?m)^[A-Za-z0-9_-]{43}$", combined) is None
 assert re.search(r"(?m)^YISHU_APNS_KEY_ID=[A-Z0-9]{10}$", combined) is None
 assert re.search(r"(?m)^YISHU_APNS_TEAM_ID=[A-Z0-9]{10}$", combined) is None
 
+subprocess.run(["python3", "Server/tests/push-timer-upgrade-contract-test.py"], check=True)
 print("push outbox operations contract passed")

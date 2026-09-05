@@ -38,7 +38,8 @@ readonly FPM_POOL_TARGET=/etc/php/8.3/fpm/pool.d/zz-shuzijun-push-env.conf
 
 readonly WORKER_SHA=b1c2d89303f07fbf0668961ee36c7c7e76c9f4af429d268384107c31e9a7cf81
 readonly SERVICE_SHA=32f2b5b3246112eb26fa50ed349d2f956e38d29b5cebc7ef3e812743f3fdcfcf
-readonly TIMER_SHA=7adf34cc6f17806842dca1acf35e554605a32ac3a7c17e795f4c7dbd80946bd8
+readonly TIMER_SHA=ec66500255b42738963638882fe5f3aded61e0791736bc68bfbd4f87db3bc527
+readonly PREVIOUS_TIMER_SHA=7adf34cc6f17806842dca1acf35e554605a32ac3a7c17e795f4c7dbd80946bd8
 readonly FPM_SYSTEMD_SHA=6baab9ee1e36d019a45a43208b51301575d7929c1cbfa2456fa55062b5bdabde
 readonly FPM_POOL_SHA=7647909856b5bb993fa15f950ca7e151d02e43f12507ba24b7ed72b6cf6f55af
 
@@ -90,6 +91,22 @@ require_absent_or_reviewed() {
     metadata=$(stat -c '%U:%G:%a:%h' -- "$path") || fail 'cannot inspect installed target'
     [[ "$metadata" == "root:root:$mode:1" && "$(sha "$path")" == "$expected" ]] \
         || fail 'installed target differs from the reviewed release'
+}
+
+require_absent_or_reviewed_timer() {
+    if [[ ! -e "$TIMER_TARGET" && ! -L "$TIMER_TARGET" ]]; then return 0; fi
+    # Only this timer changed. Never accept an arbitrary older worker, service
+    # or FPM configuration as an upgrade baseline.
+    local metadata actual
+    [[ ! -L "$TIMER_TARGET" && -f "$TIMER_TARGET" \
+        && "$(realpath -e -- "$TIMER_TARGET")" == "$TIMER_TARGET" ]] \
+        || fail 'installed timer is unsafe'
+    metadata=$(stat -c '%U:%G:%a:%h' -- "$TIMER_TARGET") \
+        || fail 'cannot inspect installed timer'
+    [[ "$metadata" == root:root:644:1 ]] || fail 'installed timer metadata is invalid'
+    actual=$(sha "$TIMER_TARGET") || fail 'cannot hash installed timer'
+    [[ "$actual" == "$TIMER_SHA" || "$actual" == "$PREVIOUS_TIMER_SHA" ]] \
+        || fail 'installed timer differs from both reviewed releases'
 }
 
 require_immutable() {
@@ -203,7 +220,7 @@ validate_target_parents() {
 validate_installed_state() {
     require_absent_or_reviewed "$WORKER_TARGET" 755 "$WORKER_SHA"
     require_absent_or_reviewed "$SERVICE_TARGET" 644 "$SERVICE_SHA"
-    require_absent_or_reviewed "$TIMER_TARGET" 644 "$TIMER_SHA"
+    require_absent_or_reviewed_timer
     require_absent_or_reviewed "$FPM_SYSTEMD_TARGET" 644 "$FPM_SYSTEMD_SHA"
     require_absent_or_reviewed "$FPM_POOL_TARGET" 644 "$FPM_POOL_SHA"
 }
@@ -217,7 +234,13 @@ installed_state() {
     done
     case "$present" in
         0) printf 'absent\n' ;;
-        5) printf 'reviewed\n' ;;
+        5)
+            if [[ "$(sha "$TIMER_TARGET")" == "$PREVIOUS_TIMER_SHA" ]]; then
+                printf 'previous\n'
+            else
+                printf 'reviewed\n'
+            fi
+            ;;
         *) fail 'installed push-worker release is partial' ;;
     esac
 }
@@ -263,6 +286,58 @@ timer_state_matches_role() {
     fi
 }
 
+upgrade_reviewed_timer() {
+    require_file "$TIMER_TARGET" root root 644 "$PREVIOUS_TIMER_SHA"
+    timer_state_matches_role
+    require_dir /var root root 755
+    require_dir /var/backups root root 755
+    TIMER_UPGRADE_BACKUP=$(mktemp -d /var/backups/shuzijun-push-timer-upgrade.XXXXXX) \
+        || fail 'cannot create timer upgrade backup'
+    require_dir "$TIMER_UPGRADE_BACKUP" root root 700
+    install -o root -g root -m 644 -- "$TIMER_TARGET" "$TIMER_UPGRADE_BACKUP/timer"
+    require_file "$TIMER_UPGRADE_BACKUP/timer" root root 644 "$PREVIOUS_TIMER_SHA"
+    ROLLBACK_TIMER_UPGRADE=1
+    # Stopping the timer does not stop its already-running service. The existing
+    # worker retains its role/lease fences and may finish normally.
+    "$SYSTEMD" stop shuzijun-push-outbox.timer
+    install_asset "$TIMER_SOURCE" "$TIMER_TARGET" 644 "$TIMER_SHA"
+    require_all_installed
+    "$SYSTEMD" daemon-reload
+    if [[ $ROLE == authority ]]; then
+        "$SYSTEMD" enable --now shuzijun-push-outbox.timer
+    else
+        "$SYSTEMD" disable --now shuzijun-push-outbox.timer
+    fi
+    timer_state_matches_role
+    "$SYSTEMD" is-active --quiet "$PHP_FPM_SERVICE" || fail 'PHP-FPM is not active'
+    ROLLBACK_TIMER_UPGRADE=0
+    printf 'push-worker-deploy: timer upgraded; previous timer preserved in %s\n' "$TIMER_UPGRADE_BACKUP"
+}
+
+rollback_reviewed_timer() {
+    # Validate both backup and live boundaries in a subshell so a failed guard
+    # cannot abort the EXIT handler before it reports operator attention.
+    (
+        require_dir "$TIMER_UPGRADE_BACKUP" root root 700
+        require_file "$TIMER_UPGRADE_BACKUP/timer" root root 644 "$PREVIOUS_TIMER_SHA"
+        require_absent_or_reviewed_timer
+    ) || return 1
+    "$SYSTEMD" stop shuzijun-push-outbox.timer || return 1
+    (
+        install_asset "$TIMER_UPGRADE_BACKUP/timer" "$TIMER_TARGET" 644 "$PREVIOUS_TIMER_SHA"
+        require_file "$TIMER_TARGET" root root 644 "$PREVIOUS_TIMER_SHA"
+    ) || return 1
+    "$SYSTEMD" daemon-reload || return 1
+    if [[ $ROLE == authority ]]; then
+        "$SYSTEMD" enable --now shuzijun-push-outbox.timer || return 1
+    else
+        "$SYSTEMD" disable --now shuzijun-push-outbox.timer || return 1
+    fi
+    ( timer_state_matches_role ) || return 1
+    "$SYSTEMD" is-active --quiet "$PHP_FPM_SERVICE" || return 1
+    return 0
+}
+
 (( $# == 3 )) || usage
 readonly NODE=$1
 readonly ROLE=$2
@@ -291,6 +366,8 @@ fi
 
 declare -a TEMP_FILES=()
 ROLLBACK_NEW_INSTALL=0
+ROLLBACK_TIMER_UPGRADE=0
+TIMER_UPGRADE_BACKUP=
 UNINSTALL_BACKUP=
 cleanup() {
     local original_status=$? temporary cleanup_failed=0
@@ -303,6 +380,14 @@ cleanup() {
                 || cleanup_failed=1
         fi
     done
+    if (( ROLLBACK_TIMER_UPGRADE == 1 )); then
+        if rollback_reviewed_timer; then
+            printf 'push-worker-deploy: incomplete timer upgrade rolled back; backup=%s\n' "$TIMER_UPGRADE_BACKUP" >&2
+        else
+            cleanup_failed=1
+            printf 'push-worker-deploy: timer upgrade rollback requires operator attention; backup=%s\n' "$TIMER_UPGRADE_BACKUP" >&2
+        fi
+    fi
     if (( ROLLBACK_NEW_INSTALL == 1 )); then
         "$SYSTEMD" disable --now shuzijun-push-outbox.timer >/dev/null 2>&1 || true
         remove_if_reviewed "$WORKER_TARGET" 755 "$WORKER_SHA" || cleanup_failed=1
@@ -356,7 +441,20 @@ case "$MODE" in
         ;;
     --install)
         validate_release_sources
-        if [[ "$INSTALLED_STATE" == absent ]]; then
+        if [[ "$INSTALLED_STATE" == previous ]]; then
+            upgrade_reviewed_timer
+            printf 'push-worker-deploy: install completed node=%s role=%s\n' "$NODE" "$ROLE"
+            exit 0
+        elif [[ "$INSTALLED_STATE" == reviewed ]]; then
+            # Repeating this exact release is read-only: no FPM restart, timer
+            # reset, or replacement of unchanged worker/configuration files.
+            require_all_installed
+            "$PHP_FPM_BIN" -t >/dev/null 2>&1 || fail 'PHP-FPM configuration is invalid'
+            "$SYSTEMD" is-active --quiet "$PHP_FPM_SERVICE" || fail 'PHP-FPM is not active'
+            timer_state_matches_role
+            printf 'push-worker-deploy: reviewed release already installed node=%s role=%s\n' "$NODE" "$ROLE"
+            exit 0
+        else
             ROLLBACK_NEW_INSTALL=1
             install -d -o root -g root -m 755 "$FPM_SYSTEMD_ROOT"
             install_asset "$WORKER_SOURCE" "$WORKER_TARGET" 755 "$WORKER_SHA"

@@ -115,6 +115,7 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.33-build45.8.md`](Server/releases/v1.3.33-build45.8.md)：在保留 `PrivateDevices` 的同时恢复一次性 `CAP_SETUID` 启动能力，确保 Worker 可降权后执行空队列 sweep。
 - [`Server/releases/v1.3.34-build46.md`](Server/releases/v1.3.34-build46.md)：首次启动通知授权、设备连接状态、旧会话绑定兼容与重连竞态修复。
 - [`Server/releases/v1.3.34-build46.2.md`](Server/releases/v1.3.34-build46.2.md)：修复新登录和旧会话设备初始化将等值数据库更新误判为失败的 HTTP 503；客户端仍使用 Build 46。
+- [`Server/releases/v1.3.34-build46.3.md`](Server/releases/v1.3.34-build46.3.md)：推送工作器改为完成后 5 秒调度，保留单节点执行、精确升级与失败回滚；不改变客户端。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
