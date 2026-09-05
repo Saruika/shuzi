@@ -693,7 +693,7 @@ final class ContentAndAccessTests: XCTestCase {
         }
     }
 
-    func testHomeHeroShowsTheFullPhotoOnlyForLandscapeIPadWindows() {
+    func testHomeHeroShowsTheFullPhotoInEveryWindow() {
         XCTAssertEqual(
             HomeHeroRenderPolicy.presentation(
                 for: CGSize(width: 1_366, height: 1_024),
@@ -706,21 +706,21 @@ final class ContentAndAccessTests: XCTestCase {
                 for: CGSize(width: 1_024, height: 1_366),
                 idiom: .pad
             ),
-            .fill
+            .fit
         )
         XCTAssertEqual(
             HomeHeroRenderPolicy.presentation(
                 for: CGSize(width: 932, height: 430),
                 idiom: .phone
             ),
-            .fill
+            .fit
         )
         XCTAssertEqual(
             HomeHeroRenderPolicy.presentation(
                 for: CGSize(width: 430, height: 932),
                 idiom: .phone
             ),
-            .fill
+            .fit
         )
     }
 
@@ -818,21 +818,72 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(HomeHeroRenderPolicy.shouldLoadRemoteImage(at: 5, selection: 0, count: 5))
     }
 
-    func testLandscapeHeroReservesItsActualCaptionWithoutCroppingThePhoto() {
-        let viewport = CGSize(width: 1376, height: 1000)
-        for captionHeight in [64.0, 100.0, 180.0] {
-            let frame = HomeHeroRenderPolicy.imageFrame(in: viewport, presentation: .fit,
-                                                       topInset: 24, captionHeight: captionHeight)
-            XCTAssertEqual(frame.minY, 88)
-            XCTAssertLessThanOrEqual(frame.maxY, viewport.height - captionHeight - 24)
-            let fitted = HomeHeroRenderPolicy.fittedSize(sourceSize: CGSize(width: 959, height: 1440), in: frame.size)
-            XCTAssertEqual(fitted.width / fitted.height, 959.0 / 1440.0, accuracy: 0.0001)
-            XCTAssertLessThanOrEqual(fitted.height, frame.height + 0.001)
+    func testWeeklyHeroReorderingKeepsTheCurrentPhotoAndHandlesReplacement() {
+        let originals = ContentCatalog.heroImages
+        let reordered = Array(originals.reversed())
+        XCTAssertEqual(HomeHeroRenderPolicy.selectionAfterUpdate(previous: originals,
+            updated: reordered, selection: 1), originals.count - 2)
+        XCTAssertEqual(HomeHeroRenderPolicy.selectionAfterUpdate(previous: originals,
+            updated: [originals[0]], selection: 4), 0)
+        XCTAssertEqual(HomeHeroRenderPolicy.selectionAfterUpdate(previous: [],
+            updated: originals, selection: -1), 0)
+        XCTAssertEqual(HomeHeroRenderPolicy.selectionAfterUpdate(previous: originals,
+            updated: [], selection: 4), 0)
+    }
+
+    func testGallerySlotsKeepEveryWeeklyPhotoClearOfTextAndWeather() {
+        let sources = [CGSize(width: 959, height: 1440), CGSize(width: 1440, height: 959),
+                       CGSize(width: 1200, height: 1200), CGSize(width: 2400, height: 600)]
+        for viewport in [CGSize(width: 320, height: 480), CGSize(width: 375, height: 547),
+                         CGSize(width: 440, height: 762), CGSize(width: 740, height: 310),
+                         CGSize(width: 834, height: 1100), CGSize(width: 1376, height: 910)] {
+            for largeText in [false, true] {
+                let layout = HomeGalleryLayout(viewport: viewport, accessibilityText: largeText)
+                for frame in [layout.image, layout.caption, layout.weather] {
+                    XCTAssertTrue(CGRect(origin: .zero, size: viewport).contains(frame))
+                    XCTAssertGreaterThan(frame.width, 0)
+                    XCTAssertGreaterThan(frame.height, 0)
+                }
+                XCTAssertFalse(layout.image.intersects(layout.caption))
+                XCTAssertFalse(layout.image.intersects(layout.weather))
+                XCTAssertFalse(layout.caption.intersects(layout.weather))
+                for source in sources {
+                    let fitted = HomeHeroRenderPolicy.fittedSize(sourceSize: source, in: layout.image.size)
+                    XCTAssertEqual(fitted.width / fitted.height, source.width / source.height, accuracy: 0.0001)
+                    XCTAssertLessThanOrEqual(fitted.width, layout.image.width + 0.001)
+                    XCTAssertLessThanOrEqual(fitted.height, layout.image.height + 0.001)
+                }
+            }
         }
-        XCTAssertEqual(HomeHeroRenderPolicy.imageFrame(in: viewport, presentation: .fill,
-            topInset: 24, captionHeight: 180), CGRect(origin: .zero, size: viewport))
-        XCTAssertEqual(HomeHeroRenderPolicy.imageFrame(in: .zero, presentation: .fit,
-            topInset: 24, captionHeight: 180), .zero)
+        XCTAssertEqual(HomeGalleryLayout(viewport: .zero, accessibilityText: false).image, .zero)
+    }
+
+    @MainActor
+    func testLateHomeImageCompletionCannotRestoreRetiredOrBackgroundPhotos() {
+        let oldURL = ContentCatalog.heroImages[0]
+        let newURL = ContentCatalog.heroImages[1]
+        let image = UIImage()
+        let state = HomeHeroPlaybackState(selection: 0)
+        state.isVisible = true
+        state.isActive = true
+        state.activeURLs = [newURL]
+        state.selectedURL = newURL
+        state.recordPreparedImage(image, for: oldURL)
+        XCTAssertTrue(state.preparedImages.isEmpty, "上一期延迟返回的照片不得写回新一期")
+        XCTAssertNil(state.landscapeContinuityImage)
+        state.recordPreparedImage(image, for: newURL)
+        XCTAssertTrue(state.preparedImages[newURL] === image)
+        XCTAssertTrue(state.landscapeContinuityImage === image)
+        state.preparedImages = [:]
+        state.landscapeContinuityImage = nil
+        state.isActive = false
+        state.recordPreparedImage(image, for: newURL)
+        XCTAssertTrue(state.preparedImages.isEmpty, "退到后台后延迟完成不能恢复已清空的照片")
+        XCTAssertNil(state.landscapeContinuityImage)
+        state.isActive = true
+        state.isVisible = false
+        state.recordPreparedImage(image, for: newURL)
+        XCTAssertTrue(state.preparedImages.isEmpty)
     }
 
     func testLandscapeIPadWarmsEveryHeroBeforePaging() {
@@ -1469,6 +1520,23 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(MediaTheme.ink, original.background.color)
         XCTAssertEqual(MediaTheme.gold, original.accent.color)
         XCTAssertEqual(MediaTheme.warmWhite, original.text.color)
+    }
+
+    func testHomeGalleryLayoutDoesNotDependOnTheSelectedPhotoOrTheme() {
+        for largeText in [false, true] {
+            let portrait = HomeGalleryLayout(viewport: CGSize(width: 834, height: 1100),
+                                             accessibilityText: largeText)
+            let landscape = HomeGalleryLayout(viewport: CGSize(width: 1194, height: 740),
+                                              accessibilityText: largeText)
+            XCTAssertFalse(portrait.isSideBySide)
+            XCTAssertGreaterThan(portrait.caption.minY, portrait.image.maxY)
+            XCTAssertTrue(landscape.isSideBySide)
+            XCTAssertGreaterThan(landscape.caption.minX, landscape.image.maxX)
+            // Recreating a slot has no image- or theme-dependent measurement
+            // that could trigger the old first-frame resizing effect.
+            XCTAssertEqual(portrait, HomeGalleryLayout(viewport: CGSize(width: 834, height: 1100),
+                                                       accessibilityText: largeText))
+        }
     }
 
     @MainActor

@@ -310,7 +310,6 @@ struct RootView: View {
         ZStack {
             TabView(selection: $selectedTab) {
                 HomeView(showPortfolio: { selectedTab = .portfolio })
-                    .ignoresSafeArea(.container, edges: .top)
                     .tag(AppTab.home)
                     .tabItem { Label("首页", systemImage: "house") }
 

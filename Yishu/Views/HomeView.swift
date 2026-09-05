@@ -12,7 +12,9 @@ enum HomeHeroRenderPolicy {
         for viewport: CGSize,
         idiom: UIUserInterfaceIdiom
     ) -> HomeHeroPresentation {
-        idiom == .pad && viewport.width > viewport.height ? .fit : .fill
+        // A weekly selection can contain portrait, landscape and square art.
+        // Cropping must not depend on the particular photograph selected today.
+        .fit
     }
 
     static func fittedSize(sourceSize: CGSize, in viewport: CGSize) -> CGSize {
@@ -30,14 +32,12 @@ enum HomeHeroRenderPolicy {
         )
     }
 
-    static func imageFrame(in viewport: CGSize, presentation: HomeHeroPresentation,
-                           topInset: CGFloat, captionHeight: CGFloat) -> CGRect {
-        guard viewport.width > 0, viewport.height > 0 else { return .zero }
-        guard presentation == .fit else { return CGRect(origin: .zero, size: viewport) }
-        let top = min(viewport.height, max(0, topInset) + 64)
-        let bottom = min(max(0, viewport.height - top), max(64, captionHeight) + 24)
-        return CGRect(x: 0, y: top, width: viewport.width,
-                      height: max(0, viewport.height - top - bottom))
+    static func selectionAfterUpdate(previous: [URL], updated: [URL], selection: Int) -> Int {
+        guard !updated.isEmpty else { return 0 }
+        if previous.indices.contains(selection), let retained = updated.firstIndex(of: previous[selection]) {
+            return retained
+        }
+        return min(max(0, selection), updated.count - 1)
     }
 
     static func shouldLoadRemoteImage(
@@ -72,6 +72,43 @@ enum HomeHeroRenderPolicy {
     }
 }
 
+/// Slots depend only on the safe viewport and text size, never image content
+/// or a delayed geometry preference. A new image cannot move the whole page.
+struct HomeGalleryLayout: Equatable {
+    let image: CGRect
+    let weather: CGRect
+    let caption: CGRect
+    let isSideBySide: Bool
+
+    init(viewport: CGSize, accessibilityText: Bool) {
+        let width = max(0, viewport.width)
+        let height = max(0, viewport.height)
+        let inset = min(width / 8, height / 8, width >= 700 ? 24.0 : 16.0)
+        let gap = min(height / 12, height < 620 ? 10.0 : 16.0)
+        let innerWidth = max(0, width - 2 * inset)
+        let innerHeight = max(0, height - 2 * inset)
+        let header = min(44.0, innerHeight)
+        isSideBySide = width >= 600 && width > height
+
+        if isSideBySide {
+            let copyWidth = min(360, max(240, innerWidth * 0.31))
+            let photoWidth = max(0, innerWidth - copyWidth - gap * 2)
+            image = CGRect(x: inset, y: inset, width: photoWidth, height: innerHeight)
+            let copyX = image.maxX + gap * 2
+            weather = CGRect(x: copyX, y: inset, width: copyWidth, height: header)
+            caption = CGRect(x: copyX, y: weather.maxY + gap, width: copyWidth,
+                             height: max(0, innerHeight - header - gap))
+        } else {
+            weather = CGRect(x: inset, y: inset, width: innerWidth, height: header)
+            let preferredCaption = accessibilityText ? 244.0 : (height < 620 ? 132.0 : 152.0)
+            let captionHeight = min(preferredCaption, max(0, innerHeight - header - 2 * gap) * 0.48)
+            let photoHeight = max(0, innerHeight - header - captionHeight - 2 * gap)
+            image = CGRect(x: inset, y: weather.maxY + gap, width: innerWidth, height: photoHeight)
+            caption = CGRect(x: inset, y: image.maxY + gap, width: innerWidth, height: captionHeight)
+        }
+    }
+}
+
 /// A changed identity cancels the old sleep, including an already-due tick.
 /// A cancelled/unfinished drag must receive the same full dwell as a page turn.
 struct HomeHeroAdvanceRequest: Equatable {
@@ -100,13 +137,11 @@ struct HomeView: View {
                     imageURLs: portfolioStore.heroImages,
                     localWeather: localWeather,
                     viewport: proxy.size,
-                    topSafeAreaInset: proxy.safeAreaInsets.top,
                     showPortfolio: showPortfolio
                 )
                     .frame(width: proxy.size.width, height: proxy.size.height)
             }
         }
-        .ignoresSafeArea(.container, edges: .top)
         .toolbar(.hidden, for: .navigationBar)
         .toolbarColorScheme(AppearanceStore.shared.theme.colorScheme, for: .tabBar)
         .task {
@@ -118,24 +153,33 @@ struct HomeView: View {
 /// One observable reference is shared by paging callbacks and overlay builders.
 /// A copied value snapshot must not leave the caption and the visible page apart.
 @MainActor @Observable
-private final class HomeHeroPlaybackState {
+final class HomeHeroPlaybackState {
     var selection: Int
     var isVisible = false
+    var isActive = false
     var landscapeContinuityImage: UIImage?
-    var measuredCaptionHeight: CGFloat = 64
+    var activeURLs: Set<URL> = []
+    var selectedURL: URL?
     var isTouching = false
     var interactionGeneration: UInt = 0
     var preparedImages: [URL: UIImage] = [:]
     var automaticAdvanceCount = 0
 
     init(selection: Int) { self.selection = selection }
+
+    func recordPreparedImage(_ image: UIImage, for url: URL) {
+        // Read live state, not the SwiftUI value captured before a weekly
+        // manifest update, rotation or a transition into the background.
+        guard isVisible, isActive, activeURLs.contains(url) else { return }
+        preparedImages[url] = image
+        if selectedURL == url { landscapeContinuityImage = image }
+    }
 }
 
 private struct HeroPager: View {
     let imageURLs: [URL]
     let localWeather: LocalWeatherStore
     let viewport: CGSize
-    let topSafeAreaInset: CGFloat
     let showPortfolio: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
@@ -176,15 +220,12 @@ private struct HeroPager: View {
             idiom: UIDevice.current.userInterfaceIdiom
         )
         let exposesVisualTestState = exposesHeroStateForVisualTesting
-        let imageFrame = HomeHeroRenderPolicy.imageFrame(
-            in: viewport, presentation: presentation,
-            topInset: AppWindowMetrics.topInsetForLayout(measured: topSafeAreaInset),
-            captionHeight: playback.measuredCaptionHeight
-        )
+        let layout = HomeGalleryLayout(viewport: viewport, accessibilityText: dynamicTypeSize.isAccessibilitySize)
 
-        ZStack(alignment: .bottom) {
+        ZStack(alignment: .topLeading) {
             TabView(selection: Binding(get: { playback.selection }, set: { playback.selection = $0 })) {
                 ForEach(slides.indices, id: \.self) { index in
+                    let url = slides[index]
                     let loadsRemoteImage = !holdsRemoteImagesForVisualTesting
                         && HomeHeroRenderPolicy.shouldLoadRemoteImage(
                             at: index,
@@ -198,48 +239,42 @@ private struct HeroPager: View {
                         : nil
 
                     HeroSlideImage(
-                        url: slides[index],
+                        url: url,
                         loadsRemoteImage: loadsRemoteImage,
                         usesVisualTestArtwork: holdsRemoteImagesForVisualTesting,
                         presentation: presentation,
                         visualTestIdentifier: visualTestIdentifier,
-                        preparedImage: playback.preparedImages[slides[index]],
+                        preparedImage: playback.preparedImages[url],
                         continuityImage: playback.landscapeContinuityImage,
                         onImageLoaded: { loadedImage in
-                            guard playback.isVisible, scenePhase == .active else { return }
-                            playback.preparedImages[slides[index]] = loadedImage
-                            guard index == playback.selection else { return }
-                            playback.landscapeContinuityImage = loadedImage
+                            playback.recordPreparedImage(loadedImage, for: url)
                         }
                     )
-                        .frame(width: imageFrame.width, height: imageFrame.height)
-                        .offset(y: imageFrame.minY)
-                        .frame(width: viewport.width, height: viewport.height, alignment: .top)
+                        .frame(width: layout.image.width, height: layout.image.height)
                         .clipped()
                         .accessibilityHidden(!exposesVisualTestState)
                         .tag(index)
                 }
             }
-            .frame(width: viewport.width, height: viewport.height)
+            .frame(width: layout.image.width, height: layout.image.height)
             .tabViewStyle(.page(indexDisplayMode: .never))
             .background(HomeTouchObserver { playback.isTouching = $0 })
-            .overlay(alignment: .top) {
-                LinearGradient(
-                    colors: [AppTheme.ink, AppTheme.ink.opacity(0.72), .clear],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-                .frame(height: 132)
-                .allowsHitTesting(false)
-            }
+            .offset(x: layout.image.minX, y: layout.image.minY)
 
-            heroOverlay
+            weatherRow
+                .frame(width: layout.weather.width, height: layout.weather.height)
+                .offset(x: layout.weather.minX, y: layout.weather.minY)
+
+            galleryCaption(in: layout)
+                .frame(width: layout.caption.width, height: layout.caption.height)
+                .offset(x: layout.caption.minX, y: layout.caption.minY)
 
             homeHeroVisualTestControls(
                 presentation: presentation
             )
         }
-        .task(id: prefetchRequestID(for: viewport)) {
+        .frame(width: viewport.width, height: viewport.height, alignment: .topLeading)
+        .task(id: prefetchRequestID(for: layout.image.size)) {
             guard !holdsRemoteImagesForVisualTesting, playback.isVisible, scenePhase == .active else { return }
             await ArtworkImagePrefetcher.prefetch(
                 urls: prefetchURLs(for: presentation),
@@ -247,34 +282,32 @@ private struct HeroPager: View {
                     1_800,
                     max(
                         320,
-                        Int(ceil(max(viewport.width, viewport.height) * displayScale))
+                        Int(ceil(max(layout.image.width, layout.image.height) * displayScale))
                     )
                 ),
                 onImageLoaded: { url, image in
-                    guard playback.isVisible, scenePhase == .active, slides.contains(url) else { return }
-                    playback.preparedImages[url] = image
-                    if slides.indices.contains(playback.selection), slides[playback.selection] == url {
-                        playback.landscapeContinuityImage = image
-                    }
+                    playback.recordPreparedImage(image, for: url)
                 }
             )
         }
-        .onPreferenceChange(HomeCaptionHeightKey.self) { height in
-            if abs(playback.measuredCaptionHeight - height) > 0.5 {
-                playback.measuredCaptionHeight = height
-            }
-        }
         .onAppear {
+            playback.activeURLs = Set(slides)
+            playback.selectedURL = slides.indices.contains(playback.selection) ? slides[playback.selection] : nil
+            playback.isActive = scenePhase == .active
             playback.isVisible = true
         }
         .onDisappear {
             playback.isVisible = false
+            playback.isActive = false
             playback.isTouching = false
             playback.landscapeContinuityImage = nil
             playback.preparedImages = [:]
+            playback.activeURLs = []
+            playback.selectedURL = nil
         }
         .onChange(of: playback.isTouching) { _, _ in playback.interactionGeneration &+= 1 }
         .onChange(of: scenePhase) { _, phase in
+            playback.isActive = phase == .active
             if phase != .active {
                 playback.isTouching = false
                 playback.landscapeContinuityImage = nil
@@ -294,116 +327,48 @@ private struct HeroPager: View {
         }
         .onChange(of: slides) { oldSlides, newSlides in
             guard oldSlides != newSlides else { return }
-            let selectedURL = oldSlides.indices.contains(playback.selection) ? oldSlides[playback.selection] : nil
+            playback.activeURLs = Set(newSlides)
+            playback.interactionGeneration &+= 1
             playback.preparedImages = playback.preparedImages.filter { newSlides.contains($0.key) }
             playback.landscapeContinuityImage = nil
-            playback.selection = selectedURL.flatMap(newSlides.firstIndex(of:))
-                ?? min(playback.selection, max(0, newSlides.count - 1))
+            playback.selection = HomeHeroRenderPolicy.selectionAfterUpdate(
+                previous: oldSlides, updated: newSlides, selection: playback.selection)
+            playback.selectedURL = newSlides.indices.contains(playback.selection) ? newSlides[playback.selection] : nil
         }
         .onChange(of: playback.selection) { _, index in
+            playback.selectedURL = slides.indices.contains(index) ? slides[index] : nil
             if slides.indices.contains(index), let image = playback.preparedImages[slides[index]] {
                 playback.landscapeContinuityImage = image
             }
         }
     }
 
-    @ViewBuilder
-    private var heroOverlay: some View {
-        let usesCompactLayout = viewport.width > viewport.height
-            || viewport.height < 620
-            || dynamicTypeSize.isAccessibilitySize
-        let topPadding = max(
-            18,
-            AppWindowMetrics.topInsetForLayout(measured: topSafeAreaInset) + 2
-        )
-
-        Group {
-            if usesCompactLayout {
-                compactHeroOverlay(photoIsFitted: HomeHeroRenderPolicy.presentation(
-                    for: viewport, idiom: UIDevice.current.userInterfaceIdiom) == .fit)
-            } else {
-                regularHeroOverlay
-            }
-        }
-        .padding(.horizontal, 22)
-        .padding(.top, topPadding)
-        .padding(.bottom, usesCompactLayout ? 16 : 32)
-    }
-
-    private var regularHeroOverlay: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            weatherRow
-
-            Spacer(minLength: 18)
-
-            VStack(alignment: .leading, spacing: 0) {
-                heroTitle(font: .system(.largeTitle, design: .serif), multiline: true)
-                heroSubtitle.padding(.top, 15)
-                HStack(spacing: 14) {
-                    portfolioButton
-                    pageIndicator
+    private func galleryCaption(in layout: HomeGalleryLayout) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: layout.isSideBySide ? 18 : 8) {
+                    heroTitle(font: .system(layout.isSideBySide ? .largeTitle : .title2, design: .serif),
+                              multiline: layout.isSideBySide)
+                    heroSubtitle
                 }
-                .padding(.top, 26)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minHeight: layout.isSideBySide ? max(0, layout.caption.height - 84) : nil,
+                       alignment: .center)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background { captionBackdrop(bottomBleed: 32) }
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollIndicators(.visible)
+            .accessibilityIdentifier("home-hero-copy-scroll")
+
+            HStack(spacing: 12) {
+                portfolioButton
+                Spacer(minLength: 0)
+                pageIndicator
+            }
+            // Keep this row comfortably tappable without sacrificing the
+            // whole photograph at AX sizes. The copy above remains scrollable.
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         }
-    }
-
-    private func compactHeroOverlay(photoIsFitted: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            weatherRow
-
-            Spacer(minLength: 8)
-
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .bottom, spacing: 18) {
-                    compactHeroCopy
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                    VStack(alignment: .trailing, spacing: 12) {
-                        portfolioButton
-                        pageIndicator
-                    }
-                    .fixedSize(horizontal: true, vertical: false)
-                }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    compactHeroCopy
-                    HStack(spacing: 14) {
-                        portfolioButton
-                        pageIndicator
-                    }
-                }
-            }
-            .background { captionBackdrop(bottomBleed: 16, topBleed: photoIsFitted ? 0 : 40) }
-            .background {
-                GeometryReader { caption in
-                    Color.clear.preference(key: HomeCaptionHeightKey.self, value: caption.size.height)
-                }
-            }
-        }
-    }
-
-    /// Follow the measured caption group instead of a fixed percentage of the
-    /// photograph. This keeps both dark and paper-like themes readable when
-    /// Dynamic Type or landscape layout changes the height of the copy.
-    private func captionBackdrop(bottomBleed: CGFloat, topBleed: CGFloat = 40) -> some View {
-        EditorialCaptionBackdrop()
-        .padding(.top, -topBleed)
-        .padding(.horizontal, -22)
-        .padding(.bottom, -bottomBleed)
-        .allowsHitTesting(false)
-    }
-
-    private var compactHeroCopy: some View {
-        VStack(alignment: .leading, spacing: dynamicTypeSize.isAccessibilitySize ? 0 : 8) {
-            heroTitle(font: .system(.title, design: .serif), multiline: false)
-
-            if !dynamicTypeSize.isAccessibilitySize {
-                heroSubtitle
-            }
-        }
+        .foregroundStyle(AppTheme.warmWhite)
     }
 
     private func heroTitle(font: Font, multiline: Bool) -> some View {
@@ -422,6 +387,7 @@ private struct HeroPager: View {
             .tracking(0.9)
             .foregroundStyle(AppTheme.warmWhite)
             .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("home-hero-subtitle")
     }
 
     private var portfolioButton: some View {
@@ -476,10 +442,8 @@ private struct HeroPager: View {
                 )
         }
         .buttonStyle(.plain)
-        // The hero is a compact photographic overlay. Keep it readable when
-        // the system uses accessibility sizes without allowing this one
-        // capsule to obscure the portrait; VoiceOver continues to expose the
-        // complete, uncapped weather summary.
+        // This compact utility now lives outside the photograph. VoiceOver
+        // receives the complete weather summary even at the capped text size.
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .accessibilityIdentifier("home-weather")
         .accessibilityElement(children: .ignore)
@@ -504,14 +468,15 @@ private struct HeroPager: View {
     }
 
     private var pageIndicator: some View {
-        HStack(spacing: 7) {
-            ForEach(slides.indices, id: \.self) { index in
-                Capsule()
-                    .fill(index == playback.selection ? AppTheme.gold : AppTheme.muted)
-                    .frame(width: index == playback.selection ? 18 : 5, height: 5)
-                    .animation(reduceMotion ? nil : .easeInOut, value: playback.selection)
-            }
+        HStack(spacing: 8) {
+            Text(String(format: "%02d", playback.selection + 1))
+                .foregroundStyle(AppTheme.warmWhite)
+            Rectangle().fill(AppTheme.line).frame(width: 24, height: 1)
+                .accessibilityHidden(true)
+            Text(String(format: "%02d", slides.count))
+                .foregroundStyle(AppTheme.muted)
         }
+        .font(.caption.monospacedDigit())
         .frame(minWidth: 44, minHeight: 44, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
@@ -785,13 +750,6 @@ private struct HomeTouchObserver: UIViewRepresentable {
     }
 }
 
-private struct HomeCaptionHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat { 0 }
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
-    }
-}
-
 private struct HeroSlideImage: View {
     let url: URL
     let loadsRemoteImage: Bool
@@ -820,7 +778,7 @@ private struct HeroSlideImage: View {
     @ViewBuilder
     private func visualTestComposition(in size: CGSize) -> some View {
 #if DEBUG
-        let sourceSize = CGSize(width: 959, height: 1_440)
+        let sourceSize = visualTestSourceSize
         if presentation == .fit {
             let fittedSize = HomeHeroRenderPolicy.fittedSize(
                 sourceSize: sourceSize,
@@ -847,6 +805,18 @@ private struct HeroSlideImage: View {
         placeholder
 #endif
     }
+
+#if DEBUG
+    private var visualTestSourceSize: CGSize {
+        guard ProcessInfo.processInfo.arguments.contains("-home-hero-varied-aspects-for-visual-testing") else {
+            return CGSize(width: 959, height: 1_440)
+        }
+        let sizes = [CGSize(width: 959, height: 1440), CGSize(width: 1440, height: 959),
+                     CGSize(width: 1200, height: 1200), CGSize(width: 2400, height: 600),
+                     CGSize(width: 800, height: 1600)]
+        return sizes[(ContentCatalog.heroImages.firstIndex(of: url) ?? 0) % sizes.count]
+    }
+#endif
 
     private var visualTestArtwork: some View {
         LinearGradient(
@@ -949,18 +919,7 @@ private struct HeroSlideImage: View {
 
     @ViewBuilder
     private func fittedBackground(in size: CGSize) -> some View {
-        ZStack {
-            AppTheme.elevatedInk
-            LinearGradient(
-                colors: [
-                    AppTheme.gold.opacity(0.08),
-                    AppTheme.ink,
-                    AppTheme.elevatedInk,
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
+        AppTheme.ink
     }
 
     @ViewBuilder

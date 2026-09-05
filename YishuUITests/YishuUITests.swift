@@ -541,7 +541,7 @@ final class YishuUITests: XCTestCase {
                 let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 \(index + 1) 张，共 5 张"), object: page)
                 XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 2), .completed)
                 XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
-                XCTAssertTrue(element("home-hero-actual-filled-image-\(index)", in: app).waitForExistence(timeout: 5))
+                XCTAssertTrue(element("home-hero-actual-fitted-image-\(index)", in: app).waitForExistence(timeout: 5))
                 XCTAssertFalse(element("artwork-image-retry", in: app).exists)
             }
             for index in (0...3).reversed() {
@@ -549,7 +549,7 @@ final class YishuUITests: XCTestCase {
                 let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 \(index + 1) 张，共 5 张"), object: page)
                 XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 2), .completed)
                 XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
-                XCTAssertTrue(element("home-hero-actual-filled-image-\(index)", in: app).waitForExistence(timeout: 5))
+                XCTAssertTrue(element("home-hero-actual-fitted-image-\(index)", in: app).waitForExistence(timeout: 5))
                 XCTAssertFalse(element("artwork-image-retry", in: app).exists)
             }
         }
@@ -2034,6 +2034,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
     }
 
     private func verifyHomeThemes(_ themes: [(String, UInt32)]) throws {
+        var referencePhotoSamples: [[UInt8]]?
         for (theme, expectedBackground) in themes {
             let app = launchApp(arguments: [
                 "-cn.com.shuzijun.yishu.appearance.v1", theme,
@@ -2053,12 +2054,19 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             assertMinimumTapTarget(element("home-open-portfolio", in: app), named: "查看作品")
             let title = element("home-hero-title", in: app)
             XCTAssertTrue(title.waitForExistence(timeout: 5))
-            if UIDevice.current.userInterfaceIdiom == .pad, window.width > window.height {
-                let photo = element("home-hero-actual-fitted-image-0", in: app)
-                XCTAssertTrue(photo.waitForExistence(timeout: 5))
-                XCTAssertLessThanOrEqual(photo.frame.maxY, title.frame.minY,
-                                        "\(theme)：横屏照片下半身不能被主题文案底色遮住")
+            let photo = element("home-hero-actual-fitted-image-0", in: app)
+            XCTAssertTrue(photo.waitForExistence(timeout: 5))
+            for identifier in ["home-hero-title", "home-hero-subtitle", "home-weather", "home-open-portfolio"] {
+                let control = element(identifier, in: app)
+                XCTAssertTrue(control.exists)
+                XCTAssertFalse(photo.frame.intersects(control.frame), "\(theme)：\(identifier) 遮挡照片")
+                XCTAssertTrue(window.contains(control.frame), "\(theme)：\(identifier) 超出窗口")
+                if app.tabBars.firstMatch.exists {
+                    XCTAssertFalse(app.tabBars.firstMatch.frame.intersects(control.frame),
+                                   "\(theme)：\(identifier) 被底部导航遮挡")
+                }
             }
+            XCTAssertTrue(window.contains(photo.frame), "\(theme)：照片被窗口裁切")
             let screenshot = XCUIScreen.main.screenshot()
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1
@@ -2098,6 +2106,37 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
                 XCTAssertEqual(Double(pixel[index]), Double((expectedBackground >> shift) & 0xff),
                                accuracy: 14, "\(theme)：首页没有渲染所选主题；像素=\(pixel)")
             }
+            // Sample inside the actual photo, not a window coordinate that may
+            // belong to a landscape safe area or to the new external caption.
+            var samples: [[UInt8]] = []
+            for fraction in [0.2, 0.8] {
+                let photoCrop = try XCTUnwrap(source.cropping(to: CGRect(
+                    x: photo.frame.minX - window.minX + photo.frame.width * fraction,
+                    y: photo.frame.minY - window.minY + photo.frame.height * fraction,
+                    width: 8, height: 8)))
+                var sample = [UInt8](repeating: 0, count: 4)
+                try sample.withUnsafeMutableBytes { buffer in
+                    let sampler = try XCTUnwrap(CGContext(data: buffer.baseAddress, width: 1, height: 1,
+                        bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                    sampler.draw(photoCrop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+                }
+                samples.append(sample)
+            }
+            let photoVariation = (0..<3).reduce(0.0) { total, channel in
+                total + abs(Double(samples[0][channel]) - Double(samples[1][channel]))
+            } / 3
+            XCTAssertGreaterThan(photoVariation, 25, "\(theme)：照片内容没有正常显示；像素=\(samples)")
+            if let referencePhotoSamples {
+                for index in samples.indices {
+                    for channel in 0..<3 {
+                        XCTAssertEqual(Double(samples[index][channel]), Double(referencePhotoSamples[index][channel]),
+                                       accuracy: 3, "\(theme)：主题改变了照片原始色彩")
+                    }
+                }
+            } else {
+                referencePhotoSamples = samples
+            }
             // Only the synthetic gradient fixture is saved, never a photograph.
             let attachment = XCTAttachment(screenshot: screenshot)
             attachment.name = "home-theme-\(theme)-\(Int(window.width))x\(Int(window.height))"
@@ -2132,12 +2171,11 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         XCTAssertTrue(state.waitForExistence(timeout: 8), "缺少首页图片显示状态")
         XCTAssertTrue(pageIndicator.waitForExistence(timeout: 8), "缺少首页轮播页码")
 
-        let expectsFullComposition = UIDevice.current.userInterfaceIdiom == .pad
-            && window.frame.width > window.frame.height
+        let expectsFullComposition = true
         XCTAssertEqual(
             state.label,
             expectsFullComposition ? "完整显示" : "铺满显示",
-            "首页没有按当前 iPad 窗口方向选择正确构图"
+            "首页在任何 iPad 窗口方向都应完整显示构图"
         )
         XCTAssertEqual(pageIndicator.value as? String, "第 1 张，共 5 张")
         if expectsFullComposition {
@@ -2185,6 +2223,8 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             "-UIPreferredContentSizeCategoryName",
             "UICTContentSizeCategoryAccessibilityXXXL",
             "-simulate-ready-weather-for-visual-testing",
+            "-hold-home-remote-images-for-visual-testing",
+            "-disable-home-auto-advance-for-visual-testing",
         ])
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的应用窗口")
@@ -2199,7 +2239,53 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         XCTAssertTrue(portfolioAction.isHittable, "辅助功能大字号下查看作品不可点击")
         XCTAssertTrue(window.frame.contains(weather.frame), "辅助功能大字号下天气入口超出窗口")
         XCTAssertTrue(window.frame.contains(portfolioAction.frame), "辅助功能大字号下查看作品超出窗口")
+        let copy = app.scrollViews["home-hero-copy-scroll"]
+        let role = element("home-hero-subtitle", in: app)
+        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        for _ in 0..<4 where role.frame.maxY > copy.frame.maxY + 1 {
+            copy.swipeUp()
+        }
+        XCTAssertEqual(role.label, "短剧演员 · 模特 · 视频创作者")
+        XCTAssertLessThanOrEqual(role.frame.maxY, copy.frame.maxY + 1,
+                                "超大字号下应能滚动读到职业说明末尾，而不是永久裁掉")
+        XCTAssertGreaterThan(role.frame.maxY, copy.frame.minY)
+        XCTAssertTrue(portfolioAction.isHittable, "阅读长文后查看作品仍应可用")
         attachScreenshot(named: "adaptive-home-accessibility-xxxl", app: app)
+    }
+
+    func testWeeklyGalleryHandlesMixedAspectsWithoutMovingTheCaption() throws {
+        let app = launchApp(arguments: ["-hold-home-remote-images-for-visual-testing",
+            "-disable-home-auto-advance-for-visual-testing", "-expose-home-hero-state-for-visual-testing",
+            "-home-hero-varied-aspects-for-visual-testing"])
+        let title = element("home-hero-title", in: app)
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        let titleFrame = title.frame
+        let weather = element("home-weather", in: app)
+        let weatherFrame = weather.frame
+        let page = element("home-hero-page-indicator", in: app)
+        let ratios = [959.0 / 1440, 1440.0 / 959, 1, 4, 0.5]
+        for index in 0..<5 {
+            let photo = element("home-hero-actual-fitted-image-\(index)", in: app)
+            XCTAssertTrue(photo.waitForExistence(timeout: 5))
+            XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
+            XCTAssertEqual(photo.frame.width / photo.frame.height, ratios[index], accuracy: 0.02)
+            XCTAssertTrue(app.windows.firstMatch.frame.contains(photo.frame))
+            XCTAssertFalse(photo.frame.intersects(title.frame))
+            XCTAssertFalse(photo.frame.intersects(weather.frame))
+            XCTAssertEqual(title.frame.minY, titleFrame.minY, accuracy: 1)
+            XCTAssertEqual(title.frame.minX, titleFrame.minX, accuracy: 1)
+            XCTAssertEqual(weather.frame, weatherFrame)
+            assertHomeHeroIsVisiblyRendered(in: app, page: index + 1)
+            if index < 4 { photo.swipeLeft(velocity: .fast) }
+        }
+        for index in (0...3).reversed() {
+            element("home-hero-actual-fitted-image-\(index + 1)", in: app).swipeRight(velocity: .fast)
+            XCTAssertTrue(element("home-hero-actual-fitted-image-\(index)", in: app).waitForExistence(timeout: 5))
+            XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
+            XCTAssertEqual(title.frame.minY, titleFrame.minY, accuracy: 1)
+        }
+        // Safe to retain: these are generated color fixtures, not remote photos.
+        attachScreenshot(named: "weekly-gallery-mixed-aspects", app: app)
     }
 
     private func launchApp(arguments: [String], screenProtectionEnabled: Bool = false) -> XCUIApplication {
@@ -2236,16 +2322,29 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        guard let source = app.screenshot().image.cgImage else {
+        let window = app.windows.firstMatch.frame
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        // app.screenshot().cgImage can retain portrait storage coordinates
+        // under XCTest's landscape UI configurations. Draw the screen UIImage
+        // first so orientation metadata and the AX window use the same space.
+        let screenshot = XCUIScreen.main.screenshot()
+        let normalized = UIGraphicsImageRenderer(size: window.size, format: format).image { _ in
+            screenshot.image.draw(in: CGRect(origin: .zero, size: window.size))
+        }
+        guard let source = normalized.cgImage else {
             XCTFail("无法读取第 \(page) 张首页截图", file: file, line: line)
             return
         }
-        let cropRect = CGRect(
-            x: CGFloat(source.width) * 0.34,
-            y: CGFloat(source.height) * 0.18,
-            width: CGFloat(source.width) * 0.32,
-            height: CGFloat(source.height) * 0.48
-        ).integral
+        let photo = element("home-hero-actual-fitted-image-\(page - 1)", in: app)
+        guard photo.waitForExistence(timeout: 5) else {
+            XCTFail("缺少第 \(page) 张照片的实际显示范围", file: file, line: line)
+            return
+        }
+        let scale = CGFloat(source.width) / window.width
+        let frame = photo.frame.offsetBy(dx: -window.minX, dy: -window.minY).insetBy(dx: 4, dy: 4)
+        let cropRect = CGRect(x: frame.minX * scale, y: frame.minY * scale,
+                              width: frame.width * scale, height: frame.height * scale).integral
         guard let crop = source.cropping(to: cropRect) else {
             XCTFail("无法裁取第 \(page) 张首页图片区", file: file, line: line)
             return
