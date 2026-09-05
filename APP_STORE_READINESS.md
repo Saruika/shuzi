@@ -16,6 +16,8 @@
 
 [Apple：创建 Sign in with Apple 私钥](https://developer.apple.com/help/account/capabilities/create-a-sign-in-with-apple-private-key/)
 
+后续只读核对：Apple Developer 中已存在关联本 App 的登录密钥，本机受限权限目录也找到原有 `.p8` 与原始数据密钥。因此不需要直接新建/撤销密钥；下一步应确认恢复这些既有凭据到生产配置，先备份并比对，禁止重新生成数据密钥。尚未执行该生产凭据恢复。
+
 下列接口均返回 HTTP 200；空数据来自实际成功响应，不是把 API 不可读误判为缺失。
 
 | 检查项 | 实际读取结果 | 提交前处理 |
