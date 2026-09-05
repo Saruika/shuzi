@@ -30,7 +30,7 @@ def main() -> None:
     ios_push = IOS_PUSH.read_text(encoding="utf-8")
     combined = "\n".join((core, fan, push, identity, delivery))
 
-    assert "Version: 1.5.12.3" in entry
+    assert "Version: 1.5.13" in entry
     assert "v1.3.33-build45" in release
     assert "推送 Worker 尚未启用" in release
     for variable in (
@@ -82,7 +82,7 @@ def main() -> None:
     assert "'/app-admin/push-notifications'" in core
     assert "'permission_callback' => array(__CLASS__, 'can_manage_push')" in core
     assert "const PUSH_CAPABILITY = 'manage_yishu_push_notifications';" in core
-    assert "const PUSH_SCHEMA_VERSION = 3;" in core
+    assert "const PUSH_SCHEMA_VERSION = 4;" in core
     assert "is_sensitive tinyint(1) unsigned NOT NULL DEFAULT 1" in push
     assert re.search(r"(?m)^\s*sensitive\s+tinyint", push) is None
     assert core.count("$role->add_cap(self::PUSH_CAPABILITY, true)") == 1
@@ -92,7 +92,8 @@ def main() -> None:
     assert "'pushNotificationsEnabled'" in core
     assert "'canSendPushNotifications'" in core
 
-    # Schema v3 makes installation ownership and binding order durable across
+    # Schema v4 preserves v3 ownership and adds receive-only read receipts.
+    # Installation ownership and binding order remain durable across
     # PHP workers, hosts and cache loss. Both device and outbox rows carry the
     # exact generation they were created for, while the notification stores one
     # immutable absolute APNs deadline.
@@ -101,7 +102,7 @@ def main() -> None:
         "public static function ensure_push_storage",
         "private static function push_table_names",
     )
-    assert "'version-3'" in storage
+    assert "'version-4'" in storage
     assert "migrate_push_notification_sensitivity_column" in storage
     assert "schema_migration_failed" in storage
     assert "schema_delta_failed" in storage
@@ -120,7 +121,9 @@ def main() -> None:
         '$install_states_sql = "CREATE TABLE',
         "foreach (array(",
     )
-    assert "'push_schema', 'version-3'" in storage
+    assert "'push_schema', 'version-4'" in storage
+    assert "read_at datetime NULL" in storage
+    assert "KEY fan_unread (fan_user_id, read_at, notification_id)" in storage
     assert "session_option_id bigint(20) unsigned NOT NULL" in devices_schema
     assert "binding_generation bigint(20) unsigned NOT NULL" in devices_schema
     assert "deliver_before bigint(20) unsigned NOT NULL" in notifications_schema
@@ -365,7 +368,10 @@ def main() -> None:
         "func synchronize",
         "func requestAuthorizationAfterRationale",
     )
-    assert "UIApplication.shared.unregisterForRemoteNotifications()" in account_transition
+    assert "registrationClient.unregister()" in account_transition
+    assert "cancelRecovery(resetAttempts: true)" in account_transition
+    assert "recoveryContext = nil" in account_transition
+    assert "registrationAccount = nil" in account_transition
     assert "await stopDeliveryLocally(unbindingFrom: account)" in preference_change
     assert "if enabled" in preference_change and "await synchronize(with: account)" in preference_change
     assert "beginDeviceRegistration(for: account)" in synchronization
@@ -374,7 +380,33 @@ def main() -> None:
         "private func beginDeviceRegistration",
         "private func scheduleBindingRefresh",
     )
-    assert "UIApplication.shared.registerForRemoteNotifications()" in device_registration
+    assert "registrationClient.register()" in device_registration
+    system_registration = section(
+        ios_push,
+        "struct SystemPushDeviceRegistrationClient",
+        "protocol PushNotificationSleeper",
+    )
+    assert "func register() { UIApplication.shared.registerForRemoteNotifications() }" in system_registration
+    assert "func unregister() { UIApplication.shared.unregisterForRemoteNotifications() }" in system_registration
+    assert "registrationClient: any PushDeviceRegistrationClient = SystemPushDeviceRegistrationClient()" in ios_push
+    local_stop = section(ios_push, "private func stopDeliveryLocally", "private func beginDeviceRegistration")
+    assert "registrationClient.unregister()" in local_stop
+    assert local_stop.index("isAcceptingDeviceTokens = false") < local_stop.index("try? await account.unbindPushDevice()")
+    assert "cancelRecovery(resetAttempts: true)" in local_stop
+    recovery = section(ios_push, "private func scheduleRecovery", "private func scheduleBindingRefresh")
+    for required in (
+        "notificationsEnabled, isAcceptingDeviceTokens",
+        "recoveryTask == nil",
+        "PushRecoveryPolicy.delay(attempt: recoveryAttempt)",
+        "self.recoveryGeneration == generation",
+        "self.currentRecoveryContext(for: account) == context",
+        "!Task.isCancelled",
+        "resetRecoveryBudget: false",
+    ):
+        assert required in recovery
+    assert "requestAuthorization(" not in recovery
+    assert "[.seconds(5), .seconds(15), .seconds(60), .seconds(300), .seconds(300)]" in ios_push
+    assert "delays.indices.contains(attempt)" in ios_push
 
     # Plain tokens cannot be persisted: authenticated ciphertext and a keyed
     # index are independently derived from an out-of-webroot server data key.
@@ -643,6 +675,8 @@ def main() -> None:
     assert "WHERE install_hash = %s AND fan_user_id = %d" in invalidation
     assert "AND session_option_id = %d AND binding_generation = %d" in invalidation
     assert "SET desired_state = 'unbound'" in invalidation
+    assert "AND id <> %d" in invalidation
+    assert "$job_id <= 0" in invalidation
     for method in (
         "ensure_push_outbox_schedule",
         "sweep_push_outbox",
@@ -653,17 +687,34 @@ def main() -> None:
     init = section(core, "public static function init()", "public static function ensure_roles()")
     assert "if (self::account_authority_enabled())" in init
     assert "self::PUSH_OUTBOX_HOOK" in init and "self::PUSH_SWEEP_HOOK" in init
+    assert "add_action(self::PUSH_SWEEP_HOOK, array(__CLASS__, 'run_push_outbox_sweep'), 10, 0)" in init
+    sweep_wrapper = section(push, "public static function run_push_outbox_sweep", "public static function sweep_push_outbox")
+    assert "self::sweep_push_outbox() === true" in sweep_wrapper
+    assert "catch (Throwable $error)" in sweep_wrapper
+    assert "defined('WP_CLI') && WP_CLI === true && class_exists('WP_CLI')" in sweep_wrapper
+    assert "WP_CLI::error('Push outbox sweep failed.');" in sweep_wrapper
+    assert "$error->getMessage()" not in sweep_wrapper
+    sweep_result = section(push, "public static function sweep_push_outbox", "public static function process_push_outbox")
+    assert sweep_result.count(")) === false) { return false; }") == 8
+    assert ") === false) { return false; }" in sweep_result
+    assert "self::process_push_outbox((int) $id) !== true" in sweep_result
+    assert "return $succeeded && $scheduled;" in sweep_result
 
-    # Sensitive content defaults to a generic alert, and all records have a
-    # bounded retention/deletion path including zero-device recipients.
+    # Sensitive original content remains in the protected cloud inbox. Only
+    # APNs receives a generic alert; retention also covers zero-device users.
     sanitizer = section(
         push,
         "private static function sanitize_targeted_push_request",
         "private static function normalize_push_text",
     )
     assert "$raw_sensitive === null ? true" in sanitizer
-    assert "$title = 'Hi，梳子';" in sanitizer
-    assert "$body = '有新消息，请登录查看';" in sanitizer
+    assert "$title = 'Hi，梳子';" not in sanitizer
+    assert "$body = '有新消息，请登录查看';" not in sanitizer
+    payload_builder = section(delivery, "private static function push_apns_payload", "private static function send_push_to_apns")
+    assert "$sensitive ? 'Hi，梳子'" in payload_builder
+    assert "$sensitive ? '有新消息，请登录查看'" in payload_builder
+    assert "'notificationID' => (string) $notification['public_id']" in payload_builder
+    assert "self::push_apns_payload($notification)" in delivery
     assert "yishu_push_recipients" in push
     assert push.count("expires_at datetime NOT NULL") >= 2
     assert "PUSH_RETENTION_SECONDS" in combined and "PUSH_DEVICE_TTL" in combined

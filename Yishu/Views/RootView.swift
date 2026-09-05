@@ -114,6 +114,40 @@ struct RootView: View {
         .task(id: pushSynchronizationTaskID) {
             await pushNotifications.synchronize(with: fanAccount)
         }
+        .task(id: "\(fanAccount.notificationContext?.userID ?? "none"):\(fanAccount.pushSessionGeneration):\(pushNotifications.notificationReceiptGeneration)") {
+            await fanAccount.notificationStore.refresh(using: fanAccount)
+        }
+        .fullScreenCover(item: Binding(
+            get: { fanAccount.notificationContext == nil ? nil : pushNotifications.pendingNotification },
+            set: { if $0 == nil { pushNotifications.clearPendingNotification() } }
+        )) { pending in
+            SecureCaptureSurface(owner: .fullScreenPresentation, onExit: {
+                pushNotifications.clearPendingNotification()
+            }) {
+                NavigationStack {
+                    FanNotificationInboxView(
+                        inbox: fanAccount.notificationStore,
+                        initialNotificationID: pending.id
+                    )
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("关闭") { pushNotifications.clearPendingNotification() }
+                                .accessibilityIdentifier("fan-notification-presentation-close")
+                        }
+                    }
+                }
+                .environmentObject(fanAccount)
+            }
+        }
+        .task {
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-notification-inbox-ui-fixture") {
+                pushNotifications.receiveNotification(
+                    userInfo: ["notificationID": FanNotificationUITestFixture.message.id], opened: true
+                )
+            }
+#endif
+        }
         .confirmationDialog(
             "接收重要通知？",
             isPresented: Binding(
@@ -226,6 +260,7 @@ struct RootView: View {
                 resetProtectedPresentation()
                 return
             }
+            Task { await fanAccount.notificationStore.refresh(using: fanAccount) }
             Task {
                 await fanAccount.revalidateAppleCredentialIfNeeded(resetRetrySchedule: true)
                 await pushNotifications.synchronize(with: fanAccount)

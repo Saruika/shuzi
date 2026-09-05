@@ -369,13 +369,6 @@ enum AdminPushNotificationValidation {
         body: String,
         sensitive: Bool
     ) -> AdminPushNotificationContent? {
-        if sensitive {
-            return AdminPushNotificationContent(
-                title: privateTitle,
-                body: privateBody,
-                sensitive: true
-            )
-        }
         guard containsOnlySafeText(title), containsOnlySafeText(body) else { return nil }
         let cleanTitle = collapsedWhitespace(title)
         let cleanBody = collapsedWhitespace(body)

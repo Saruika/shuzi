@@ -238,6 +238,7 @@ function rest_ensure_response($value): WP_REST_Response {
     return $value instanceof WP_REST_Response ? $value : new WP_REST_Response($value);
 }
 function wp_schedule_single_event($timestamp, string $hook, array $args = array(), bool $wp_error = false) {
+    if (!empty($GLOBALS['yishu_test_schedule_failure'])) { return false; }
     $GLOBALS['yishu_test_scheduled'][] = array(
         'timestamp' => (int) $timestamp,
         'hook' => $hook,
@@ -596,6 +597,7 @@ expect_same(503, $migration_storage_error->get_error_data()['status'] ?? null, '
 $GLOBALS['wpdb'] = $legacy_migration_original_db;
 
 require __DIR__ . '/push-ownership-regression.php';
+require __DIR__ . '/fan-inbox-regression.php';
 
 // The worker must honor the absolute deadline stored with the notification.
 // Test mode returns before network I/O but only after payload/deadline checks.
@@ -1091,7 +1093,7 @@ expect_same(
         '2026-09-04-approval-v4',
     ),
     Shuzijun_App_Content_API::FAN_ACCEPTED_TRANSITIONAL_NEW_CONSENT_VERSIONS,
-    '1.5.12.3 新同意过渡只能精确接受 Build 42 v3 与 Build 45 v4'
+    '1.5.13 新同意过渡只能精确接受 Build 42 v3 与 Build 45 v4'
 );
 expect_same(
     array(
@@ -1128,7 +1130,7 @@ expect_true(
         && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(array(
             '2026-08-31-approval-v2',
         )),
-    '1.5.12.3 新同意只能精确接受 v3/v4，v2、未知、缺失或非字符串必须失败'
+    '1.5.13 新同意只能精确接受 v3/v4，v2、未知、缺失或非字符串必须失败'
 );
 expect_true(
     Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
@@ -2253,7 +2255,7 @@ $invitation_meta_source = ($invitation_meta_start === false || $invitation_meta_
     ? ''
     : substr($plugin_source, $invitation_meta_start, $invitation_meta_end - $invitation_meta_start);
 expect_true(
-    strpos($plugin_source, 'Version: 1.5.12.3') !== false
+    strpos($plugin_source, 'Version: 1.5.13') !== false
         && Shuzijun_App_Content_API::FAN_CAPABILITY === 'manage_yishu_fan_accounts'
         && Shuzijun_App_Content_API::FAN_INVITATION_TTL === 86400
         && Shuzijun_App_Content_API::FAN_ONBOARDING_SESSION_TTL === 600
@@ -2486,7 +2488,7 @@ expect_true(
         && strpos($plugin_source, "'https://appleid.apple.com/auth/keys'") !== false
         && strpos($plugin_source, "JWK::parseKeySet(\$filtered, 'RS256')") !== false
         && strpos($plugin_source, "(string) (\$headers->alg ?? '') !== 'RS256'") !== false
-        && strpos($plugin_source, 'Version: 1.5.12.3') !== false,
+        && strpos($plugin_source, 'Version: 1.5.13') !== false,
     'Apple 认证必须强制 authorization code 交换并用 RS256/JWKS 严格验证'
 );
 $apple_jwks_start = strpos($plugin_source, 'private static function fetch_apple_jwk_keys');
@@ -3244,5 +3246,6 @@ expect_same($defaults['launchPosters'], $recovered_config['launchPosters'], '损
 expect_same($defaults['showreel'], $recovered_config['showreel'], '损坏的 Showreel 应独立回退');
 expect_same($defaults['dramas'], $recovered_config['dramas'], '损坏的影视履历应独立回退');
 
+require __DIR__ . '/push-worker-result-regression.php';
 @unlink($authority_test_path);
 fwrite(STDOUT, "plugin-contract-test: passed\n");

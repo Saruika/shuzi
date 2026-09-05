@@ -89,7 +89,7 @@ final class Shuzijun_App_Content_API {
     const COLLABORATION_OUTBOX_MAX_ATTEMPTS = 5;
     const COLLABORATION_OUTBOX_LEASE_SECONDS = 300;
     const PUSH_SCHEMA_OPTION = 'yishu_push_schema_version';
-    const PUSH_SCHEMA_VERSION = 3;
+    const PUSH_SCHEMA_VERSION = 4;
     const PUSH_TOPIC = 'cn.com.shuzijun.yishu';
     const PUSH_PRODUCTION_HOST = 'https://api.push.apple.com';
     const PUSH_OUTBOX_HOOK = 'yishu_process_push_outbox';
@@ -174,7 +174,7 @@ final class Shuzijun_App_Content_API {
             add_action('init', array(__CLASS__, 'ensure_fan_apple_tombstone_schedule'), 42);
             add_action('init', array(__CLASS__, 'ensure_push_storage'), 22);
             add_action(self::PUSH_OUTBOX_HOOK, array(__CLASS__, 'process_push_outbox'), 10, 1);
-            add_action(self::PUSH_SWEEP_HOOK, array(__CLASS__, 'sweep_push_outbox'), 10, 0);
+            add_action(self::PUSH_SWEEP_HOOK, array(__CLASS__, 'run_push_outbox_sweep'), 10, 0);
             add_action('init', array(__CLASS__, 'ensure_push_outbox_schedule'), 44);
             if (self::collaboration_phase1_enabled()) {
                 add_action('init', array(__CLASS__, 'ensure_collaboration_storage'), 21);
@@ -476,6 +476,24 @@ final class Shuzijun_App_Content_API {
             'methods' => WP_REST_Server::CREATABLE,
             'callback' => array(__CLASS__, 'create_targeted_push_notification'),
             'permission_callback' => array(__CLASS__, 'can_manage_push'),
+        ));
+
+        // Receive-only inbox. Fans may read their own messages and acknowledge
+        // reading; only the existing capability-gated administrator may send.
+        register_rest_route('shuzijun/v1', '/fan/notifications', array(
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => array(__CLASS__, 'list_fan_notifications'),
+            'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session'),
+        ));
+        register_rest_route('shuzijun/v1', '/fan/notifications/(?P<notificationID>[a-f0-9-]{36})', array(
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => array(__CLASS__, 'get_fan_notification'),
+            'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session'),
+        ));
+        register_rest_route('shuzijun/v1', '/fan/notifications/(?P<notificationID>[a-f0-9-]{36})/read', array(
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => array(__CLASS__, 'mark_fan_notification_read'),
+            'permission_callback' => array(__CLASS__, 'can_access_normal_fan_session'),
         ));
 
         if (self::collaboration_phase1_enabled()) {

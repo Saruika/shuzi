@@ -88,6 +88,7 @@ fi
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/entitlement-verifier/app.py").read_text(encoding="utf-8"))'
 python3 -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8")) for path in pathlib.Path("Server/operations").glob("*.py")]'
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/operations/deploy-shuzijun-sync-release").read_text(encoding="utf-8"))'
+python3 Scripts/test-signout-contract.py
 python3 Server/tests/app-content-release-contract-test.py
 python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py

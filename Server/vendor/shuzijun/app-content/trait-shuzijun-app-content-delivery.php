@@ -1044,6 +1044,21 @@ trait Shuzijun_App_Content_Delivery {
         return $offset === strlen($der) ? implode('', $parts) : '';
     }
 
+    /** Cloud inbox text is never substituted until this transport boundary. */
+    private static function push_apns_payload($notification) {
+        if (!is_array($notification) || !self::is_uuid_v4($notification['public_id'] ?? '')) {
+            return null;
+        }
+        $sensitive = (int) ($notification['is_sensitive'] ?? 1) !== 0;
+        $title = $sensitive ? 'Hi，梳子' : ($notification['title'] ?? null);
+        $body = $sensitive ? '有新消息，请登录查看' : ($notification['body'] ?? null);
+        if (!is_string($title) || !is_string($body)) { return null; }
+        return wp_json_encode(array(
+            'aps' => array('alert' => array('title' => $title, 'body' => $body), 'sound' => 'default'),
+            'notificationID' => (string) $notification['public_id'],
+        ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    }
+
     private static function send_push_to_apns($device_token, $notification) {
         $device_token = strtolower((string) $device_token);
         $deliver_before = is_array($notification) && is_scalar($notification['deliver_before'] ?? null)
@@ -1076,13 +1091,7 @@ trait Shuzijun_App_Content_Delivery {
         if (!function_exists('curl_init') || !defined('CURL_HTTP_VERSION_2TLS')) {
             return array('outcome' => 'retry', 'code' => 'http2_unavailable');
         }
-        $payload = wp_json_encode(array('aps' => array(
-            'alert' => array(
-                'title' => (string) ($notification['title'] ?? ''),
-                'body' => (string) ($notification['body'] ?? ''),
-            ),
-            'sound' => 'default',
-        )), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        $payload = self::push_apns_payload($notification);
         if (!is_string($payload) || strlen($payload) > 4096) {
             return array('outcome' => 'dead', 'code' => 'payload_too_large');
         }

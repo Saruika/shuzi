@@ -138,6 +138,12 @@ final class YishuUITests: XCTestCase {
         XCTAssertTrue(aboutHeading.waitForExistence(timeout: 5), "关闭管理员页后没有返回关于页")
     }
 
+    func testProtectedNotificationTapCanOpenReturnAndCloseInbox() {
+        // Every actual portrait/landscape window is separately required by
+        // YishuAdaptiveLayoutUITests; this ordinary case keeps the base flow.
+        _ = verifyProtectedNotificationCurrentWindow()
+    }
+
     private func recognizedText(in screenshot: XCUIScreenshot) throws -> String {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
@@ -232,41 +238,9 @@ final class YishuUITests: XCTestCase {
     }
 
     func testLaunchPosterCanvasCoversTheWindowAcrossOrientations() {
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "-disable-screen-protection-for-visual-testing",
-            "-reset-fan-session-for-visual-testing",
-            "-bypass-access-gate-for-visual-testing",
-            "-UIPreferredContentSizeCategoryName",
-            "UICTContentSizeCategoryAccessibilityXXXL",
-        ]
-        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
-        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
-        app.launch()
-
-        let window = app.windows.firstMatch
-        let canvas = element("launch-poster-canvas", in: app)
-        XCTAssertTrue(window.waitForExistence(timeout: 12), "开屏缺少应用窗口")
-        XCTAssertTrue(canvas.waitForExistence(timeout: 12), "开屏缺少可验证的全屏画布")
-        assertLaunchPosterCanvas(canvas, covers: window, orientation: "竖屏")
-        attachScreenshot(named: "00-launch-poster-full-window-portrait", app: app)
-
-        XCUIDevice.shared.orientation = .landscapeLeft
-        // XCUIElement's KVC predicate may retain the initial frame snapshot
-        // across rotation. Re-query both elements after UIKit settles.
-        Thread.sleep(forTimeInterval: 3)
-        let landscapeWindow = app.windows.firstMatch
-        let landscapeCanvas = element("launch-poster-canvas", in: app)
-        XCTAssertGreaterThan(
-            landscapeWindow.frame.width,
-            landscapeWindow.frame.height,
-            "开屏窗口未进入横屏"
-        )
-        XCTAssertTrue(landscapeCanvas.waitForExistence(timeout: 3), "旋转后开屏画布丢失")
-        assertLaunchPosterCanvas(landscapeCanvas, covers: landscapeWindow, orientation: "横屏")
-        attachScreenshot(named: "00-launch-poster-full-window-landscape", app: app)
-
-        XCUIDevice.shared.orientation = .portrait
+        // Every actual portrait/landscape window is separately required by
+        // YishuAdaptiveLayoutUITests; this ordinary case keeps the base flow.
+        _ = verifyLaunchPosterCurrentWindow()
     }
 
     func testPrimaryTabsExposeTheirCoreContent() {
@@ -619,102 +593,9 @@ final class YishuUITests: XCTestCase {
     }
 
     func testProtectedGalleryPresentationKeepsItsEnvironmentAndControls() {
-        let app = XCUIApplication()
-        app.launchArguments = [
-            "-skip-launch-poster-for-visual-testing",
-            "-reset-fan-session-for-visual-testing",
-            "-bypass-access-gate-for-visual-testing",
-            "-open-portfolio-for-visual-testing",
-            "-use-multi-image-gallery-for-visual-testing",
-        ]
-        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
-        app.launch()
-
-        assertExists("portfolio-heading", in: app, timeout: 12)
-        let card = app.buttons
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-"))
-            .firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 8))
-        card.tap()
-
-        let firstImage = app.buttons
-            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-"))
-            .firstMatch
-        XCTAssertTrue(firstImage.waitForExistence(timeout: 8))
-        firstImage.tap()
-
-        assertExists("gallery-close", in: app, timeout: 8)
-        XCTAssertTrue(app.buttons["收藏照片"].exists || app.buttons["取消收藏"].exists)
-
-        let window = app.windows.firstMatch
-        let firstGalleryImage = element("gallery-image-18", in: app)
-        let caption = element("gallery-caption", in: app)
-        let counter = element("gallery-counter", in: app)
-        let close = element("gallery-close", in: app)
-        XCTAssertTrue(close.waitForExistence(timeout: 5), "受保护图片查看器缺少关闭按钮")
-        XCTAssertTrue(firstGalleryImage.waitForExistence(timeout: 5), "受保护图片查看器没有显示照片")
-        XCTAssertTrue(close.isHittable, "受保护图片查看器关闭按钮不可点击")
-        let statusBarHidden = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == false"),
-            object: app.statusBars.firstMatch
-        )
-        XCTAssertEqual(
-            XCTWaiter.wait(for: [statusBarHidden], timeout: 3),
-            .completed,
-            "受保护全屏图片查看器没有隐藏系统状态栏"
-        )
-
-        XCUIDevice.shared.orientation = .landscapeLeft
-        let landscapeWindow = XCTNSPredicateExpectation(
-            predicate: NSPredicate { _, _ in
-                window.exists && window.frame.width > window.frame.height
-            },
-            object: window
-        )
-        XCTAssertEqual(
-            XCTWaiter.wait(for: [landscapeWindow], timeout: 5),
-            .completed,
-            "受保护图片查看器没有响应 iPad 横屏尺寸"
-        )
-        XCTAssertTrue(window.frame.contains(firstGalleryImage.frame), "横屏后受保护照片超出窗口")
-        if window.frame.width >= 700 {
-            XCTAssertGreaterThanOrEqual(
-                firstGalleryImage.frame.minY,
-                close.frame.maxY - 1,
-                "iPad 横屏时照片上边缘被工具栏遮挡"
-            )
-            XCTAssertLessThanOrEqual(
-                firstGalleryImage.frame.maxY,
-                caption.frame.minY + 1,
-                "iPad 横屏时照片下边缘被说明遮挡"
-            )
-        }
-
-        XCTAssertEqual(counter.label, "第 1 张，共 3 张")
-        firstGalleryImage.swipeLeft()
-        let protectedPageChanged = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "label == %@", "第 2 张，共 3 张"),
-            object: counter
-        )
-        XCTAssertEqual(
-            XCTWaiter.wait(for: [protectedPageChanged], timeout: 5),
-            .completed,
-            "受保护图片查看器横屏切图失败"
-        )
-        let secondGalleryImage = element("gallery-image-33", in: app)
-        XCTAssertTrue(secondGalleryImage.waitForExistence(timeout: 5), "横屏切图后照片没有出现")
-        XCTAssertTrue(window.frame.contains(secondGalleryImage.frame), "横屏切图后照片超出窗口")
-
-        close.tap()
-        let viewerDismissed = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == false"),
-            object: close
-        )
-        XCTAssertEqual(
-            XCTWaiter.wait(for: [viewerDismissed], timeout: 3),
-            .completed,
-            "受保护图片查看器无法关闭"
-        )
+        // Every actual portrait/landscape window is separately required by
+        // YishuAdaptiveLayoutUITests; this ordinary case keeps the base flow.
+        _ = verifyProtectedGalleryCurrentWindow()
     }
 
     func testAccessibilityTextSizeKeepsPrimaryActionsComfortable() {
@@ -1109,15 +990,255 @@ final class YishuUITests: XCTestCase {
     }
 }
 
+private extension XCTestCase {
+    func verifyLaunchPosterCurrentWindow() -> CGRect {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-disable-screen-protection-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing",
+            "-UIPreferredContentSizeCategoryName",
+            "UICTContentSizeCategoryAccessibilityXXXL",
+        ]
+        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
+        app.launch()
+
+        let window = app.windows.firstMatch
+        let canvas = presentationElement("launch-poster-canvas", in: app)
+        XCTAssertTrue(window.waitForExistence(timeout: 12), "开屏缺少应用窗口")
+        XCTAssertTrue(canvas.waitForExistence(timeout: 12), "开屏缺少可验证的全屏画布")
+        presentationAssertCanvas(canvas, covers: window, orientation: "当前窗口")
+        let measuredFrame = window.frame
+        let close = presentationElement("launch-poster-skip", in: app)
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "开屏缺少可操作的跳过入口")
+        XCTAssertTrue(close.isHittable, "当前窗口的开屏跳过入口不可点击")
+        close.tap()
+        XCTAssertTrue(app.buttons["首页"].firstMatch.waitForExistence(timeout: 8), "关闭开屏后未恢复主导航")
+        return measuredFrame
+    }
+
+    func verifyProtectedGalleryCurrentWindow() -> CGRect {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-skip-launch-poster-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing",
+            "-open-portfolio-for-visual-testing",
+            "-use-multi-image-gallery-for-visual-testing",
+        ]
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
+        app.launch()
+
+        presentationAssertExists("portfolio-heading", in: app, timeout: 12)
+        let card = app.buttons
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-"))
+            .firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 8))
+        card.tap()
+
+        let firstImage = app.buttons
+            .matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-"))
+            .firstMatch
+        XCTAssertTrue(firstImage.waitForExistence(timeout: 8))
+        firstImage.tap()
+
+        presentationAssertExists("gallery-close", in: app, timeout: 8)
+        XCTAssertTrue(app.buttons["收藏照片"].exists || app.buttons["取消收藏"].exists)
+
+        let window = app.windows.firstMatch
+        let firstGalleryImage = presentationElement("gallery-image-18", in: app)
+        let measuredFrame = window.frame
+        let caption = presentationElement("gallery-caption", in: app)
+        let counter = presentationElement("gallery-counter", in: app)
+        let close = presentationElement("gallery-close", in: app)
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "受保护图片查看器缺少关闭按钮")
+        XCTAssertTrue(firstGalleryImage.waitForExistence(timeout: 5), "受保护图片查看器没有显示照片")
+        XCTAssertTrue(close.isHittable, "受保护图片查看器关闭按钮不可点击")
+        XCTAssertGreaterThanOrEqual(close.frame.width, 43.5)
+        XCTAssertGreaterThanOrEqual(close.frame.height, 43.5)
+        let statusBarHidden = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: app.statusBars.firstMatch
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [statusBarHidden], timeout: 3),
+            .completed,
+            "受保护全屏图片查看器没有隐藏系统状态栏"
+        )
+
+        XCTAssertTrue(window.frame.contains(firstGalleryImage.frame), "当前窗口内受保护照片超出窗口")
+        if window.frame.width >= 700 {
+            XCTAssertGreaterThanOrEqual(
+                firstGalleryImage.frame.minY,
+                close.frame.maxY - 1,
+                "iPad 当前窗口内照片上边缘被工具栏遮挡"
+            )
+            XCTAssertLessThanOrEqual(
+                firstGalleryImage.frame.maxY,
+                caption.frame.minY + 1,
+                "iPad 当前窗口内照片下边缘被说明遮挡"
+            )
+        }
+
+        XCTAssertEqual(counter.label, "第 1 张，共 3 张")
+        firstGalleryImage.swipeLeft()
+        let protectedPageChanged = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "第 2 张，共 3 张"),
+            object: counter
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [protectedPageChanged], timeout: 5),
+            .completed,
+            "受保护图片查看器当前窗口切图失败"
+        )
+        let secondGalleryImage = presentationElement("gallery-image-33", in: app)
+        XCTAssertTrue(secondGalleryImage.waitForExistence(timeout: 5), "当前窗口切图后照片没有出现")
+        XCTAssertTrue(window.frame.contains(secondGalleryImage.frame), "当前窗口切图后照片超出窗口")
+
+        close.tap()
+        let viewerDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: close
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [viewerDismissed], timeout: 3),
+            .completed,
+            "受保护图片查看器无法关闭"
+        )
+        return measuredFrame
+    }
+
+    func verifyProtectedNotificationCurrentWindow() -> CGRect {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-skip-launch-poster-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-skip-startup-notification-authorization-for-testing",
+            "-notification-inbox-ui-fixture",
+        ]
+        // Deliberately do not disable protection. This exercises the separate
+        // secure UIHostingController and its explicit account environment.
+        app.launch()
+        let detail = presentationElement("fan-message-detail", in: app)
+        XCTAssertTrue(detail.waitForExistence(timeout: 15), "点通知后受保护详情没有加载，可能缺少账号环境")
+        XCTAssertTrue(app.staticTexts["消息箱界面测试"].exists, "详情必须来自认证消息API的假数据而非推送正文")
+        let measuredFrame = app.windows.firstMatch.frame
+        let back = app.navigationBars.buttons["消息箱"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "消息详情缺少返回消息箱入口")
+        XCTAssertTrue(back.isHittable)
+        XCTAssertTrue(measuredFrame.contains(back.frame), "消息返回入口超出当前窗口")
+        back.tap()
+        XCTAssertTrue(presentationElement("fan-message-11111111-2222-4333-8444-555555555555", in: app).waitForExistence(timeout: 5))
+        let close = presentationElement("fan-notification-presentation-close", in: app)
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        XCTAssertTrue(measuredFrame.contains(close.frame), "消息箱关闭入口超出当前窗口")
+        XCTAssertGreaterThanOrEqual(close.frame.width, 43.5)
+        XCTAssertTrue(close.isHittable, "当前窗口的消息箱关闭必须可触控")
+        // iPadOS 26 sizes this native toolbar control to 36pt high. A measured
+        // ±21.5pt probe did not hit; do not claim a 44pt target or replace the
+        // system navigation layout merely to satisfy that additional target.
+        // Actual in-window, center-hit, return and dismissal remain mandatory.
+        print("PRESENTATION_NATIVE_CLOSE window=\(measuredFrame) close=\(close.frame) bars=\(app.navigationBars.allElementsBoundByIndex.map(\.frame))")
+        close.tap()
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == 0"), object: close)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
+        XCTAssertTrue(presentationElement("access-gate-admin-entry", in: app).waitForExistence(timeout: 5), "假消息回归不得绕过真实App登录门禁")
+        XCTAssertFalse(app.buttons["发送"].exists)
+        XCTAssertFalse(app.buttons["回复"].exists)
+        return measuredFrame
+    }
+
+    func presentationElement(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    func presentationAssertExists(_ identifier: String, in app: XCUIApplication, timeout: TimeInterval = 8) {
+        XCTAssertTrue(presentationElement(identifier, in: app).waitForExistence(timeout: timeout), "缺少关键界面元素 \(identifier)")
+    }
+
+    func presentationAssertCanvas(
+        _ canvas: XCUIElement,
+        covers window: XCUIElement,
+        orientation: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let windowFrame = window.frame
+        let visibleFrame = windowFrame.intersection(canvas.frame)
+        XCTAssertGreaterThanOrEqual(
+            visibleFrame.width / max(windowFrame.width, 1),
+            0.995,
+            "\(orientation)开屏未覆盖窗口全宽：window=\(windowFrame), canvas=\(canvas.frame)",
+            file: file,
+            line: line
+        )
+        XCTAssertGreaterThanOrEqual(
+            visibleFrame.height / max(windowFrame.height, 1),
+            0.995,
+            "\(orientation)开屏未覆盖窗口全高：window=\(windowFrame), canvas=\(canvas.frame)",
+            file: file,
+            line: line
+        )
+    }
+
+}
+
+
 /// Runs only the layout-sensitive checks across every orientation and
 /// appearance configuration the app declares. This is XCTest's supported way
 /// to validate iPadOS 26 windows, whose geometry can be independent from the
 /// device's physical orientation.
 final class YishuAdaptiveLayoutUITests: XCTestCase {
     override class var runsForEachTargetApplicationUIConfiguration: Bool { true }
+    // ci-ios-tests.sh deliberately disables parallel testing: the process-local
+    // evidence must cover all UI configurations before this class tears down.
+    private static var presentationGeometries: [String: Set<String>] = [:]
+
+    override class func setUp() {
+        super.setUp()
+        presentationGeometries = [:]
+    }
+
+    override class func tearDown() {
+        // A physical orientation label is not proof of a rotated iPad window.
+        // Fail the suite when any exercised presentation never actually ran
+        // in both geometries, even if all its portrait assertions passed.
+        for (name, geometries) in presentationGeometries.sorted(by: { $0.key < $1.key }) {
+            XCTAssertTrue(geometries.contains("portrait"), "\(name) 未取得真实竖屏窗口证据：\(geometries)")
+            XCTAssertTrue(geometries.contains("landscape"), "\(name) 未取得真实横屏窗口证据，不能视为完成横屏验收：\(geometries)")
+        }
+        super.tearDown()
+    }
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+    }
+
+    func testLaunchPosterCoversEveryActualWindowConfiguration() {
+        recordPresentationGeometry("launch-poster", frame: verifyLaunchPosterCurrentWindow())
+    }
+
+    func testProtectedGalleryWorksInEveryActualWindowConfiguration() {
+        recordPresentationGeometry("protected-gallery", frame: verifyProtectedGalleryCurrentWindow())
+    }
+
+    func testProtectedNotificationWorksInEveryActualWindowConfiguration() {
+        recordPresentationGeometry("protected-notification", frame: verifyProtectedNotificationCurrentWindow())
+    }
+
+    private func recordPresentationGeometry(_ name: String, frame: CGRect) {
+        XCTAssertGreaterThan(frame.width, 0)
+        XCTAssertGreaterThan(frame.height, 0)
+        let geometry = frame.width > frame.height ? "landscape" : "portrait"
+        Self.presentationGeometries[name, default: []].insert(geometry)
+        let evidence = "\(name): \(geometry), window=\(frame)"
+        print("PRESENTATION_GEOMETRY \(evidence)")
+        XCTContext.runActivity(named: "Actual window geometry — \(name)") { activity in
+            let attachment = XCTAttachment(string: evidence)
+            attachment.lifetime = .keepAlways
+            activity.add(attachment)
+        }
     }
 
     func testAboutLayoutMatchesTheCurrentSceneConfiguration() {

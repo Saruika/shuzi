@@ -563,6 +563,50 @@ enum FanAccountOperationGuard {
     }
 }
 
+@MainActor
+struct FanSignOutOperation {
+    struct Request {
+        let path: String
+        let method: String
+        let body: Data?
+        let authorizationToken: String
+    }
+
+    private let requests: [Request]
+
+    /// Freeze the old session requests and clear access synchronously, before
+    /// even the first network suspension. Remote completion owns no local state.
+    static func begin(
+        authorizationToken: String?,
+        unbindingBody: Data?,
+        clearLocalState: () -> Void
+    ) -> FanSignOutOperation {
+        var requests: [Request] = []
+        if let authorizationToken {
+            if let unbindingBody {
+                requests.append(Request(
+                    path: "shuzijun/v1/fan/push-device", method: "DELETE",
+                    body: unbindingBody, authorizationToken: authorizationToken
+                ))
+            }
+            requests.append(Request(
+                path: "shuzijun/v1/fan/logout", method: "POST",
+                body: nil, authorizationToken: authorizationToken
+            ))
+        }
+        clearLocalState()
+        return FanSignOutOperation(requests: requests)
+    }
+
+    func complete(using send: (Request) async throws -> Void) async {
+        for request in requests {
+            // A failed unbind must not prevent best-effort old-session logout.
+            // Neither success nor failure may clear a newly signed-in account.
+            try? await send(request)
+        }
+    }
+}
+
 enum FanAppleRegistrationCompletionPolicy {
     static func accepts(_ profile: FanProfile) -> Bool {
         profile.accountStatus != nil
@@ -646,8 +690,11 @@ enum FanAppleDeletionEligibility {
 }
 
 @MainActor
-final class FanAccountStore: ObservableObject {
-    @Published private(set) var profile: FanProfile?
+final class FanAccountStore: ObservableObject, FanNotificationAccount {
+    @Published private(set) var profile: FanProfile? {
+        didSet { notificationStore.updateContext(notificationContext) }
+    }
+    let notificationStore = FanNotificationStore()
     @Published private(set) var appleRegistration: FanAppleRegistrationState?
     @Published private(set) var usesAppleSignIn = false
     @Published private(set) var appleCredentialAccessState: FanAppleCredentialAccessState = .notRequired
@@ -692,6 +739,15 @@ final class FanAccountStore: ObservableObject {
         )
     }
     var hasPushEligibleSession: Bool { pushEligibleUserID != nil }
+    var notificationContext: FanNotificationContext? {
+#if DEBUG
+        if FanNotificationUITestFixture.isEnabled {
+            return FanNotificationContext(userID: "11111111-2222-4333-8444-666666666666", sessionGeneration: 1)
+        }
+#endif
+        guard let userID = pushEligibleUserID else { return nil }
+        return FanNotificationContext(userID: userID, sessionGeneration: pushSessionGeneration)
+    }
     var hasPushUnbindingSession: Bool {
         token != nil && profile.map { $0.sessionExpiresAt > Date() } == true
     }
@@ -746,6 +802,48 @@ final class FanAccountStore: ObservableObject {
             authorized: true
         )
         guard response.ok else { throw FanAccountError.invalidResponse }
+    }
+
+    func fetchNotificationPage(cursor: String?) async throws -> FanNotificationPage {
+#if DEBUG
+        if FanNotificationUITestFixture.isEnabled {
+            return FanNotificationPage(notifications: [FanNotificationUITestFixture.message], nextCursor: nil, unreadCount: 0)
+        }
+#endif
+        guard notificationContext != nil else { throw FanNotificationError.signInRequired }
+        var query = [URLQueryItem(name: "limit", value: "20")]
+        if let cursor {
+            guard FanNotificationValidation.isValidCursor(cursor) else { throw FanAccountError.invalidResponse }
+            query.append(URLQueryItem(name: "cursor", value: cursor))
+        }
+        return try await perform(
+            path: "shuzijun/v1/fan/notifications", method: "GET", authorized: true,
+            queryItems: query
+        )
+    }
+
+    func fetchNotification(id: String) async throws -> FanNotification {
+        try await performNotificationRequest(id: id, markRead: false)
+    }
+
+    func markNotificationRead(id: String) async throws -> FanNotification {
+        try await performNotificationRequest(id: id, markRead: true)
+    }
+
+    private func performNotificationRequest(id: String, markRead: Bool) async throws -> FanNotification {
+#if DEBUG
+        if FanNotificationUITestFixture.isEnabled {
+            guard id == FanNotificationUITestFixture.message.id else { throw FanNotificationError.notFound }
+            return FanNotificationUITestFixture.message
+        }
+#endif
+        guard notificationContext != nil else { throw FanNotificationError.signInRequired }
+        guard FanNotificationValidation.canonicalID(id) != nil else { throw FanAccountError.invalidResponse }
+        let response: FanNotificationResponse = try await perform(
+            path: "shuzijun/v1/fan/notifications/\(id)" + (markRead ? "/read" : ""),
+            method: markRead ? "POST" : "GET", authorized: true
+        )
+        return response.notification
     }
 
     func unbindPushDevice() async throws {
@@ -1640,26 +1738,33 @@ final class FanAccountStore: ObservableObject {
     }
 
     func signOut() async {
-        refreshGeneration &+= 1
-        let operationGeneration = refreshGeneration
-        let expectedToken = token
-        if expectedToken != nil {
-            try? await unbindPushDevice()
-            let _: FanLogoutResponse? = try? await perform(
-                path: "shuzijun/v1/fan/logout",
-                method: "POST",
-                authorized: true
+        let authorizationToken = token
+        let unbindingBody: Data?
+        if hasPushUnbindingSession, let bindingGeneration = try? nextPushBindingGeneration() {
+            unbindingBody = try? JSONEncoder().encode(FanPushDeviceUnbindingRequest(
+                installID: installID.uuidString.lowercased(),
+                bindingGeneration: bindingGeneration
+            ))
+        } else {
+            unbindingBody = nil
+        }
+        let operation = FanSignOutOperation.begin(
+            authorizationToken: authorizationToken,
+            unbindingBody: unbindingBody
+        ) {
+            clearLocalSession()
+            errorMessage = nil
+            noticeMessage = nil
+        }
+        await operation.complete { request in
+            let _: FanLogoutResponse = try await perform(
+                path: request.path,
+                method: request.method,
+                body: request.body,
+                authorized: true,
+                authorizationToken: request.authorizationToken
             )
         }
-        guard FanAccountOperationGuard.canAccept(
-            requestGeneration: operationGeneration,
-            currentGeneration: refreshGeneration,
-            expectedToken: expectedToken,
-            currentToken: token
-        ) else { return }
-        clearLocalSession()
-        errorMessage = nil
-        noticeMessage = nil
     }
 
     func deleteAccount(currentPassword: String) async {
@@ -1997,14 +2102,26 @@ final class FanAccountStore: ObservableObject {
         method: String,
         body: Data? = nil,
         authorized: Bool,
-        authorizationToken: String? = nil
+        authorizationToken: String? = nil,
+        queryItems: [URLQueryItem] = []
     ) async throws -> T {
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains(".."),
               !path.contains("?"), !path.contains("#"),
               ["DELETE", "GET", "POST"].contains(method) else {
             throw FanAccountError.invalidResponse
         }
-        let endpoint = apiRoot.appending(path: path)
+        // Only the receive-only inbox accepts query parameters. Keep every
+        // existing account/auth path's original no-query contract unchanged.
+        guard queryItems.isEmpty || (
+            path == "shuzijun/v1/fan/notifications" && method == "GET"
+                && queryItems.count <= 2
+                && Set(queryItems.map(\.name)).count == queryItems.count
+                && queryItems.allSatisfy {
+                    ($0.name == "limit" && $0.value == "20")
+                        || ($0.name == "cursor" && $0.value.map(FanNotificationValidation.isValidCursor) == true)
+                }
+        ) else { throw FanAccountError.invalidResponse }
+        let endpoint = apiRoot.appending(path: path).appending(queryItems: queryItems)
         guard AppNetworkSecurityPolicy.isTrustedAdminAPIURL(endpoint) else {
             throw FanAccountError.invalidResponse
         }
@@ -2047,6 +2164,14 @@ final class FanAccountStore: ObservableObject {
             throw FanAccountError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
+            if path == "shuzijun/v1/fan/notifications" || path.hasPrefix("shuzijun/v1/fan/notifications/") {
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    throw FanNotificationError.signInRequired
+                }
+            }
+            if path.hasPrefix("shuzijun/v1/fan/notifications/"), http.statusCode == 404 {
+                throw FanNotificationError.notFound
+            }
             throw decodeError(data: data, response: http)
         }
         guard !data.isEmpty,

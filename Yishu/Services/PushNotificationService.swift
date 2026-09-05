@@ -82,6 +82,43 @@ struct SystemPushAuthorizationClient: PushAuthorizationClient {
     }
 }
 
+@MainActor
+protocol PushDeviceRegistrationClient {
+    func register()
+    func unregister()
+}
+
+struct SystemPushDeviceRegistrationClient: PushDeviceRegistrationClient {
+    nonisolated init() {}
+
+    func register() { UIApplication.shared.registerForRemoteNotifications() }
+    func unregister() { UIApplication.shared.unregisterForRemoteNotifications() }
+}
+
+@MainActor
+protocol PushNotificationSleeper {
+    func sleep(for duration: Duration) async throws
+}
+
+struct SystemPushNotificationSleeper: PushNotificationSleeper {
+    nonisolated init() {}
+
+    func sleep(for duration: Duration) async throws {
+        try await Task.sleep(for: duration)
+    }
+}
+
+enum PushRecoveryPolicy {
+    // A bounded burst repairs temporary registration/transport failures without
+    // polling forever. A later foreground or explicit retry starts a new burst.
+    static let delays: [Duration] = [.seconds(5), .seconds(15), .seconds(60), .seconds(300), .seconds(300)]
+
+    static func delay(attempt: Int) -> Duration? {
+        guard delays.indices.contains(attempt) else { return nil }
+        return delays[attempt]
+    }
+}
+
 enum PushStartupConsentPolicy {
     private static let pendingKey = "push-notifications-startup-consent-pending"
 
@@ -212,6 +249,8 @@ final class PushNotificationCoordinator: ObservableObject {
     @Published private(set) var isUpdatingPreference = false
     @Published private(set) var shouldPresentAuthorizationRationale = false
     @Published private(set) var deviceRegistrationState: PushDeviceRegistrationState = .inactive
+    @Published private(set) var pendingNotification: PendingFanNotification?
+    @Published private(set) var notificationReceiptGeneration: UInt64 = 0
 
     private struct BoundContext: Equatable {
         let userID: String
@@ -231,6 +270,8 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private let authorizationClient: any PushAuthorizationClient
+    private let registrationClient: any PushDeviceRegistrationClient
+    private let sleeper: any PushNotificationSleeper
     private let defaults: UserDefaults
     private let registrationTimeout: Duration
     private var deviceToken: String?
@@ -244,13 +285,27 @@ final class PushNotificationCoordinator: ObservableObject {
     private var bindingRefreshTask: Task<Void, Never>?
     private var registrationTimeoutTask: Task<Void, Never>?
     private var registrationTimeoutSession: UInt64?
+    private weak var registrationAccount: (any PushNotificationAccount)?
+    private struct RecoveryContext: Equatable {
+        let userID: String
+        let sessionGeneration: UInt64
+        let preferenceGeneration: UInt64
+    }
+    private var recoveryContext: RecoveryContext?
+    private var recoveryTask: Task<Void, Never>?
+    private var recoveryAttempt = 0
+    private var recoveryGeneration: UInt64 = 0
 
     init(
         authorizationClient: any PushAuthorizationClient = SystemPushAuthorizationClient(),
         defaults: UserDefaults = .standard,
-        registrationTimeout: Duration = .seconds(30)
+        registrationTimeout: Duration = .seconds(30),
+        registrationClient: any PushDeviceRegistrationClient = SystemPushDeviceRegistrationClient(),
+        sleeper: any PushNotificationSleeper = SystemPushNotificationSleeper()
     ) {
         self.authorizationClient = authorizationClient
+        self.registrationClient = registrationClient
+        self.sleeper = sleeper
         self.defaults = defaults
         self.registrationTimeout = registrationTimeout
         // No account identity is known during initialization. The preference is
@@ -277,12 +332,27 @@ final class PushNotificationCoordinator: ObservableObject {
         registrationGeneration &+= 1
     }
 
+    func receiveNotification(userInfo: [AnyHashable: Any], opened: Bool) {
+        guard let rawID = userInfo["notificationID"] as? String,
+              let id = FanNotificationValidation.canonicalID(rawID) else { return }
+        notificationReceiptGeneration &+= 1
+        if opened { pendingNotification = PendingFanNotification(id: id) }
+    }
+
+    func clearPendingNotification() { pendingNotification = nil }
+
     func registrationFailed() {
+        guard isAcceptingDeviceTokens, let account = registrationAccount,
+              deviceRegistrationState != .requiresSignIn,
+              recoveryContext == currentRecoveryContext(for: account) else { return }
         deviceToken = nil
         boundContext = nil
-        if isAcceptingDeviceTokens { deviceRegistrationState = .failed }
+        deviceRegistrationState = .failed
         registrationTimeoutTask?.cancel()
         registrationTimeoutTask = nil
+        bindingRefreshTask?.cancel()
+        bindingRefreshTask = nil
+        scheduleRecovery(for: account)
     }
 
     /// System permission is app-wide and may be requested before login. Device
@@ -322,6 +392,13 @@ final class PushNotificationCoordinator: ObservableObject {
     /// binds the volatile APNs token through that same protected fan session.
     /// The token is deliberately never written to UserDefaults, Keychain or logs.
     func synchronize(with account: any PushNotificationAccount) async {
+        await synchronize(with: account, resetRecoveryBudget: true)
+    }
+
+    private func synchronize(
+        with account: any PushNotificationAccount,
+        resetRecoveryBudget: Bool
+    ) async {
         guard let eligibleUserID = account.pushEligibleUserID else {
             accountContextDidChange(to: nil)
             shouldPresentAuthorizationRationale = false
@@ -330,6 +407,12 @@ final class PushNotificationCoordinator: ObservableObject {
         }
         let sessionGeneration = account.pushSessionGeneration
         accountContextDidChange(to: eligibleUserID)
+        let context = currentRecoveryContext(for: account)
+        if resetRecoveryBudget || recoveryContext != context {
+            cancelRecovery(resetAttempts: true)
+        }
+        recoveryContext = context
+        registrationAccount = account
         guard !isSynchronizing else {
             needsSynchronization = true
             return
@@ -339,7 +422,7 @@ final class PushNotificationCoordinator: ObservableObject {
             isSynchronizing = false
             if needsSynchronization {
                 needsSynchronization = false
-                Task { await self.synchronize(with: account) }
+                Task { await self.synchronize(with: account, resetRecoveryBudget: false) }
             }
         }
 
@@ -423,6 +506,9 @@ final class PushNotificationCoordinator: ObservableObject {
 
     func accountContextDidChange(to userID: String?) {
         guard accountUserID != userID else { return }
+        // A tap received before any account is known may wait for first login;
+        // a tap associated with an existing account must never follow a switch.
+        if accountUserID != nil { clearPendingNotification() }
         accountUserID = userID
         notificationsEnabled = PushNotificationPreferencePolicy.isEnabled(
             in: defaults,
@@ -430,7 +516,7 @@ final class PushNotificationCoordinator: ObservableObject {
             associationKey: Self.associationKey,
             userID: userID
         )
-        UIApplication.shared.unregisterForRemoteNotifications()
+        registrationClient.unregister()
         isAcceptingDeviceTokens = false
         deviceToken = nil
         boundContext = nil
@@ -440,6 +526,9 @@ final class PushNotificationCoordinator: ObservableObject {
         bindingRefreshTask?.cancel()
         bindingRefreshTask = nil
         shouldPresentAuthorizationRationale = false
+        cancelRecovery(resetAttempts: true)
+        recoveryContext = nil
+        registrationAccount = nil
     }
 
     func forgetSessionBinding() {
@@ -449,6 +538,7 @@ final class PushNotificationCoordinator: ObservableObject {
         registrationTimeoutTask = nil
         bindingRefreshTask?.cancel()
         bindingRefreshTask = nil
+        cancelRecovery(resetAttempts: true)
     }
 
     func setNotificationsEnabled(_ enabled: Bool, for account: any PushNotificationAccount) async {
@@ -512,6 +602,7 @@ final class PushNotificationCoordinator: ObservableObject {
                 boundAt: Date()
             )
             deviceRegistrationState = .ready
+            cancelRecovery(resetAttempts: true)
             registrationTimeoutTask?.cancel()
             registrationTimeoutTask = nil
             scheduleBindingRefresh(for: account)
@@ -521,15 +612,15 @@ final class PushNotificationCoordinator: ObservableObject {
                   notificationsEnabled else { return }
             registrationTimeoutTask?.cancel()
             registrationTimeoutTask = nil
+            bindingRefreshTask?.cancel()
+            bindingRefreshTask = nil
             if case FanAccountError.sessionExpired = error {
                 deviceRegistrationState = .requiresSignIn
-                bindingRefreshTask?.cancel()
-                bindingRefreshTask = nil
+                cancelRecovery(resetAttempts: true)
                 return
             }
             deviceRegistrationState = .failed
-            // Foreground/session reconciliation retries without logging the token.
-            scheduleBindingRefresh(for: account, after: 5 * 60)
+            scheduleRecovery(for: account)
         }
     }
 
@@ -537,7 +628,7 @@ final class PushNotificationCoordinator: ObservableObject {
         // Reject callbacks before the network await so a late APNs registration
         // can never resurrect a denied, revoked, switched or signed-out context.
         isAcceptingDeviceTokens = false
-        UIApplication.shared.unregisterForRemoteNotifications()
+        registrationClient.unregister()
         deviceToken = nil
         boundContext = nil
         deviceRegistrationState = .inactive
@@ -545,6 +636,9 @@ final class PushNotificationCoordinator: ObservableObject {
         registrationTimeoutTask = nil
         bindingRefreshTask?.cancel()
         bindingRefreshTask = nil
+        cancelRecovery(resetAttempts: true)
+        registrationAccount = nil
+        recoveryContext = nil
         guard account.hasPushUnbindingSession else { return }
         // All local cleanup must happen before suspension. An older unbind
         // response must not erase a newer account's successful binding. The
@@ -570,17 +664,60 @@ final class PushNotificationCoordinator: ObservableObject {
                 registrationTimeoutSession = sessionGeneration
                 registrationTimeoutTask = Task { [weak self, weak account] in
                     guard let timeout = self?.registrationTimeout else { return }
-                    do { try await Task.sleep(for: timeout) } catch { return }
+                    guard let sleeper = self?.sleeper else { return }
+                    do { try await sleeper.sleep(for: timeout) } catch { return }
                     guard !Task.isCancelled, let self, let account,
                           account.pushEligibleUserID == userID,
                           account.pushSessionGeneration == sessionGeneration,
                           self.deviceRegistrationState == .connecting else { return }
                     self.deviceRegistrationState = .failed
                     self.registrationTimeoutTask = nil
+                    self.scheduleRecovery(for: account)
                 }
             }
         }
-        UIApplication.shared.registerForRemoteNotifications()
+        registrationAccount = account
+        registrationClient.register()
+    }
+
+    private func currentRecoveryContext(for account: any PushNotificationAccount) -> RecoveryContext? {
+        guard let userID = account.pushEligibleUserID else { return nil }
+        return RecoveryContext(
+            userID: userID,
+            sessionGeneration: account.pushSessionGeneration,
+            preferenceGeneration: preferenceGeneration
+        )
+    }
+
+    private func cancelRecovery(resetAttempts: Bool) {
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        recoveryGeneration &+= 1
+        if resetAttempts { recoveryAttempt = 0 }
+    }
+
+    private func scheduleRecovery(for account: any PushNotificationAccount) {
+        guard notificationsEnabled, isAcceptingDeviceTokens,
+              accountUserID == account.pushEligibleUserID,
+              let context = currentRecoveryContext(for: account),
+              recoveryContext == context,
+              deviceRegistrationState != .requiresSignIn,
+              recoveryTask == nil,
+              let delay = PushRecoveryPolicy.delay(attempt: recoveryAttempt) else { return }
+        recoveryAttempt += 1
+        recoveryGeneration &+= 1
+        let generation = recoveryGeneration
+        recoveryTask = Task { [weak self, weak account] in
+            guard let sleeper = self?.sleeper else { return }
+            do { try await sleeper.sleep(for: delay) } catch { return }
+            guard !Task.isCancelled, let self, let account,
+                  self.recoveryGeneration == generation,
+                  self.recoveryContext == context,
+                  self.currentRecoveryContext(for: account) == context,
+                  self.notificationsEnabled, self.isAcceptingDeviceTokens else { return }
+            self.recoveryTask = nil
+            await self.synchronize(with: account, resetRecoveryBudget: false)
+        }
     }
 
     private func scheduleBindingRefresh(
@@ -589,13 +726,14 @@ final class PushNotificationCoordinator: ObservableObject {
     ) {
         bindingRefreshTask?.cancel()
         bindingRefreshTask = Task { [weak self, weak account] in
+            guard let sleeper = self?.sleeper else { return }
             do {
-                try await Task.sleep(for: .seconds(delay))
+                try await sleeper.sleep(for: .seconds(delay))
             } catch {
                 return
             }
             guard !Task.isCancelled, let self, let account else { return }
-            await self.synchronize(with: account)
+            await self.synchronize(with: account, resetRecoveryBudget: false)
         }
     }
 }
@@ -628,15 +766,20 @@ final class YishuApplicationDelegate: NSObject, UIApplicationDelegate, UNUserNot
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .list, .sound]
+        PushNotificationCoordinator.shared.receiveNotification(
+            userInfo: notification.request.content.userInfo, opened: false
+        )
+        return [.banner, .list, .sound]
     }
 
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        // Notification payloads never choose a URL or privileged destination.
-        // Until the App has a protected message inbox, tapping safely activates
-        // the existing authenticated interface and performs no custom routing.
+        // Only a canonical opaque ID crosses into navigation. Title/body/URL
+        // payload fields are never trusted as the authenticated message detail.
+        PushNotificationCoordinator.shared.receiveNotification(
+            userInfo: response.notification.request.content.userInfo, opened: true
+        )
     }
 }

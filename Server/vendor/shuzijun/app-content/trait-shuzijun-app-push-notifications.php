@@ -10,7 +10,7 @@ trait Shuzijun_App_Push_Notifications {
             return true;
         }
 
-        $lock = self::acquire_named_fan_lock('push_schema', 'version-3');
+        $lock = self::acquire_named_fan_lock('push_schema', 'version-4');
         if (is_wp_error($lock)) {
             do_action('yishu_push_security_audit', 'schema_lock_unavailable');
             return false;
@@ -99,9 +99,11 @@ trait Shuzijun_App_Push_Notifications {
                 notification_id bigint(20) unsigned NOT NULL,
                 fan_user_id bigint(20) unsigned NOT NULL,
                 created_at datetime NOT NULL,
+                read_at datetime NULL,
                 PRIMARY KEY  (id),
                 UNIQUE KEY notification_user (notification_id, fan_user_id),
-                KEY fan_notifications (fan_user_id, notification_id)
+                KEY fan_notifications (fan_user_id, notification_id),
+                KEY fan_unread (fan_user_id, read_at, notification_id)
             ) ENGINE=InnoDB {$charset};";
             $install_states_sql = "CREATE TABLE {$tables['install_states']} (
                 install_hash char(64) NOT NULL,
@@ -244,7 +246,7 @@ trait Shuzijun_App_Push_Notifications {
                 'body', 'is_sensitive', 'created_by', 'recipient_count',
                 'device_count', 'deliver_before', 'created_at', 'expires_at',
             ),
-            'recipients' => array('id', 'notification_id', 'fan_user_id', 'created_at'),
+            'recipients' => array('id', 'notification_id', 'fan_user_id', 'created_at', 'read_at'),
             'outbox' => array(
                 'id', 'notification_id', 'fan_user_id', 'install_hash', 'token_hash',
                 'binding_generation',
@@ -1715,10 +1717,8 @@ trait Shuzijun_App_Push_Notifications {
             return new WP_Error('push_sensitive_invalid', '推送隐私标记无效。', array('status' => 400));
         }
         $sensitive = $raw_sensitive === null ? true : rest_sanitize_boolean($raw_sensitive);
-        if ($sensitive) {
-            $title = 'Hi，梳子';
-            $body = '有新消息，请登录查看';
-        }
+        // Preserve the authorized administrator's actual message in the cloud
+        // inbox. Sensitive redaction belongs only in the APNs payload builder.
         $idempotency_key = strtolower(trim((string) $request->get_param('idempotencyKey')));
         if (!self::is_uuid_v4($idempotency_key)) {
             return new WP_Error(
@@ -1768,8 +1768,8 @@ trait Shuzijun_App_Push_Notifications {
         $input = self::sanitize_targeted_push_request($request);
         if (is_wp_error($input)) { return $input; }
         if (!self::push_storage_ready()) { return self::push_storage_error(); }
-        $provider = self::apns_provider_configuration();
-        if (is_wp_error($provider)) { return $provider; }
+        // The durable inbox remains available without a device or during an
+        // APNs outage. Its optional outbox jobs wait for worker readiness.
         $actor_id = get_current_user_id();
         if ($actor_id <= 0) {
             return new WP_Error('push_admin_required', '需要管理员权限。', array('status' => 403));
@@ -1997,6 +1997,207 @@ trait Shuzijun_App_Push_Notifications {
         return $response;
     }
 
+    public static function list_fan_notifications(WP_REST_Request $request) {
+        return self::fan_notification_request($request, 'list');
+    }
+
+    public static function get_fan_notification(WP_REST_Request $request) {
+        return self::fan_notification_request($request, 'detail');
+    }
+
+    public static function mark_fan_notification_read(WP_REST_Request $request) {
+        return self::fan_notification_request($request, 'read');
+    }
+
+    /** Revalidate account eligibility under the same fan lock as deletion. */
+    private static function fan_inbox_context_is_current($context) {
+        global $wpdb;
+        $user_id = (int) $context['userID'];
+        if (!self::fan_session_context_is_current_from_database($context, 'normal', true)) {
+            return !empty($wpdb->last_error) ? self::push_storage_error() : new WP_Error(
+                'fan_session_invalid', '登录已失效，请重新登录。', array('status' => 401)
+            );
+        }
+        $exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT ID FROM {$wpdb->users} WHERE ID = %d LIMIT 1 FOR UPDATE", $user_id
+        ));
+        if (!empty($wpdb->last_error)) { return self::push_storage_error(); }
+        $meta = array();
+        foreach (array(
+            self::FAN_META_UUID, self::FAN_META_STATUS, self::FAN_META_DOUYIN_ID,
+            self::FAN_META_INVITATION, self::FAN_META_PASSWORD_RECOVERY, self::FAN_META_APPLE_SETUP,
+        ) as $key) {
+            $meta[$key] = self::fan_meta_from_database($user_id, $key, null, true);
+            if (!empty($wpdb->last_error)) { return self::push_storage_error(); }
+        }
+        $douyin = $meta[self::FAN_META_DOUYIN_ID];
+        if ((int) $exists !== $user_id || !is_string($meta[self::FAN_META_UUID])
+            || !self::is_uuid_v4($meta[self::FAN_META_UUID])
+            || !in_array($meta[self::FAN_META_STATUS], array('pending', 'active'), true)
+            || !is_string($douyin) || $douyin === ''
+            || !hash_equals($douyin, self::normalize_douyin_id($douyin))
+            || self::is_invitation_douyin_id($douyin)
+            || !empty($meta[self::FAN_META_INVITATION])
+            || !empty($meta[self::FAN_META_PASSWORD_RECOVERY])
+            || !empty($meta[self::FAN_META_APPLE_SETUP])) {
+            return new WP_Error(
+                'fan_inbox_unavailable', '请先完成账号设置或联系管理员确认账号状态。', array('status' => 403)
+            );
+        }
+        return true;
+    }
+
+    /** Receive-only: list/detail never acknowledge a message implicitly. */
+    private static function fan_notification_request(WP_REST_Request $request, $operation) {
+        $context = self::$fan_session_context;
+        if (!is_array($context) || (int) ($context['userID'] ?? 0) <= 0
+            || (string) ($context['scope'] ?? '') !== 'normal') {
+            return new WP_Error('fan_session_required', '请重新登录。', array('status' => 401));
+        }
+        $install_id = self::request_install_id($request);
+        if (is_wp_error($install_id)) { return $install_id; }
+        if (!hash_equals((string) ($context['installHash'] ?? ''), hash('sha256', $install_id))) {
+            return new WP_Error('fan_session_invalid', '登录已失效，请重新登录。', array('status' => 401));
+        }
+        if (!in_array($operation, array('list', 'detail', 'read'), true)) {
+            return new WP_Error('fan_inbox_operation_invalid', '消息操作无效。', array('status' => 400));
+        }
+        $limit = 20;
+        $cursor = PHP_INT_MAX;
+        $public_id = '';
+        if ($operation === 'list') {
+            $raw_limit = $request->get_param('limit');
+            $raw_cursor = $request->get_param('cursor');
+            if ($raw_limit !== null) {
+                if ((!is_string($raw_limit) && !is_int($raw_limit))
+                    || preg_match('/^[1-9][0-9]?$/D', (string) $raw_limit) !== 1
+                    || (int) $raw_limit > 50) {
+                    return new WP_Error('fan_inbox_page_invalid', '消息分页参数无效。', array('status' => 400));
+                }
+                $limit = (int) $raw_limit;
+            }
+            if ($raw_cursor !== null) {
+                if (!is_string($raw_cursor) || preg_match('/^[1-9][0-9]{0,18}$/D', $raw_cursor) !== 1
+                    || strlen($raw_cursor) > strlen((string) PHP_INT_MAX)
+                    || (strlen($raw_cursor) === strlen((string) PHP_INT_MAX)
+                        && strcmp($raw_cursor, (string) PHP_INT_MAX) > 0)) {
+                    return new WP_Error('fan_inbox_page_invalid', '消息分页参数无效。', array('status' => 400));
+                }
+                $cursor = (int) $raw_cursor;
+            }
+        } else {
+            $public_id = $request->get_param('notificationID');
+            if (!is_string($public_id) || !self::is_uuid_v4($public_id)) {
+                return new WP_Error('fan_notification_not_found', '消息不存在或已过期。', array('status' => 404));
+            }
+        }
+        if (!self::push_storage_ready()) { return self::push_storage_error(); }
+        $user_id = (int) $context['userID'];
+        $lock = self::acquire_fan_lock($user_id);
+        if (is_wp_error($lock)) { return $lock; }
+        global $wpdb;
+        $tables = self::push_table_names();
+        $transaction = false;
+        $committed = false;
+        try {
+            if ($wpdb->query('START TRANSACTION') === false) { return self::push_storage_error(); }
+            $transaction = true;
+            $eligible = self::fan_inbox_context_is_current($context);
+            if (is_wp_error($eligible)) { return $eligible; }
+            $now = gmdate('Y-m-d H:i:s');
+            $columns = 'n.id, n.public_id, n.title, n.body, n.is_sensitive, n.created_at, n.expires_at, r.read_at';
+            if ($operation === 'list') {
+                $rows = $wpdb->get_results($wpdb->prepare(
+                    "SELECT {$columns} FROM {$tables['recipients']} r
+                     INNER JOIN {$tables['notifications']} n ON n.id = r.notification_id
+                     WHERE r.fan_user_id = %d AND n.expires_at > %s AND n.id < %d
+                     ORDER BY n.id DESC LIMIT %d", $user_id, $now, $cursor, $limit + 1
+                ), ARRAY_A);
+                if (!is_array($rows) || !empty($wpdb->last_error)) { return self::push_storage_error(); }
+                $has_more = count($rows) > $limit;
+                $rows = array_slice($rows, 0, $limit);
+                $items = array();
+                foreach ($rows as $row) {
+                    $item = self::fan_notification_payload($row);
+                    if (is_wp_error($item)) { return $item; }
+                    $items[] = $item;
+                }
+                $unread = $wpdb->get_var($wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$tables['recipients']} r
+                     INNER JOIN {$tables['notifications']} n ON n.id = r.notification_id
+                     WHERE r.fan_user_id = %d AND r.read_at IS NULL AND n.expires_at > %s", $user_id, $now
+                ));
+                if (!empty($wpdb->last_error) || !is_scalar($unread)
+                    || preg_match('/^[0-9]+$/D', (string) $unread) !== 1) {
+                    return self::push_storage_error();
+                }
+                $last = empty($rows) ? null : $rows[count($rows) - 1];
+                $payload = array(
+                    'notifications' => $items,
+                    'nextCursor' => $has_more && is_array($last) ? (string) $last['id'] : null,
+                    'unreadCount' => (int) $unread,
+                );
+            } else {
+                $row = $wpdb->get_row($wpdb->prepare(
+                    "SELECT {$columns} FROM {$tables['recipients']} r
+                     INNER JOIN {$tables['notifications']} n ON n.id = r.notification_id
+                     WHERE r.fan_user_id = %d AND n.public_id = %s AND n.expires_at > %s
+                     LIMIT 1 FOR UPDATE", $user_id, $public_id, $now
+                ), ARRAY_A);
+                if (!empty($wpdb->last_error)) { return self::push_storage_error(); }
+                if (!is_array($row)) {
+                    return new WP_Error('fan_notification_not_found', '消息不存在或已过期。', array('status' => 404));
+                }
+                if ($operation === 'read' && ($row['read_at'] ?? null) === null) {
+                    $updated = $wpdb->query($wpdb->prepare(
+                        "UPDATE {$tables['recipients']} SET read_at = %s
+                         WHERE notification_id = %d AND fan_user_id = %d AND read_at IS NULL",
+                        $now, (int) $row['id'], $user_id
+                    ));
+                    if ($updated !== 1) { return self::push_storage_error(); }
+                    $row['read_at'] = $now;
+                }
+                $item = self::fan_notification_payload($row);
+                if (is_wp_error($item)) { return $item; }
+                $payload = array('notification' => $item);
+            }
+            if ($wpdb->query('COMMIT') === false) { return self::push_storage_error(); }
+            $committed = true;
+            $response = rest_ensure_response($payload);
+            $response->header('Cache-Control', 'private, no-store, max-age=0');
+            $response->header('Vary', 'Authorization, X-Yishu-Install-ID');
+            return $response;
+        } finally {
+            if ($transaction && !$committed) { $wpdb->query('ROLLBACK'); }
+            self::release_fan_lock($user_id, $lock);
+        }
+    }
+
+    private static function fan_notification_payload($row) {
+        if (!is_array($row) || !self::is_uuid_v4($row['public_id'] ?? '')
+            || !is_string($row['title'] ?? null) || !is_string($row['body'] ?? null)) {
+            return self::push_storage_error();
+        }
+        $dates = array();
+        foreach (array('created_at', 'expires_at', 'read_at') as $key) {
+            if ($key === 'read_at' && ($row[$key] ?? null) === null) {
+                $dates[$key] = null;
+                continue;
+            }
+            $value = $row[$key] ?? null;
+            $timestamp = is_string($value) ? strtotime($value . ' UTC') : false;
+            if ($timestamp === false) { return self::push_storage_error(); }
+            $dates[$key] = gmdate('Y-m-d\TH:i:s\Z', $timestamp);
+        }
+        return array(
+            'notificationID' => (string) $row['public_id'],
+            'title' => $row['title'], 'body' => $row['body'],
+            'sensitive' => (int) ($row['is_sensitive'] ?? 1) !== 0,
+            'createdAt' => $dates['created_at'], 'expiresAt' => $dates['expires_at'],
+            'readAt' => $dates['read_at'],
+        );
+    }
+
     public static function ensure_push_outbox_schedule() {
         if (!self::account_authority_enabled() || !self::push_storage_ready()) {
             return false;
@@ -2020,6 +2221,21 @@ trait Shuzijun_App_Push_Notifications {
         return true;
     }
 
+    /** Hook return values are discarded by WordPress; explicitly fail WP-CLI. */
+    public static function run_push_outbox_sweep() {
+        try {
+            $succeeded = self::sweep_push_outbox() === true;
+        } catch (Throwable $error) {
+            // Never place database diagnostics, notification text or tokens in
+            // cron output/journald. Job finally blocks retain their own fences.
+            $succeeded = false;
+        }
+        if (!$succeeded && defined('WP_CLI') && WP_CLI === true && class_exists('WP_CLI')) {
+            WP_CLI::error('Push outbox sweep failed.');
+        }
+        return $succeeded;
+    }
+
     public static function sweep_push_outbox() {
         if (!self::account_authority_enabled() || !self::push_storage_ready()) {
             return false;
@@ -2027,23 +2243,23 @@ trait Shuzijun_App_Push_Notifications {
         global $wpdb;
         $tables = self::push_table_names();
         $now = gmdate('Y-m-d H:i:s');
-        $wpdb->query($wpdb->prepare(
+        if ($wpdb->query($wpdb->prepare(
             "DELETE FROM {$tables['devices']} WHERE expires_at <= %s",
             $now
-        ));
-        $wpdb->query($wpdb->prepare(
+        )) === false) { return false; }
+        if ($wpdb->query($wpdb->prepare(
             "DELETE FROM {$tables['install_states']} WHERE session_expires_at <= %s",
             $now
-        ));
-        $wpdb->query(
+        )) === false) { return false; }
+        if ($wpdb->query(
             "DELETE d FROM {$tables['devices']} d
              LEFT JOIN {$tables['install_states']} s ON s.install_hash = d.install_hash
              WHERE s.install_hash IS NULL"
-        );
+        ) === false) { return false; }
         // Notification content and terminal delivery metadata have a bounded
         // retention period. The delivery deadline is intentionally earlier:
         // terminal rows remain for the 30-day audit window after delivery stops.
-        $wpdb->query($wpdb->prepare(
+        if ($wpdb->query($wpdb->prepare(
             "UPDATE {$tables['outbox']} o
              INNER JOIN {$tables['notifications']} n ON n.id = o.notification_id
              SET o.status = 'dead', o.last_error_code = 'expired',
@@ -2051,11 +2267,11 @@ trait Shuzijun_App_Push_Notifications {
              WHERE n.deliver_before <= %d AND o.status IN ('pending', 'processing')",
             $now,
             time()
-        ));
+        )) === false) { return false; }
         // Recover crashed claims independently of the normal due-job selector.
         // A final-attempt crash becomes terminal instead of remaining in the
         // processing state forever; earlier attempts return to pending.
-        $wpdb->query($wpdb->prepare(
+        if ($wpdb->query($wpdb->prepare(
             "UPDATE {$tables['outbox']}
              SET status = 'dead', last_error_code = 'attempts_exhausted',
                  lease_token = NULL, lease_until = NULL, updated_at = %s
@@ -2063,8 +2279,8 @@ trait Shuzijun_App_Push_Notifications {
             $now,
             $now,
             self::PUSH_OUTBOX_MAX_ATTEMPTS
-        ));
-        $wpdb->query($wpdb->prepare(
+        )) === false) { return false; }
+        if ($wpdb->query($wpdb->prepare(
             "UPDATE {$tables['outbox']}
              SET status = 'pending', lease_token = NULL, lease_until = NULL,
                  next_attempt_at = %s, last_error_code = 'lease_recovered', updated_at = %s
@@ -2073,30 +2289,30 @@ trait Shuzijun_App_Push_Notifications {
             $now,
             $now,
             self::PUSH_OUTBOX_MAX_ATTEMPTS
-        ));
-        $wpdb->query($wpdb->prepare(
+        )) === false) { return false; }
+        if ($wpdb->query($wpdb->prepare(
             "DELETE o FROM {$tables['outbox']} o
              INNER JOIN {$tables['notifications']} n ON n.id = o.notification_id
              WHERE n.expires_at <= %s",
             $now
-        ));
-        $wpdb->query($wpdb->prepare(
+        )) === false) { return false; }
+        if ($wpdb->query($wpdb->prepare(
             "DELETE r FROM {$tables['recipients']} r
              INNER JOIN {$tables['notifications']} n ON n.id = r.notification_id
              WHERE n.expires_at <= %s",
             $now
-        ));
-        $wpdb->query($wpdb->prepare(
+        )) === false) { return false; }
+        if ($wpdb->query($wpdb->prepare(
             "DELETE FROM {$tables['notifications']} WHERE expires_at <= %s",
             $now
-        ));
+        )) === false) { return false; }
         if (!empty($wpdb->last_error)) { return false; }
         // Retention cleanup must continue even if APNs credentials are absent
         // or temporarily invalid. In that state leave live jobs untouched and
         // retry readiness on the next sweep without consuming delivery attempts.
         if (is_wp_error(self::apns_provider_configuration())) {
             self::schedule_push_sweep(time() + 60);
-            return true;
+            return false;
         }
         // Do not claim jobs while the device data key or crypto runtime is
         // unavailable. Readiness failures are operational and must not consume
@@ -2104,7 +2320,7 @@ trait Shuzijun_App_Push_Notifications {
         $device_keys = self::push_device_keys();
         if (is_wp_error($device_keys)) {
             self::schedule_push_sweep(time() + 60);
-            return true;
+            return false;
         }
         sodium_memzero($device_keys['encryption']);
         sodium_memzero($device_keys['index']);
@@ -2118,13 +2334,22 @@ trait Shuzijun_App_Push_Notifications {
             $now
         ));
         if (!is_array($ids) || !empty($wpdb->last_error)) { return false; }
+        $succeeded = true;
         foreach ($ids as $id) {
-            if ((int) $id > 0) { self::process_push_outbox((int) $id); }
+            try {
+                if ((int) $id <= 0 || self::process_push_outbox((int) $id) !== true) {
+                    $succeeded = false;
+                }
+            } catch (Throwable $error) {
+                $succeeded = false;
+            }
         }
-        self::schedule_push_sweep(time() + 60);
-        return true;
+        $scheduled = self::schedule_push_sweep(time() + 60);
+        return $succeeded && $scheduled;
     }
 
+    // true means a durable outcome (accepted, retry, terminal or safely skipped)
+    // was handled. It never means that the device displayed/read a notification.
     public static function process_push_outbox($job_id) {
         $job_id = (int) $job_id;
         if ($job_id <= 0 || !self::account_authority_enabled()
@@ -2154,7 +2379,7 @@ trait Shuzijun_App_Push_Notifications {
             $now,
             $now
         ));
-        if ($claimed !== 1) { return false; }
+        if ($claimed !== 1) { return $claimed === 0; }
         $routing = $wpdb->get_row($wpdb->prepare(
             "SELECT o.fan_user_id, o.install_hash
              FROM {$tables['outbox']} o
@@ -2174,8 +2399,7 @@ trait Shuzijun_App_Push_Notifications {
             ? strtolower((string) ($routing['install_hash'] ?? ''))
             : '';
         if ($user_id <= 0 || preg_match('/^[a-f0-9]{64}$/D', $install_hash) !== 1) {
-            self::complete_push_outbox_job($job_id, $lease, 'dead', 'device_missing');
-            return false;
+            return self::complete_push_outbox_job($job_id, $lease, 'dead', 'device_missing');
         }
         // Global lock order is always installation then fan. These locks, plus
         // the install-state row lock below, remain held through curl_exec so a
@@ -2246,7 +2470,7 @@ trait Shuzijun_App_Push_Notifications {
             $job = $wpdb->get_row($wpdb->prepare(
                 "SELECT o.id, o.fan_user_id, o.install_hash AS outbox_install_hash,
                         o.token_hash, o.binding_generation, o.attempts,
-                        n.public_id, n.title, n.body, n.deliver_before,
+                        n.public_id, n.title, n.body, n.is_sensitive, n.deliver_before,
                         d.install_hash, d.session_option_id, d.binding_generation AS device_generation,
                         d.token_ciphertext,
                         s.fan_user_id AS owner_user_id,
@@ -2302,16 +2526,16 @@ trait Shuzijun_App_Push_Notifications {
                 || !hash_equals('bound', (string) ($job['desired_state'] ?? ''))
                 || strtotime((string) ($job['session_expires_at'] ?? '') . ' UTC') <= time()
                 || !$session_current) {
-                self::complete_push_outbox_job($job_id, $lease, 'dead', 'recipient_inactive');
-                if ($wpdb->query('COMMIT') === false) { return false; }
+                if (!self::complete_push_outbox_job($job_id, $lease, 'dead', 'recipient_inactive')
+                    || $wpdb->query('COMMIT') === false) { return false; }
                 $committed = true;
-                return false;
+                return true;
             }
             if ((int) ($job['deliver_before'] ?? 0) <= time()) {
-                self::complete_push_outbox_job($job_id, $lease, 'dead', 'expired');
-                if ($wpdb->query('COMMIT') === false) { return false; }
+                if (!self::complete_push_outbox_job($job_id, $lease, 'dead', 'expired')
+                    || $wpdb->query('COMMIT') === false) { return false; }
                 $committed = true;
-                return false;
+                return true;
             }
             $device_token = self::decrypt_push_device_token(
                 (string) $job['token_ciphertext'],
@@ -2326,16 +2550,16 @@ trait Shuzijun_App_Push_Notifications {
                 );
             }
             if ($device_token === '') {
-                self::invalidate_push_binding_for_job($job, 'device_ciphertext_invalid');
-                self::complete_push_outbox_job(
+                $invalidated = self::invalidate_push_binding_for_job($job, 'device_ciphertext_invalid');
+                $completed = self::complete_push_outbox_job(
                     $job_id,
                     $lease,
                     'dead',
                     'device_ciphertext_invalid'
                 );
-                if ($wpdb->query('COMMIT') === false) { return false; }
+                if (!$invalidated || !$completed || $wpdb->query('COMMIT') === false) { return false; }
                 $committed = true;
-                return false;
+                return true;
             }
             $result = self::send_push_to_apns($device_token, $job);
             if (function_exists('sodium_memzero')) { sodium_memzero($device_token); }
@@ -2345,8 +2569,8 @@ trait Shuzijun_App_Push_Notifications {
             if ($outcome === 'sent') {
                 $updated = self::complete_push_outbox_job($job_id, $lease, 'sent', '');
             } elseif ($outcome === 'invalid') {
-                self::invalidate_push_binding_for_job($job, $code ?: 'device_invalid');
-                $updated = self::complete_push_outbox_job(
+                $invalidated = self::invalidate_push_binding_for_job($job, $code ?: 'device_invalid');
+                $updated = $invalidated && self::complete_push_outbox_job(
                     $job_id,
                     $lease,
                     'dead',
@@ -2372,12 +2596,12 @@ trait Shuzijun_App_Push_Notifications {
                         'updated_at' => gmdate('Y-m-d H:i:s'),
                     ), array('id' => $job_id, 'lease_token' => $lease),
                         array('%s', '%s', '%s', '%s', '%s', '%s'), array('%d', '%s')) === 1;
-                    self::schedule_push_sweep(time() + $delay);
+                    if (!self::schedule_push_sweep(time() + $delay)) { return false; }
                 }
             }
             if (!$updated || $wpdb->query('COMMIT') === false) { return false; }
             $committed = true;
-            return $outcome === 'sent';
+            return true;
         } finally {
             if (is_string($device_token) && $device_token !== '') {
                 if (function_exists('sodium_memzero')) { sodium_memzero($device_token); }
@@ -2419,8 +2643,8 @@ trait Shuzijun_App_Push_Notifications {
             $job_id,
             $lease
         ));
-        self::schedule_push_sweep(time() + 60);
-        return $updated === 1;
+        $scheduled = self::schedule_push_sweep(time() + 60);
+        return $updated === 1 && $scheduled;
     }
 
     private static function push_delivery_session_is_current($job) {
@@ -2496,10 +2720,11 @@ trait Shuzijun_App_Push_Notifications {
         global $wpdb;
         $tables = self::push_table_names();
         $user_id = (int) ($job['fan_user_id'] ?? 0);
+        $job_id = (int) ($job['id'] ?? 0);
         $generation = (int) ($job['binding_generation'] ?? 0);
         $session_option_id = (int) ($job['session_option_id'] ?? 0);
         $install_hash = strtolower((string) ($job['install_hash'] ?? ''));
-        if ($user_id <= 0 || $generation <= 0 || $session_option_id <= 0
+        if ($user_id <= 0 || $job_id <= 0 || $generation <= 0 || $session_option_id <= 0
             || preg_match('/^[a-f0-9]{64}$/D', $install_hash) !== 1) {
             return false;
         }
@@ -2508,12 +2733,13 @@ trait Shuzijun_App_Push_Notifications {
             "UPDATE {$tables['outbox']} SET status = 'dead', last_error_code = %s,
                 lease_token = NULL, lease_until = NULL, updated_at = %s
              WHERE install_hash = %s AND fan_user_id = %d AND binding_generation = %d
-               AND status IN ('pending', 'processing')",
+               AND status IN ('pending', 'processing') AND id <> %d",
             sanitize_key((string) $reason),
             $now,
             $install_hash,
             $user_id,
-            $generation
+            $generation,
+            $job_id
         ));
         $device = $wpdb->query($wpdb->prepare(
             "DELETE FROM {$tables['devices']} WHERE install_hash = %s

@@ -651,6 +651,8 @@ struct FanAccountView: View {
                 }
 
                 if !requiresDouyinCompletion {
+                    FanNotificationAccountEntry(account: account)
+
                     NavigationLink {
                         FanAccountSecurityView()
                     } label: {
@@ -2409,14 +2411,14 @@ private struct FanPushComposerView: View {
                 Section("通知内容") {
                     if privacyMode {
                         Label(
-                            "隐私模式使用固定安全文案；下方自定义内容不会上传。",
+                            "隐私模式仅在登录后的云端消息箱显示原文，锁屏只显示通用提醒。",
                             systemImage: "lock.shield"
                         )
                         .font(.caption)
                         .foregroundStyle(AppTheme.muted)
                     }
                     TextField("标题", text: $title)
-                        .disabled(isSending || privacyMode)
+                        .disabled(isSending)
                         .onChange(of: title) { _, value in
                             if value.count > AdminPushNotificationValidation.titleLimit {
                                 title = String(value.prefix(AdminPushNotificationValidation.titleLimit))
@@ -2425,7 +2427,7 @@ private struct FanPushComposerView: View {
                         }
                     TextEditor(text: $message)
                         .frame(minHeight: 110)
-                        .disabled(isSending || privacyMode)
+                        .disabled(isSending)
                         .onChange(of: message) { _, value in
                             if value.count > AdminPushNotificationValidation.bodyLimit {
                                 message = String(value.prefix(AdminPushNotificationValidation.bodyLimit))
@@ -2447,13 +2449,13 @@ private struct FanPushComposerView: View {
                         .onChange(of: privacyMode) { _, _ in draftDidChange() }
                     Text(
                         privacyMode
-                            ? "已开启：锁屏仅显示“有新消息，请登录查看”，不发送上方具体文本。"
+                            ? "已开启：原文保存到收件人的云端消息箱，锁屏仅显示“有新消息，请登录查看”。"
                             : "已关闭：将按上方文本发送。请确保内容不含联系方式、账号、密码或其他敏感信息。"
                     )
                     .font(.caption)
                     .foregroundStyle(privacyMode ? AppTheme.muted : .orange)
                 } footer: {
-                    Text("推送会发往该账号已开启通知的设备，不会暴露设备令牌。")
+                    Text("消息会保存在该用户的云端消息箱。通知权限只影响系统提醒，不影响登录后查看消息，也不会暴露设备令牌。")
                 }
 
                 if let resultMessage {
@@ -2557,8 +2559,8 @@ private struct FanPushComposerView: View {
             )
             idempotencyKey = UUID()
             resultMessage = response.deviceCount > 0
-                ? "已加入队列，将发送到 \(response.deviceCount) 台设备。"
-                : "通知已记录，但该用户暂无可用的推送设备。"
+                ? "已存入消息箱，系统提醒已加入 \(response.deviceCount) 台设备的发送队列。"
+                : "已存入该用户的消息箱；暂无线上的推送设备，用户登录后仍可查看。"
         } catch {
             errorMessage = (error as? AdminAPIError)?.errorDescription
                 ?? "暂时无法发送通知。"
