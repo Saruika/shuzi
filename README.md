@@ -4,6 +4,8 @@
 
 > 当前 TestFlight 内部测试版本：`1.3.35 (47)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
+最新相册内容更新：[v1.3.35-content.1](Server/releases/v1.3.35-content.1.md)（2026-09-05）：新增“灯影绮罗”“花庭清韵”，为“新中式”补充同套照片，共 10 册、70 张。云端更新，作品页下拉刷新即可，无需重装 TestFlight。
+
 ## 产品功能
 
 - **首页**：人物主视觉轮播、身份表达和作品入口；可按需通过 Apple WeatherKit 显示当地天气。
