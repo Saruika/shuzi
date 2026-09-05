@@ -47,7 +47,7 @@ final class LocalWeatherStore: NSObject {
     override init() {
         super.init()
         locationManager.delegate = self
-        locationManager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
+        locationManager.desiredAccuracy = kCLLocationAccuracyReduced
 
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains(
@@ -149,6 +149,13 @@ final class LocalWeatherStore: NSObject {
     }
 
     private func loadWeather(for location: CLLocation) {
+        // A cached callback may have higher precision than requested. Strip
+        // that precision before either Apple service or our in-memory cache
+        // receives a location; never retain altitude, course or speed.
+        guard let location = WeatherLocationPrivacy.approximate(location) else {
+            showUnavailableLocation()
+            return
+        }
         if let lastLocation,
            let lastUpdated,
            location.distance(from: lastLocation) < 5_000,
@@ -327,6 +334,29 @@ final class LocalWeatherStore: NSObject {
         location.horizontalAccuracy >= 0
             && location.horizontalAccuracy <= 100_000
             && abs(location.timestamp.timeIntervalSinceNow) <= 30 * 60
+    }
+}
+
+enum WeatherLocationPrivacy {
+    // A fixed coarse grid, not a random offset that repeated requests could
+    // average back to a more precise position. Latitude steps are about 5.6 km.
+    static func approximate(_ location: CLLocation) -> CLLocation? {
+        guard CLLocationCoordinate2DIsValid(location.coordinate),
+              location.horizontalAccuracy.isFinite,
+              location.horizontalAccuracy >= 0 else { return nil }
+        let step = 0.05
+        let coordinate = CLLocationCoordinate2D(
+            latitude: (location.coordinate.latitude / step).rounded() * step,
+            longitude: (location.coordinate.longitude / step).rounded() * step
+        )
+        guard CLLocationCoordinate2DIsValid(coordinate) else { return nil }
+        return CLLocation(
+            coordinate: coordinate,
+            altitude: 0,
+            horizontalAccuracy: max(location.horizontalAccuracy, 6_000),
+            verticalAccuracy: -1,
+            timestamp: location.timestamp
+        )
     }
 }
 

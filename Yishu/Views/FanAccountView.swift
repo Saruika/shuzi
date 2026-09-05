@@ -87,6 +87,7 @@ struct FanAccountView: View {
     @State private var presentsAdminAccess = false
     @StateObject private var appleSignIn = AppleSignInCoordinator()
     @State private var appleRegistrationDraft = FanAppleRegistrationDraft()
+    @State private var needsAppleRegistrationRestore = false
     @State private var showAppleDeleteConfirmation = false
 
     init(
@@ -150,12 +151,16 @@ struct FanAccountView: View {
             clearAuthenticationPasswords()
         }
         .onChange(of: scenePhase) { _, phase in
+            appleSignIn.scenePhaseDidChange(to: phase)
             if phase != .active {
-                appleSignIn.cancel()
                 clearAllPasswords()
-                clearAppleRegistrationFields()
                 profileUpgradeCurrentPassword = ""
-            } else if account.appleRegistration != nil {
+            }
+            if phase == .background {
+                clearAppleRegistrationFields()
+                needsAppleRegistrationRestore = true
+            } else if phase == .active, needsAppleRegistrationRestore {
+                needsAppleRegistrationRestore = false
                 prepareAppleRegistrationFields(for: account.appleRegistration)
             }
         }

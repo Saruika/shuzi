@@ -2,6 +2,7 @@ import AuthenticationServices
 import CryptoKit
 import Foundation
 import UIKit
+import SwiftUI
 
 struct FanAppleChallenge: Decodable, Equatable {
     let challengeID: String
@@ -137,7 +138,12 @@ final class AppleSignInCoordinator: NSObject, ObservableObject {
     private var controller: ASAuthorizationController?
     private var challenge: FanAppleChallenge?
     private var completion: ((Result<FanAppleCredentialSubmission, Error>) -> Void)?
-    private var generation: UInt64 = 0
+    private let performAuthorization: (ASAuthorizationController) -> Void
+
+    init(performAuthorization: @escaping (ASAuthorizationController) -> Void = { $0.performRequests() }) {
+        self.performAuthorization = performAuthorization
+        super.init()
+    }
 
     func start(
         challenge: FanAppleChallenge,
@@ -154,7 +160,6 @@ final class AppleSignInCoordinator: NSObject, ObservableObject {
             return
         }
 
-        generation &+= 1
         self.presentationAnchor = presentationAnchor
         self.challenge = challenge
         self.completion = completion
@@ -170,22 +175,28 @@ final class AppleSignInCoordinator: NSObject, ObservableObject {
         controller.delegate = self
         controller.presentationContextProvider = self
         self.controller = controller
-        controller.performRequests()
+        performAuthorization(controller)
     }
 
     func cancel() {
         cancel(notifying: false)
     }
 
+    func scenePhaseDidChange(to phase: ScenePhase) {
+        // A system authorization sheet can temporarily make its host inactive.
+        // Only actually leaving the foreground should abandon this request.
+        if phase == .background { cancel() }
+    }
+
     private func cancel(notifying: Bool) {
-        generation &+= 1
-        controller?.cancel()
+        let previousController = controller
         controller = nil
         presentationAnchor = nil
         challenge = nil
         let completion = self.completion
         self.completion = nil
         isWorking = false
+        previousController?.cancel()
         if notifying { completion?(.failure(AppleSignInCoordinatorError.cancelled)) }
     }
 
@@ -198,6 +209,31 @@ final class AppleSignInCoordinator: NSObject, ObservableObject {
         isWorking = false
         completion?(result)
     }
+
+    func completeAuthorization(
+        controller: ASAuthorizationController,
+        credential: ASAuthorizationAppleIDCredential?
+    ) {
+        // Ignore superseded callbacks before validating their contents. A stale
+        // callback must never finish (or clear) the current authorization.
+        guard controller === self.controller else { return }
+        guard let challenge, challenge.isValid(),
+              let credential,
+              AppleSignInSecurity.statesMatch(credential.state, challenge.state),
+              let identityToken = AppleSignInSecurity.validatedIdentityToken(credential.identityToken),
+              let authorizationCode = AppleSignInSecurity.validatedAuthorizationCode(credential.authorizationCode),
+              !credential.user.isEmpty, credential.user.count <= 1_024 else {
+            finish(.failure(AppleSignInCoordinatorError.invalidCredential))
+            return
+        }
+        finish(.success(FanAppleCredentialSubmission(
+            identityToken: identityToken,
+            authorizationCode: authorizationCode,
+            challengeID: challenge.challengeID,
+            state: challenge.state,
+            localAppleUserID: credential.user
+        )))
+    }
 }
 
 extension AppleSignInCoordinator: ASAuthorizationControllerDelegate {
@@ -206,29 +242,10 @@ extension AppleSignInCoordinator: ASAuthorizationControllerDelegate {
         didCompleteWithAuthorization authorization: ASAuthorization
     ) {
         Task { @MainActor [weak self] in
-            guard let self, controller === self.controller,
-                  let challenge = self.challenge,
-                  challenge.isValid(),
-                  let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
-                  AppleSignInSecurity.statesMatch(credential.state, challenge.state),
-                  let identityToken = AppleSignInSecurity.validatedIdentityToken(
-                    credential.identityToken
-                  ),
-                  let authorizationCode = AppleSignInSecurity.validatedAuthorizationCode(
-                    credential.authorizationCode
-                  ),
-                  !credential.user.isEmpty,
-                  credential.user.count <= 1_024 else {
-                self?.finish(.failure(AppleSignInCoordinatorError.invalidCredential))
-                return
-            }
-            self.finish(.success(FanAppleCredentialSubmission(
-                identityToken: identityToken,
-                authorizationCode: authorizationCode,
-                challengeID: challenge.challengeID,
-                state: challenge.state,
-                localAppleUserID: credential.user
-            )))
+            self?.completeAuthorization(
+                controller: controller,
+                credential: authorization.credential as? ASAuthorizationAppleIDCredential
+            )
         }
     }
 

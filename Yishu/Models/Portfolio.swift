@@ -241,7 +241,7 @@ enum ContentCatalog {
             ),
             eyebrow: "东方美学",
             title: "易姝",
-            subtitle: "镜头之内，自有叙事。",
+            subtitle: "很高兴，在这里遇见你。",
             startsAt: Date(timeIntervalSince1970: 0),
             endsAt: Date(timeIntervalSince1970: 4_102_444_800),
             displaySeconds: 2.5
@@ -254,7 +254,7 @@ enum ContentCatalog {
             ),
             eyebrow: "东方美学",
             title: "易姝",
-            subtitle: "镜头之内，自有叙事。",
+            subtitle: "很高兴，在这里遇见你。",
             startsAt: Date(timeIntervalSince1970: 0),
             endsAt: Date(timeIntervalSince1970: 4_102_444_800),
             displaySeconds: 2.5
@@ -267,7 +267,7 @@ enum ContentCatalog {
             ),
             eyebrow: "东方美学",
             title: "易姝",
-            subtitle: "镜头之内，自有叙事。",
+            subtitle: "很高兴，在这里遇见你。",
             startsAt: Date(timeIntervalSince1970: 0),
             endsAt: Date(timeIntervalSince1970: 4_102_444_800),
             displaySeconds: 2.5

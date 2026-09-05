@@ -5,6 +5,7 @@ import SwiftUI
 import UIKit
 import UserNotifications
 import WeatherKit
+import CoreLocation
 @testable import Yishu
 
 private enum TestCredentialFixture {
@@ -471,6 +472,53 @@ final class ContentAndAccessTests: XCTestCase {
         edited.subtitle = "安全写回"
         row.wrappedValue = edited
         XCTAssertEqual(posters.first?.subtitle, "安全写回")
+    }
+
+    func testWeatherLocationDiscardsPrecisionAndMotionMetadata() throws {
+        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
+        let precise = CLLocation(
+            coordinate: CLLocationCoordinate2D(latitude: 22.543099, longitude: 114.057868),
+            altitude: 102, horizontalAccuracy: 5, verticalAccuracy: 3,
+            course: 91, speed: 8, timestamp: timestamp
+        )
+        let coarse = try XCTUnwrap(WeatherLocationPrivacy.approximate(precise))
+        XCTAssertEqual(coarse.coordinate.latitude, 22.55, accuracy: 0.000001)
+        XCTAssertEqual(coarse.coordinate.longitude, 114.05, accuracy: 0.000001)
+        XCTAssertEqual(coarse.altitude, 0)
+        XCTAssertLessThan(coarse.verticalAccuracy, 0)
+        XCTAssertLessThan(coarse.course, 0)
+        XCTAssertLessThan(coarse.speed, 0)
+        XCTAssertEqual(coarse.timestamp, timestamp)
+        XCTAssertGreaterThanOrEqual(coarse.horizontalAccuracy, 6_000)
+        let repeated = try XCTUnwrap(WeatherLocationPrivacy.approximate(coarse))
+        XCTAssertEqual(repeated.coordinate.latitude, coarse.coordinate.latitude)
+        XCTAssertEqual(repeated.coordinate.longitude, coarse.coordinate.longitude)
+    }
+
+    func testWeatherNearbyPointsShareOneCoarseCoordinate() throws {
+        let first = try XCTUnwrap(WeatherLocationPrivacy.approximate(
+            CLLocation(latitude: 22.543099, longitude: 114.057868)
+        ))
+        let next = try XCTUnwrap(WeatherLocationPrivacy.approximate(
+            CLLocation(latitude: 22.543101, longitude: 114.057872)
+        ))
+        XCTAssertEqual(first.coordinate.latitude, next.coordinate.latitude)
+        XCTAssertEqual(first.coordinate.longitude, next.coordinate.longitude)
+    }
+
+    func testWeatherCoarseCoordinatesRejectInvalidInputAndSupportWorldEdges() throws {
+        for coordinate in [
+            CLLocationCoordinate2D(latitude: 90, longitude: 180),
+            CLLocationCoordinate2D(latitude: -90, longitude: -180),
+            CLLocationCoordinate2D(latitude: 0, longitude: 0),
+        ] {
+            let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            let result = try XCTUnwrap(WeatherLocationPrivacy.approximate(location))
+            XCTAssertTrue(CLLocationCoordinate2DIsValid(result.coordinate))
+        }
+        XCTAssertNil(WeatherLocationPrivacy.approximate(CLLocation(latitude: 91, longitude: 0)))
+        XCTAssertNil(WeatherLocationPrivacy.approximate(CLLocation(latitude: .nan, longitude: 0)))
+        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "NSLocationDefaultAccuracyReduced") as? Bool, true)
     }
 
     func testWeatherLocationAlwaysKeepsAConcisePlaceName() {
@@ -1457,6 +1505,60 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertTrue(AppleSignInSecurity.statesMatch("same-state", "same-state"))
         XCTAssertFalse(AppleSignInSecurity.statesMatch("same-state-x", "same-state"))
         XCTAssertFalse(AppleSignInSecurity.statesMatch(nil, "same-state"))
+    }
+
+    @MainActor
+    func testAppleAuthorizationSurvivesInactiveButCancelsInBackground() throws {
+        var controllers: [ASAuthorizationController] = []
+        let coordinator = AppleSignInCoordinator { controllers.append($0) }
+        let window = UIWindow()
+        let challenge = FanAppleChallenge(
+            challengeID: String(repeating: "a", count: 32),
+            nonce: String(repeating: "b", count: 64),
+            state: String(repeating: "c", count: 64),
+            expiresAt: Date().addingTimeInterval(300)
+        )
+        var completions = 0
+        coordinator.start(challenge: challenge, presentationAnchor: window) { _ in completions += 1 }
+        XCTAssertTrue(coordinator.isWorking)
+        coordinator.scenePhaseDidChange(to: .inactive)
+        coordinator.scenePhaseDidChange(to: .active)
+        XCTAssertTrue(coordinator.isWorking)
+        XCTAssertEqual(completions, 0)
+        coordinator.scenePhaseDidChange(to: .background)
+        XCTAssertFalse(coordinator.isWorking)
+        coordinator.completeAuthorization(controller: try XCTUnwrap(controllers.first), credential: nil)
+        XCTAssertEqual(completions, 0, "A callback after background cancellation is no longer current")
+    }
+
+    @MainActor
+    func testAppleSupersededSuccessCallbackCannotClearNewAuthorization() throws {
+        var controllers: [ASAuthorizationController] = []
+        let coordinator = AppleSignInCoordinator { controllers.append($0) }
+        let window = UIWindow()
+        let challenge = FanAppleChallenge(
+            challengeID: String(repeating: "a", count: 32),
+            nonce: String(repeating: "b", count: 64),
+            state: String(repeating: "c", count: 64),
+            expiresAt: Date().addingTimeInterval(300)
+        )
+        var oldCompletions = 0
+        var newCompletions = 0
+        coordinator.start(challenge: challenge, presentationAnchor: window) { _ in oldCompletions += 1 }
+        let oldController = try XCTUnwrap(controllers.first)
+        coordinator.start(challenge: challenge, presentationAnchor: window) { result in
+            newCompletions += 1
+            if case .success = result { XCTFail("An invalid current credential must still fail closed") }
+        }
+        coordinator.completeAuthorization(controller: oldController, credential: nil)
+        XCTAssertTrue(coordinator.isWorking)
+        XCTAssertEqual(oldCompletions, 0)
+        XCTAssertEqual(newCompletions, 0)
+        coordinator.completeAuthorization(controller: try XCTUnwrap(controllers.last), credential: nil)
+        XCTAssertFalse(coordinator.isWorking)
+        XCTAssertEqual(newCompletions, 1)
+        coordinator.completeAuthorization(controller: try XCTUnwrap(controllers.last), credential: nil)
+        XCTAssertEqual(newCompletions, 1, "Duplicate callbacks must not complete twice")
     }
 
     func testAppleChallengeRejectsExpiredAndOverlongTTL() {

@@ -10,7 +10,6 @@ struct LaunchPosterView: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var artworkIsVisible = false
     @State private var remoteImageIsVisible = false
-    @State private var artworkScale: CGFloat = 1.035
     // The title must never depend on a remote image finishing its request.
     // Starting visible also prevents a recreated launch-poster hierarchy from
     // resetting the copy to an invisible pre-animation state.
@@ -64,7 +63,6 @@ struct LaunchPosterView: View {
                     ) { phase in
                         if case .success(let image) = phase {
                             launchArtwork(image, in: proxy.size)
-                                .scaleEffect(artworkScale)
                                 .opacity(remoteImageIsVisible ? 1 : 0)
                                 .onAppear {
                                     revealArtworkIfNeeded()
@@ -169,14 +167,10 @@ struct LaunchPosterView: View {
         guard !artworkIsVisible else { return }
         if reduceMotion {
             artworkIsVisible = true
-            artworkScale = 1
             copyIsVisible = true
         } else {
             withAnimation(.easeOut(duration: 0.45)) {
                 artworkIsVisible = true
-            }
-            withAnimation(.linear(duration: min(max(poster.displaySeconds, 1.5), 5) + 0.6)) {
-                artworkScale = 1
             }
             withAnimation(.easeOut(duration: 0.55).delay(0.12)) {
                 copyIsVisible = true
@@ -270,18 +264,12 @@ struct LaunchPosterTextBlock: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 8 : 11) {
-            HStack(spacing: compact ? 8 : 10) {
-                Capsule()
-                    .fill(AppTheme.gold)
-                    .frame(width: compact ? 18 : 26, height: 1.5)
-
-                Text(poster.eyebrow)
-                    .font(compact ? .caption2.weight(.bold) : .caption.weight(.bold))
-                    .tracking(compact ? 2.2 : 3)
-                    .foregroundStyle(AppTheme.gold)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(poster.eyebrow)
+                .font(compact ? .caption2.weight(.bold) : .caption.weight(.bold))
+                .tracking(compact ? 2.2 : 3)
+                .foregroundStyle(AppTheme.gold)
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                .fixedSize(horizontal: false, vertical: true)
 
             Text(poster.title)
                 .font(titleFont)

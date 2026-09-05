@@ -6,6 +6,16 @@
 
 ## 已核实的 ASC 直接缺项
 
+2026-09-05 15:38 再次通过只读 ASC 核验：下表缺项仍存在。用户随后确认首发包含中国大陆和其他地区、全部免费、保留抖音 ID 必填及人工审批。商店描述和 URL 尚未写入；App 备案号（不是网站备案号）、审核联系人及已审批审核账号仍待补齐。不得把本次确认或本地修复当成已提交审核。
+
+### 新增阻塞：Apple 登录服务端配置
+
+2026-09-05 16:00 左右，对上海实际 WordPress 运行环境执行只读检查：JWT 库可加载，Bundle ID 匹配，测试模式关闭；但 `YISHU_APPLE_TEAM_ID`、`YISHU_APPLE_KEY_ID`、`YISHU_APPLE_PRIVATE_KEY_PATH`、`YISHU_APPLE_DATA_KEY_PATH` 均未定义。客户端签名/描述文件包含 Apple 登录能力不等于服务端配置就绪。签名与数据密钥检查返回 `fan_apple_configuration_unavailable`。FPM 的 `auto_prepend_file` 为空，已检查的 FPM 配置与 wp-config 中没有上述配置项。此轮未使用真实 Apple 授权码执行端到端登录。
+
+需核对/配置已关联本 App 的 Sign in with Apple 私钥及稳定的数据密钥；不能用 App Store Connect 上传密钥替代，也不能覆盖可能存在的旧数据密钥。当前未生成或轮换密钥、未改账号、未部署服务器代码。客户端另修复了 inactive 阶段误取消授权、迟到回调误清理新请求，详见源修正版记录。已有身份码账号与 Apple 新账号不会仅凭抖音 ID 自动合并；若重复登记会要求使用原账号，这不是审批旁路。
+
+[Apple：创建 Sign in with Apple 私钥](https://developer.apple.com/help/account/capabilities/create-a-sign-in-with-apple-private-key/)
+
 下列接口均返回 HTTP 200；空数据来自实际成功响应，不是把 API 不可读误判为缺失。
 
 | 检查项 | 实际读取结果 | 提交前处理 |
@@ -48,16 +58,18 @@
 
 证据：[服务端主类](Server/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php)、[合作页面](Yishu/Views/CollaborationInquiryView.swift)、[邮箱常量](Yishu/Models/Portfolio.swift)、[Phase 1 门槛](Server/COLLABORATION_PHASE1.md)。
 
-### 4. 首发免费还是付费：不能把测试阶段决定自动延续为商店承诺
+### 4. 首发收费决策：已确认全部免费
 
 - **当前代码已验证**：App 内订阅代码已移除；当前权限来自管理员审批及分配，不是有效 StoreKit 订阅。以前的“人民币 3 元/月”仅保留为未来恢复方案。
-- **产品决定待确认**：首发若免费，商店元数据不能写已提供月订阅；若首发收费，需另行完成 StoreKit、商品、恢复购买、服务器校验、退款/撤销与订阅审核，不是改一个后台价格即可上线。不得用人工授予权限替代应使用的数字内容内购流程。[Apple App 内购买](https://developer.apple.com/in-app-purchase/)
+- **2026-09-05 产品确认**：首发全部免费，保留审批；商店文案不得宣传月订阅或付费解锁。未来如改变收费方案，必须另行评估并完成 StoreKit 等要求，不能直接用人工授权替代内购。[Apple App 内购买](https://developer.apple.com/in-app-purchase/)
 
 证据：[SUBSCRIPTION_SETUP.md](SUBSCRIPTION_SETUP.md)、[README.md](README.md)。
 
 ## 高优先级：代码与披露一致性
 
 ### 定位精度承诺需要收紧或改准确
+
+**本轮源码已修正，尚未进入 TestFlight**：默认请求降低精度；进入反向地理编码与 WeatherKit 前按固定 0.05° 网格降低经纬度精度，丢弃高度、速度与方向。新位置测试覆盖邻近点、世界边界、无效输入与重复处理；本轮共 166 项单元测试通过（含 Apple 登录回归）。以下是修正前的审计依据，不能再当成当前源码状态；真机城市与天气展示仍需验收。
 
 **当前代码已验证**：`LocalWeatherStore.swift:50` 设置约 3 公里期望精度，但 `:170`、`:231` 将返回的原始 `CLLocation` 交给反向地理编码和 WeatherKit；`:326` 并不排除更高精度位置。`Info.plist` 和隐私政策则描述仅使用约 3 公里/粗略位置。
 

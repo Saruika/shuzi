@@ -6,6 +6,8 @@
 
 最新客户端发布：[v1.3.36-build48](Server/releases/v1.3.36-build48.md)：iPad「关于」页左侧人物图与姓名、职业介绍固定，右侧详情独立滚动。2026-09-05 已确认 Apple `VALID`、内部 `IN_BETA_TESTING`；所有旧构建均已过期，请在 TestFlight 更新至 Build 48。这是客户端更新，不是相册云端热更新。
 
+最新源码修正：[v1.3.36-build48.1](Server/releases/v1.3.36-build48.1.md)：Apple 登录生命周期与迟到回调隔离、开屏取消缩放/装饰横线、粗略位置约束。**尚未上传新 TestFlight 包**；上海运行环境缺少 Apple 登录签名与数据密钥配置，真实 Apple 登录还不能宣称已修复。首发已确认全部免费、保留抖音 ID 与人工审批，包含中国大陆及其他地区；App 备案与商店资料仍待完成。
+
 最新相册内容更新：[v1.3.35-content.1](Server/releases/v1.3.35-content.1.md)（2026-09-05）：新增“灯影绮罗”“花庭清韵”，为“新中式”补充同套照片，共 10 册、70 张。云端更新，作品页下拉刷新即可，无需重装 TestFlight。
 
 ## 产品功能
@@ -323,7 +325,7 @@ Build 42 在录屏、投屏和切后台的公开保护之外，按产品方明�
 - 自绘 Showreel 播放器保持无系统播放器外壳，同时完整显示画面，并提供暂停、静音、播放进度、拖动与重播等无障碍控制。
 - iPhone 与 iPad 均支持横竖屏；iOS 26 采用系统原生自适应标签栏材质，旧系统保留高对比深色回退。
 - UI 回归在 iPhone 直接运行 Apple 辅助功能审计，iPad 则运行安全区、44pt、VoiceOver、Accessibility XXXL 与 Apple UI 配置（横竖屏/窗口化）的确定性门禁；两端都不以忽略规则或吞掉失败来掩盖问题。
-- Apple Developer 已为 `cn.com.shuzijun.yishu` 开启 Sign in with Apple 与 WeatherKit；服务端通知与专用签名密钥按仓库外安全配置部署。
+- Apple Developer 已为 `cn.com.shuzijun.yishu` 开启 Sign in with Apple 与 WeatherKit；服务端通知与专用签名密钥要求仓库外配置。更正：2026-09-05 实际运行检查未发现 Apple 登录所需的四个配置项，历史描述不能作为已部署证明，详见上架就绪检查。
 - 安全门禁继续扫描一方代码、资源与第三方 `vendor` 中的长期凭据，仅排除已锁定 JWT 依赖文档中的公开测试样例；CI 强制执行 Composer 漏洞审计并由 Dependabot 每周检查锁定依赖。
 - 主备同步、Web 根目录检查与 Nginx 规则新增 Apple `.p8` 私钥防护；`wp-content` 与全部插件/主题代码保持 root 所有，仅上传和缓存目录允许 PHP worker 写入且禁止执行 PHP。
 - 旧版 `/images/...` 地址改由只允许图片扩展名的 Nginx 映射提供，移除 Web 根目录符号链接，同时保持官网与 CDN 图片兼容。
