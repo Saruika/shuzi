@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Observation
 
 enum HomeHeroPresentation: String, Equatable {
     case fill
@@ -29,6 +30,16 @@ enum HomeHeroRenderPolicy {
         )
     }
 
+    static func imageFrame(in viewport: CGSize, presentation: HomeHeroPresentation,
+                           topInset: CGFloat, captionHeight: CGFloat) -> CGRect {
+        guard viewport.width > 0, viewport.height > 0 else { return .zero }
+        guard presentation == .fit else { return CGRect(origin: .zero, size: viewport) }
+        let top = min(viewport.height, max(0, topInset) + 64)
+        let bottom = min(max(0, viewport.height - top), max(64, captionHeight) + 24)
+        return CGRect(x: 0, y: top, width: viewport.width,
+                      height: max(0, viewport.height - top - bottom))
+    }
+
     static func shouldLoadRemoteImage(
         at index: Int,
         selection: Int,
@@ -38,14 +49,10 @@ enum HomeHeroRenderPolicy {
         guard count > 0,
               (0..<count).contains(index),
               (0..<count).contains(selection) else { return false }
-        // A landscape iPad shows the whole portrait photograph, so a blank
-        // neighbouring page is especially conspicuous. The hero is capped at
-        // five images; warming this small, bounded set in volatile memory
-        // keeps every swipe continuous without persisting protected media.
-        if presentation == .fit { return true }
-        let directDistance = abs(index - selection)
-        let circularDistance = min(directDistance, count - directDistance)
-        return circularDistance <= 1
+        // The manifest caps the hero at five photographs. Keep their loading
+        // views alive in BOTH directions, even while the paging controller's
+        // selection still points at the page the finger is leaving.
+        return true
     }
 
     static func prefetchIndices(
@@ -54,12 +61,7 @@ enum HomeHeroRenderPolicy {
         presentation: HomeHeroPresentation = .fill
     ) -> [Int] {
         guard count > 0, (0..<count).contains(selection) else { return [] }
-        if presentation == .fit { return Array(0..<count) }
-        return Array(Set([
-            (selection - 1 + count) % count,
-            selection,
-            (selection + 1) % count,
-        ])).sorted()
+        return Array(0..<count)
     }
 
     static func shouldAnimateTransition(from current: Int, to next: Int, count: Int) -> Bool {
@@ -67,6 +69,21 @@ enum HomeHeroRenderPolicy {
               (0..<count).contains(current),
               (0..<count).contains(next) else { return false }
         return abs(current - next) == 1
+    }
+}
+
+/// A changed identity cancels the old sleep, including an already-due tick.
+/// A cancelled/unfinished drag must receive the same full dwell as a page turn.
+struct HomeHeroAdvanceRequest: Equatable {
+    let enabled: Bool
+    let selection: Int
+    let interactionGeneration: UInt
+
+    static func permitsAdvance(isVisible: Bool, isActive: Bool, reducesMotion: Bool,
+                               voiceOverEnabled: Bool, isTouching: Bool,
+                               count: Int, currentReady: Bool, nextReady: Bool) -> Bool {
+        isVisible && isActive && !reducesMotion && !voiceOverEnabled && !isTouching
+            && count > 1 && currentReady && nextReady
     }
 }
 
@@ -78,10 +95,12 @@ struct HomeView: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                MediaTheme.ink.ignoresSafeArea()
+                AppTheme.ink.ignoresSafeArea()
                 HeroPager(
                     imageURLs: portfolioStore.heroImages,
                     localWeather: localWeather,
+                    viewport: proxy.size,
+                    topSafeAreaInset: proxy.safeAreaInsets.top,
                     showPortfolio: showPortfolio
                 )
                     .frame(width: proxy.size.width, height: proxy.size.height)
@@ -89,17 +108,34 @@ struct HomeView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .toolbar(.hidden, for: .navigationBar)
-        .toolbarColorScheme(.dark, for: .tabBar)
-        .environment(\.colorScheme, .dark)
+        .toolbarColorScheme(AppearanceStore.shared.theme.colorScheme, for: .tabBar)
         .task {
             localWeather.refreshIfAuthorized()
         }
     }
 }
 
+/// One observable reference is shared by paging callbacks and overlay builders.
+/// A copied value snapshot must not leave the caption and the visible page apart.
+@MainActor @Observable
+private final class HomeHeroPlaybackState {
+    var selection: Int
+    var isVisible = false
+    var landscapeContinuityImage: UIImage?
+    var measuredCaptionHeight: CGFloat = 64
+    var isTouching = false
+    var interactionGeneration: UInt = 0
+    var preparedImages: [URL: UIImage] = [:]
+    var automaticAdvanceCount = 0
+
+    init(selection: Int) { self.selection = selection }
+}
+
 private struct HeroPager: View {
     let imageURLs: [URL]
     let localWeather: LocalWeatherStore
+    let viewport: CGSize
+    let topSafeAreaInset: CGFloat
     let showPortfolio: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
@@ -107,9 +143,7 @@ private struct HeroPager: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.displayScale) private var displayScale
-    @State private var selection = HeroPager.visualTestInitialSelection
-    @State private var isVisible = false
-    @State private var landscapeContinuityImage: UIImage?
+    @State private var playback = HomeHeroPlaybackState(selection: HeroPager.visualTestInitialSelection)
 
     private var slides: [URL] {
         // Keep the adaptive-layout fixture independent from a stale manifest
@@ -122,143 +156,171 @@ private struct HeroPager: View {
     }
 
     private var shouldAutoAdvance: Bool {
-        return isVisible
-            && scenePhase == .active
-            && !reduceMotion
-            && !voiceOverEnabled
-            && !disablesAutoAdvanceForVisualTesting
-            && slides.count > 1
+        guard slides.indices.contains(playback.selection) else { return false }
+        return !disablesAutoAdvanceForVisualTesting && HomeHeroAdvanceRequest.permitsAdvance(
+            isVisible: playback.isVisible, isActive: scenePhase == .active, reducesMotion: reduceMotion,
+            voiceOverEnabled: voiceOverEnabled, isTouching: playback.isTouching, count: slides.count,
+            currentReady: holdsRemoteImagesForVisualTesting || playback.preparedImages[slides[playback.selection]] != nil,
+            nextReady: holdsRemoteImagesForVisualTesting || playback.preparedImages[slides[(playback.selection + 1) % slides.count]] != nil
+        )
+    }
+
+    private var advanceRequest: HomeHeroAdvanceRequest {
+        HomeHeroAdvanceRequest(enabled: shouldAutoAdvance, selection: playback.selection,
+                               interactionGeneration: playback.interactionGeneration)
     }
 
     var body: some View {
-        GeometryReader { proxy in
-            let presentation = HomeHeroRenderPolicy.presentation(
-                for: proxy.size,
-                idiom: UIDevice.current.userInterfaceIdiom
-            )
-            let exposesVisualTestState = exposesHeroStateForVisualTesting
+        let presentation = HomeHeroRenderPolicy.presentation(
+            for: viewport,
+            idiom: UIDevice.current.userInterfaceIdiom
+        )
+        let exposesVisualTestState = exposesHeroStateForVisualTesting
+        let imageFrame = HomeHeroRenderPolicy.imageFrame(
+            in: viewport, presentation: presentation,
+            topInset: AppWindowMetrics.topInsetForLayout(measured: topSafeAreaInset),
+            captionHeight: playback.measuredCaptionHeight
+        )
 
-            ZStack(alignment: .bottom) {
-                TabView(selection: $selection) {
-                    ForEach(slides.indices, id: \.self) { index in
-                        let loadsRemoteImage = !holdsRemoteImagesForVisualTesting
-                            && HomeHeroRenderPolicy.shouldLoadRemoteImage(
-                                at: index,
-                                selection: selection,
-                                count: slides.count,
-                                presentation: presentation
-                            )
-                        let visualTestIdentifier = exposesVisualTestState
-                            && presentation == .fit
-                            && index == selection
-                            ? "home-hero-actual-fitted-image-\(index)"
-                            : nil
-
-                        HeroSlideImage(
-                            url: slides[index],
-                            loadsRemoteImage: loadsRemoteImage,
-                            usesVisualTestArtwork: holdsRemoteImagesForVisualTesting,
-                            presentation: presentation,
-                            visualTestIdentifier: visualTestIdentifier,
-                            continuityImage: presentation == .fit
-                                ? landscapeContinuityImage
-                                : nil,
-                            onImageLoaded: { loadedImage in
-                                guard presentation == .fit,
-                                      index == selection else { return }
-                                landscapeContinuityImage = loadedImage
-                            }
+        ZStack(alignment: .bottom) {
+            TabView(selection: Binding(get: { playback.selection }, set: { playback.selection = $0 })) {
+                ForEach(slides.indices, id: \.self) { index in
+                    let loadsRemoteImage = !holdsRemoteImagesForVisualTesting
+                        && HomeHeroRenderPolicy.shouldLoadRemoteImage(
+                            at: index,
+                            selection: playback.selection,
+                            count: slides.count,
+                            presentation: presentation
                         )
-                            .frame(width: proxy.size.width, height: proxy.size.height)
-                            .clipped()
-                            .accessibilityHidden(!exposesVisualTestState || index != selection)
-                            .tag(index)
-                    }
-                }
-                .frame(width: proxy.size.width, height: proxy.size.height)
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                .overlay(alignment: .top) {
-                    LinearGradient(
-                        colors: [.black, .black.opacity(0.62), .clear],
-                        startPoint: .top,
-                        endPoint: .bottom
+                    let visualTestIdentifier = exposesVisualTestState
+                        && index == playback.selection
+                        ? "home-hero-actual-\(presentation == .fit ? "fitted" : "filled")-image-\(index)"
+                        : nil
+
+                    HeroSlideImage(
+                        url: slides[index],
+                        loadsRemoteImage: loadsRemoteImage,
+                        usesVisualTestArtwork: holdsRemoteImagesForVisualTesting,
+                        presentation: presentation,
+                        visualTestIdentifier: visualTestIdentifier,
+                        preparedImage: playback.preparedImages[slides[index]],
+                        continuityImage: playback.landscapeContinuityImage,
+                        onImageLoaded: { loadedImage in
+                            guard playback.isVisible, scenePhase == .active else { return }
+                            playback.preparedImages[slides[index]] = loadedImage
+                            guard index == playback.selection else { return }
+                            playback.landscapeContinuityImage = loadedImage
+                        }
                     )
-                    .frame(height: 132)
-                    .allowsHitTesting(false)
+                        .frame(width: imageFrame.width, height: imageFrame.height)
+                        .offset(y: imageFrame.minY)
+                        .frame(width: viewport.width, height: viewport.height, alignment: .top)
+                        .clipped()
+                        .accessibilityHidden(!exposesVisualTestState)
+                        .tag(index)
                 }
-
+            }
+            .frame(width: viewport.width, height: viewport.height)
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .background(HomeTouchObserver { playback.isTouching = $0 })
+            .overlay(alignment: .top) {
                 LinearGradient(
-                    gradient: Gradient(stops: [
-                        .init(color: .clear, location: 0),
-                        .init(color: .clear, location: 0.55),
-                        .init(
-                            color: MediaTheme.ink.opacity(presentation == .fit ? 0.68 : 0.95),
-                            location: 1
-                        )
-                    ]),
+                    colors: [AppTheme.ink, AppTheme.ink.opacity(0.72), .clear],
                     startPoint: .top,
                     endPoint: .bottom
                 )
+                .frame(height: 132)
                 .allowsHitTesting(false)
-
-                heroOverlay(in: proxy)
-
-                homeHeroVisualTestControls(
-                    presentation: presentation
-                )
             }
-            .task(id: prefetchRequestID(for: proxy.size)) {
-                guard !holdsRemoteImagesForVisualTesting else { return }
-                await ArtworkImagePrefetcher.prefetch(
-                    urls: prefetchURLs(for: presentation),
-                    maxPixelSize: min(
-                        1_800,
-                        max(
-                            320,
-                            Int(ceil(max(proxy.size.width, proxy.size.height) * displayScale))
-                        )
+
+            heroOverlay
+
+            homeHeroVisualTestControls(
+                presentation: presentation
+            )
+        }
+        .task(id: prefetchRequestID(for: viewport)) {
+            guard !holdsRemoteImagesForVisualTesting, playback.isVisible, scenePhase == .active else { return }
+            await ArtworkImagePrefetcher.prefetch(
+                urls: prefetchURLs(for: presentation),
+                maxPixelSize: min(
+                    1_800,
+                    max(
+                        320,
+                        Int(ceil(max(viewport.width, viewport.height) * displayScale))
                     )
-                )
+                ),
+                onImageLoaded: { url, image in
+                    guard playback.isVisible, scenePhase == .active, slides.contains(url) else { return }
+                    playback.preparedImages[url] = image
+                    if slides.indices.contains(playback.selection), slides[playback.selection] == url {
+                        playback.landscapeContinuityImage = image
+                    }
+                }
+            )
+        }
+        .onPreferenceChange(HomeCaptionHeightKey.self) { height in
+            if abs(playback.measuredCaptionHeight - height) > 0.5 {
+                playback.measuredCaptionHeight = height
             }
         }
         .onAppear {
-            isVisible = true
+            playback.isVisible = true
         }
-        .onDisappear { isVisible = false }
-        .task(id: shouldAutoAdvance) {
-            guard shouldAutoAdvance else { return }
+        .onDisappear {
+            playback.isVisible = false
+            playback.isTouching = false
+            playback.landscapeContinuityImage = nil
+            playback.preparedImages = [:]
+        }
+        .onChange(of: playback.isTouching) { _, _ in playback.interactionGeneration &+= 1 }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                playback.isTouching = false
+                playback.landscapeContinuityImage = nil
+                playback.preparedImages = [:]
+            }
+        }
+        .task(id: advanceRequest) {
+            let request = advanceRequest
+            guard request.enabled else { return }
             do {
-                while !Task.isCancelled {
-                    try await Task.sleep(for: .seconds(5))
-                    guard shouldAutoAdvance else { return }
-                    setSelection(
-                        (selection + 1) % slides.count,
-                        animationDuration: 0.65
-                    )
-                }
+                try await Task.sleep(for: .seconds(5))
+                try Task.checkCancellation()
+                guard advanceRequest == request else { return }
+                playback.automaticAdvanceCount += 1
+                setSelection((playback.selection + 1) % slides.count, animationDuration: 0.65)
             } catch { }
         }
         .onChange(of: slides) { oldSlides, newSlides in
             guard oldSlides != newSlides else { return }
-            let selectedURL = oldSlides.indices.contains(selection) ? oldSlides[selection] : nil
-            selection = selectedURL.flatMap(newSlides.firstIndex(of:))
-                ?? min(selection, max(0, newSlides.count - 1))
+            let selectedURL = oldSlides.indices.contains(playback.selection) ? oldSlides[playback.selection] : nil
+            playback.preparedImages = playback.preparedImages.filter { newSlides.contains($0.key) }
+            playback.landscapeContinuityImage = nil
+            playback.selection = selectedURL.flatMap(newSlides.firstIndex(of:))
+                ?? min(playback.selection, max(0, newSlides.count - 1))
+        }
+        .onChange(of: playback.selection) { _, index in
+            if slides.indices.contains(index), let image = playback.preparedImages[slides[index]] {
+                playback.landscapeContinuityImage = image
+            }
         }
     }
 
     @ViewBuilder
-    private func heroOverlay(in proxy: GeometryProxy) -> some View {
-        let usesCompactLayout = proxy.size.width > proxy.size.height
-            || proxy.size.height < 620
+    private var heroOverlay: some View {
+        let usesCompactLayout = viewport.width > viewport.height
+            || viewport.height < 620
             || dynamicTypeSize.isAccessibilitySize
         let topPadding = max(
             18,
-            AppWindowMetrics.topInsetForLayout(measured: proxy.safeAreaInsets.top) + 2
+            AppWindowMetrics.topInsetForLayout(measured: topSafeAreaInset) + 2
         )
 
         Group {
             if usesCompactLayout {
-                compactHeroOverlay
+                compactHeroOverlay(photoIsFitted: HomeHeroRenderPolicy.presentation(
+                    for: viewport, idiom: UIDevice.current.userInterfaceIdiom) == .fit)
             } else {
                 regularHeroOverlay
             }
@@ -274,20 +336,21 @@ private struct HeroPager: View {
 
             Spacer(minLength: 18)
 
-            heroTitle(font: .system(.largeTitle, design: .serif), multiline: true)
-
-            heroSubtitle
-                .padding(.top, 15)
-
-            HStack(spacing: 14) {
-                portfolioButton
-                pageIndicator
+            VStack(alignment: .leading, spacing: 0) {
+                heroTitle(font: .system(.largeTitle, design: .serif), multiline: true)
+                heroSubtitle.padding(.top, 15)
+                HStack(spacing: 14) {
+                    portfolioButton
+                    pageIndicator
+                }
+                .padding(.top, 26)
             }
-            .padding(.top, 26)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background { captionBackdrop(bottomBleed: 32) }
         }
     }
 
-    private var compactHeroOverlay: some View {
+    private func compactHeroOverlay(photoIsFitted: Bool) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             weatherRow
 
@@ -313,7 +376,24 @@ private struct HeroPager: View {
                     }
                 }
             }
+            .background { captionBackdrop(bottomBleed: 16, topBleed: photoIsFitted ? 0 : 40) }
+            .background {
+                GeometryReader { caption in
+                    Color.clear.preference(key: HomeCaptionHeightKey.self, value: caption.size.height)
+                }
+            }
         }
+    }
+
+    /// Follow the measured caption group instead of a fixed percentage of the
+    /// photograph. This keeps both dark and paper-like themes readable when
+    /// Dynamic Type or landscape layout changes the height of the copy.
+    private func captionBackdrop(bottomBleed: CGFloat, topBleed: CGFloat = 40) -> some View {
+        EditorialCaptionBackdrop()
+        .padding(.top, -topBleed)
+        .padding(.horizontal, -22)
+        .padding(.bottom, -bottomBleed)
+        .allowsHitTesting(false)
     }
 
     private var compactHeroCopy: some View {
@@ -330,17 +410,17 @@ private struct HeroPager: View {
         Text(multiline ? "镜头之内，\n自有叙事。" : "镜头之内，自有叙事。")
             .font(font)
             .lineSpacing(multiline ? 4 : 2)
-            .foregroundStyle(.white)
+            .foregroundStyle(AppTheme.warmWhite)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier("home-hero-title")
     }
 
     private var heroSubtitle: some View {
         Text("短剧演员 · 模特 · 视频创作者")
             .font(.footnote.weight(.medium))
             .tracking(0.9)
-            .foregroundStyle(.white)
-            .shadow(color: .black.opacity(0.65), radius: 3, y: 1)
+            .foregroundStyle(AppTheme.warmWhite)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -353,8 +433,8 @@ private struct HeroPager: View {
             .font(.subheadline.weight(.semibold))
             .padding(.horizontal, 20)
             .frame(minHeight: 44)
-            .background(.white)
-            .foregroundStyle(.black)
+            .background(AppTheme.warmWhite)
+            .foregroundStyle(AppTheme.ink)
             .clipShape(Capsule())
         }
         .fixedSize(horizontal: true, vertical: false)
@@ -366,27 +446,26 @@ private struct HeroPager: View {
             Spacer(minLength: 0)
             weatherButton
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(AppTheme.warmWhite)
     }
 
     private var weatherButton: some View {
         Button { openWeatherOrSettings() } label: {
             weatherSummary
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(AppTheme.warmWhite)
                 .padding(.horizontal, 11)
                 .padding(.vertical, 7)
-                .background(.black, in: Capsule())
+                .background(AppTheme.elevatedInk, in: Capsule())
                 .overlay {
                     Capsule()
-                        .stroke(.white.opacity(0.30), lineWidth: 0.5)
+                        .stroke(AppTheme.line, lineWidth: 0.5)
                 }
-                .shadow(color: .black.opacity(0.20), radius: 6, y: 2)
+                .shadow(color: AppTheme.surfaceShadow, radius: 6, y: 2)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
-                // VoiceOver receives the complete button summary below. Hiding
-                // the visual fragments avoids duplicate accessibility nodes.
-                .accessibilityHidden(true)
+                // VoiceOver receives one complete button summary below,
+                // rather than duplicate icon and text nodes.
                 .animation(
                     reduceMotion ? nil : .easeInOut(duration: 0.22),
                     value: localWeather.locationText
@@ -403,6 +482,7 @@ private struct HeroPager: View {
         // complete, uncapped weather summary.
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .accessibilityIdentifier("home-weather")
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(localWeather.accessibilitySummary)
         .accessibilityHint(weatherAccessibilityHint)
     }
@@ -427,16 +507,16 @@ private struct HeroPager: View {
         HStack(spacing: 7) {
             ForEach(slides.indices, id: \.self) { index in
                 Capsule()
-                    .fill(index == selection ? MediaTheme.warmWhite : .white.opacity(0.35))
-                    .frame(width: index == selection ? 18 : 5, height: 5)
-                    .animation(reduceMotion ? nil : .easeInOut, value: selection)
+                    .fill(index == playback.selection ? AppTheme.gold : AppTheme.muted)
+                    .frame(width: index == playback.selection ? 18 : 5, height: 5)
+                    .animation(reduceMotion ? nil : .easeInOut, value: playback.selection)
             }
         }
         .frame(minWidth: 44, minHeight: 44, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("首页照片")
-        .accessibilityValue("第 \(selection + 1) 张，共 \(slides.count) 张")
+        .accessibilityValue("第 \(playback.selection + 1) 张，共 \(slides.count) 张")
         .accessibilityIdentifier("home-hero-page-indicator")
         .accessibilityHint(slides.count > 1 ? "上下轻扫切换照片" : "")
         .accessibilityAdjustableAction { direction in
@@ -454,29 +534,29 @@ private struct HeroPager: View {
 
     private func changeSelection(by offset: Int) {
         guard !slides.isEmpty else { return }
-        let nextSelection = (selection + offset + slides.count) % slides.count
+        let nextSelection = (playback.selection + offset + slides.count) % slides.count
         setSelection(nextSelection, animationDuration: 0.22)
     }
 
     private func setSelection(_ nextSelection: Int, animationDuration: Double) {
         let shouldAnimate = !reduceMotion
             && HomeHeroRenderPolicy.shouldAnimateTransition(
-                from: selection,
+                from: playback.selection,
                 to: nextSelection,
                 count: slides.count
             )
         if shouldAnimate {
             withAnimation(.easeInOut(duration: animationDuration)) {
-                selection = nextSelection
+                playback.selection = nextSelection
             }
         } else {
-            selection = nextSelection
+            playback.selection = nextSelection
         }
     }
 
     private func prefetchURLs(for presentation: HomeHeroPresentation) -> [URL] {
         HomeHeroRenderPolicy.prefetchIndices(
-            selection: selection,
+            selection: playback.selection,
             count: slides.count,
             presentation: presentation
         ).map { slides[$0] }
@@ -493,8 +573,7 @@ private struct HeroPager: View {
         // In fit mode every bounded hero URL is already part of this request.
         // Keeping the current page out of the identity prevents a swipe from
         // cancelling and restarting the same preheat work mid-transition.
-        let selectionKey = presentation == .fit ? "all" : String(selection)
-        return "\(selectionKey)#\(Int(size.width.rounded()))x\(Int(size.height.rounded()))#\(urls)"
+        return "\(playback.isVisible)#\(scenePhase == .active)#\(Int(size.width.rounded()))x\(Int(size.height.rounded()))#\(urls)"
     }
 
     private var holdsRemoteImagesForVisualTesting: Bool {
@@ -556,9 +635,23 @@ private struct HeroPager: View {
                 .accessibilityLabel(
                     presentation == .fit ? "完整显示" : "铺满显示"
                 )
-                .accessibilityValue("第 \(selection + 1) 张，共 \(slides.count) 张")
-                .accessibilityIdentifier("home-hero-visual-state-\(selection)")
-                .id("home-hero-visual-state-\(selection)")
+                .accessibilityValue("第 \(playback.selection + 1) 张，共 \(slides.count) 张")
+                .accessibilityIdentifier("home-hero-visual-state-\(playback.selection)")
+                .id("home-hero-visual-state-\(playback.selection)")
+                .allowsHitTesting(false)
+
+            Color.clear.frame(width: 1, height: 1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("自动轮播次数")
+                .accessibilityValue(String(playback.automaticAdvanceCount))
+                .accessibilityIdentifier("home-hero-auto-advance-count")
+                .allowsHitTesting(false)
+
+            Color.clear.frame(width: 1, height: 1)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("已在内存中准备的首页图片")
+                .accessibilityValue(String(playback.preparedImages.count))
+                .accessibilityIdentifier("home-hero-ready-count")
                 .allowsHitTesting(false)
         }
 #endif
@@ -587,10 +680,115 @@ private struct HeroPager: View {
         if localWeather.phase == .locating || localWeather.phase == .loading {
             ProgressView()
                 .controlSize(.mini)
-                .tint(.white)
+                .tint(AppTheme.gold)
         } else {
             Image(systemName: localWeather.symbolName)
         }
+    }
+}
+
+/// Observe contact without competing with native scrolling.
+/// This recognizer never recognizes, prevents another recognizer or cancels
+/// delivery to controls. It works on the supported iOS 17+ range.
+private struct HomeTouchObserver: UIViewRepresentable {
+    let onContactChanged: (Bool) -> Void
+
+    func makeUIView(context: Context) -> ContactView {
+        let view = ContactView()
+        view.isUserInteractionEnabled = false
+        view.onContactChanged = onContactChanged
+        return view
+    }
+
+    func updateUIView(_ uiView: ContactView, context: Context) {
+        uiView.onContactChanged = onContactChanged
+    }
+
+    final class ContactView: UIView, UIGestureRecognizerDelegate {
+        var onContactChanged: ((Bool) -> Void)?
+        private weak var observingWindow: UIWindow?
+        private lazy var contact = ContactRecognizer { [weak self] touching in
+            self?.onContactChanged?(touching)
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard observingWindow !== window else { return }
+            contact.isEnabled = false
+            observingWindow?.removeGestureRecognizer(contact)
+            observingWindow = window
+            contact.delegate = self
+            contact.isEnabled = true
+            window?.addGestureRecognizer(contact)
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            guard let window, !isHidden else { return false }
+            return convert(bounds, to: window).contains(touch.location(in: window))
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+            true
+        }
+    }
+
+    final class ContactRecognizer: UIGestureRecognizer {
+        private var contacts = Set<UITouch>()
+        private let onContactChanged: (Bool) -> Void
+
+        init(onContactChanged: @escaping (Bool) -> Void) {
+            self.onContactChanged = onContactChanged
+            super.init(target: nil, action: nil)
+            cancelsTouchesInView = false
+            delaysTouchesBegan = false
+            delaysTouchesEnded = false
+        }
+
+        override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+        override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+            let wasEmpty = contacts.isEmpty
+            contacts.formUnion(touches)
+            if wasEmpty { onContactChanged(true) }
+        }
+
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+            finish(touches)
+        }
+
+        override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+            // Contact remains active; native recognizers alone interpret motion.
+        }
+
+        override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
+            finish(touches)
+        }
+
+        override func reset() {
+            super.reset()
+            if !contacts.isEmpty {
+                contacts.removeAll()
+                onContactChanged(false)
+            }
+        }
+
+        private func finish(_ touches: Set<UITouch>) {
+            let wasTouching = !contacts.isEmpty
+            contacts.subtract(touches)
+            if wasTouching && contacts.isEmpty {
+                onContactChanged(false)
+                state = .failed
+            }
+        }
+    }
+}
+
+private struct HomeCaptionHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -600,6 +798,7 @@ private struct HeroSlideImage: View {
     let usesVisualTestArtwork: Bool
     let presentation: HomeHeroPresentation
     let visualTestIdentifier: String?
+    let preparedImage: UIImage?
     let continuityImage: UIImage?
     let onImageLoaded: (UIImage) -> Void
     @State private var measuredURL: URL?
@@ -628,10 +827,7 @@ private struct HeroSlideImage: View {
                 in: size
             )
             ZStack {
-                visualTestArtwork
-                    .frame(width: size.width, height: size.height)
-                    .blur(radius: 24, opaque: true)
-                    .overlay { Color.black.opacity(0.12) }
+                fittedBackground(in: size)
 
                 visualTestArtwork
                     .frame(width: fittedSize.width, height: fittedSize.height)
@@ -688,7 +884,6 @@ private struct HeroSlideImage: View {
     private func filledComposition(in size: CGSize) -> some View {
         ZStack {
             placeholder
-                .overlay { ProgressView().tint(MediaTheme.gold) }
 
             remoteImage(in: size, usesFittedPresentation: false)
         }
@@ -714,7 +909,7 @@ private struct HeroSlideImage: View {
                 case .success(let image):
                     if usesFittedPresentation {
                         ZStack {
-                            fittedBackground(image, in: size)
+                            fittedBackground(in: size)
                             fittedForeground(
                                 image,
                                 in: size,
@@ -730,14 +925,20 @@ private struct HeroSlideImage: View {
                             .transition(.opacity)
                     }
                 case .empty, .failure:
-                    if let continuityImage {
-                        fittedContinuityArtwork(
-                            Image(uiImage: continuityImage),
-                            in: size,
-                            usesFittedPresentation: usesFittedPresentation
-                        )
-                    } else {
-                        Color.clear
+                    ZStack {
+                        if let preview = preparedImage ?? continuityImage {
+                            fittedContinuityArtwork(
+                                Image(uiImage: preview),
+                                in: size,
+                                usesFittedPresentation: usesFittedPresentation,
+                                sourceSize: preview.size
+                            )
+                        }
+                        // Do not leave an animating spinner underneath every
+                        // successfully loaded page, or show one after failure.
+                        if case .empty = phase, preparedImage == nil {
+                            ProgressView().tint(AppTheme.gold)
+                        }
                     }
                 @unknown default:
                     Color.clear
@@ -749,12 +950,12 @@ private struct HeroSlideImage: View {
     @ViewBuilder
     private func fittedBackground(in size: CGSize) -> some View {
         ZStack {
-            MediaTheme.elevatedInk
+            AppTheme.elevatedInk
             LinearGradient(
                 colors: [
-                    MediaTheme.gold.opacity(0.16),
-                    Color(red: 0.10, green: 0.13, blue: 0.12),
-                    MediaTheme.elevatedInk,
+                    AppTheme.gold.opacity(0.08),
+                    AppTheme.ink,
+                    AppTheme.elevatedInk,
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -766,15 +967,16 @@ private struct HeroSlideImage: View {
     private func fittedContinuityArtwork(
         _ image: Image,
         in size: CGSize,
-        usesFittedPresentation: Bool
+        usesFittedPresentation: Bool,
+        sourceSize: CGSize
     ) -> some View {
         if usesFittedPresentation {
             ZStack {
-                fittedBackground(image, in: size)
+                fittedBackground(in: size)
                 fittedForeground(
                     image,
                     in: size,
-                    sourceSize: continuityImage?.size,
+                    sourceSize: sourceSize,
                     accessibilityIdentifier: nil
                 )
             }
@@ -783,23 +985,14 @@ private struct HeroSlideImage: View {
         }
     }
 
-    private func fittedBackground(_ image: Image, in size: CGSize) -> some View {
-        image
-            .resizable()
-            .scaledToFill()
-            .frame(width: size.width, height: size.height)
-            .scaleEffect(1.06)
-            .blur(radius: 24, opaque: true)
-            .saturation(0.82)
-            .brightness(-0.10)
-            .overlay { Color.black.opacity(0.18) }
-    }
-
     private func filledArtwork(_ image: Image, in size: CGSize) -> some View {
         image
             .resizable()
             .scaledToFill()
             .frame(width: size.width, height: size.height)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("首页照片")
+            .accessibilityIdentifier(visualTestIdentifier ?? "")
     }
 
     @ViewBuilder
@@ -836,21 +1029,21 @@ private struct HeroSlideImage: View {
                 .resizable()
                 .scaledToFit()
                 .frame(width: fittedSize.width, height: fittedSize.height)
-                .shadow(color: .black.opacity(0.28), radius: 16)
+                .shadow(color: AppTheme.surfaceShadow, radius: 16)
         } else {
             image
                 .resizable()
                 .scaledToFit()
                 .frame(width: size.width, height: size.height)
-                .shadow(color: .black.opacity(0.28), radius: 16)
+                .shadow(color: AppTheme.surfaceShadow, radius: 16)
         }
     }
 
     private var placeholder: some View {
         ZStack {
-            MediaTheme.elevatedInk
+            AppTheme.elevatedInk
             LinearGradient(
-                colors: [.white.opacity(0.035), .clear, MediaTheme.gold.opacity(0.05)],
+                colors: [AppTheme.subtleFill, .clear, AppTheme.gold.opacity(0.05)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )

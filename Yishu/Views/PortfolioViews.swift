@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct PortfolioGridView: View {
     @EnvironmentObject private var store: PortfolioStore
@@ -121,6 +122,13 @@ struct PortfolioGridView: View {
                 .padding(.top, horizontalSizeClass == .regular ? -1 : 0)
                 .padding(.bottom, 10)
                 .background(AppTheme.ink)
+                .background {
+#if DEBUG
+                    if ProcessInfo.processInfo.arguments.contains("-trace-portfolio-layout-for-testing") {
+                        PortfolioLayoutTrace()
+                    }
+#endif
+                }
         }
         .toolbar(.hidden, for: .navigationBar)
     }
@@ -150,6 +158,49 @@ struct PortfolioGridView: View {
         }
     }
 }
+
+#if DEBUG
+/// Records geometry only (no pixels or user data), including intermediate
+/// navigation/layout passes that a final-frame screenshot cannot reveal.
+private struct PortfolioLayoutTrace: UIViewRepresentable {
+    func makeUIView(context: Context) -> PortfolioLayoutTraceView { PortfolioLayoutTraceView() }
+    func updateUIView(_ view: PortfolioLayoutTraceView, context: Context) { }
+}
+
+private final class PortfolioLayoutTraceView: UIView {
+    private var frames: [CGRect] = []
+    private var displayLink: CADisplayLink?
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        isAccessibilityElement = true
+        accessibilityIdentifier = "portfolio-layout-trace"
+        accessibilityLabel = "作品顶部布局轨迹"
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        displayLink?.invalidate()
+        displayLink = nil
+        if window != nil {
+            let link = CADisplayLink(target: self, selector: #selector(sample))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+        }
+    }
+    override func layoutSubviews() { super.layoutSubviews(); sample() }
+    @objc private func sample() {
+        guard let window, bounds.width > window.bounds.width * 0.7 else { return }
+        let frame = convert(bounds, to: window).integral
+        // Exclude horizontal push/pop movement; detect unintended vertical
+        // reflow once the page is aligned inside the current app window.
+        guard frame.minX >= 0, frame.maxX <= window.bounds.maxX,
+              frames.last != frame, frames.count < 120 else { return }
+        frames.append(frame)
+        accessibilityValue = frames.map { "\(Int($0.minY)),\(Int($0.height))" }.joined(separator: ";")
+    }
+}
+#endif
 
 private struct PortfolioSearchBar: View {
     @Binding var text: String
@@ -235,7 +286,6 @@ private struct PortfolioGridCard: View {
             ArtworkImage(url: portfolio.coverURL)
                 .aspectRatio(3 / 4, contentMode: .fit)
                 .frame(maxWidth: .infinity)
-            LinearGradient(colors: [.clear, .black.opacity(0.82)], startPoint: .center, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 5) {
                 Text(editorialEyebrow)
                     .font(.caption2.weight(.semibold))
@@ -253,6 +303,19 @@ private struct PortfolioGridCard: View {
                     .foregroundStyle(.white)
             }
             .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                // Size the scrim to the caption, not a percentage of the
+                // photograph. Pale clothing/railings must not wash out the
+                // title or its gold eyebrow, including larger text sizes.
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black.opacity(0.82), location: 0.18),
+                    .init(color: .black.opacity(0.82), location: 1),
+                ], startPoint: .top, endPoint: .bottom)
+                .padding(.top, -20)
+                .allowsHitTesting(false)
+            }
 
         }
         .frame(maxWidth: .infinity)
@@ -373,7 +436,7 @@ struct PortfolioDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .toolbarBackground(.hidden, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
+        .stableDetailTabBar()
         .onAppear {
             recentlyViewed.record(currentPortfolio)
 #if DEBUG

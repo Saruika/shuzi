@@ -93,7 +93,7 @@ struct PrivacyPolicyView: View {
         .navigationTitle("隐私政策")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
+        .stableDetailTabBar()
     }
 
     private func policySection(_ title: String, text: String) -> some View {

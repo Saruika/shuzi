@@ -232,6 +232,37 @@ final class YishuUITests: XCTestCase {
         XCTAssertEqual(original.value as? String, "已选择")
     }
 
+    func testRegistrationConsentCannotBypassRequiredDouyinID() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-reset-fan-session-for-visual-testing",
+                               "-skip-startup-notification-authorization-for-testing",
+                               "-disable-screen-protection-for-visual-testing"]
+        app.launch()
+        let name = app.textFields["fan-register-display-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 12))
+        scrollToElement(name, in: app)
+        name.tap()
+        name.typeText("资料验证")
+
+        let submit = app.buttons["fan-register-submit"]
+        let consent = element("fan-register-consent", in: app)
+        scrollToElement(consent, in: app)
+        XCTAssertFalse(submit.isEnabled, "未同意隐私政策时不能提交申请")
+        consent.tap()
+        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == true"), object: submit)
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 3), .completed,
+                       "勾选同意后提交按钮仍停留在旧状态")
+        scrollToElement(submit, in: app)
+        // Douyin ID stays empty. FanAccountStore rejects it before any request;
+        // this regression never creates a server account or sends an email.
+        submit.tap()
+        let validation = app.staticTexts.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "请填写 2–50 位抖音 ID"
+        )).firstMatch
+        XCTAssertTrue(validation.waitForExistence(timeout: 5), "没有在本地拦截缺少抖音 ID 的申请")
+        XCTAssertFalse(tabButton("首页", in: app).exists, "同意隐私政策不能绕过注册审批")
+    }
+
     func testThemeChoicesRemainAccessibleAtXXXL() throws {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -259,7 +290,8 @@ final class YishuUITests: XCTestCase {
     }
 
     func testIvoryThemeKeepsHomeStatusBarReadable() throws {
-        let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", "ivory"])
+        let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", "ivory",
+            "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"])
         XCTAssertTrue(element("home-open-portfolio", in: app).waitForExistence(timeout: 8))
         // Inspect transient pixels only; never attach or save the photograph.
         let source = try XCTUnwrap(app.screenshot().image.cgImage)
@@ -277,7 +309,12 @@ final class YishuUITests: XCTestCase {
         let bright = stride(from: 0, to: bytes.count, by: 4).filter {
             bytes[$0] > 200 && bytes[$0 + 1] > 200 && bytes[$0 + 2] > 200
         }.count
-        XCTAssertGreaterThan(bright, 80, "浅色主题首页的时间/系统图标消失在深色图片背景中")
+        XCTAssertGreaterThan(Double(bright) / Double(width * rows), 0.65,
+                             "月白主题的首页状态栏背景仍被固定为黑色")
+        let dark = stride(from: 0, to: bytes.count, by: 4).filter {
+            bytes[$0] < 70 && bytes[$0 + 1] < 70 && bytes[$0 + 2] < 70
+        }.count
+        XCTAssertGreaterThan(dark, 80, "浅色首页必须使用可读的深色时间/系统图标")
     }
 
     func testAppleFirstUseStillRequiresRegistrationAndApproval() {
@@ -383,6 +420,139 @@ final class YishuUITests: XCTestCase {
             )
         }
         attachScreenshot(named: "05-about", app: app)
+    }
+
+    func testIPadPortraitPortfolioDoesNotReflowWhenOpeningOrReturning() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("iPad 竖屏导航回归") }
+        let app = launchApp(arguments: ["-trace-portfolio-layout-for-testing",
+            "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"])
+        tabButton("作品", in: app).tap()
+        let search = element("portfolio-search-control", in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 8))
+        let initial = search.frame
+        for _ in 0..<3 {
+            let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
+            XCTAssertTrue(card.waitForExistence(timeout: 8))
+            let portfolioID = card.identifier.replacingOccurrences(of: "portfolio-card-", with: "")
+            card.tap()
+            XCTAssertTrue(element("portfolio-detail-\(portfolioID)", in: app).waitForExistence(timeout: 8))
+            let back = app.navigationBars.buttons.firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 5))
+            back.tap()
+            XCTAssertTrue(search.waitForExistence(timeout: 8))
+            XCTAssertEqual(search.frame.minY, initial.minY, accuracy: 1)
+            XCTAssertEqual(search.frame.height, initial.height, accuracy: 1)
+        }
+        let trace = element("portfolio-layout-trace", in: app)
+        let recorded = trace.value as? String ?? ""
+        let attachment = XCTAttachment(string: recorded)
+        attachment.name = "portfolio-portrait-navigation-geometry"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let topPositions = recorded.split(separator: ";").compactMap { Double($0.split(separator: ",")[0]) }
+        XCTAssertFalse(topPositions.isEmpty)
+        XCTAssertLessThanOrEqual((topPositions.max() ?? 0) - (topPositions.min() ?? 0), 2,
+                                 "进入相册或返回时发生二次纵向重排：\(recorded)")
+    }
+
+    func testHomeTouchDefersAutomaticPagingUntilAFullNewInterval() {
+        verifyHomeTouchDefersAutomaticPaging(screenProtectionEnabled: false)
+    }
+
+    func testProtectedHomeTouchDefersAutomaticPagingUntilAFullNewInterval() {
+        verifyHomeTouchDefersAutomaticPaging(screenProtectionEnabled: true)
+    }
+
+    private func verifyHomeTouchDefersAutomaticPaging(screenProtectionEnabled: Bool) {
+        let app = launchApp(arguments: ["-hold-home-remote-images-for-visual-testing",
+                                       "-expose-home-hero-state-for-visual-testing"],
+                            screenProtectionEnabled: screenProtectionEnabled)
+        let counter = element("home-hero-auto-advance-count", in: app)
+        XCTAssertTrue(counter.waitForExistence(timeout: 5))
+        let before = counter.value as? String
+        let page = element("home-hero-page-indicator", in: app)
+        let pageBefore = page.value as? String
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.45))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.45))
+        start.press(forDuration: 6, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0)
+        let releasedAt = Date()
+        XCTAssertEqual(counter.value as? String, before, "手指操作期间不应触发自动翻页")
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 2 张，共 5 张"), object: page)
+        XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 2), .completed,
+                       "观察触摸不能吞掉翻页，之前：\(pageBefore ?? "nil")，之后：\(page.value ?? "nil")")
+        let prematurelyAdvanced = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value != %@", before ?? "0"), object: counter)
+        XCTAssertEqual(XCTWaiter.wait(for: [prematurelyAdvanced], timeout: max(0.1, 4 - Date().timeIntervalSince(releasedAt))), .timedOut,
+                       "松手后还没等满停留时间就自动切换")
+        let advanced = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value != %@", before ?? "0"), object: counter)
+        XCTAssertEqual(XCTWaiter.wait(for: [advanced], timeout: 8), .completed, "松手后自动翻页没有恢复")
+    }
+
+    func testHomeStationaryLongTouchAlsoRestartsTheFullInterval() {
+        let app = launchApp(arguments: ["-hold-home-remote-images-for-visual-testing",
+                                       "-expose-home-hero-state-for-visual-testing"])
+        let counter = element("home-hero-auto-advance-count", in: app)
+        let before = counter.value as? String ?? "0"
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.4)).press(forDuration: 6)
+        XCTAssertEqual(counter.value as? String, before, "只按住而不翻页时也必须暂停自动切换")
+        XCTAssertEqual(element("home-hero-page-indicator", in: app).value as? String, "第 1 张，共 5 张")
+        let premature = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value != %@", before), object: counter)
+        XCTAssertEqual(XCTWaiter.wait(for: [premature], timeout: 3), .timedOut, "没有翻页的触摸结束后未重置停留时间")
+        let resumed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value != %@", before), object: counter)
+        XCTAssertEqual(XCTWaiter.wait(for: [resumed], timeout: 5), .completed)
+    }
+
+    func testHomeManualPagingUpdatesTheCurrentPageInBothDirections() {
+        let arguments = ["-hold-home-remote-images-for-visual-testing",
+                         "-expose-home-hero-state-for-visual-testing",
+                         "-disable-home-auto-advance-for-visual-testing"]
+        let app = launchApp(arguments: arguments)
+        let page = element("home-hero-page-indicator", in: app)
+        let right = app.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.45))
+        let left = app.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.45))
+        right.press(forDuration: 0.05, thenDragTo: left)
+        let quickSettled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 2 张，共 5 张"), object: page)
+        let settledResult = XCTWaiter.wait(for: [quickSettled], timeout: 2)
+        XCTAssertEqual(settledResult, .completed)
+        XCTAssertEqual(page.value as? String, "第 2 张，共 5 张", "快速滑动没有更新当前页")
+        right.press(forDuration: 6, thenDragTo: left, withVelocity: .slow, thenHoldForDuration: 0)
+        let heldSettled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 3 张，共 5 张"), object: page)
+        XCTAssertEqual(XCTWaiter.wait(for: [heldSettled], timeout: 2), .completed)
+        XCTAssertEqual(page.value as? String, "第 3 张，共 5 张", "长按滑动没有更新当前页")
+        left.press(forDuration: 0.05, thenDragTo: right)
+        let reversed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 2 张，共 5 张"), object: page)
+        XCTAssertEqual(XCTWaiter.wait(for: [reversed], timeout: 2), .completed, "反向滑动没有更新当前页")
+    }
+
+    func testLiveHomePhotosRemainLoadedWhenSwipingInBothDirections() throws {
+        guard ProcessInfo.processInfo.environment["YISHU_UI_TEST_LIVE_MEDIA"] == "1" else {
+            throw XCTSkip("真实媒体只读检查需显式开启，离线 CI 不依赖公网")
+        }
+        let app = launchApp(arguments: ["-expose-home-hero-state-for-visual-testing",
+                                       "-disable-home-auto-advance-for-visual-testing"])
+        let ready = element("home-hero-ready-count", in: app)
+        let loaded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "5"), object: ready)
+        XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 40), .completed, "真实首页五张照片没有准备好")
+        let page = element("home-hero-page-indicator", in: app)
+        let left = app.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.42))
+        let right = app.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.42))
+        for _ in 0..<2 {
+            for index in 1...4 {
+                right.press(forDuration: 0.05, thenDragTo: left)
+                let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 \(index + 1) 张，共 5 张"), object: page)
+                XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 2), .completed)
+                XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
+                XCTAssertTrue(element("home-hero-actual-filled-image-\(index)", in: app).waitForExistence(timeout: 5))
+                XCTAssertFalse(element("artwork-image-retry", in: app).exists)
+            }
+            for index in (0...3).reversed() {
+                left.press(forDuration: 0.05, thenDragTo: right)
+                let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 \(index + 1) 张，共 5 张"), object: page)
+                XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 2), .completed)
+                XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
+                XCTAssertTrue(element("home-hero-actual-filled-image-\(index)", in: app).waitForExistence(timeout: 5))
+                XCTAssertFalse(element("artwork-image-retry", in: app).exists)
+            }
+        }
     }
 
     func testAboutRoleSummaryIsCompleteInLandscapeAndLargeText() throws {
@@ -616,6 +786,32 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "02-portfolio-search", app: app)
     }
 
+    func testSearchQueryFitsAtAccessibilityXXXL() {
+        let app = launchApp(arguments: ["-open-portfolio-for-visual-testing",
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])
+        let field = app.textFields["portfolio-search-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 8))
+        field.tap()
+        field.typeText("婚纱\n")
+        let font = UIFont.preferredFont(forTextStyle: .body, compatibleWith:
+            UITraitCollection(preferredContentSizeCategory: .accessibilityExtraExtraExtraLarge))
+        print("SEARCH_ACTUAL_XXXL frame=\(field.frame) requiredLineHeight=\(font.lineHeight)")
+        XCTAssertGreaterThanOrEqual(field.frame.height, ceil(font.lineHeight),
+                                   "搜索文字的输入区域不能被固定高度裁切")
+        XCTAssertEqual(field.value as? String, "婚纱")
+        // Text only: retain direct evidence of the real maximum-size input,
+        // independently from the native audit's heuristic prediction.
+        let fieldShot = XCTAttachment(screenshot: field.screenshot())
+        fieldShot.name = "search-actual-xxxl-\(Int(app.windows.firstMatch.frame.width))"
+        fieldShot.lifetime = .keepAlways
+        add(fieldShot)
+        XCTAssertTrue(app.buttons["清除搜索"].isHittable)
+        app.buttons["清除搜索"].tap()
+        let clearedValue = field.value as? String
+        XCTAssertTrue(clearedValue == "" || clearedValue == "搜索作品",
+                      "清除后只能为空或系统提供的占位提示")
+    }
+
     func testCollaborationAndAdministratorRoutesRemainReachable() {
         let app = launchApp(arguments: ["-open-about-for-visual-testing"])
         assertExists("about-heading", in: app)
@@ -753,14 +949,42 @@ final class YishuUITests: XCTestCase {
     }
 
     func testPrimaryPagesMeetFocusedAccessibilityGate() throws {
-        let app = launchApp()
+        try verifyPrimaryPagesAccessibility(theme: "blackGold")
+    }
+
+    func testLightThemesKeepPrimaryPagesReadable() throws {
+        for theme in ["ivory", "blush", "bamboo"] {
+            try verifyPrimaryPagesAccessibility(theme: theme)
+        }
+    }
+
+    private func verifyPrimaryPagesAccessibility(theme: String) throws {
+        let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", theme])
 
         assertExists("home-open-portfolio", in: app)
         try auditPrimaryPageAccessibilityBaseline(pageNamed: "首页", in: app)
 
         openTab("作品", in: app)
         assertExists("portfolio-heading", in: app)
-        try auditPrimaryPageAccessibilityBaseline(pageNamed: "作品", in: app)
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            // The iOS 26 audit can crop a below-viewport title as an empty
+            // strip of the page and report that strip as failed contrast.
+            // Search each fixture album so every title is fully rendered;
+            // still audit all four categories without filtering any issues.
+            let search = app.textFields["portfolio-search-field"]
+            for title in ["婚纱", "新中式", "旗袍"] {
+                search.tap()
+                let clear = app.buttons["清除搜索"]
+                if clear.exists { clear.tap() }
+                search.typeText(title + "\n")
+                let albumTitle = app.staticTexts[title]
+                XCTAssertTrue(albumTitle.waitForExistence(timeout: 5))
+                scrollFullyAbovePhoneTabBar(albumTitle, in: app)
+                try auditPrimaryPageAccessibilityBaseline(pageNamed: "作品 · \(title) · \(theme)", in: app)
+            }
+        } else {
+            try auditPrimaryPageAccessibilityBaseline(pageNamed: "作品", in: app)
+        }
 
         openTab("关于", in: app)
         assertExists("about-heading", in: app)
@@ -776,22 +1000,30 @@ final class YishuUITests: XCTestCase {
                 )
             ).firstMatch
             scrollFullyAbovePhoneTabBar(copyrightText, in: app)
+            // The attribution follows the copyright block. Bring this final
+            // card in too, otherwise its not-yet-visible title can produce
+            // the same blank-strip contrast artifact on light page surfaces.
+            scrollFullyAbovePhoneTabBar(element("about-weather-legal-link", in: app), in: app)
         }
         try auditPrimaryPageAccessibilityBaseline(pageNamed: "关于", in: app)
+        app.terminate()
     }
 
     private func launchApp(
         arguments: [String] = [],
+        screenProtectionEnabled: Bool = false,
         environment: [String: String] = [:]
     ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
             "-skip-launch-poster-for-visual-testing",
-            "-disable-screen-protection-for-visual-testing",
             "-reset-fan-session-for-visual-testing",
             "-bypass-access-gate-for-visual-testing",
         ] + arguments
-        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        if !screenProtectionEnabled {
+            app.launchArguments.append("-disable-screen-protection-for-visual-testing")
+            app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        }
         for (key, value) in environment {
             app.launchEnvironment[key] = value
         }
@@ -1023,8 +1255,12 @@ final class YishuUITests: XCTestCase {
 
     private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication) {
         var attempts = 0
+        // iPad's About portrait intentionally does not scroll. Drag the actual
+        // right-hand details column rather than the center of the whole window.
+        let details = app.scrollViews["about-details-scroll"]
+        let scrollTarget = details.exists ? details : app
         while (!element.isHittable || !elementCenterIsVisible(element, in: app)), attempts < 8 {
-            app.swipeUp()
+            scrollTarget.swipeUp()
             attempts += 1
         }
     }
@@ -1035,7 +1271,7 @@ final class YishuUITests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        XCTAssertTrue(element.waitForExistence(timeout: 8), "待审计版权正文不存在", file: file, line: line)
+        XCTAssertTrue(element.waitForExistence(timeout: 8), "待审计内容不存在", file: file, line: line)
         let window = app.windows.firstMatch
         let tabBar = app.tabBars.firstMatch
         XCTAssertTrue(tabBar.waitForExistence(timeout: 3), "缺少底部导航边界", file: file, line: line)
@@ -1064,10 +1300,12 @@ final class YishuUITests: XCTestCase {
                 .withOffset(CGVector(dx: windowFrame.midX, dy: visibleFrame.midY))
             start.press(
                 forDuration: 0.1,
-                thenDragTo: start.withOffset(CGVector(dx: 0, dy: -movement))
+                thenDragTo: start.withOffset(CGVector(dx: 0, dy: -movement)),
+                withVelocity: .slow,
+                thenHoldForDuration: 0.3
             )
         }
-        XCTFail("版权正文未能完整滚入底部导航上方，不能执行有效的对比度审计：\(element.frame)", file: file, line: line)
+        XCTFail("内容未能完整滚入底部导航上方，不能执行有效的对比度审计：\(element.frame)", file: file, line: line)
     }
 
     private func elementCenterIsVisible(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
@@ -1337,16 +1575,34 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         entry.tap()
         let themeEntry = element("theme-preference-entry", in: app)
         XCTAssertTrue(themeEntry.waitForExistence(timeout: 5))
+        // Settings is not only a color chooser: both existing routes must
+        // remain usable and return to the same navigation context.
+        element("settings-account", in: app).tap()
+        XCTAssertTrue(element("fan-account-heading", in: app).waitForExistence(timeout: 6))
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertTrue(tabButton("首页", in: app).isHittable, "iPad 账号页不能让顶部标签栏消失")
+        }
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(element("settings-privacy", in: app).waitForExistence(timeout: 5))
+        element("settings-privacy", in: app).tap()
+        XCTAssertTrue(element("privacy-policy-heading", in: app).waitForExistence(timeout: 5))
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            XCTAssertTrue(tabButton("首页", in: app).isHittable, "iPad 隐私页不能让顶部标签栏消失")
+        }
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(themeEntry.waitForExistence(timeout: 5))
         themeEntry.tap()
         let window = app.windows.firstMatch
         recordPresentationGeometry("appearance-settings", frame: window.frame)
         for theme in ["blackGold", "pine", "indigo", "ivory", "plum", "rouge", "blush", "bamboo"] {
             let choice = app.buttons["theme-choice-\(theme)"]
-            for _ in 0..<6 where !choice.isHittable { app.swipeUp() }
+            scrollThemeCardFullyIntoView(choice, in: app, towardBeginning: false)
             XCTAssertTrue(choice.isHittable, "\(theme) 主题选项不可操作")
             XCTAssertGreaterThanOrEqual(choice.frame.width, 44)
             XCTAssertGreaterThanOrEqual(choice.frame.height, 44)
             choice.tap()
+            let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "已选择"), object: choice)
+            XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 2), .completed, "\(theme) 主题未选中")
             XCTAssertEqual(choice.value as? String, "已选择")
             XCTAssertTrue(element("appearance-settings", in: app).exists, "换色不能重建导航并退出设置")
             XCTAssertGreaterThanOrEqual(choice.frame.minX, window.frame.minX)
@@ -1370,9 +1626,39 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         XCTAssertEqual(themeEntry.value as? String, "竹青")
         themeEntry.tap()
         let original = app.buttons["theme-choice-blackGold"]
-        for _ in 0..<6 where !original.isHittable { app.swipeDown() }
+        scrollThemeCardFullyIntoView(original, in: app, towardBeginning: true)
         original.tap()
         XCTAssertEqual(original.value as? String, "已选择")
+    }
+
+    private func scrollThemeCardFullyIntoView(_ card: XCUIElement, in app: XCUIApplication, towardBeginning: Bool) {
+        let scene = app.windows.firstMatch
+        let window = scene.frame
+        let top = max(window.minY + 12, app.navigationBars.firstMatch.frame.maxY + 8)
+        let bottom = window.maxY - 24
+        for _ in 0..<12 {
+            let frame = card.exists ? card.frame : .zero
+            if card.isHittable, frame.minY >= top, frame.maxY <= bottom { return }
+            // `isHittable` alone includes partly clipped cards. Their center
+            // can lie under the navigation bar, where a synthesized tap goes
+            // to the bar instead of the card. Use short, directed drags.
+            let delta: CGFloat
+            if frame.isEmpty {
+                delta = towardBeginning ? 100 : -100
+            } else if frame.minY < top {
+                delta = top - frame.minY + 12
+            } else {
+                delta = bottom - frame.maxY - 12
+            }
+            let limit = (bottom - top) * 0.4
+            let origin = scene.coordinate(withNormalizedOffset: .zero)
+            let start = origin.withOffset(CGVector(dx: window.width * 0.75, dy: (top + bottom) / 2))
+            let end = start.withOffset(CGVector(dx: 0, dy: max(-limit, min(limit, delta))))
+            // End stationary: inertial flicks otherwise alternate between
+            // overshooting the same row above and below a short landscape view.
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        XCTFail("主题卡片没有完整进入可点击区域：\(card.frame)，范围 \(top)...\(bottom)")
     }
 
     func testAdministratorLaunchPreviewMatchesWindowAndUpdatesDraft() {
@@ -1729,6 +2015,99 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             predicate: NSPredicate(format: "exists == false"), object: close
         )
         XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 3), .completed)
+    }
+
+    func testHomeBlackGoldAndPineMatchThePage() throws {
+        try verifyHomeThemes([("blackGold", 0x060606), ("pine", 0x10201B)])
+    }
+
+    func testHomeIndigoAndIvoryMatchThePage() throws {
+        try verifyHomeThemes([("indigo", 0x131E32), ("ivory", 0xF4F0E8)])
+    }
+
+    func testHomePlumAndRougeMatchThePage() throws {
+        try verifyHomeThemes([("plum", 0x231D2B), ("rouge", 0x2B1E22)])
+    }
+
+    func testHomeBlushAndBambooMatchThePage() throws {
+        try verifyHomeThemes([("blush", 0xF4EBED), ("bamboo", 0xEBF1E8)])
+    }
+
+    private func verifyHomeThemes(_ themes: [(String, UInt32)]) throws {
+        for (theme, expectedBackground) in themes {
+            let app = launchApp(arguments: [
+                "-cn.com.shuzijun.yishu.appearance.v1", theme,
+                "-hold-home-remote-images-for-visual-testing",
+                "-disable-home-auto-advance-for-visual-testing",
+                "-expose-home-hero-state-for-visual-testing",
+            ])
+            let window = app.windows.firstMatch.frame
+            XCTAssertTrue(element("home-open-portfolio", in: app).waitForExistence(timeout: 8))
+            for (title, heading) in [("作品", "portfolio-heading"), ("影视", "credits-heading"),
+                                     ("收藏", "favorites-heading"), ("关于", "about-heading")] {
+                tabButton(title, in: app).tap()
+                XCTAssertTrue(element(heading, in: app).waitForExistence(timeout: 6), "\(theme)：\(title)丢失")
+            }
+            tabButton("首页", in: app).tap()
+            assertMinimumTapTarget(element("home-weather", in: app), named: "天气")
+            assertMinimumTapTarget(element("home-open-portfolio", in: app), named: "查看作品")
+            let title = element("home-hero-title", in: app)
+            XCTAssertTrue(title.waitForExistence(timeout: 5))
+            if UIDevice.current.userInterfaceIdiom == .pad, window.width > window.height {
+                let photo = element("home-hero-actual-fitted-image-0", in: app)
+                XCTAssertTrue(photo.waitForExistence(timeout: 5))
+                XCTAssertLessThanOrEqual(photo.frame.maxY, title.frame.minY,
+                                        "\(theme)：横屏照片下半身不能被主题文案底色遮住")
+            }
+            let screenshot = XCUIScreen.main.screenshot()
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let normalized = UIGraphicsImageRenderer(size: window.size, format: format).image { _ in
+                screenshot.image.draw(in: CGRect(origin: .zero, size: window.size))
+            }
+            let source = try XCTUnwrap(normalized.cgImage)
+            // iPadOS 26's native audit can hang with XCTest -56. Check the
+            // rendered capsule itself in every configuration as well as the
+            // source palette contrast tests; retain the native audit on phone.
+            let weather = element("home-weather", in: app).frame.offsetBy(dx: -window.minX, dy: -window.minY)
+            let weatherCrop = try XCTUnwrap(source.cropping(to: weather.insetBy(dx: 8, dy: 10)))
+            let pixelCount = weatherCrop.width * weatherCrop.height
+            var weatherPixels = [UInt8](repeating: 0, count: pixelCount * 4)
+            let weatherContext = try XCTUnwrap(CGContext(data: &weatherPixels, width: weatherCrop.width,
+                height: weatherCrop.height, bitsPerComponent: 8, bytesPerRow: weatherCrop.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            weatherContext.draw(weatherCrop, in: CGRect(x: 0, y: 0, width: weatherCrop.width, height: weatherCrop.height))
+            func linear(_ value: UInt8) -> Double {
+                let component = Double(value) / 255
+                return component <= 0.04045 ? component / 12.92 : pow((component + 0.055) / 1.055, 2.4)
+            }
+            let luminances = stride(from: 0, to: weatherPixels.count, by: 4).map { offset in
+                0.2126 * linear(weatherPixels[offset]) + 0.7152 * linear(weatherPixels[offset + 1])
+                    + 0.0722 * linear(weatherPixels[offset + 2])
+            }.sorted()
+            XCTAssertGreaterThanOrEqual((luminances[pixelCount * 95 / 100] + 0.05)
+                / (luminances[pixelCount * 5 / 100] + 0.05), 4.5, "\(theme)：实际天气胶囊文字不清晰")
+            let crop = try XCTUnwrap(source.cropping(to: CGRect(x: window.width * 0.18, y: 2,
+                                                               width: window.width * 0.12, height: 4)))
+            var pixel = [UInt8](repeating: 0, count: 4)
+            let context = try XCTUnwrap(CGContext(data: &pixel, width: 1, height: 1,
+                bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            for (index, shift) in [16, 8, 0].enumerated() {
+                XCTAssertEqual(Double(pixel[index]), Double((expectedBackground >> shift) & 0xff),
+                               accuracy: 14, "\(theme)：首页没有渲染所选主题；像素=\(pixel)")
+            }
+            // Only the synthetic gradient fixture is saved, never a photograph.
+            let attachment = XCTAttachment(screenshot: screenshot)
+            attachment.name = "home-theme-\(theme)-\(Int(window.width))x\(Int(window.height))"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            if UIDevice.current.userInterfaceIdiom == .phone, window.height > window.width {
+                try app.performAccessibilityAudit(for: [.contrast, .textClipped, .trait])
+            }
+            app.terminate()
+        }
     }
 
     func testHomeHeroKeepsTheFullIPadCompositionAndNeverTurnsBlank() throws {

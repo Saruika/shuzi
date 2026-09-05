@@ -121,7 +121,7 @@ struct FanAccountView: View {
         .navigationTitle(isAccessGate ? "访问申请" : "粉丝账号")
         .navigationBarTitleDisplayMode(.inline)
         .themeNavigationChrome()
-        .toolbar(.hidden, for: .tabBar)
+        .stableDetailTabBar()
         .task { await account.restoreSession() }
         .onAppear {
             if account.appleRegistration != nil {

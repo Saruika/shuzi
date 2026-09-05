@@ -183,22 +183,20 @@ struct AboutView: View {
                     .accessibilityIdentifier("about-portrait")
             } else {
                 ZStack {
-                    MediaTheme.elevatedInk
+                    AppTheme.elevatedInk
                     Image(systemName: "person.crop.rectangle")
                         .font(.largeTitle.weight(.light))
-                        .foregroundStyle(MediaTheme.gold.opacity(0.72))
+                        .foregroundStyle(AppTheme.gold)
                 }
                     .accessibilityLabel("易姝形象照")
                     .accessibilityValue("正在安全加载")
                     .accessibilityIdentifier("about-portrait")
             }
-            LinearGradient(colors: [.clear, MediaTheme.ink], startPoint: .center, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 8) {
                 Text("YI SHU")
                     .font(.caption2.weight(.semibold))
                     .tracking(4)
-                    .foregroundStyle(MediaTheme.warmWhite)
-                    .shadow(color: .black.opacity(0.95), radius: 2, y: 1)
+                    .foregroundStyle(AppTheme.gold)
                     // Decorative transliteration; the following Chinese name
                     // carries the same semantic content for VoiceOver.
                     .accessibilityHidden(true)
@@ -206,16 +204,17 @@ struct AboutView: View {
                     .font(.system(.largeTitle, design: .serif))
                 Text("短剧演员 / 模特 / 视频创作者")
                     .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.white)
-                    .shadow(color: .black.opacity(0.9), radius: 2, y: 1)
+                    .foregroundStyle(AppTheme.warmWhite)
                     .lineLimit(nil)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("about-role-summary")
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(AppTheme.warmWhite)
             .padding(.horizontal, portraitCaptionInset)
             .padding(.top, portraitCaptionInset)
             .padding(.bottom, captionBottomPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background { EditorialCaptionBackdrop().padding(.top, -24) }
         }
         .aspectRatio(portraitAspectRatio, contentMode: .fit)
     }

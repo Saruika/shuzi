@@ -151,7 +151,7 @@ struct AdminView: View {
         .navigationTitle(admin.isAuthenticated ? "内容管理" : "管理员登录")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
-        .toolbar(.hidden, for: .tabBar)
+        .stableDetailTabBar()
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
         .task(id: admin.isAuthenticated) {
             if admin.isAuthenticated {

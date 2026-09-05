@@ -26,7 +26,9 @@ jobs:
   quality:
     name: Security, iPhone and iPad
     runs-on: macos-26
-    timeout-minutes: 40
+    # The full iPhone + iPad orientation/theme/gesture suites run serially.
+    # Keep every regression instead of timing out halfway through iPad checks.
+    timeout-minutes: 120
 
     steps:
       - name: Check out source

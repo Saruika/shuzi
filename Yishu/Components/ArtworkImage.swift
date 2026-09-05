@@ -218,15 +218,18 @@ private actor ArtworkImagePipeline {
 }
 
 enum ArtworkImagePrefetcher {
-    static func prefetch(urls: [URL], maxPixelSize: Int) async {
+    static func prefetch(urls: [URL], maxPixelSize: Int,
+                         onImageLoaded: (@MainActor (URL, UIImage) -> Void)? = nil) async {
         let uniqueURLs = Array(Set(urls))
         await withTaskGroup(of: Void.self) { group in
             for url in uniqueURLs {
                 group.addTask {
-                    _ = try? await ArtworkImagePipeline.shared.image(
+                    if let image = try? await ArtworkImagePipeline.shared.image(
                         for: url,
                         maxPixelSize: maxPixelSize
-                    )
+                    ), !Task.isCancelled {
+                        await onImageLoaded?(url, image)
+                    }
                 }
             }
         }

@@ -303,7 +303,7 @@ struct RootView: View {
     }
 
     private var usesDarkMediaCanvas: Bool {
-        hasResolvedAccess && canAccessAppContent && (selectedTab == .home || isLaunchPosterVisible)
+        hasResolvedAccess && canAccessAppContent && isLaunchPosterVisible
     }
 
     private var authorizedAppContent: some View {

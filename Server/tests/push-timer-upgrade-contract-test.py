@@ -144,10 +144,14 @@ def run_case(kind: str, role: str = 'authority', fault: str = '') -> None:
             declarations.append(f'{name}_TARGET={shlex.quote(str(path))}')
             declarations.append(f'{name}_SHA={pins[name + "_SHA"]}')
         target = Path(env['TIMER_TARGET'])
-        if kind == 'bad_owner': env['BAD_OWNER'] = '1'
-        if kind == 'writable': target.chmod(0o666)
-        if kind == 'hardlink': os.link(target, root / 'extra-link')
-        if kind == 'partial': Path(env['FPM_POOL_TARGET']).unlink()
+        if kind == 'bad_owner':
+            env['BAD_OWNER'] = '1'
+        if kind == 'writable':
+            target.chmod(0o666)
+        if kind == 'hardlink':
+            os.link(target, root / 'extra-link')
+        if kind == 'partial':
+            Path(env['FPM_POOL_TARGET']).unlink()
         if kind == 'symlink':
             target.rename(root / 'timer-real')
             target.symlink_to(root / 'timer-real')

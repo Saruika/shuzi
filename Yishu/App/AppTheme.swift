@@ -159,6 +159,11 @@ enum AppTheme {
     static var muted: Color { palette.secondary.color }
     static var line: Color { palette.text.color.opacity(0.16) }
     static var subtleFill: Color { palette.text.color.opacity(0.055) }
+    // Paper-like themes use a soft edge instead of the heavy photographic
+    // shadow used by dark canvases. This changes hierarchy, not control sizes.
+    static var surfaceShadow: Color {
+        Color.black.opacity(AppearanceStore.shared.theme.colorScheme == .light ? 0.10 : 0.24)
+    }
     static var warning: Color {
         AppearanceStore.shared.theme.colorScheme == .light ? ThemeRGB(0x874100).color : .orange
     }
@@ -171,6 +176,20 @@ struct ThemeInputChrome: ViewModifier {
             .overlay {
                 RoundedRectangle(cornerRadius: 6).stroke(AppTheme.line, lineWidth: 0.5)
             }
+    }
+}
+
+/// An editorial photo caption fades into the selected page surface. Callers
+/// size this to their actual text group, so large text is not stranded above a
+/// fixed-height or fixed-percentage scrim. Fullscreen media stays independent.
+struct EditorialCaptionBackdrop: View {
+    var body: some View {
+        LinearGradient(stops: [
+            .init(color: .clear, location: 0),
+            .init(color: AppTheme.ink.opacity(0.96), location: 0.18),
+            .init(color: AppTheme.ink, location: 1),
+        ], startPoint: .top, endPoint: .bottom)
+        .allowsHitTesting(false)
     }
 }
 
@@ -266,11 +285,21 @@ private struct FloatingTabBarScrollClearance: ViewModifier {
     }
 }
 
+private struct StableDetailTabBar: ViewModifier {
+    func body(content: Content) -> some View {
+        // iPad's top tab bar is part of the page's top safe area. Removing it
+        // during push/pop resizes the still-mounted source page by 64 points.
+        // Phone keeps its existing immersive detail presentation.
+        content.toolbar(UIDevice.current.userInterfaceIdiom == .pad ? .visible : .hidden, for: .tabBar)
+    }
+}
+
 extension View {
     func appAppearance(isAppRoot: Bool = false) -> some View {
         modifier(AppAppearanceModifier(isAppRoot: isAppRoot))
     }
     func themeNavigationChrome() -> some View { modifier(ThemeNavigationChrome()) }
+    func stableDetailTabBar() -> some View { modifier(StableDetailTabBar()) }
 
     func floatingTabBarScrollClearance(_ height: CGFloat = 84) -> some View {
         modifier(FloatingTabBarScrollClearance(height: height))

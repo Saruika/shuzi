@@ -744,7 +744,7 @@ final class ContentAndAccessTests: XCTestCase {
     func testHomeHeroTreatsTheFirstAndLastSlidesAsCircularNeighbours() {
         XCTAssertEqual(
             HomeHeroRenderPolicy.prefetchIndices(selection: 0, count: 5),
-            [0, 1, 4]
+            [0, 1, 2, 3, 4]
         )
         XCTAssertTrue(
             HomeHeroRenderPolicy.shouldLoadRemoteImage(
@@ -760,7 +760,7 @@ final class ContentAndAccessTests: XCTestCase {
                 count: 5
             )
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             HomeHeroRenderPolicy.shouldLoadRemoteImage(
                 at: 3,
                 selection: 0,
@@ -778,6 +778,61 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertTrue(
             HomeHeroRenderPolicy.shouldAnimateTransition(from: 3, to: 4, count: 5)
         )
+    }
+
+    func testHeroAutoAdvanceDefersToTouchAccessibilityAndImageReadiness() {
+        func allowed(touching: Bool = false, ready: Bool = true, next: Bool = true,
+                     active: Bool = true, visible: Bool = true, reduced: Bool = false,
+                     voiceOver: Bool = false, count: Int = 5) -> Bool {
+            HomeHeroAdvanceRequest.permitsAdvance(isVisible: visible, isActive: active,
+                reducesMotion: reduced, voiceOverEnabled: voiceOver, isTouching: touching,
+                count: count, currentReady: ready, nextReady: next)
+        }
+        XCTAssertTrue(allowed())
+        XCTAssertFalse(allowed(touching: true))
+        XCTAssertFalse(allowed(ready: false))
+        XCTAssertFalse(allowed(next: false))
+        XCTAssertFalse(allowed(active: false))
+        XCTAssertFalse(allowed(visible: false))
+        XCTAssertFalse(allowed(reduced: true))
+        XCTAssertFalse(allowed(voiceOver: true))
+        XCTAssertFalse(allowed(count: 1))
+        let original = HomeHeroAdvanceRequest(enabled: true, selection: 0, interactionGeneration: 0)
+        XCTAssertNotEqual(original, HomeHeroAdvanceRequest(enabled: true, selection: 1, interactionGeneration: 0))
+        XCTAssertNotEqual(original, HomeHeroAdvanceRequest(enabled: true, selection: 0, interactionGeneration: 1),
+                          "即使拖动取消、停在原图，自动翻页也必须重新计时")
+    }
+
+    func testHeroPreheatIdentityDoesNotDependOnSwipeDirection() {
+        for selection in 0..<5 {
+            for presentation in [HomeHeroPresentation.fill, .fit] {
+                XCTAssertEqual(HomeHeroRenderPolicy.prefetchIndices(selection: selection, count: 5,
+                    presentation: presentation), [0, 1, 2, 3, 4])
+                for index in 0..<5 {
+                    XCTAssertTrue(HomeHeroRenderPolicy.shouldLoadRemoteImage(at: index,
+                        selection: selection, count: 5, presentation: presentation))
+                }
+            }
+        }
+        XCTAssertEqual(HomeHeroRenderPolicy.prefetchIndices(selection: 0, count: 0), [])
+        XCTAssertFalse(HomeHeroRenderPolicy.shouldLoadRemoteImage(at: 5, selection: 0, count: 5))
+    }
+
+    func testLandscapeHeroReservesItsActualCaptionWithoutCroppingThePhoto() {
+        let viewport = CGSize(width: 1376, height: 1000)
+        for captionHeight in [64.0, 100.0, 180.0] {
+            let frame = HomeHeroRenderPolicy.imageFrame(in: viewport, presentation: .fit,
+                                                       topInset: 24, captionHeight: captionHeight)
+            XCTAssertEqual(frame.minY, 88)
+            XCTAssertLessThanOrEqual(frame.maxY, viewport.height - captionHeight - 24)
+            let fitted = HomeHeroRenderPolicy.fittedSize(sourceSize: CGSize(width: 959, height: 1440), in: frame.size)
+            XCTAssertEqual(fitted.width / fitted.height, 959.0 / 1440.0, accuracy: 0.0001)
+            XCTAssertLessThanOrEqual(fitted.height, frame.height + 0.001)
+        }
+        XCTAssertEqual(HomeHeroRenderPolicy.imageFrame(in: viewport, presentation: .fill,
+            topInset: 24, captionHeight: 180), CGRect(origin: .zero, size: viewport))
+        XCTAssertEqual(HomeHeroRenderPolicy.imageFrame(in: .zero, presentation: .fit,
+            topInset: 24, captionHeight: 180), .zero)
     }
 
     func testLandscapeIPadWarmsEveryHeroBeforePaging() {

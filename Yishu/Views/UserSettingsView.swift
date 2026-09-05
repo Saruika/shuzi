@@ -6,6 +6,7 @@ struct UserSettingsView: View {
             Section("外观") {
                 ThemePreferenceRow()
             }
+            .listRowBackground(AppTheme.elevatedInk)
             Section("账号与通知") {
                 NavigationLink {
                     FanAccountView()
@@ -14,29 +15,33 @@ struct UserSettingsView: View {
                 }
                 .accessibilityIdentifier("settings-account")
             }
+            .listRowBackground(AppTheme.elevatedInk)
             Section("隐私") {
                 NavigationLink {
                     PrivacyPolicyView()
                 } label: {
                     Label("隐私政策与数据选择", systemImage: "hand.raised")
                 }
+                .accessibilityIdentifier("settings-privacy")
                 Text("如需删除个人资料，可在账号页主动永久删除账号。")
                     .font(.footnote)
                     .foregroundStyle(AppTheme.muted)
             }
+            .listRowBackground(AppTheme.elevatedInk)
             Section("版本") {
                 LabeledContent("Hi，梳子", value: versionLabel)
                 Text("主题偏好只保存在这台设备，不上传、不用于追踪，也不改变账号权限。")
                     .font(.footnote)
                     .foregroundStyle(AppTheme.muted)
             }
+            .listRowBackground(AppTheme.elevatedInk)
         }
         .scrollContentBackground(.hidden)
         .background(AppTheme.ink.ignoresSafeArea())
         .navigationTitle("设置")
         .navigationBarTitleDisplayMode(.inline)
         .themeNavigationChrome()
-        .toolbar(.hidden, for: .tabBar)
+        .stableDetailTabBar()
         .accessibilityIdentifier("user-settings")
     }
 
@@ -84,7 +89,7 @@ struct AppearanceSettingsView: View {
                 Text("选一个喜欢的颜色")
                     .font(.title2.weight(.semibold))
                     .accessibilityAddTraits(.isHeader)
-                Text("轻点即可预览并保存。照片、海报和视频保留原本的色彩与深色展示区。")
+                Text("轻点即可预览并保存。首页和其他页面会一起搭配，照片与视频保持原色。")
                     .font(.subheadline)
                     .foregroundStyle(AppTheme.muted)
                     .fixedSize(horizontal: false, vertical: true)
@@ -115,7 +120,7 @@ struct AppearanceSettingsView: View {
         .navigationTitle("外观与主题")
         .navigationBarTitleDisplayMode(.inline)
         .themeNavigationChrome()
-        .toolbar(.hidden, for: .tabBar)
+        .stableDetailTabBar()
         .accessibilityIdentifier("appearance-settings")
     }
 

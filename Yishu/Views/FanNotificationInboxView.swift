@@ -107,7 +107,7 @@ struct FanNotificationInboxView: View {
         .foregroundStyle(AppTheme.warmWhite)
         .navigationTitle("消息箱")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar(.hidden, for: .tabBar)
+        .stableDetailTabBar()
         .refreshable { await inbox.refresh(using: account) }
         .task(id: inbox.notifications.map(\.expiresAt).min()) {
             guard let expiry = inbox.notifications.map(\.expiresAt).min() else { return }
