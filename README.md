@@ -2,13 +2,13 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前 TestFlight 内部测试版本：`1.3.38 (50)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前 TestFlight 内部测试版本：`1.3.39 (51)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-最新客户端发布：[v1.3.38-build50](Server/releases/v1.3.38-build50.md)：修正相册照片放大后连续拖动的渲染开销，保留外观、图片保护、翻页和关闭。2026-09-05 17:37 上传成功，随后确认 Apple `VALID`、内部 `IN_BETA_TESTING`；完整枚举 41 个构建，仅 Build 50 未过期，全部 40 个旧构建已过期。请在 TestFlight 更新至 Build 50，重点真机验证放大后拖动的流畅度。
+最新客户端发布：[v1.3.39-build51](Server/releases/v1.3.39-build51.md)：修正 App 内管理员海报预览与实际开屏不一致的问题，共用图片布局、字体、渐变和安全区；统一新增海报的默认文案，保留已有手动内容。2026-09-05 18:07 上传成功，随后确认 Apple `VALID`、内部 `IN_BETA_TESTING`；完整枚举 42 个构建，仅 Build 51 未过期，全部 41 个旧构建已过期。请在 TestFlight 更新至 Build 51，检查后台海报预览及相册放大拖动。
 
-Build 50 包含源码补丁 [v1.3.37-build49.1](Server/releases/v1.3.37-build49.1.md)：将相册缩放/拖动交给原生滚动视图，减少拖动期间的 SwiftUI 更新和重复图片合成。168 项独立 iPhone 单元测试、iPhone/iPad 共 8 组操作配置、Release Analyze 与发行包检查通过；没有真机前后 FPS 对比，不承诺所有设备零卡顿。
+本版继续包含 [Build 50](Server/releases/v1.3.38-build50.md) 的相册修复：将缩放/拖动交给原生滚动视图，减少拖动期间的 SwiftUI 更新和重复图片合成。该专项曾通过 168 项独立 iPhone 单元测试、iPhone/iPad 共 8 组操作配置；没有真机前后 FPS 对比，不承诺所有设备零卡顿。
 
-后续候选 [1.3.39 (51)](Server/releases/v1.3.39-build51.md) 正在验证管理员海报预览与实际开屏共用布局、新增草稿默认文案及发布状态提示；尚未上传，现有 Build 50 不包含这项新修正。
+Build 51 的 iPhone/iPad 独立构建各 170 项单元测试、共 16 组后台预览和实际开屏操作配置通过，隔离源码门禁、Release Analyze 与发行包检查通过。后台预览显示未发布草稿；替换海报图片后仍需点击“保存并发布全部修改”，本次未覆盖任何生产海报或手动文案。
 
 本版包含 [v1.3.36-build48.1](Server/releases/v1.3.36-build48.1.md) 的源码修正，以及 Build 48 的 iPad 关于页固定左图、右栏独立滚动。按用户明确授权，两台生产服务器已恢复找到的原始 Apple 签名及数据密钥配置，实际 PHP-FPM 校验通过；真实 Apple 授权、登录与删号仍需 TestFlight 真机验收。首发已确认全部免费、保留抖音 ID 与人工审批，包含中国大陆及其他地区；App 备案与商店资料仍待完成。本次未提交正式 App Store 审核。
 
