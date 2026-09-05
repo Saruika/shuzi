@@ -83,7 +83,7 @@ struct FanNotificationInboxView: View {
                     }
                 }
                 if let error = inbox.errorMessage {
-                    Text(error).font(.callout).foregroundStyle(.orange)
+                    Text(error).font(.callout).foregroundStyle(AppTheme.warning)
                     Button("重试读取消息") { Task { await inbox.refresh(using: account) } }
                         .frame(minHeight: 44)
                 }
@@ -165,7 +165,7 @@ private struct FanNotificationDetailView: View {
                 if let item = inbox.detail, item.id == notificationID, account.notificationContext != nil {
                     FanNotificationDetailText(item: item)
                     if let error = inbox.readErrorMessage {
-                        Text(error).font(.caption).foregroundStyle(.orange)
+                        Text(error).font(.caption).foregroundStyle(AppTheme.warning)
                         Button("重试同步已读") { Task { await inbox.markCurrentDetailRead(using: account) } }
                             .frame(minHeight: 44)
                     }

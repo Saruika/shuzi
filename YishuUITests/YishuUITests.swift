@@ -61,12 +61,20 @@ final class YishuUITests: XCTestCase {
     }
 
     func testProtectedStaticScreenshotArtifactAndTouchContinuity() throws {
+        try verifyProtectedScreenshotAndTouch(arguments: [])
+    }
+
+    func testIvoryThemePreservesScreenshotProtectionAndTouch() throws {
+        try verifyProtectedScreenshotAndTouch(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", "ivory"])
+    }
+
+    private func verifyProtectedScreenshotAndTouch(arguments: [String]) throws {
         let app = XCUIApplication()
         app.launchArguments = [
             "-skip-launch-poster-for-visual-testing",
             "-reset-fan-session-for-visual-testing",
             "-bypass-access-gate-for-visual-testing",
-        ]
+        ] + arguments
         app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
@@ -181,6 +189,97 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "00-access-gate", app: app)
     }
 
+    func testRegistrationThemeChoicePreservesDraftAndSurvivesRestart() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["-reset-fan-session-for-visual-testing",
+                               "-skip-startup-notification-authorization-for-testing"]
+        app.launch()
+        let name = app.textFields["fan-register-display-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 12))
+        scrollToElement(name, in: app)
+        name.tap()
+        name.typeText("主题回归")
+        let form = app.scrollViews["fan-account-scroll"]
+        let entry = app.descendants(matching: .any).matching(identifier: "theme-preference-entry").firstMatch
+        for _ in 0..<10 {
+            let top = app.navigationBars.firstMatch.frame.maxY + 20
+            let bottom = form.frame.maxY - 60
+            if entry.isHittable, entry.frame.midY > top, entry.frame.midY < bottom { break }
+            let isAbove = entry.frame.midY <= top
+            form.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: isAbove ? 0.35 : 0.65))
+                .press(forDuration: 0.05, thenDragTo: form.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: isAbove ? 0.65 : 0.35)))
+        }
+        XCTAssertTrue(entry.isHittable)
+        entry.tap()
+        XCTAssertTrue(app.scrollViews["appearance-settings"].waitForExistence(timeout: 5), app.debugDescription)
+        let ivory = app.buttons["theme-choice-ivory"]
+        scrollToElement(ivory, in: app)
+        ivory.tap()
+        XCTAssertEqual(ivory.value as? String, "已选择")
+        XCTAssertFalse(app.tabBars.buttons["首页"].exists, "选择主题不得绕过注册审批")
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertEqual(name.value as? String, "主题回归", "更换主题不能清空已填写的注册资料")
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(name.waitForExistence(timeout: 12))
+        scrollToElement(entry, in: app)
+        XCTAssertEqual(entry.value as? String, "月白", "重启后应恢复本机外观偏好")
+        entry.tap()
+        let original = app.buttons["theme-choice-blackGold"]
+        for _ in 0..<6 where !original.isHittable { app.swipeDown() }
+        original.tap()
+        XCTAssertEqual(original.value as? String, "已选择")
+    }
+
+    func testThemeChoicesRemainAccessibleAtXXXL() throws {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["-reset-fan-session-for-visual-testing",
+                               "-skip-startup-notification-authorization-for-testing",
+                               "-disable-screen-protection-for-visual-testing",
+                               "-UIPreferredContentSizeCategoryName",
+                               "UICTContentSizeCategoryAccessibilityXXXL"]
+        app.launch()
+        let entry = element("theme-preference-entry", in: app)
+        XCTAssertTrue(entry.waitForExistence(timeout: 12))
+        scrollToElement(entry, in: app)
+        entry.tap()
+        let black = app.buttons["theme-choice-blackGold"]
+        let pine = app.buttons["theme-choice-pine"]
+        XCTAssertTrue(black.waitForExistence(timeout: 5))
+        scrollToElement(black, in: app)
+        let firstFrame = black.frame
+        XCTAssertGreaterThanOrEqual(firstFrame.width, 280)
+        XCTAssertGreaterThanOrEqual(firstFrame.height, 44)
+        XCTAssertGreaterThanOrEqual(pine.frame.minY, firstFrame.maxY, "辅助功能大字必须变为单列")
+        black.tap()
+        XCTAssertEqual(black.value as? String, "已选择")
+        XCTAssertFalse(app.tabBars.buttons["首页"].exists)
+    }
+
+    func testIvoryThemeKeepsHomeStatusBarReadable() throws {
+        let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", "ivory"])
+        XCTAssertTrue(element("home-open-portfolio", in: app).waitForExistence(timeout: 8))
+        // Inspect transient pixels only; never attach or save the photograph.
+        let source = try XCTUnwrap(app.screenshot().image.cgImage)
+        let scene = app.windows.firstMatch.frame
+        let scale = CGFloat(source.width) / scene.width
+        let height = UIDevice.current.userInterfaceIdiom == .pad ? 30.0 : 60.0
+        let crop = try XCTUnwrap(source.cropping(to: CGRect(x: 0, y: 0,
+            width: source.width, height: Int(height * scale))))
+        let width = crop.width, rows = crop.height
+        var bytes = [UInt8](repeating: 0, count: width * rows * 4)
+        let context = try XCTUnwrap(CGContext(data: &bytes, width: width, height: rows,
+            bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: rows))
+        let bright = stride(from: 0, to: bytes.count, by: 4).filter {
+            bytes[$0] > 200 && bytes[$0 + 1] > 200 && bytes[$0 + 2] > 200
+        }.count
+        XCTAssertGreaterThan(bright, 80, "浅色主题首页的时间/系统图标消失在深色图片背景中")
+    }
+
     func testAppleFirstUseStillRequiresRegistrationAndApproval() {
         let app = XCUIApplication()
         app.launchArguments = [
@@ -198,6 +297,7 @@ final class YishuUITests: XCTestCase {
         assertExists("fan-apple-douyin-id", in: app)
         assertExists("fan-apple-consent", in: app)
         assertExists("fan-apple-delete-onboarding", in: app)
+        assertExists("theme-preference-entry", in: app)
         XCTAssertFalse(app.tabBars.buttons["首页"].exists, "Apple 首次申请不得直接进入主页")
         attachScreenshot(named: "00-apple-first-use", app: app)
     }
@@ -1217,6 +1317,59 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
 
     func testLaunchPosterCoversEveryActualWindowConfiguration() {
         recordPresentationGeometry("launch-poster", frame: verifyLaunchPosterCurrentWindow())
+    }
+
+    func testThemesFromAboutKeepNavigationAndFitActualWindow() throws {
+        let app = launchApp(arguments: ["-open-about-for-visual-testing"])
+        let entry = element("about-settings", in: app)
+        let scene = app.windows.firstMatch.frame
+        for _ in 0..<16 {
+            // A partly exposed row may be reported as hittable while its
+            // center is still covered by the floating landscape tab bar.
+            if entry.isHittable, entry.frame.midY > scene.minY + 80,
+               entry.frame.midY < scene.maxY - 130 { break }
+            let details = app.scrollViews["about-details-scroll"]
+            let scroll = details.exists ? details : app.scrollViews.firstMatch
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.8))
+                .press(forDuration: 0.05, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.2)))
+        }
+        XCTAssertTrue(entry.isHittable, "关于页必须能进入用户设置：entry=\(entry.frame)，window=\(app.windows.firstMatch.frame)")
+        entry.tap()
+        let themeEntry = element("theme-preference-entry", in: app)
+        XCTAssertTrue(themeEntry.waitForExistence(timeout: 5))
+        themeEntry.tap()
+        let window = app.windows.firstMatch
+        recordPresentationGeometry("appearance-settings", frame: window.frame)
+        for theme in ["blackGold", "pine", "indigo", "ivory"] {
+            let choice = app.buttons["theme-choice-\(theme)"]
+            for _ in 0..<6 where !choice.isHittable { app.swipeUp() }
+            XCTAssertTrue(choice.isHittable, "\(theme) 主题选项不可操作")
+            XCTAssertGreaterThanOrEqual(choice.frame.width, 44)
+            XCTAssertGreaterThanOrEqual(choice.frame.height, 44)
+            choice.tap()
+            XCTAssertEqual(choice.value as? String, "已选择")
+            XCTAssertTrue(element("appearance-settings", in: app).exists, "换色不能重建导航并退出设置")
+            XCTAssertGreaterThanOrEqual(choice.frame.minX, window.frame.minX)
+            XCTAssertLessThanOrEqual(choice.frame.maxX, window.frame.maxX)
+            // This settings-only screenshot contains no photographs or account data.
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = "theme-\(theme)-\(Int(window.frame.width))x\(Int(window.frame.height))"
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+        // Audit the entire light page, including UIKit's navigation title,
+        // rather than inferring readability from palette values alone.
+        if window.frame.height > window.frame.width {
+            try app.performAccessibilityAudit(for: [.contrast, .textClipped, .trait])
+        }
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(element("settings-account", in: app).waitForExistence(timeout: 5))
+        XCTAssertEqual(themeEntry.value as? String, "月白")
+        themeEntry.tap()
+        let original = app.buttons["theme-choice-blackGold"]
+        for _ in 0..<6 where !original.isHittable { app.swipeDown() }
+        original.tap()
+        XCTAssertEqual(original.value as? String, "已选择")
     }
 
     func testAdministratorLaunchPreviewMatchesWindowAndUpdatesDraft() {

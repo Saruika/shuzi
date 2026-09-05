@@ -255,7 +255,7 @@ struct AdminView: View {
             if let administratorContentError {
                 Label(administratorContentError, systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(AppTheme.warning)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.updatesFrequently)
                 Button {
@@ -330,7 +330,7 @@ struct AdminView: View {
             if let error = admin.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(AppTheme.warning)
                     .accessibilityAddTraits(.updatesFrequently)
             }
 
@@ -391,7 +391,7 @@ struct AdminView: View {
             } else if let operationMessage {
                 Label(operationMessage, systemImage: operationFailed ? "exclamationmark.triangle" : "checkmark.circle")
                     .font(.caption)
-                    .foregroundStyle(operationFailed ? .orange : AppTheme.gold)
+                    .foregroundStyle(operationFailed ? AppTheme.warning : AppTheme.gold)
                     .accessibilityAddTraits(.updatesFrequently)
             }
         }
@@ -475,7 +475,7 @@ struct AdminView: View {
                                             .padding(.horizontal, 7)
                                             .padding(.vertical, 5)
                                             .background(.black.opacity(0.68), in: Capsule())
-                                            .foregroundStyle(AppTheme.gold)
+                                            .foregroundStyle(MediaTheme.gold)
                                     }
                                     Spacer()
                                     Button { pendingRemoval = image } label: {
@@ -1421,7 +1421,7 @@ private struct CollaborationInboxView: View {
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(AppTheme.warning)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.updatesFrequently)
                 Button {
@@ -1470,7 +1470,7 @@ private struct CollaborationInboxView: View {
                 .accessibilityLabel("处理状态：\(request.requestStatus?.title ?? "未知")")
             }
 
-            Divider().overlay(.white.opacity(0.1))
+            Divider().overlay(AppTheme.line)
 
             detailRow("联系方式", value: request.contactMethod)
             if !request.organization.isEmpty {
@@ -1497,7 +1497,7 @@ private struct CollaborationInboxView: View {
                 }
             }
 
-            Divider().overlay(.white.opacity(0.1))
+            Divider().overlay(AppTheme.line)
 
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Label(mailDeliveryTitle(request.delivery), systemImage: mailDeliveryIcon(request.delivery))
@@ -1612,7 +1612,7 @@ private struct CollaborationInboxView: View {
     }
 
     private func mailDeliveryColor(_ delivery: AdminCollaborationDelivery) -> Color {
-        delivery.status == "dead" ? .orange : AppTheme.gold
+        delivery.status == "dead" ? AppTheme.warning : AppTheme.gold
     }
 }
 
@@ -1787,17 +1787,19 @@ private struct AdminTextFieldStyle: TextFieldStyle {
         configuration
             .padding(.horizontal, 13)
             .frame(minHeight: 48)
-            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
-            .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(.white.opacity(0.1), lineWidth: 0.5)
-            }
+            .modifier(ThemeInputChrome())
     }
 }
 
 private extension View {
-    nonisolated func adminPrimaryButton() -> some View {
-        frame(maxWidth: .infinity)
+    nonisolated func adminPrimaryButton() -> some View { modifier(AdminPrimaryButtonChrome()) }
+    nonisolated func adminSecondaryButton() -> some View { modifier(AdminSecondaryButtonChrome()) }
+}
+
+private struct AdminPrimaryButtonChrome: ViewModifier {
+    nonisolated init() {}
+    func body(content: Content) -> some View {
+        content.frame(maxWidth: .infinity)
             .padding(.vertical, 14)
             .background(AppTheme.warmWhite, in: RoundedRectangle(cornerRadius: 6))
             .foregroundStyle(AppTheme.ink)
@@ -1805,8 +1807,12 @@ private extension View {
             .frame(minHeight: 48)
     }
 
-    nonisolated func adminSecondaryButton() -> some View {
-        frame(maxWidth: .infinity)
+}
+
+private struct AdminSecondaryButtonChrome: ViewModifier {
+    nonisolated init() {}
+    func body(content: Content) -> some View {
+        content.frame(maxWidth: .infinity)
             .padding(.vertical, 12)
             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
             .foregroundStyle(AppTheme.warmWhite)

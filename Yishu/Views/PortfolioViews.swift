@@ -198,7 +198,7 @@ private struct PortfolioSearchBar: View {
             .background(AppTheme.elevatedInk, in: Capsule())
             .overlay {
                 Capsule()
-                    .stroke(.white.opacity(0.1), lineWidth: 1)
+                    .stroke(AppTheme.line, lineWidth: 1)
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("portfolio-search-control")
@@ -244,7 +244,7 @@ private struct PortfolioGridCard: View {
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .layoutPriority(1)
-                    .foregroundStyle(AppTheme.gold)
+                    .foregroundStyle(MediaTheme.gold)
                     .accessibilityLabel(portfolio.eyebrow)
                 Text(portfolio.title)
                     .font(.system(.title3, design: .serif))
@@ -413,7 +413,7 @@ private struct PortfolioHeroArtwork: View {
             EditorialArtworkImage(url: image.url)
 
             LinearGradient(
-                colors: [.clear, AppTheme.ink.opacity(0.18), AppTheme.ink.opacity(0.96)],
+                colors: [.clear, MediaTheme.ink.opacity(0.18), MediaTheme.ink.opacity(0.96)],
                 startPoint: .center,
                 endPoint: .bottom
             )
@@ -422,7 +422,7 @@ private struct PortfolioHeroArtwork: View {
                 Text(portfolio.eyebrow)
                     .font(.caption2.weight(.semibold))
                     .tracking(2)
-                    .foregroundStyle(AppTheme.gold)
+                    .foregroundStyle(MediaTheme.gold)
                 Text(portfolio.title)
                     .font(.system(.largeTitle, design: .serif))
                 Text(portfolio.subtitle)
@@ -430,6 +430,7 @@ private struct PortfolioHeroArtwork: View {
                     .foregroundStyle(.white.opacity(0.72))
                     .fixedSize(horizontal: false, vertical: true)
             }
+            .foregroundStyle(.white)
             .multilineTextAlignment(.leading)
             .padding(.horizontal, 22)
             .padding(.bottom, 24)
@@ -583,6 +584,7 @@ struct GalleryViewer: View {
             }
         }
         .statusBarHidden()
+        .environment(\.colorScheme, .dark)
         .onChange(of: accessibleImages.map(\.id)) { _, imageIDs in
             if !imageIDs.contains(selection), let firstID = imageIDs.first {
                 selection = firstID
@@ -617,7 +619,7 @@ struct GalleryViewer: View {
                     .frame(width: 44, height: 44)
                     .background(.ultraThinMaterial, in: Circle())
             }
-            .tint(selected.map(favorites.contains) == true ? AppTheme.gold : .white)
+            .tint(selected.map(favorites.contains) == true ? MediaTheme.gold : .white)
             .accessibilityLabel(selected.map(favorites.contains) == true ? "取消收藏" : "收藏照片")
         }
     }

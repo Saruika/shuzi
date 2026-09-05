@@ -146,6 +146,8 @@ struct CreditsView: View {
                 .accessibilityValue("内容简介：\(showreel.summary)，时长 \(showreel.durationLabel)")
             }
         }
+        .foregroundStyle(.white)
+        .environment(\.colorScheme, .dark)
         .padding(.horizontal, 20)
     }
 
@@ -164,7 +166,7 @@ struct CreditsView: View {
                         .font(.body.weight(.semibold))
                         .padding(.horizontal, 16)
                         .frame(minHeight: 44)
-                        .background(AppTheme.warmWhite, in: Capsule())
+                        .background(MediaTheme.warmWhite, in: Capsule())
                         .foregroundStyle(.black)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -185,7 +187,7 @@ struct CreditsView: View {
                         .font(.body.weight(.semibold))
                         .foregroundStyle(.black)
                         .frame(minWidth: 52, minHeight: 52)
-                        .background(AppTheme.warmWhite, in: Circle())
+                        .background(MediaTheme.warmWhite, in: Circle())
                 }
                 .padding(18)
             }
@@ -197,7 +199,7 @@ struct CreditsView: View {
             Text(showreel.eyebrow)
                 .font(.caption2.weight(.semibold))
                 .tracking(1.7)
-                .foregroundStyle(AppTheme.gold)
+                .foregroundStyle(MediaTheme.gold)
             Text(showreel.title)
                 .font(.system(.title2, design: .serif))
             Text(showreel.tags.joined(separator: " · "))
@@ -217,7 +219,7 @@ struct CreditsView: View {
                 in: 0...max(inlineDuration, 1),
                 onEditingChanged: handleInlineSeekEditing
             )
-            .tint(AppTheme.gold)
+            .tint(MediaTheme.gold)
             .padding(.vertical, 7)
             .contentShape(Rectangle())
             .disabled(inlineDuration <= 0)

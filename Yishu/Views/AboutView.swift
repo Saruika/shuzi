@@ -167,6 +167,7 @@ struct AboutView: View {
             profileActions
             links
             fanAccountAccess
+            settingsAccess
             copyrightNotice
             privacyAccess
             adminAccess
@@ -182,21 +183,21 @@ struct AboutView: View {
                     .accessibilityIdentifier("about-portrait")
             } else {
                 ZStack {
-                    AppTheme.elevatedInk
+                    MediaTheme.elevatedInk
                     Image(systemName: "person.crop.rectangle")
                         .font(.largeTitle.weight(.light))
-                        .foregroundStyle(AppTheme.gold.opacity(0.72))
+                        .foregroundStyle(MediaTheme.gold.opacity(0.72))
                 }
                     .accessibilityLabel("易姝形象照")
                     .accessibilityValue("正在安全加载")
                     .accessibilityIdentifier("about-portrait")
             }
-            LinearGradient(colors: [.clear, AppTheme.ink], startPoint: .center, endPoint: .bottom)
+            LinearGradient(colors: [.clear, MediaTheme.ink], startPoint: .center, endPoint: .bottom)
             VStack(alignment: .leading, spacing: 8) {
                 Text("YI SHU")
                     .font(.caption2.weight(.semibold))
                     .tracking(4)
-                    .foregroundStyle(AppTheme.warmWhite)
+                    .foregroundStyle(MediaTheme.warmWhite)
                     .shadow(color: .black.opacity(0.95), radius: 2, y: 1)
                     // Decorative transliteration; the following Chinese name
                     // carries the same semantic content for VoiceOver.
@@ -211,6 +212,7 @@ struct AboutView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("about-role-summary")
             }
+            .foregroundStyle(.white)
             .padding(.horizontal, portraitCaptionInset)
             .padding(.top, portraitCaptionInset)
             .padding(.bottom, captionBottomPadding)
@@ -227,7 +229,7 @@ struct AboutView: View {
             Text("专注于短剧表演、时尚摄影与艺术创作。希望通过克制而真实的情绪、东方气质与镜头表现，让每个角色留下属于自己的余韵。")
                 .font(.body)
                 .lineSpacing(9)
-                .foregroundStyle(.white.opacity(0.76))
+                .foregroundStyle(AppTheme.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
             if dynamicTypeSize.isAccessibilitySize {
@@ -264,17 +266,17 @@ struct AboutView: View {
             if dynamicTypeSize.isAccessibilitySize {
                 VStack(spacing: 0) {
                     stat("演员", "身份")
-                    Divider().overlay(.white.opacity(0.14))
+                    Divider().overlay(AppTheme.line)
                     stat("浙江 · 杭州", "所在地")
-                    Divider().overlay(.white.opacity(0.14))
+                    Divider().overlay(AppTheme.line)
                     stat("合作中", "状态")
                 }
             } else {
                 HStack(spacing: 0) {
                     stat("演员", "身份")
-                    Divider().overlay(.white.opacity(0.14))
+                    Divider().overlay(AppTheme.line)
                     stat("浙江 · 杭州", "所在地")
-                    Divider().overlay(.white.opacity(0.14))
+                    Divider().overlay(AppTheme.line)
                     stat("合作中", "状态")
                 }
                 .frame(minHeight: 68)
@@ -363,7 +365,7 @@ struct AboutView: View {
             Text("本 App 展示的照片与影像均已取得合法展示授权，相关著作权、肖像权及其他权利归各自权利人所有。未经书面许可，不得下载、复制、截图传播、转载、改编、二次创作或用于商业用途。")
                 .font(.footnote)
                 .lineSpacing(6)
-                .foregroundStyle(.white.opacity(0.68))
+                .foregroundStyle(AppTheme.muted)
                 .fixedSize(horizontal: false, vertical: true)
 
             NavigationLink {
@@ -402,7 +404,7 @@ struct AboutView: View {
                     .font(.title3)
                     .foregroundStyle(AppTheme.gold)
                     .frame(width: 38, height: 38)
-                    .background(.white.opacity(0.055), in: Circle())
+                    .background(AppTheme.subtleFill, in: Circle())
                 VStack(alignment: .leading, spacing: 3) {
                     Text(fanAccount.profile?.displayName ?? "粉丝账号")
                         .font(.subheadline.weight(.semibold))
@@ -413,7 +415,7 @@ struct AboutView: View {
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.38))
+                    .foregroundStyle(AppTheme.muted)
             }
             .foregroundStyle(AppTheme.warmWhite)
             .padding(15)
@@ -424,6 +426,36 @@ struct AboutView: View {
         .padding(.horizontal, 16)
         .padding(.top, 10)
         .padding(.bottom, 8)
+    }
+
+    private var settingsAccess: some View {
+        NavigationLink {
+            UserSettingsView()
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: "gearshape")
+                    .font(.title3)
+                    .foregroundStyle(AppTheme.gold)
+                    .frame(width: 38, height: 38)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("设置").font(.subheadline.weight(.semibold))
+                    Text("\(AppearanceStore.shared.theme.name) · 账号与通知 · 隐私")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.muted)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(AppTheme.muted)
+            }
+            .foregroundStyle(AppTheme.warmWhite)
+            .padding(15)
+            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("about-settings")
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
     }
 
     private var adminAccess: some View {
@@ -456,7 +488,7 @@ struct AboutView: View {
                     .font(.body)
                     .foregroundStyle(AppTheme.gold)
                     .frame(width: 34, height: 34)
-                    .background(.white.opacity(0.055), in: Circle())
+                    .background(AppTheme.subtleFill, in: Circle())
                 VStack(alignment: .leading, spacing: 3) {
                     Text("隐私政策与数据选择")
                         .font(.footnote.weight(.semibold))
@@ -467,7 +499,7 @@ struct AboutView: View {
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.35))
+                    .foregroundStyle(AppTheme.muted)
             }
                 .foregroundStyle(AppTheme.warmWhite)
                 .padding(14)
@@ -485,7 +517,8 @@ struct AboutView: View {
         Link(destination: localWeather.attributionLegalURL) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 14) {
-                    AsyncImage(url: localWeather.attributionMarkURL) { phase in
+                    AsyncImage(url: AppearanceStore.shared.theme.colorScheme == .light
+                               ? localWeather.attributionLightMarkURL : localWeather.attributionMarkURL) { phase in
                         if case .success(let image) = phase {
                             image
                                 .resizable()
@@ -500,7 +533,7 @@ struct AboutView: View {
                     Spacer()
                     Image(systemName: "arrow.up.right")
                         .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.4))
+                        .foregroundStyle(AppTheme.muted)
                 }
 
                 Text("天气数据由 Apple Weather 提供")
@@ -546,7 +579,7 @@ struct AboutView: View {
             HStack(spacing: 14) {
                 contactIcon(icon)
                     .frame(width: 36, height: 36)
-                    .background(.white.opacity(0.055), in: Circle())
+                    .background(AppTheme.subtleFill, in: Circle())
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.subheadline.weight(.medium))
@@ -557,7 +590,7 @@ struct AboutView: View {
                 Spacer()
                 Image(systemName: "arrow.up.right")
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.4))
+                    .foregroundStyle(AppTheme.muted)
             }
             .foregroundStyle(AppTheme.warmWhite)
             .padding(15)

@@ -36,6 +36,8 @@ struct PrivacyPolicyView: View {
                         "安全与诊断：服务器基础设施可在安全日志中处理 IP 地址，应用限流使用哈希化网络指纹。请求时间、错误状态和有限运行日志可能与已验证账号或会话关联，仅用于防止滥用、保障服务和排查故障，不用于跟踪或广告。",
                     ])
 
+                    policySection("本机外观偏好", text: "你可以在注册时或关于页的设置中选择界面主题。只在本机保存所选主题的标识，不与账号关联、不上传服务器、不用于追踪或广告。主题选择是可选项，不影响注册审批或内容权限；可随时更换或选择黑金恢复默认外观。")
+
                     policySection("使用目的", text: "上述数据只用于创建和验证账号、密码恢复与修改、让你查看和撤销其他登录设备、发出一次性账号邀请、由本人完成账号设置、提交和处理访问申请、批准或拒绝 App 访问、远程分配权限、向开启通知的指定账号发送与 App 功能相关的消息、让内容管理员上传和发布授权影像、回复你主动发送的合作邀约并安排合作、提供你主动请求的天气、保护服务安全及排查故障。抖音 ID 仅用于管理员辅助核验；未填写时不能完成新账号申请或获得内容访问。我们不使用这些数据进行跨 App 跟踪、定向广告或出售给数据经纪商。")
 
                     policySection("共享与处理者", text: "账号数据和管理员主动发布的影像保存在用于运行本服务的云服务器上；App 根据已验证账号的状态和权限决定界面中可见的内容。管理员创建邀请或密码恢复时只能看到一次临时凭据，无法再次查询，也无法查看你本人设置的新密码。管理员日常仅能查看核验和权限分配必需的昵称、身份码、权限和抖音 ID，不能查看推送设备令牌。通过 Apple 登录的身份验证与授权撤销由 Apple 处理，通知交付由 Apple Push Notification service（APNs）处理，天气请求由 Apple WeatherKit 处理。我们要求所有为本服务处理用户数据的服务提供方遵守与本政策相同或同等的保护要求。")
@@ -68,7 +70,7 @@ struct PrivacyPolicyView: View {
                             .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity, minHeight: 48)
                             .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(AppTheme.warmWhite)
                     }
                     .accessibilityIdentifier("privacy-contact-email")
 
@@ -102,7 +104,7 @@ struct PrivacyPolicyView: View {
             Text(text)
                 .font(.body)
                 .lineSpacing(6)
-                .foregroundStyle(.white.opacity(0.72))
+                .foregroundStyle(AppTheme.muted)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -121,7 +123,7 @@ struct PrivacyPolicyView: View {
                     Text(bullet)
                         .font(.body)
                         .lineSpacing(6)
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(AppTheme.muted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

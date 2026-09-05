@@ -90,7 +90,7 @@ struct RootView: View {
         _selectedTab = State(initialValue: initialTab)
     }
 
-    var body: some View {
+    private var themedAccessContent: some View {
         Group {
             if !hasResolvedAccess {
                 accessResolutionView
@@ -100,7 +100,14 @@ struct RootView: View {
                 AppAccessGateView()
             }
         }
-        .tint(AppTheme.gold)
+        .tint(usesDarkMediaCanvas ? MediaTheme.gold : AppTheme.gold)
+        .onChange(of: usesDarkMediaCanvas, initial: true) { _, visible in
+            AppearanceStore.shared.setDarkMediaCanvasVisible(visible)
+        }
+    }
+
+    var body: some View {
+        themedAccessContent
         .task { await restoreAccess() }
         .onChange(of: scenePhase, initial: true) { _, phase in
             guard phase == .active else { return }
@@ -293,6 +300,10 @@ struct RootView: View {
             canUnbindPushDevice: fanAccount.hasPushUnbindingSession,
             appleCredentialAccessState: fanAccount.appleCredentialAccessState
         )
+    }
+
+    private var usesDarkMediaCanvas: Bool {
+        hasResolvedAccess && canAccessAppContent && (selectedTab == .home || isLaunchPosterVisible)
     }
 
     private var authorizedAppContent: some View {

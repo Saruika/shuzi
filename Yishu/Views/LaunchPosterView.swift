@@ -25,7 +25,7 @@ struct LaunchPosterView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
-        .background(AppTheme.ink.ignoresSafeArea())
+        .background(MediaTheme.ink.ignoresSafeArea())
         .task(
             id: LaunchPosterDismissTaskID(
                 imageURL: poster.imageURL,
@@ -80,10 +80,10 @@ struct LaunchPosterCanvas: View {
             || dynamicTypeSize.isAccessibilitySize
 
         ZStack {
-            AppTheme.ink
+            MediaTheme.ink
                 .overlay {
                     LinearGradient(
-                        colors: [.white.opacity(0.025), .clear, AppTheme.gold.opacity(0.08)],
+                        colors: [.white.opacity(0.025), .clear, MediaTheme.gold.opacity(0.08)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
@@ -119,7 +119,7 @@ struct LaunchPosterCanvas: View {
                 stops: [
                     .init(color: .clear, location: 0),
                     .init(color: .clear, location: 0.5),
-                    .init(color: AppTheme.ink.opacity(0.94), location: 1),
+                    .init(color: MediaTheme.ink.opacity(0.94), location: 1),
                 ],
                 startPoint: .top,
                 endPoint: .bottom
@@ -205,21 +205,21 @@ struct LaunchPosterCanvas: View {
 
     private func launchPlaceholder(in size: CGSize) -> some View {
         ZStack {
-            AppTheme.ink
+            MediaTheme.ink
             RadialGradient(
-                colors: [AppTheme.gold.opacity(0.16), .clear],
+                colors: [MediaTheme.gold.opacity(0.16), .clear],
                 center: .topTrailing,
                 startRadius: 0,
                 endRadius: max(size.width, size.height) * 0.78
             )
             LinearGradient(
-                colors: [.white.opacity(0.035), .clear, AppTheme.gold.opacity(0.06)],
+                colors: [.white.opacity(0.035), .clear, MediaTheme.gold.opacity(0.06)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
             ProgressView()
                 .controlSize(.small)
-                .tint(AppTheme.gold)
+                .tint(MediaTheme.gold)
                 .accessibilityLabel("正在安全加载开屏图片")
                 .accessibilityIdentifier("launch-poster-loading")
         }
@@ -255,7 +255,7 @@ struct LaunchPosterCanvas: View {
                     .scaledToFill()
                     .frame(width: size.width, height: size.height)
                     .blur(radius: 34)
-                    .overlay(AppTheme.ink.opacity(0.42))
+                    .overlay(MediaTheme.ink.opacity(0.42))
 
                 image
                     .resizable()
@@ -292,7 +292,7 @@ struct LaunchPosterTextBlock: View {
             Text(poster.eyebrow)
                 .font(compact ? .caption2.weight(.bold) : .caption.weight(.bold))
                 .tracking(compact ? 2.2 : 3)
-                .foregroundStyle(AppTheme.gold)
+                .foregroundStyle(MediaTheme.gold)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
                 .fixedSize(horizontal: false, vertical: true)
 

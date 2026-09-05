@@ -132,7 +132,7 @@ struct CollaborationInquiryView: View {
                     .foregroundStyle(AppTheme.gold)
             }
 
-            Divider().overlay(.white.opacity(0.1))
+            Divider().overlay(AppTheme.line)
 
             HStack {
                 Label("浙江 · 杭州", systemImage: "location")
@@ -305,7 +305,7 @@ struct CollaborationInquiryView: View {
     private func fieldLabel(_ text: String) -> some View {
         Text(text)
             .font(.caption.weight(.medium))
-            .foregroundStyle(.white.opacity(0.75))
+            .foregroundStyle(AppTheme.muted)
     }
 
     private func valueOrPlaceholder(_ value: String) -> String {

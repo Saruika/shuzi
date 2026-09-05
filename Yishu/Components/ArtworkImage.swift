@@ -720,10 +720,10 @@ enum ScreenProtectionTesting {
 struct CaptureProtectionCover: View {
     var body: some View {
         ZStack {
-            AppTheme.ink
+            MediaTheme.ink
 
             RadialGradient(
-                colors: [AppTheme.gold.opacity(0.16), .clear],
+                colors: [MediaTheme.gold.opacity(0.16), .clear],
                 center: .center,
                 startRadius: 10,
                 endRadius: 330
@@ -737,24 +737,24 @@ struct CaptureProtectionCover: View {
                         Text("狐狸姐姐温馨提示")
                             .font(.caption.weight(.semibold))
                             .tracking(2.4)
-                            .foregroundStyle(AppTheme.gold)
+                            .foregroundStyle(MediaTheme.gold)
 
                         ZStack {
                             Circle()
-                                .stroke(AppTheme.gold.opacity(0.22), lineWidth: 1)
+                                .stroke(MediaTheme.gold.opacity(0.22), lineWidth: 1)
                                 .frame(width: 108, height: 108)
                             Circle()
-                                .fill(AppTheme.gold.opacity(0.1))
+                                .fill(MediaTheme.gold.opacity(0.1))
                                 .frame(width: 82, height: 82)
                             Image(systemName: "lock.shield.fill")
                                 .font(.largeTitle.weight(.regular))
-                                .foregroundStyle(AppTheme.gold)
+                                .foregroundStyle(MediaTheme.gold)
                         }
                         .padding(.top, 36)
 
                         Text("影像内容已保护")
                             .font(.system(.title, design: .serif))
-                            .foregroundStyle(AppTheme.warmWhite)
+                            .foregroundStyle(MediaTheme.warmWhite)
                             .padding(.top, 28)
 
                         Text("受版权保护的影像不提供保存或分享\n录屏、投屏或 App 离开前台时将自动隐藏")
@@ -765,14 +765,14 @@ struct CaptureProtectionCover: View {
                             .padding(.top, 16)
 
                         Capsule()
-                            .fill(AppTheme.gold.opacity(0.7))
+                            .fill(MediaTheme.gold.opacity(0.7))
                             .frame(width: 32, height: 1)
                             .padding(.top, 28)
 
                         Text("PROTECTED CONTENT · YI SHU")
                             .font(.caption2.weight(.semibold))
                             .tracking(2.1)
-                            .foregroundStyle(AppTheme.muted)
+                            .foregroundStyle(MediaTheme.muted)
                             .padding(.top, 18)
                     }
                     .frame(maxWidth: .infinity)
@@ -801,7 +801,7 @@ struct CaptureProtectionCover: View {
                     offset += spacing
                 }
             }
-            .stroke(AppTheme.gold.opacity(0.035), lineWidth: 1)
+            .stroke(MediaTheme.gold.opacity(0.035), lineWidth: 1)
         }
         .allowsHitTesting(false)
     }
@@ -1054,6 +1054,7 @@ struct SecureCaptureSurface<Content: View>: View {
     var body: some View {
         if ScreenProtectionTesting.isDisabled {
             content
+                .appAppearance(isAppRoot: owner == .appRoot)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             ZStack {
@@ -1067,6 +1068,7 @@ struct SecureCaptureSurface<Content: View>: View {
 
                 ScreenshotProtectedContent(owner: owner, onExit: onExit) {
                     content
+                        .appAppearance(isAppRoot: owner == .appRoot)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .privacySensitive()
                         .protectedFromScreenCapture()
@@ -1548,7 +1550,7 @@ private struct ScreenProtectionUnavailableView: View {
                     .font(.body)
                     .multilineTextAlignment(.center)
                     .lineSpacing(6)
-                    .foregroundStyle(.white.opacity(0.66))
+                    .foregroundStyle(AppTheme.muted)
 
                 if owner == .fullScreenPresentation, let onExit {
                     Button("关闭当前页面", action: onExit)

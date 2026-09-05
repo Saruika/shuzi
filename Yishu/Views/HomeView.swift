@@ -78,7 +78,7 @@ struct HomeView: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                AppTheme.ink.ignoresSafeArea()
+                MediaTheme.ink.ignoresSafeArea()
                 HeroPager(
                     imageURLs: portfolioStore.heroImages,
                     localWeather: localWeather,
@@ -89,6 +89,8 @@ struct HomeView: View {
         }
         .ignoresSafeArea(.container, edges: .top)
         .toolbar(.hidden, for: .navigationBar)
+        .toolbarColorScheme(.dark, for: .tabBar)
+        .environment(\.colorScheme, .dark)
         .task {
             localWeather.refreshIfAuthorized()
         }
@@ -190,7 +192,7 @@ private struct HeroPager: View {
                         .init(color: .clear, location: 0),
                         .init(color: .clear, location: 0.55),
                         .init(
-                            color: AppTheme.ink.opacity(presentation == .fit ? 0.68 : 0.95),
+                            color: MediaTheme.ink.opacity(presentation == .fit ? 0.68 : 0.95),
                             location: 1
                         )
                     ]),
@@ -425,7 +427,7 @@ private struct HeroPager: View {
         HStack(spacing: 7) {
             ForEach(slides.indices, id: \.self) { index in
                 Capsule()
-                    .fill(index == selection ? AppTheme.warmWhite : .white.opacity(0.35))
+                    .fill(index == selection ? MediaTheme.warmWhite : .white.opacity(0.35))
                     .frame(width: index == selection ? 18 : 5, height: 5)
                     .animation(reduceMotion ? nil : .easeInOut, value: selection)
             }
@@ -686,7 +688,7 @@ private struct HeroSlideImage: View {
     private func filledComposition(in size: CGSize) -> some View {
         ZStack {
             placeholder
-                .overlay { ProgressView().tint(AppTheme.gold) }
+                .overlay { ProgressView().tint(MediaTheme.gold) }
 
             remoteImage(in: size, usesFittedPresentation: false)
         }
@@ -747,12 +749,12 @@ private struct HeroSlideImage: View {
     @ViewBuilder
     private func fittedBackground(in size: CGSize) -> some View {
         ZStack {
-            AppTheme.elevatedInk
+            MediaTheme.elevatedInk
             LinearGradient(
                 colors: [
-                    AppTheme.gold.opacity(0.16),
+                    MediaTheme.gold.opacity(0.16),
                     Color(red: 0.10, green: 0.13, blue: 0.12),
-                    AppTheme.elevatedInk,
+                    MediaTheme.elevatedInk,
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -846,9 +848,9 @@ private struct HeroSlideImage: View {
 
     private var placeholder: some View {
         ZStack {
-            AppTheme.elevatedInk
+            MediaTheme.elevatedInk
             LinearGradient(
-                colors: [.white.opacity(0.035), .clear, AppTheme.gold.opacity(0.05)],
+                colors: [.white.opacity(0.035), .clear, MediaTheme.gold.opacity(0.05)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )

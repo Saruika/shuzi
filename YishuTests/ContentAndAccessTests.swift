@@ -6,6 +6,7 @@ import UIKit
 import UserNotifications
 import WeatherKit
 import CoreLocation
+import Observation
 @testable import Yishu
 
 private enum TestCredentialFixture {
@@ -1352,6 +1353,78 @@ final class ContentAndAccessTests: XCTestCase {
         @unknown default:
             XCTFail("Administrator previews use an unsupported content mode")
         }
+    }
+
+    @MainActor
+    func testAppearanceDefaultsToBlackGoldAndPersistsEverySupportedTheme() throws {
+        let defaults = try makePushStartupDefaults()
+        XCTAssertNil(defaults.object(forKey: AppearanceStore.preferenceKey))
+        let store = AppearanceStore(defaults: defaults)
+        XCTAssertEqual(store.theme, .blackGold)
+        defaults.set("untouched", forKey: "account-fixture-sentinel")
+        for theme in AppColorTheme.allCases {
+            store.select(theme)
+            XCTAssertEqual(AppearanceStore(defaults: defaults).theme, theme)
+            XCTAssertEqual(defaults.string(forKey: "account-fixture-sentinel"), "untouched")
+        }
+        store.select(.blackGold)
+        XCTAssertEqual(AppearanceStore(defaults: defaults).theme, .blackGold)
+    }
+
+    @MainActor
+    func testInvalidAppearancePreferenceFallsBackWithoutChangingAccounts() throws {
+        let defaults = try makePushStartupDefaults()
+        for value in ["", "future-theme", "../../account", "IVORY"] {
+            defaults.set(value, forKey: AppearanceStore.preferenceKey)
+            XCTAssertEqual(AppearanceStore(defaults: defaults).theme, .blackGold)
+        }
+    }
+
+    @MainActor
+    func testAppearanceChangesAreObservableWithoutReplacingNavigation() throws {
+        let defaults = try makePushStartupDefaults()
+        let store = AppearanceStore(defaults: defaults)
+        let changed = expectation(description: "Theme observation notified")
+        withObservationTracking { _ = store.theme.palette } onChange: { changed.fulfill() }
+        store.select(.pine)
+        wait(for: [changed], timeout: 1)
+    }
+
+    func testAllThemeTextAndControlsMeetNormalTextContrast() {
+        for theme in AppColorTheme.allCases {
+            let palette = theme.palette
+            for background in [palette.background, palette.surface] {
+                for foreground in [palette.text, palette.secondary, palette.accent] {
+                    XCTAssertGreaterThanOrEqual(foreground.contrast(with: background), 4.5,
+                                               "\(theme.name) 的正文/次级文字/强调色对比度不足")
+                }
+            }
+            XCTAssertGreaterThanOrEqual(palette.text.contrast(with: palette.background), 7)
+            XCTAssertGreaterThanOrEqual(palette.accent.contrast(with: palette.background), 4.5)
+        }
+        XCTAssertEqual(AppColorTheme.ivory.colorScheme, .light)
+        XCTAssertTrue(AppColorTheme.allCases.filter { $0 != .ivory }.allSatisfy { $0.colorScheme == .dark })
+    }
+
+    func testMediaCanvasesKeepOriginalBlackGoldColors() {
+        let original = AppColorTheme.blackGold.palette
+        XCTAssertEqual(original.background, ThemeRGB(red: 0.025, green: 0.023, blue: 0.022))
+        XCTAssertEqual(MediaTheme.ink, original.background.color)
+        XCTAssertEqual(MediaTheme.gold, original.accent.color)
+        XCTAssertEqual(MediaTheme.warmWhite, original.text.color)
+    }
+
+    @MainActor
+    func testMediaSystemAppearanceIsTransientAndDoesNotOverwriteUserTheme() throws {
+        let defaults = try makePushStartupDefaults()
+        let store = AppearanceStore(defaults: defaults)
+        store.select(.ivory)
+        store.setDarkMediaCanvasVisible(true)
+        XCTAssertEqual(store.systemColorScheme, .dark)
+        XCTAssertEqual(store.theme, .ivory)
+        XCTAssertEqual(AppearanceStore(defaults: defaults).systemColorScheme, .light)
+        store.setDarkMediaCanvasVisible(false)
+        XCTAssertEqual(store.systemColorScheme, .light)
     }
 
     func testNewLaunchPosterDraftUsesCurrentWelcomeCopyWithoutChangingManagedPosters() {

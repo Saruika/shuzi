@@ -115,10 +115,12 @@ struct FanAccountView: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollIndicators(.hidden)
+            .scrollDismissesKeyboard(.interactively)
+            .accessibilityIdentifier("fan-account-scroll")
         }
         .navigationTitle(isAccessGate ? "访问申请" : "粉丝账号")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .themeNavigationChrome()
         .toolbar(.hidden, for: .tabBar)
         .task { await account.restoreSession() }
         .onAppear {
@@ -257,9 +259,9 @@ struct FanAccountView: View {
 
             VStack(spacing: 10) {
                 HStack(spacing: 10) {
-                    Rectangle().fill(.white.opacity(0.12)).frame(height: 1)
+                    Rectangle().fill(AppTheme.line).frame(height: 1)
                     Text("或").font(.caption).foregroundStyle(AppTheme.muted)
-                    Rectangle().fill(.white.opacity(0.12)).frame(height: 1)
+                    Rectangle().fill(AppTheme.line).frame(height: 1)
                 }
 
                 NativeAppleSignInButton { window in
@@ -289,7 +291,7 @@ struct FanAccountView: View {
             if let error = account.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(AppTheme.warning)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.updatesFrequently)
             }
@@ -386,6 +388,8 @@ struct FanAccountView: View {
                 }
                 .accessibilityIdentifier("fan-apple-privacy-policy")
 
+                ThemePreferenceRow()
+
                 Toggle(isOn: $appleRegistrationDraft.acceptedDataUse) {
                     Text("我已阅读隐私政策：昵称、抖音 ID、随机身份码和安装记录用于账号识别、管理员核验、安全登录与权限分配。")
                         .font(.caption)
@@ -420,7 +424,7 @@ struct FanAccountView: View {
             if let error = account.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(AppTheme.warning)
                     .accessibilityAddTraits(.updatesFrequently)
             }
 
@@ -456,6 +460,7 @@ struct FanAccountView: View {
             TextField("昵称", text: $displayName)
                 .textContentType(.nickname)
                 .accessibilityLabel("昵称")
+                .accessibilityIdentifier("fan-register-display-name")
             TextField("抖音 ID（必填，不要填链接）", text: $douyinID)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -482,6 +487,8 @@ struct FanAccountView: View {
                     .contentShape(Rectangle())
             }
             .accessibilityIdentifier("fan-register-privacy-policy")
+
+            ThemePreferenceRow()
 
             Toggle(isOn: $acceptedDataUse) {
                 Text("我已阅读隐私政策：昵称、抖音 ID、随机身份码和安装记录用于账号识别、管理员核验、安全登录与权限分配。上述资料不用于广告跟踪。")
@@ -575,7 +582,7 @@ struct FanAccountView: View {
                         !profile.requiresAccountSetup && !profile.requiresPasswordChange
                             && !requiresDouyinCompletion
                             && profile.status == FanAccountStatus.active.rawValue
-                            ? AppTheme.gold : .orange
+                            ? AppTheme.gold : AppTheme.warning
                     )
                     .accessibilityIdentifier(
                         profile.requiresAccountSetup
@@ -597,15 +604,15 @@ struct FanAccountView: View {
 
                 VStack(spacing: 0) {
                     identityRow("粉丝身份码", value: profile.identityCode, copyable: true)
-                    Divider().overlay(.white.opacity(0.08))
+                    Divider().overlay(AppTheme.line)
                     identityRow(
                         "抖音 ID",
                         value: profile.douyinID.isEmpty ? "未填写（必须补全）" : profile.douyinID,
                         copyable: false
                     )
-                    Divider().overlay(.white.opacity(0.08))
+                    Divider().overlay(AppTheme.line)
                     identityRow("本机安装码", value: profile.installationCode, copyable: true)
-                    Divider().overlay(.white.opacity(0.08))
+                    Divider().overlay(AppTheme.line)
                     identityRow("身份记录 UUID", value: profile.userID, copyable: true)
                 }
                 .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 8))
@@ -617,7 +624,7 @@ struct FanAccountView: View {
                     )
                     .font(.subheadline)
                     .lineSpacing(5)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(AppTheme.warning)
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
@@ -766,7 +773,7 @@ struct FanAccountView: View {
             if let error = account.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(AppTheme.warning)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.updatesFrequently)
             }
@@ -838,7 +845,7 @@ struct FanAccountView: View {
             }
 
             identityRow("粉丝身份码", value: profile.identityCode, copyable: true)
-                .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                .background(AppTheme.subtleFill, in: RoundedRectangle(cornerRadius: 6))
 
             TextField("本人昵称", text: $invitedDisplayName)
                 .textContentType(.nickname)
@@ -868,6 +875,8 @@ struct FanAccountView: View {
                     .contentShape(Rectangle())
             }
             .accessibilityIdentifier("fan-setup-privacy-policy")
+
+            ThemePreferenceRow()
 
             Toggle(isOn: $acceptedInvitationDataUse) {
                 Text("我本人已阅读隐私政策，同意昵称、抖音 ID、随机身份码和安装记录用于账号识别、管理员核验、安全登录与权限分配。")
@@ -917,6 +926,11 @@ struct FanAccountView: View {
                     beginAppleAuthorization(purpose: .signIn, presentationAnchor: window)
                 }
                 .frame(height: 50)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(AppTheme.line, lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
                 .disabled(account.isWorking || appleSignIn.isWorking)
                 .opacity(account.isWorking || appleSignIn.isWorking ? 0.55 : 1)
                 .accessibilityIdentifier("fan-douyin-upgrade-apple")
@@ -990,7 +1004,7 @@ struct FanAccountView: View {
             }
 
             identityRow("粉丝身份码", value: profile.identityCode, copyable: true)
-                .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                .background(AppTheme.subtleFill, in: RoundedRectangle(cornerRadius: 6))
             SecureField("重新输入管理员给你的临时密码", text: $recoveryTemporaryPassword)
                 .textContentType(.password)
                 .accessibilityLabel("管理员提供的临时恢复密码")
@@ -1072,7 +1086,7 @@ struct FanAccountView: View {
         return Label(message, systemImage: statusIcon(status))
             .font(.subheadline)
             .lineSpacing(5)
-            .foregroundStyle(.white.opacity(0.82))
+            .foregroundStyle(AppTheme.warmWhite)
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
@@ -1213,7 +1227,7 @@ struct FanAccountView: View {
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .frame(width: 44, height: 44)
-                        .background(.white.opacity(0.06), in: Circle())
+                        .background(AppTheme.subtleFill, in: Circle())
                 }
                 .accessibilityLabel("复制\(title)")
             }
@@ -1453,7 +1467,7 @@ private struct FanAccountSecurityView: View {
                     if let error = account.errorMessage {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(AppTheme.warning)
                             .accessibilityAddTraits(.updatesFrequently)
                     }
                 }
@@ -1607,7 +1621,7 @@ struct FanAccessAdminView: View {
                     if let errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(AppTheme.warning)
                             .accessibilityAddTraits(.updatesFrequently)
                     }
                 }
@@ -1700,7 +1714,7 @@ struct FanAccessAdminView: View {
                     systemImage: "exclamationmark.shield.fill"
                 )
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.orange)
+                .foregroundStyle(AppTheme.warning)
 
                 ForEach(invitations) { invitation in
                     VStack(alignment: .leading, spacing: 9) {
@@ -1738,7 +1752,7 @@ struct FanAccessAdminView: View {
                         Label("复制全部临时账号", systemImage: "doc.on.doc.fill")
                             .font(.caption.weight(.semibold))
                             .frame(maxWidth: .infinity, minHeight: 44)
-                            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+                            .background(AppTheme.subtleFill, in: RoundedRectangle(cornerRadius: 6))
                     }
                     .buttonStyle(.plain)
                 }
@@ -2058,7 +2072,7 @@ private struct FanAccessDetailView: View {
                             .accessibilityAddTraits(.isHeader)
                         Label(adminStatusTitle(user.status), systemImage: adminStatusIcon(user.status))
                             .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
+                            .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : AppTheme.warning)
 
                         if user.requiresIdentityCompletion {
                             Label(
@@ -2072,7 +2086,7 @@ private struct FanAccessDetailView: View {
                             )
                             .font(.caption)
                             .lineSpacing(4)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(AppTheme.warning)
                             .padding(13)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
@@ -2146,7 +2160,7 @@ private struct FanAccessDetailView: View {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Label("请立即安全交给账号本人", systemImage: "exclamationmark.shield.fill")
                                         .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.orange)
+                                        .foregroundStyle(AppTheme.warning)
                                     Text(passwordRecovery.identityCode)
                                         .font(.system(.subheadline, design: .monospaced, weight: .semibold))
                                         .textSelection(.enabled)
@@ -2228,7 +2242,7 @@ private struct FanAccessDetailView: View {
                     if let errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(AppTheme.warning)
                             .accessibilityAddTraits(.updatesFrequently)
                     }
 
@@ -2458,7 +2472,7 @@ private struct FanPushComposerView: View {
                             : "已关闭：将按上方文本发送。请确保内容不含联系方式、账号、密码或其他敏感信息。"
                     )
                     .font(.caption)
-                    .foregroundStyle(privacyMode ? AppTheme.muted : .orange)
+                    .foregroundStyle(privacyMode ? AppTheme.muted : AppTheme.warning)
                 } footer: {
                     Text("消息会保存在该用户的云端消息箱。通知权限只影响系统提醒，不影响登录后查看消息，也不会暴露设备令牌。")
                 }
@@ -2472,7 +2486,7 @@ private struct FanPushComposerView: View {
                 if let errorMessage {
                     Section {
                         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(AppTheme.warning)
                     }
                 }
 
@@ -2604,14 +2618,14 @@ private struct FanAdminUserRow: View {
         HStack(spacing: 13) {
             Image(systemName: rowIcon)
                 .font(.title)
-                .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
+                .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : AppTheme.warning)
                 .frame(width: 42)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     Text(user.displayName).font(.subheadline.weight(.semibold))
                     Text(rowStatus)
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : .orange)
+                        .foregroundStyle(user.status == FanAccountStatus.active.rawValue ? AppTheme.gold : AppTheme.warning)
                 }
                 Text(user.requiresAppleRegistration
                      ? "等待完成账号申请 · \(user.identityCode)"
@@ -2628,7 +2642,7 @@ private struct FanAdminUserRow: View {
             Spacer()
             Image(systemName: "chevron.right")
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.35))
+                .foregroundStyle(AppTheme.muted)
         }
         .padding(14)
         .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 7))
@@ -2667,10 +2681,6 @@ private struct AccountTextFieldStyle: TextFieldStyle {
         configuration
             .padding(.horizontal, 13)
             .frame(minHeight: 48)
-            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
-            .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(.white.opacity(0.1), lineWidth: 0.5)
-            }
+            .modifier(ThemeInputChrome())
     }
 }

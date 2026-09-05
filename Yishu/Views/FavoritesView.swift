@@ -124,7 +124,7 @@ struct FavoritesView: View {
                             .font(.body.weight(.medium))
                             .foregroundStyle(AppTheme.gold)
                             .frame(width: 44, height: 44)
-                            .background(.white.opacity(0.06), in: Circle())
+                            .background(AppTheme.subtleFill, in: Circle())
                     }
                     .accessibilityLabel("分享收藏片单")
                 } else if selectedSection == .history, !recentPortfolios.isEmpty {
@@ -133,7 +133,7 @@ struct FavoritesView: View {
                             .font(.body.weight(.medium))
                             .foregroundStyle(AppTheme.muted)
                             .frame(width: 44, height: 44)
-                            .background(.white.opacity(0.06), in: Circle())
+                            .background(AppTheme.subtleFill, in: Circle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("清除最近浏览记录")
