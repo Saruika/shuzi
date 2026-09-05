@@ -1403,7 +1403,9 @@ final class ContentAndAccessTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(palette.accent.contrast(with: palette.background), 4.5)
         }
         XCTAssertEqual(AppColorTheme.ivory.colorScheme, .light)
-        XCTAssertTrue(AppColorTheme.allCases.filter { $0 != .ivory }.allSatisfy { $0.colorScheme == .dark })
+        XCTAssertEqual(AppColorTheme.blush.colorScheme, .light)
+        XCTAssertEqual(AppColorTheme.bamboo.colorScheme, .light)
+        XCTAssertTrue([AppColorTheme.blackGold, .pine, .indigo, .plum, .rouge].allSatisfy { $0.colorScheme == .dark })
     }
 
     func testMediaCanvasesKeepOriginalBlackGoldColors() {
@@ -1418,13 +1420,15 @@ final class ContentAndAccessTests: XCTestCase {
     func testMediaSystemAppearanceIsTransientAndDoesNotOverwriteUserTheme() throws {
         let defaults = try makePushStartupDefaults()
         let store = AppearanceStore(defaults: defaults)
-        store.select(.ivory)
-        store.setDarkMediaCanvasVisible(true)
-        XCTAssertEqual(store.systemColorScheme, .dark)
-        XCTAssertEqual(store.theme, .ivory)
-        XCTAssertEqual(AppearanceStore(defaults: defaults).systemColorScheme, .light)
-        store.setDarkMediaCanvasVisible(false)
-        XCTAssertEqual(store.systemColorScheme, .light)
+        for theme in AppColorTheme.allCases where theme.colorScheme == .light {
+            store.select(theme)
+            store.setDarkMediaCanvasVisible(true)
+            XCTAssertEqual(store.systemColorScheme, .dark)
+            XCTAssertEqual(store.theme, theme)
+            XCTAssertEqual(AppearanceStore(defaults: defaults).systemColorScheme, .light)
+            store.setDarkMediaCanvasVisible(false)
+            XCTAssertEqual(store.systemColorScheme, .light)
+        }
     }
 
     func testNewLaunchPosterDraftUsesCurrentWelcomeCopyWithoutChangingManagedPosters() {

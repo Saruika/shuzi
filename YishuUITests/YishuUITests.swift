@@ -1340,7 +1340,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         themeEntry.tap()
         let window = app.windows.firstMatch
         recordPresentationGeometry("appearance-settings", frame: window.frame)
-        for theme in ["blackGold", "pine", "indigo", "ivory"] {
+        for theme in ["blackGold", "pine", "indigo", "ivory", "plum", "rouge", "blush", "bamboo"] {
             let choice = app.buttons["theme-choice-\(theme)"]
             for _ in 0..<6 where !choice.isHittable { app.swipeUp() }
             XCTAssertTrue(choice.isHittable, "\(theme) 主题选项不可操作")
@@ -1352,7 +1352,10 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             XCTAssertGreaterThanOrEqual(choice.frame.minX, window.frame.minX)
             XCTAssertLessThanOrEqual(choice.frame.maxX, window.frame.maxX)
             // This settings-only screenshot contains no photographs or account data.
-            let shot = XCTAttachment(screenshot: app.screenshot())
+            // Capture the display, not XCUIApplication's crop: on iOS 26
+            // its landscape crop can use portrait coordinates and truncate
+            // the evidence even when the actual window is correctly laid out.
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
             shot.name = "theme-\(theme)-\(Int(window.frame.width))x\(Int(window.frame.height))"
             shot.lifetime = .keepAlways
             add(shot)
@@ -1364,7 +1367,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         }
         app.navigationBars.buttons.element(boundBy: 0).tap()
         XCTAssertTrue(element("settings-account", in: app).waitForExistence(timeout: 5))
-        XCTAssertEqual(themeEntry.value as? String, "月白")
+        XCTAssertEqual(themeEntry.value as? String, "竹青")
         themeEntry.tap()
         let original = app.buttons["theme-choice-blackGold"]
         for _ in 0..<6 where !original.isHittable { app.swipeDown() }

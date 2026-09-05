@@ -41,7 +41,7 @@ struct ThemePalette: Equatable, Sendable {
 }
 
 enum AppColorTheme: String, CaseIterable, Identifiable, Sendable {
-    case blackGold, pine, indigo, ivory
+    case blackGold, pine, indigo, ivory, plum, rouge, blush, bamboo
 
     var id: String { rawValue }
     var name: String {
@@ -50,6 +50,10 @@ enum AppColorTheme: String, CaseIterable, Identifiable, Sendable {
         case .pine: "松青"
         case .indigo: "黛蓝"
         case .ivory: "月白"
+        case .plum: "紫棠"
+        case .rouge: "胭脂"
+        case .blush: "藕粉"
+        case .bamboo: "竹青"
         }
     }
     var detail: String {
@@ -58,9 +62,18 @@ enum AppColorTheme: String, CaseIterable, Identifiable, Sendable {
         case .pine: "沉静青绿 · 柔和松色"
         case .indigo: "深邃蓝调 · 清透银蓝"
         case .ivory: "温润浅色 · 纸感留白"
+        case .plum: "烟紫深色 · 柔雾紫棠"
+        case .rouge: "暗红深色 · 温柔胭脂"
+        case .blush: "灰粉浅色 · 淡雅藕粉"
+        case .bamboo: "灰绿浅色 · 清浅竹青"
         }
     }
-    var colorScheme: ColorScheme { self == .ivory ? .light : .dark }
+    var colorScheme: ColorScheme {
+        switch self {
+        case .ivory, .blush, .bamboo: .light
+        default: .dark
+        }
+    }
     var palette: ThemePalette {
         switch self {
         case .blackGold:
@@ -80,6 +93,18 @@ enum AppColorTheme: String, CaseIterable, Identifiable, Sendable {
         case .ivory:
             ThemePalette(background: .init(0xF4F0E8), surface: .init(0xFFFCF5),
                          text: .init(0x292C29), secondary: .init(0x626761), accent: .init(0x705323))
+        case .plum:
+            ThemePalette(background: .init(0x231D2B), surface: .init(0x32283C),
+                         text: .init(0xF3EDF5), secondary: .init(0xBDB0C5), accent: .init(0xD1AFD0))
+        case .rouge:
+            ThemePalette(background: .init(0x2B1E22), surface: .init(0x3C2C32),
+                         text: .init(0xF7ECEB), secondary: .init(0xCCB4BA), accent: .init(0xE0B2B9))
+        case .blush:
+            ThemePalette(background: .init(0xF4EBED), surface: .init(0xFFFAFB),
+                         text: .init(0x3E3036), secondary: .init(0x6F5D64), accent: .init(0x84596D))
+        case .bamboo:
+            ThemePalette(background: .init(0xEBF1E8), surface: .init(0xF8FCF5),
+                         text: .init(0x2C342E), secondary: .init(0x5E695B), accent: .init(0x536A4B))
         }
     }
 }
@@ -135,7 +160,7 @@ enum AppTheme {
     static var line: Color { palette.text.color.opacity(0.16) }
     static var subtleFill: Color { palette.text.color.opacity(0.055) }
     static var warning: Color {
-        AppearanceStore.shared.theme == .ivory ? ThemeRGB(0x874100).color : .orange
+        AppearanceStore.shared.theme.colorScheme == .light ? ThemeRGB(0x874100).color : .orange
     }
 }
 
