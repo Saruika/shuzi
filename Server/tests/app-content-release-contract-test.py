@@ -5,7 +5,7 @@ from pathlib import Path
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 STANDBY_SEEDER = Path("Server/operations/seed-standby-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE_RECORD = Path("Server/releases/v1.3.34-build46.md")
+RELEASE_RECORD = Path("Server/releases/v1.3.34-build46.2.md")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
 SERVER_ROOT = Path("Server")
@@ -23,13 +23,13 @@ PLUGIN_MODULES = (
     PLUGIN_IMPLEMENTATION,
 )
 LEGACY_MANIFEST_SHA256 = "64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134"
-PREVIOUS_MANIFEST_SHA256 = "f4934cbab314142ec8a11e1b1d59aef9d9e986a19be5dda9db5ec42f24122447"
-TARGET_MANIFEST_SHA256 = "c4ac813f68d94ed7a1300aa61e945bbfc1833cc53ea8070b2b9d6f9c1f1a1dae"
-TARGET_PLUGIN_SHA256 = "7a04392312c1754da4bb058f765b3548e0cd67d6f62a411bb1e486b938dcb63c"
+PREVIOUS_MANIFEST_SHA256 = "c4ac813f68d94ed7a1300aa61e945bbfc1833cc53ea8070b2b9d6f9c1f1a1dae"
+TARGET_MANIFEST_SHA256 = "3e9f367cf89276ef1a00983b90be5a8b1f3d82435493a2473cbca8b5f0adafbd"
+TARGET_PLUGIN_SHA256 = "477205e3b9e9c6c1b435569304d533e025268d035c6bd20ab4349e77b36c519b"
 TARGET_MODULE_SHA256S = (
     "e4a4b04ec50434991446bf06d127c6604959378c70007bb4bc044a9e9916327d",
     "dc3e0af6a7ba309c94e71d65c82f5a928e171b9726f312f5db3fa9eec48ec7b0",
-    "8a8f3e45bffb0664bcae43ae44b28842f34b363b14356a58e435c11e0f6961fb",
+    "8b65cd0b0fe2ef630d314e7aa66cc4eb4e0fffe4d31eae00892af65fcaa5b35f",
     "4d70e1cbf14e4de6091bfa5e7b39abc5b009d03f673f8397efa89d645c1e3c33",
     "2383fc04dce1a208b5bc1d10ebdd15f3f3589b7c06aa914fb7c5417da0ccec80",
     "968d9e9661155390cac30600b50156523d02c29f212581d6c97a999c2e2c3ce8",
@@ -79,7 +79,7 @@ def assert_manifest_lifecycle_regressions(text: str, lines: list[str]) -> None:
 
     # A complete 1.5.8 standby seed is a valid ordinary-deploy baseline. The
     # subsequent ordinary publication changes all payload bytes before the
-    # final manifest commit, leaving one complete 1.5.12.2 release.
+    # final manifest commit, leaving one complete 1.5.12.3 release.
     live: dict[str, str] = {}
     for entry in release_entries:
         live[entry] = LEGACY_MANIFEST_SHA256

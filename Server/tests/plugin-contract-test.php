@@ -595,6 +595,8 @@ expect_error_code('push_storage_unavailable', $migration_storage_error, '真实�
 expect_same(503, $migration_storage_error->get_error_data()['status'] ?? null, '数据库故障应保留可重试状态');
 $GLOBALS['wpdb'] = $legacy_migration_original_db;
 
+require __DIR__ . '/push-ownership-regression.php';
+
 // The worker must honor the absolute deadline stored with the notification.
 // Test mode returns before network I/O but only after payload/deadline checks.
 $GLOBALS['yishu_test_filters']['yishu_apns_delivery_result'] = static function (): array {
@@ -1089,7 +1091,7 @@ expect_same(
         '2026-09-04-approval-v4',
     ),
     Shuzijun_App_Content_API::FAN_ACCEPTED_TRANSITIONAL_NEW_CONSENT_VERSIONS,
-    '1.5.12.2 新同意过渡只能精确接受 Build 42 v3 与 Build 45 v4'
+    '1.5.12.3 新同意过渡只能精确接受 Build 42 v3 与 Build 45 v4'
 );
 expect_same(
     array(
@@ -1126,7 +1128,7 @@ expect_true(
         && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(array(
             '2026-08-31-approval-v2',
         )),
-    '1.5.12.2 新同意只能精确接受 v3/v4，v2、未知、缺失或非字符串必须失败'
+    '1.5.12.3 新同意只能精确接受 v3/v4，v2、未知、缺失或非字符串必须失败'
 );
 expect_true(
     Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
@@ -2251,7 +2253,7 @@ $invitation_meta_source = ($invitation_meta_start === false || $invitation_meta_
     ? ''
     : substr($plugin_source, $invitation_meta_start, $invitation_meta_end - $invitation_meta_start);
 expect_true(
-    strpos($plugin_source, 'Version: 1.5.12.2') !== false
+    strpos($plugin_source, 'Version: 1.5.12.3') !== false
         && Shuzijun_App_Content_API::FAN_CAPABILITY === 'manage_yishu_fan_accounts'
         && Shuzijun_App_Content_API::FAN_INVITATION_TTL === 86400
         && Shuzijun_App_Content_API::FAN_ONBOARDING_SESSION_TTL === 600
@@ -2484,7 +2486,7 @@ expect_true(
         && strpos($plugin_source, "'https://appleid.apple.com/auth/keys'") !== false
         && strpos($plugin_source, "JWK::parseKeySet(\$filtered, 'RS256')") !== false
         && strpos($plugin_source, "(string) (\$headers->alg ?? '') !== 'RS256'") !== false
-        && strpos($plugin_source, 'Version: 1.5.12.2') !== false,
+        && strpos($plugin_source, 'Version: 1.5.12.3') !== false,
     'Apple 认证必须强制 authorization code 交换并用 RS256/JWKS 严格验证'
 );
 $apple_jwks_start = strpos($plugin_source, 'private static function fetch_apple_jwk_keys');

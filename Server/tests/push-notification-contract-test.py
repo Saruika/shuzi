@@ -30,7 +30,7 @@ def main() -> None:
     ios_push = IOS_PUSH.read_text(encoding="utf-8")
     combined = "\n".join((core, fan, push, identity, delivery))
 
-    assert "Version: 1.5.12.2" in entry
+    assert "Version: 1.5.12.3" in entry
     assert "v1.3.33-build45" in release
     assert "推送 Worker 尚未启用" in release
     for variable in (

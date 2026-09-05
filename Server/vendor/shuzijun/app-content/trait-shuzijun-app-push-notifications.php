@@ -1452,19 +1452,29 @@ trait Shuzijun_App_Push_Notifications {
                 "DELETE FROM {$tables['devices']} WHERE install_hash = %s",
                 $install_hash
             ));
-            $updated = $wpdb->query($wpdb->prepare(
-                "UPDATE {$tables['install_states']}
-                 SET fan_user_id = %d, session_option_id = %d,
-                     desired_state = 'unbound', session_expires_at = %s, updated_at = %s
-                 WHERE install_hash = %s",
-                $user_id,
-                $option_id,
-                gmdate('Y-m-d H:i:s', (int) $fresh_context['expires']),
-                $now,
-                $install_hash
-            ));
-            if ($cancelled === false || $deleted === false || $updated !== 1) {
+            if ($cancelled === false || $deleted === false) {
                 return self::push_storage_error();
+            }
+            if ($created === 1) {
+                // INSERT already persisted the new unbound owner. An identical
+                // UPDATE can correctly affect zero rows; do not issue it or
+                // weaken the changed-row check for an existing owner's handoff.
+                if ($owner_option_id !== $option_id || $owner_user_id !== $user_id) {
+                    return self::push_storage_error();
+                }
+            } else {
+                $updated = $wpdb->query($wpdb->prepare(
+                    "UPDATE {$tables['install_states']}
+                     SET fan_user_id = %d, session_option_id = %d,
+                         desired_state = 'unbound', session_expires_at = %s, updated_at = %s
+                     WHERE install_hash = %s",
+                    $user_id,
+                    $option_id,
+                    gmdate('Y-m-d H:i:s', (int) $fresh_context['expires']),
+                    $now,
+                    $install_hash
+                ));
+                if ($updated !== 1) { return self::push_storage_error(); }
             }
         }
         return true;
@@ -1527,18 +1537,29 @@ trait Shuzijun_App_Push_Notifications {
                     "DELETE FROM {$tables['devices']} WHERE install_hash = %s",
                     $install_hash
                 ));
-                $updated = $wpdb->query($wpdb->prepare(
-                    "UPDATE {$tables['install_states']}
-                     SET fan_user_id = %d, session_option_id = %d,
-                         desired_state = 'unbound', session_expires_at = %s, updated_at = %s
-                     WHERE install_hash = %s",
-                    $user_id,
-                    $option_id,
-                    gmdate('Y-m-d H:i:s', (int) $context['expires']),
-                    $now,
-                    $install_hash
-                ));
-                if ($cancelled === false || $deleted === false || $updated !== 1) { return false; }
+                if ($cancelled === false || $deleted === false) { return false; }
+                if ($created === 1) {
+                    // The successful INSERT is the ownership write for a new
+                    // installation. Repeating it with the same values yields
+                    // zero changed rows in MySQL, not a storage failure.
+                    if ($current_option_id !== $option_id
+                        || (int) ($state['fan_user_id'] ?? 0) !== $user_id) {
+                        return false;
+                    }
+                } else {
+                    $updated = $wpdb->query($wpdb->prepare(
+                        "UPDATE {$tables['install_states']}
+                         SET fan_user_id = %d, session_option_id = %d,
+                             desired_state = 'unbound', session_expires_at = %s, updated_at = %s
+                         WHERE install_hash = %s",
+                        $user_id,
+                        $option_id,
+                        gmdate('Y-m-d H:i:s', (int) $context['expires']),
+                        $now,
+                        $install_hash
+                    ));
+                    if ($updated !== 1) { return false; }
+                }
             } elseif ((int) ($state['fan_user_id'] ?? 0) !== $user_id) {
                 return false;
             }
