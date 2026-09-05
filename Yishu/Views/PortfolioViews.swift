@@ -655,15 +655,26 @@ struct GalleryViewer: View {
     }
 }
 
-private struct ProgressiveGalleryArtwork: View {
+struct ProgressiveGalleryArtwork: View, Equatable {
     let image: PortfolioImage
     let targetSize: CGSize
 
-    var body: some View {
-        ZStack {
-            ArtworkImage(url: image.url, contentMode: .fit)
+    init(image: PortfolioImage, targetSize: CGSize) {
+        self.image = image
+        self.targetSize = targetSize
+    }
 
-            if image.fullSizeURL != image.url {
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.image == rhs.image && lhs.targetSize == rhs.targetSize
+    }
+
+    var body: some View {
+        Group {
+            if image.fullSizeURL == image.url {
+                ArtworkImage(url: image.url, contentMode: .fit)
+            } else {
+                // Publish one visible image at a time. The loader's phase is
+                // the sole source of readiness, including URL changes/retry.
                 DownsampledAsyncImage(
                     url: image.fullSizeURL,
                     targetSize: targetSize
@@ -674,11 +685,10 @@ private struct ProgressiveGalleryArtwork: View {
                             .resizable()
                             .aspectRatio(contentMode: .fit)
                             .frame(width: targetSize.width, height: targetSize.height)
-                            .transition(.opacity)
                     case .empty, .failure:
-                        Color.clear
+                        ArtworkImage(url: image.url, contentMode: .fit)
                     @unknown default:
-                        Color.clear
+                        ArtworkImage(url: image.url, contentMode: .fit)
                     }
                 }
             }
@@ -688,155 +698,232 @@ private struct ProgressiveGalleryArtwork: View {
     }
 }
 
-private struct ZoomableArtwork: View {
+private struct ZoomableArtwork: UIViewControllerRepresentable {
     let image: PortfolioImage
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var scale: CGFloat = 1
-    @State private var lastScale: CGFloat = 1
-    @State private var offset: CGSize = .zero
-    @State private var lastOffset: CGSize = .zero
 
-    var body: some View {
-        GeometryReader { proxy in
-            ProgressiveGalleryArtwork(image: image, targetSize: proxy.size)
-                .scaleEffect(scale)
-                .offset(offset)
-                .simultaneousGesture(magnifyGesture(in: proxy.size))
-                .gesture(
-                    dragGesture(in: proxy.size),
-                    including: scale > 1.01 ? .all : .none
-                )
-                .onTapGesture(count: 2) {
-                    updateTransform {
-                        if scale > 1.01 {
-                            resetTransform()
-                        } else {
-                            scale = 2
-                            lastScale = 2
-                            offset = .zero
-                            lastOffset = .zero
-                        }
-                    }
-                }
-                // Keep the image loader's retry control reachable if loading
-                // fails while exposing zoom actions on the containing photo.
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel(image.altText)
-                .accessibilityValue("缩放 \(Int((scale * 100).rounded()))%")
-                .accessibilityHint("上下轻扫调整缩放；放大后可拖动查看")
-                .accessibilityAdjustableAction { direction in
-                    switch direction {
-                    case .increment:
-                        zoomIn(in: proxy.size)
-                    case .decrement:
-                        zoomOut(in: proxy.size)
-                    @unknown default:
-                        break
-                    }
-                }
-                .accessibilityAction(named: "放大照片") {
-                    zoomIn(in: proxy.size)
-                }
-                .accessibilityAction(named: "缩小照片") {
-                    zoomOut(in: proxy.size)
-                }
-                .accessibilityAction(named: "恢复原始大小") {
-                    updateTransform {
-                        resetTransform()
-                    }
-                }
-                .accessibilityIdentifier("gallery-image-\(image.id)")
-                .onChange(of: proxy.size) { _, _ in
-                    // A rotated or resized iPad window must immediately return
-                    // to the uncropped 1x composition. Animating from the old
-                    // viewport briefly preserves an invalid crop.
-                    resetTransform()
-                }
-        }
+    func makeUIViewController(context: Context) -> GalleryZoomViewController {
+        GalleryZoomViewController(image: image)
     }
 
-    private func magnifyGesture(in size: CGSize) -> some Gesture {
-        MagnifyGesture()
-            .onChanged { value in
-                scale = min(max(lastScale * value.magnification, 1), 4)
-                offset = constrained(offset, scale: scale, in: size)
-            }
-            .onEnded { _ in
-                if scale < 1.05 {
-                    updateTransform {
-                        resetTransform()
-                    }
-                } else {
-                    lastScale = scale
-                    offset = constrained(offset, scale: scale, in: size)
-                    lastOffset = offset
-                }
-            }
+    func updateUIViewController(_ controller: GalleryZoomViewController, context: Context) {
+        controller.update(image: image)
+    }
+}
+
+/// Keep high-frequency pinch and pan work inside UIScrollView. Updating SwiftUI
+/// @State for every finger movement invalidates the hosted image hierarchy.
+final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+    let scrollView = GalleryZoomScrollView()
+    private let zoomCanvas = UIView()
+    private var image: PortfolioImage
+    private var viewportSize: CGSize = .zero
+    private var artworkHost: UIHostingController<EquatableView<ProgressiveGalleryArtwork>>?
+    private var zoomAccessibility: GalleryZoomAccessibilityElement?
+    private var pinchStartScale: CGFloat = 1
+    private lazy var pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+
+#if DEBUG
+    private(set) var contentUpdateCount = 0
+#endif
+
+    init(image: PortfolioImage) {
+        self.image = image
+        super.init(nibName: nil, bundle: nil)
     }
 
-    private func dragGesture(in size: CGSize) -> some Gesture {
-        DragGesture(minimumDistance: 3)
-            .onChanged { value in
-                let proposed = CGSize(
-                    width: lastOffset.width + value.translation.width,
-                    height: lastOffset.height + value.translation.height
-                )
-                offset = constrained(proposed, scale: scale, in: size)
-            }
-            .onEnded { _ in
-                offset = constrained(offset, scale: scale, in: size)
-                lastOffset = offset
-            }
-    }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
 
-    private func constrained(_ proposed: CGSize, scale: CGFloat, in size: CGSize) -> CGSize {
-        guard scale > 1 else { return .zero }
-        let maximumX = max(0, size.width * (scale - 1) / 2)
-        let maximumY = max(0, size.height * (scale - 1) / 2)
-        return CGSize(
-            width: min(max(proposed.width, -maximumX), maximumX),
-            height: min(max(proposed.height, -maximumY), maximumY)
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .clear
+        scrollView.backgroundColor = .clear
+        scrollView.delegate = self
+        scrollView.minimumZoomScale = 1
+        scrollView.maximumZoomScale = 4
+        scrollView.bouncesZoom = false
+        scrollView.bounces = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = false
+        scrollView.contentInsetAdjustmentBehavior = .never
+        scrollView.delaysContentTouches = false
+        // Drive zoom explicitly through UIKit, keeping the image host out of
+        // SwiftUI's per-event update path and retaining a stable focal point.
+        scrollView.pinchGestureRecognizer?.isEnabled = false
+        pinch.delegate = self
+        scrollView.addGestureRecognizer(pinch)
+        view.addSubview(scrollView)
+        zoomCanvas.backgroundColor = .clear
+        scrollView.addSubview(zoomCanvas)
+
+        let host = UIHostingController(rootView: ProgressiveGalleryArtwork(
+            image: image, targetSize: .zero
+        ).equatable())
+        host.view.backgroundColor = .clear
+        addChild(host)
+        // Zoom a plain UIKit canvas, not UIHostingController's managed root
+        // view: SwiftUI can restore that root view's transform during layout.
+        zoomCanvas.addSubview(host.view)
+        host.didMove(toParent: self)
+        artworkHost = host
+
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(toggleZoom))
+        doubleTap.numberOfTapsRequired = 2
+        doubleTap.cancelsTouchesInView = false
+        scrollView.addGestureRecognizer(doubleTap)
+
+        let accessiblePhoto = GalleryZoomAccessibilityElement(
+            accessibilityContainer: scrollView
         )
+        accessiblePhoto.scrollView = scrollView
+        accessiblePhoto.controller = self
+        accessiblePhoto.accessibilityTraits = [.image, .adjustable]
+        accessiblePhoto.accessibilityHint = "上下轻扫调整缩放；放大后可拖动查看"
+        accessiblePhoto.accessibilityCustomActions = [
+            UIAccessibilityCustomAction(name: "放大照片", target: self, selector: #selector(zoomIn)),
+            UIAccessibilityCustomAction(name: "缩小照片", target: self, selector: #selector(zoomOut)),
+            UIAccessibilityCustomAction(name: "恢复原始大小", target: self, selector: #selector(resetZoom)),
+        ]
+        // Preserve access to the hosted retry button, rather than collapsing
+        // the entire scroll view into a single accessibility element.
+        scrollView.isAccessibilityElement = false
+        scrollView.accessibilityElements = [accessiblePhoto, host.view as Any]
+        zoomAccessibility = accessiblePhoto
+        updateAccessibility()
     }
 
-    private func resetTransform() {
-        scale = 1
-        lastScale = 1
-        offset = .zero
-        lastOffset = .zero
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let size = view.bounds.size
+        guard size.width > 0, size.height > 0, size != viewportSize else { return }
+        viewportSize = size
+        scrollView.frame = view.bounds
+        // Rotation/window resizing returns to the complete 1x composition.
+        scrollView.setZoomScale(1, animated: false)
+        zoomCanvas.frame = CGRect(origin: .zero, size: size)
+        artworkHost?.view.frame = zoomCanvas.bounds
+        scrollView.contentSize = size
+        scrollView.contentOffset = .zero
+        updateArtwork()
+        updateAccessibility()
     }
 
-    private func zoomIn(in size: CGSize) {
-        updateTransform {
-            setScale(min(4, max(2, scale + 1)), in: size)
+    func update(image: PortfolioImage) {
+        guard self.image != image else { return }
+        self.image = image
+        guard isViewLoaded else { return }
+        scrollView.setZoomScale(1, animated: false)
+        scrollView.contentOffset = .zero
+        updateArtwork()
+        updateAccessibility()
+    }
+
+    private func updateArtwork() {
+        guard viewportSize.width > 0, viewportSize.height > 0 else { return }
+        artworkHost?.rootView = ProgressiveGalleryArtwork(
+            image: image, targetSize: viewportSize
+        ).equatable()
+#if DEBUG
+        contentUpdateCount += 1
+#endif
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        zoomCanvas
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        if scrollView.zoomScale < 1.05 { scrollView.setZoomScale(1, animated: false) }
+        updateAccessibility()
+    }
+
+    @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            pinchStartScale = scrollView.zoomScale
+        case .changed:
+            let point = gesture.location(in: zoomCanvas)
+            let location = gesture.location(in: scrollView)
+            let anchor = CGPoint(
+                x: location.x - scrollView.contentOffset.x,
+                y: location.y - scrollView.contentOffset.y
+            )
+            let scale = min(4, max(1, pinchStartScale * gesture.scale))
+            scrollView.setZoomScale(scale, animated: false)
+            scrollView.contentOffset = CGPoint(
+                x: min(max(0, point.x * scale - anchor.x), max(0, scrollView.contentSize.width - scrollView.bounds.width)),
+                y: min(max(0, point.y * scale - anchor.y), max(0, scrollView.contentSize.height - scrollView.bounds.height))
+            )
+        case .ended, .cancelled, .failed:
+            if scrollView.zoomScale < 1.05 { scrollView.setZoomScale(1, animated: false) }
+            updateAccessibility()
+        default:
+            break
         }
     }
 
-    private func zoomOut(in size: CGSize) {
-        updateTransform {
-            let nextScale = max(1, scale - 1)
-            if nextScale < 1.05 {
-                resetTransform()
-            } else {
-                setScale(nextScale, in: size)
-            }
-        }
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        (gestureRecognizer === pinch && otherGestureRecognizer === scrollView.panGestureRecognizer)
+            || (otherGestureRecognizer === pinch && gestureRecognizer === scrollView.panGestureRecognizer)
     }
 
-    private func setScale(_ newScale: CGFloat, in size: CGSize) {
-        scale = newScale
-        lastScale = newScale
-        offset = constrained(offset, scale: newScale, in: size)
-        lastOffset = offset
+    private func updateAccessibility() {
+        zoomAccessibility?.accessibilityIdentifier = "gallery-image-\(image.id)"
+        zoomAccessibility?.accessibilityLabel = image.altText
+        zoomAccessibility?.accessibilityValue = "缩放 \(Int((scrollView.zoomScale * 100).rounded()))%"
     }
 
-    private func updateTransform(_ updates: () -> Void) {
-        if reduceMotion {
-            updates()
-        } else {
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-                updates()
-            }
-        }
+    private func setZoom(_ scale: CGFloat) {
+        scrollView.setZoomScale(
+            min(4, max(1, scale)),
+            animated: !UIAccessibility.isReduceMotionEnabled
+        )
+        updateAccessibility()
     }
+
+    @objc private func toggleZoom() {
+        setZoom(scrollView.zoomScale > 1.01 ? 1 : 2)
+    }
+
+    @objc @discardableResult func zoomIn() -> Bool {
+        setZoom(max(2, scrollView.zoomScale + 1))
+        return true
+    }
+
+    @objc @discardableResult func zoomOut() -> Bool {
+        setZoom(scrollView.zoomScale - 1)
+        return true
+    }
+
+    @objc @discardableResult func resetZoom() -> Bool {
+        setZoom(1)
+        return true
+    }
+}
+
+final class GalleryZoomScrollView: UIScrollView {
+    override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if gestureRecognizer === panGestureRecognizer {
+            // Let the outer pager receive swipes at 1x, without toggling a
+            // built-in recognizer while UIScrollView is processing a pinch.
+            return zoomScale > 1.01
+        }
+        return super.gestureRecognizerShouldBegin(gestureRecognizer)
+    }
+}
+
+private final class GalleryZoomAccessibilityElement: UIAccessibilityElement {
+    weak var scrollView: UIScrollView?
+    weak var controller: GalleryZoomViewController?
+
+    override var accessibilityFrame: CGRect {
+        get {
+            guard let scrollView else { return .zero }
+            return UIAccessibility.convertToScreenCoordinates(scrollView.bounds, in: scrollView)
+        }
+        set { }
+    }
+
+    override func accessibilityIncrement() { controller?.zoomIn() }
+    override func accessibilityDecrement() { controller?.zoomOut() }
 }

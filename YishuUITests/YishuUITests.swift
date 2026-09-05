@@ -1483,6 +1483,60 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         )
     }
 
+    func testGalleryRepeatedPinchPreservesPagingAndClose() {
+        let app = launchApp(arguments: [
+            "-open-portfolio-for-visual-testing",
+            "-use-multi-image-gallery-for-visual-testing",
+        ], screenProtectionEnabled: true)
+        let card = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")
+        ).firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 12))
+        card.tap()
+        let thumbnail = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-")
+        ).firstMatch
+        XCTAssertTrue(thumbnail.waitForExistence(timeout: 8))
+        let identifier = thumbnail.identifier.replacingOccurrences(
+            of: "portfolio-open-image-", with: "gallery-image-"
+        )
+        thumbnail.tap()
+        let photo = element(identifier, in: app)
+        let close = element("gallery-close", in: app)
+        let counter = element("gallery-counter", in: app)
+        XCTAssertTrue(photo.waitForExistence(timeout: 8))
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+
+        for _ in 0..<3 {
+            photo.pinch(withScale: 1.8, velocity: 0.9)
+            let zoomed = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value != %@", "缩放 100%"), object: photo
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [zoomed], timeout: 3), .completed)
+            let dragStart = photo.coordinate(withNormalizedOffset: CGVector(dx: 0.65, dy: 0.6))
+            let dragEnd = photo.coordinate(withNormalizedOffset: CGVector(dx: 0.35, dy: 0.4))
+            dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
+            dragEnd.press(forDuration: 0.05, thenDragTo: dragStart)
+            XCTAssertEqual(counter.label, "第 1 张，共 3 张", "缩放不应意外翻页")
+            photo.doubleTap()
+            let reset = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", "缩放 100%"), object: photo
+            )
+            XCTAssertEqual(XCTWaiter.wait(for: [reset], timeout: 3), .completed)
+            XCTAssertTrue(close.isHittable, "缩放后关闭按钮不可操作")
+        }
+        photo.swipeLeft()
+        let paged = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "第 2 张，共 3 张"), object: counter
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [paged], timeout: 5), .completed)
+        close.tap()
+        let dismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: close
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 3), .completed)
+    }
+
     func testHomeHeroKeepsTheFullIPadCompositionAndNeverTurnsBlank() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("该构图与黑屏门禁只适用于 iPad；iPhone 由首页控件与辅助功能用例覆盖")
@@ -1575,7 +1629,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         attachScreenshot(named: "adaptive-home-accessibility-xxxl", app: app)
     }
 
-    private func launchApp(arguments: [String]) -> XCUIApplication {
+    private func launchApp(arguments: [String], screenProtectionEnabled: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
             "-skip-launch-poster-for-visual-testing",
@@ -1583,7 +1637,11 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             "-reset-fan-session-for-visual-testing",
             "-bypass-access-gate-for-visual-testing",
         ] + arguments
-        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        if screenProtectionEnabled {
+            app.launchArguments.removeAll { $0 == "-disable-screen-protection-for-visual-testing" }
+        } else {
+            app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        }
         app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
         XCTAssertTrue(tabButton("首页", in: app).waitForExistence(timeout: 12), "主导航未出现")

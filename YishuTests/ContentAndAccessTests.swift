@@ -237,6 +237,52 @@ private final class TestPushNotificationAccount: PushNotificationAccount {
 }
 
 final class ContentAndAccessTests: XCTestCase {
+    func testGalleryArtworkIdentityIgnoresTransformsButTracksContentAndViewport() throws {
+        let preview = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-preview.webp"))
+        let full = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-full.webp"))
+        let updatedFull = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-full-v2.webp"))
+        let photo = PortfolioImage(id: 1, url: preview, fullSizeURL: full, altText: "照片")
+        let size = CGSize(width: 430, height: 760)
+        let original = ProgressiveGalleryArtwork(image: photo, targetSize: size)
+        XCTAssertEqual(original, ProgressiveGalleryArtwork(image: photo, targetSize: size))
+        XCTAssertNotEqual(original, ProgressiveGalleryArtwork(
+            image: photo, targetSize: CGSize(width: 760, height: 430)
+        ))
+        XCTAssertNotEqual(original, ProgressiveGalleryArtwork(
+            image: PortfolioImage(id: 1, url: preview, fullSizeURL: updatedFull, altText: "照片"),
+            targetSize: size
+        ))
+    }
+
+    func testNativeGalleryPanDoesNotUpdateHostedArtworkAndRotationResetsZoom() throws {
+        let url = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-photo.webp"))
+        let image = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "照片")
+        let controller = GalleryZoomViewController(image: image)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 430, height: 760)
+        controller.viewDidLayoutSubviews()
+        let initialUpdates = controller.contentUpdateCount
+        XCTAssertEqual(initialUpdates, 1)
+        XCTAssertFalse(controller.scrollView.gestureRecognizerShouldBegin(controller.scrollView.panGestureRecognizer))
+        controller.scrollView.setZoomScale(2, animated: false)
+        XCTAssertTrue(controller.scrollView.gestureRecognizerShouldBegin(controller.scrollView.panGestureRecognizer))
+        for step in 1...100 {
+            controller.scrollView.contentOffset = CGPoint(x: step, y: step)
+            controller.viewDidLayoutSubviews()
+            controller.update(image: image)
+        }
+        XCTAssertEqual(controller.contentUpdateCount, initialUpdates,
+                       "拖动/重复 representable 更新不能重建图片加载子树")
+        XCTAssertEqual(controller.scrollView.zoomScale, 2)
+        XCTAssertEqual(controller.scrollView.contentOffset, CGPoint(x: 100, y: 100))
+        controller.view.frame = CGRect(x: 0, y: 0, width: 760, height: 430)
+        controller.viewDidLayoutSubviews()
+        XCTAssertEqual(controller.contentUpdateCount, initialUpdates + 1)
+        XCTAssertEqual(controller.scrollView.zoomScale, 1)
+        XCTAssertEqual(controller.scrollView.contentOffset, .zero)
+        XCTAssertFalse(controller.scrollView.gestureRecognizerShouldBegin(controller.scrollView.panGestureRecognizer))
+    }
+
     func testScreenProtectionDoesNotCoverColdLaunchBeforeFirstActiveState() {
         var state = ScreenProtectionPresentationState()
 
