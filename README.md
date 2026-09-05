@@ -2,9 +2,9 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前 TestFlight 内部测试版本：`1.3.35 (47)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前 TestFlight 内部测试版本：`1.3.36 (48)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-最新客户端源码修正：[v1.3.35-build47.1](Server/releases/v1.3.35-build47.1.md)：iPad「关于」页左侧人物图与姓名、职业介绍固定，右侧详情独立滚动。该修正需要随新的 App 构建安装后生效，不是云端热更新；尚未上传新的 TestFlight 构建。
+最新客户端发布：[v1.3.36-build48](Server/releases/v1.3.36-build48.md)：iPad「关于」页左侧人物图与姓名、职业介绍固定，右侧详情独立滚动。2026-09-05 已确认 Apple `VALID`、内部 `IN_BETA_TESTING`；所有旧构建均已过期，请在 TestFlight 更新至 Build 48。这是客户端更新，不是相册云端热更新。
 
 最新相册内容更新：[v1.3.35-content.1](Server/releases/v1.3.35-content.1.md)（2026-09-05）：新增“灯影绮罗”“花庭清韵”，为“新中式”补充同套照片，共 10 册、70 张。云端更新，作品页下拉刷新即可，无需重装 TestFlight。
 
@@ -123,18 +123,19 @@ xcodebuild -project Yishu.xcodeproj \
 - [`Server/releases/v1.3.34-build46.2.md`](Server/releases/v1.3.34-build46.2.md)：修复新登录和旧会话设备初始化将等值数据库更新误判为失败的 HTTP 503；客户端仍使用 Build 46。
 - [`Server/releases/v1.3.34-build46.3.md`](Server/releases/v1.3.34-build46.3.md)：推送工作器改为完成后 5 秒调度，保留单节点执行、精确升级与失败回滚；不改变客户端。
 - [`Server/releases/v1.3.35-build47.md`](Server/releases/v1.3.35-build47.md)：只收云消息箱、账号隔离与已读同步、敏感推送脱敏、客户端重连及工作器故障上报。
+- [`Server/releases/v1.3.36-build48.md`](Server/releases/v1.3.36-build48.md)：iPad 关于页左图固定、右栏独立滚动，TestFlight 发布与全部旧构建过期记录。
 - [`APP_STORE_READINESS.md`](APP_STORE_READINESS.md)：正式上架资料、审核账号及已知产品风险检查；TestFlight 可测试不等于已经具备正式上架条件。
 - [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md)：Payload + Next.js + COS/CDN 的下一代后台与无停机迁移方案。
 - [`TESTING.md`](TESTING.md)：iPhone/iPad UI 回归、安全扫描与 GitHub 质量门禁。
 
-### Build 47 只收消息箱
+### Build 47 只收消息箱（已包含于 Build 48）
 
 - 消息箱位于账号页，不改动首页、相册和播放器。只开放本人消息列表、详情与幂等已读接口，不提供粉丝发送接口。
 - 云消息先保存，再尝试 APNs 提醒；设备离线、系统关闭通知或没有设备绑定，不会使已保存的消息消失。APNs 接受不等于手机已展示，未读不会触发重复轰炸。
 - 删除账号清除本人收件关系和已读记录；多人消息只要还有其他收件人就继续保留，最多 30 天。退出或换号清空 App 内存消息，迟到网络响应不能串号。
 - 自动连接使用有限重试并在成功、退出、换号或关闭通知后取消。工作器失败如实返回非零退出状态，避免清理、数据库提交或调度失败被误报为正常。
 - 点击退出立即清本地会话及消息，远端解绑/注销只使用旧会话快照；弱网和迟到响应不会保留旧消息或退出新账号。
-- 2026-09-05 已上传并确认 Apple `VALID`、内部 `IN_BETA_TESTING`；旧 Build 46 未过期。服务端 1.5.13 已部署两节点，iPhone/iPad 单元各 161 项、最终 iPad 窗口操作 15 项通过。尚未提交正式 App Store 审核。
+- 2026-09-05 上传并确认 Apple `VALID`、内部 `IN_BETA_TESTING`；该次发布时保留旧 Build 46。随后 Build 48 可测试后，47 与其余旧构建已按用户要求过期。服务端 1.5.13 已部署两节点，iPhone/iPad 单元各 161 项、最终 iPad 窗口操作 15 项通过。尚未提交正式 App Store 审核。
 
 ### Build 46 首次启动授权与设备连接（历史实现）
 
