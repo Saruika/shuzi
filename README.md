@@ -6,7 +6,7 @@
 
 最新客户端发布：[v1.3.37-build49](Server/releases/v1.3.37-build49.md)：Apple 授权生命周期与旧回调隔离、开屏取消缩放/装饰横线、粗略位置约束。2026-09-05 16:18 上传成功，随后确认 Apple `VALID`、内部 `IN_BETA_TESTING`；完整枚举 40 个构建，仅 Build 49 未过期，全部 39 个旧构建已过期。请在 TestFlight 更新至 Build 49。
 
-后续源码补丁：[v1.3.37-build49.1](Server/releases/v1.3.37-build49.1.md) 将相册缩放/拖动交给原生滚动视图，减少拖动期间的 SwiftUI 更新和重复图片合成；尚未上传 TestFlight，不包含在现有 Build 49 中。
+后续源码补丁：[v1.3.37-build49.1](Server/releases/v1.3.37-build49.1.md) 将相册缩放/拖动交给原生滚动视图，减少拖动期间的 SwiftUI 更新和重复图片合成。正在准备 [1.3.38 (50)](Server/releases/v1.3.38-build50.md) 的 TestFlight 发行包；现有 Build 49 不包含此修复，新版可测试后才过期旧版。
 
 本版包含 [v1.3.36-build48.1](Server/releases/v1.3.36-build48.1.md) 的源码修正，以及 Build 48 的 iPad 关于页固定左图、右栏独立滚动。按用户明确授权，两台生产服务器已恢复找到的原始 Apple 签名及数据密钥配置，实际 PHP-FPM 校验通过；真实 Apple 授权、登录与删号仍需 TestFlight 真机验收。首发已确认全部免费、保留抖音 ID 与人工审批，包含中国大陆及其他地区；App 备案与商店资料仍待完成。本次未提交正式 App Store 审核。
 
