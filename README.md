@@ -2,11 +2,11 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前 TestFlight 内部测试版本：`1.3.36 (48)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 当前 TestFlight 内部测试版本：`1.3.37 (49)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-最新客户端发布：[v1.3.36-build48](Server/releases/v1.3.36-build48.md)：iPad「关于」页左侧人物图与姓名、职业介绍固定，右侧详情独立滚动。2026-09-05 已确认 Apple `VALID`、内部 `IN_BETA_TESTING`；所有旧构建均已过期，请在 TestFlight 更新至 Build 48。这是客户端更新，不是相册云端热更新。
+最新客户端发布：[v1.3.37-build49](Server/releases/v1.3.37-build49.md)：Apple 授权生命周期与旧回调隔离、开屏取消缩放/装饰横线、粗略位置约束。2026-09-05 16:18 上传成功，随后确认 Apple `VALID`、内部 `IN_BETA_TESTING`；完整枚举 40 个构建，仅 Build 49 未过期，全部 39 个旧构建已过期。请在 TestFlight 更新至 Build 49。
 
-最新源码修正：[v1.3.36-build48.1](Server/releases/v1.3.36-build48.1.md)：Apple 登录生命周期与迟到回调隔离、开屏取消缩放/装饰横线、粗略位置约束。**尚未上传新 TestFlight 包**；上海运行环境缺少 Apple 登录签名与数据密钥配置，真实 Apple 登录还不能宣称已修复。首发已确认全部免费、保留抖音 ID 与人工审批，包含中国大陆及其他地区；App 备案与商店资料仍待完成。
+本版包含 [v1.3.36-build48.1](Server/releases/v1.3.36-build48.1.md) 的源码修正，以及 Build 48 的 iPad 关于页固定左图、右栏独立滚动。按用户明确授权，两台生产服务器已恢复找到的原始 Apple 签名及数据密钥配置，实际 PHP-FPM 校验通过；真实 Apple 授权、登录与删号仍需 TestFlight 真机验收。首发已确认全部免费、保留抖音 ID 与人工审批，包含中国大陆及其他地区；App 备案与商店资料仍待完成。本次未提交正式 App Store 审核。
 
 最新相册内容更新：[v1.3.35-content.1](Server/releases/v1.3.35-content.1.md)（2026-09-05）：新增“灯影绮罗”“花庭清韵”，为“新中式”补充同套照片，共 10 册、70 张。云端更新，作品页下拉刷新即可，无需重装 TestFlight。
 

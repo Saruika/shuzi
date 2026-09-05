@@ -2,6 +2,12 @@
 
 Build 34 使用 WordPress REST API 的状态型 Apple 登录流程。本文只记录部署契约，不记录任何 Team ID、Key ID、私钥、client secret、authorization code 或 token。
 
+## 2026-09-05 生产配置恢复
+
+经用户明确授权，原始签名密钥及原始数据密钥已恢复到上海、新加坡节点的 Web 根目录外。`wp-config.php` 原文件分别保留于 root-only 恢复备份目录；操作使用与发布/同步相同的 site-operation 锁，节点角色不变。已有不同字节的目标凭据会拒绝覆盖，未生成、轮换或撤销密钥，未改动用户账号。
+
+两节点以 www-data 执行的 WordPress 配置检查，以及实际 PHP-FPM 进程的 JWT 库、client secret 生成和数据密钥加载检查均通过。验证不输出任何私钥、token 或用户标识。临时非公开 FPM 检查文件已移除。HTTPS 官网 200，上海与新加坡转发的未登录账号接口返回正确的 401；不以此冒充真实 Apple 授权码交换/登录/删号验收，后者需使用 TestFlight 真机完成。
+
 ## 依赖与配置
 
 - 必须把 `shuzijun-app-content.php`、`composer.json`、`composer.lock` 和完整 `vendor/` 作为一个原子发布单元。`firebase/php-jwt` 必须严格锁定为 `7.1.0`，发布前执行 `composer audit --locked --no-dev`。
