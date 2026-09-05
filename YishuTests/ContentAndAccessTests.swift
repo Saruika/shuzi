@@ -1354,6 +1354,46 @@ final class ContentAndAccessTests: XCTestCase {
         }
     }
 
+    func testNewLaunchPosterDraftUsesCurrentWelcomeCopyWithoutChangingManagedPosters() {
+        let original = ContentCatalog.launchPosters[0]
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let calendar = Calendar(identifier: .gregorian)
+        let draft = LaunchPosterContent.newDraft(imageURL: original.imageURL, now: now, calendar: calendar)
+        XCTAssertNotEqual(draft.id, original.id)
+        XCTAssertEqual(draft.imageURL, original.imageURL)
+        XCTAssertEqual(draft.eyebrow, "东方美学")
+        XCTAssertEqual(draft.title, "易姝")
+        XCTAssertEqual(draft.subtitle, "很高兴，在这里遇见你。")
+        XCTAssertEqual(draft.startsAt, calendar.startOfDay(for: now))
+        XCTAssertEqual(calendar.dateComponents([.day], from: draft.startsAt, to: draft.endsAt).day, 30)
+        XCTAssertTrue(draft.isActive(at: now))
+        XCTAssertEqual(draft.displaySeconds, 2.5)
+        for fallback in ContentCatalog.launchPosters {
+            XCTAssertEqual(fallback.eyebrow, draft.eyebrow)
+            XCTAssertEqual(fallback.title, draft.title)
+            XCTAssertEqual(fallback.subtitle, draft.subtitle)
+        }
+        XCTAssertEqual(ContentCatalog.launchPosters[0], original)
+    }
+
+    func testLaunchPosterPreviewUsesActualWindowAspectWithoutStretching() {
+        for viewport in [CGSize(width: 440, height: 956), CGSize(width: 956, height: 440),
+                         CGSize(width: 1032, height: 1376), CGSize(width: 1376, height: 1032)] {
+            let available = CGSize(width: 370, height: 420)
+            let layout = LaunchPosterPreviewLayout(viewport: viewport, available: available)
+            XCTAssertGreaterThan(layout.scale, 0)
+            XCTAssertLessThanOrEqual(layout.scale, 1)
+            XCTAssertLessThanOrEqual(layout.size.width, available.width)
+            XCTAssertLessThanOrEqual(layout.size.height, available.height)
+            XCTAssertEqual(layout.size.width / layout.size.height, viewport.width / viewport.height, accuracy: 0.000001)
+        }
+        let empty = LaunchPosterPreviewLayout(viewport: .zero, available: CGSize(width: 370, height: 420))
+        XCTAssertEqual(empty.size, .zero)
+        XCTAssertEqual(empty.scale, 0)
+        let invalid = LaunchPosterPreviewLayout(viewport: CGSize(width: CGFloat.infinity, height: 420), available: .zero)
+        XCTAssertEqual(invalid.size, .zero)
+    }
+
     func testFanIdentityCodesAreNormalizedWithoutAmbiguousCharacters() {
         XCTAssertEqual(
             FanAccountValidation.normalizedIdentityCode("hs-abcd-2345"),

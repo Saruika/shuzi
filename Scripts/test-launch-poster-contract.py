@@ -22,6 +22,22 @@ for field in ("eyebrow", "title", "subtitle"):
 
 catalog = (root / "Yishu/Models/Portfolio.swift").read_text()
 posters = catalog.split("static let launchPosters = [", 1)[1].split("static let showreel", 1)[0]
-assert posters.count('subtitle: "很高兴，在这里遇见你。"') == 3
+assert posters.count('subtitle: LaunchPosterDefaultCopy.subtitle') == 3
+assert 'static let subtitle = "很高兴，在这里遇见你。"' in catalog
 assert "镜头之内，自有叙事。" not in posters
-print("launch-poster-contract: still artwork, no decorative dash, distinct managed copy passed")
+
+admin = (root / "Yishu/Views/AdminView.swift").read_text()
+preview = admin.split("struct LaunchPosterAdminPreview: View {", 1)[1].split("#if DEBUG", 1)[0]
+assert "LaunchPosterCanvas(" in preview and "LaunchPosterCanvas(" in source
+assert "LaunchPosterWindowSafeArea.resolvedInsets" in preview
+assert "LaunchPosterWindowSafeArea.resolvedInsets" in source
+assert "imageTargetSize: layout.size" in preview, "Small previews must not decode window-sized textures"
+assert "LaunchPosterTextBlock" not in preview, "Admin must not maintain an independent typography layout"
+assert "LinearGradient" not in preview and "AdminMediaPreview(" not in preview
+assert ".task" not in preview and "LaunchPosterView(" not in preview, "Previews must never run launch dismissal timers"
+assert ".allowsHitTesting(false)" in preview, "Preview's scaled controls must not intercept editor touches"
+assert "compact: true" not in preview and ".aspectRatio(9 / 16" not in preview
+upload = admin.split("private func uploadLaunchPoster", 1)[1].split("private func replaceLaunchPoster", 1)[0]
+assert ".newDraft(imageURL: media.sourceURL)" in upload
+assert "SEASONAL POSTER" not in upload and "镜头之内，自有叙事。" not in upload
+print("launch-poster-contract: shared canvas and copy, timer-free responsive preview passed")

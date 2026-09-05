@@ -8,6 +8,8 @@
 
 Build 50 包含源码补丁 [v1.3.37-build49.1](Server/releases/v1.3.37-build49.1.md)：将相册缩放/拖动交给原生滚动视图，减少拖动期间的 SwiftUI 更新和重复图片合成。168 项独立 iPhone 单元测试、iPhone/iPad 共 8 组操作配置、Release Analyze 与发行包检查通过；没有真机前后 FPS 对比，不承诺所有设备零卡顿。
 
+后续候选 [1.3.39 (51)](Server/releases/v1.3.39-build51.md) 正在验证管理员海报预览与实际开屏共用布局、新增草稿默认文案及发布状态提示；尚未上传，现有 Build 50 不包含这项新修正。
+
 本版包含 [v1.3.36-build48.1](Server/releases/v1.3.36-build48.1.md) 的源码修正，以及 Build 48 的 iPad 关于页固定左图、右栏独立滚动。按用户明确授权，两台生产服务器已恢复找到的原始 Apple 签名及数据密钥配置，实际 PHP-FPM 校验通过；真实 Apple 授权、登录与删号仍需 TestFlight 真机验收。首发已确认全部免费、保留抖音 ID 与人工审批，包含中国大陆及其他地区；App 备案与商店资料仍待完成。本次未提交正式 App Store 审核。
 
 最新相册内容更新：[v1.3.35-content.1](Server/releases/v1.3.35-content.1.md)（2026-09-05）：新增“灯影绮罗”“花庭清韵”，为“新中式”补充同套照片，共 10 册、70 张。云端更新，作品页下拉刷新即可，无需重装 TestFlight。

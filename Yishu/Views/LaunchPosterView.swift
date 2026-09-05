@@ -4,16 +4,10 @@ import UIKit
 struct LaunchPosterView: View {
     let poster: LaunchPosterContent
     let dismiss: () -> Void
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilitySwitchControlEnabled) private var switchControlEnabled
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var artworkIsVisible = false
-    @State private var remoteImageIsVisible = false
-    // The title must never depend on a remote image finishing its request.
-    // Starting visible also prevents a recreated launch-poster hierarchy from
-    // resetting the copy to an invisible pre-animation state.
-    @State private var copyIsVisible = true
 
     private var pausesAutomaticDismissal: Bool {
         voiceOverEnabled || switchControlEnabled || dynamicTypeSize.isAccessibilitySize
@@ -21,124 +15,13 @@ struct LaunchPosterView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let topInset = AppWindowMetrics.topInsetForLayout(
-                measured: proxy.safeAreaInsets.top
+            LaunchPosterCanvas(
+                poster: poster,
+                size: proxy.size,
+                safeAreaInsets: LaunchPosterWindowSafeArea.resolvedInsets(measured: proxy.safeAreaInsets),
+                artworkIsVisible: $artworkIsVisible,
+                dismiss: dismiss
             )
-            let bottomInset = AppWindowMetrics.bottomInsetForLayout(
-                measured: proxy.safeAreaInsets.bottom
-            )
-            let horizontalSafeArea = LaunchPosterWindowSafeArea.horizontalInsets(
-                measured: proxy.safeAreaInsets
-            )
-            let leadingInset = max(20, horizontalSafeArea.leading + 16)
-            let trailingInset = max(20, horizontalSafeArea.trailing + 16)
-            let topControlInset = topInset + 10
-            let bottomContentInset = bottomInset + (proxy.size.width > proxy.size.height ? 14 : 24)
-            let copyTopInset = topControlInset + 56
-            let copyAvailableHeight = max(
-                80,
-                proxy.size.height - copyTopInset - bottomContentInset
-            )
-            let needsScrollableCopy = proxy.size.width > proxy.size.height
-                || dynamicTypeSize.isAccessibilitySize
-
-            ZStack {
-                AppTheme.ink
-                    .overlay {
-                        LinearGradient(
-                            colors: [.white.opacity(0.025), .clear, AppTheme.gold.opacity(0.08)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                }
-
-                ZStack {
-                    launchPlaceholder(in: proxy.size)
-
-                    DownsampledAsyncImage(
-                        url: poster.imageURL,
-                        targetSize: proxy.size,
-                        maximumPixelSize: 2_880,
-                        showsRetryButton: false
-                    ) { phase in
-                        if case .success(let image) = phase {
-                            launchArtwork(image, in: proxy.size)
-                                .opacity(remoteImageIsVisible ? 1 : 0)
-                                .onAppear {
-                                    revealArtworkIfNeeded()
-                                    if reduceMotion {
-                                        remoteImageIsVisible = true
-                                    } else {
-                                        withAnimation(.easeOut(duration: 0.45)) {
-                                            remoteImageIsVisible = true
-                                        }
-                                    }
-                                }
-                        }
-                    }
-                }
-
-                LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: 0),
-                        .init(color: .clear, location: 0.5),
-                        .init(color: AppTheme.ink.opacity(0.94), location: 1),
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-
-                statusBarScrim(topInset: topInset, canvasHeight: proxy.size.height)
-
-                if needsScrollableCopy {
-                    ScrollView(.vertical) {
-                        LaunchPosterTextBlock(poster: poster)
-                            .frame(minHeight: copyAvailableHeight, alignment: .bottom)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .scrollIndicators(.hidden)
-                    .scrollBounceBehavior(.basedOnSize)
-                    .padding(.top, copyTopInset)
-                    .padding(.bottom, bottomContentInset)
-                    .padding(.leading, leadingInset)
-                    .padding(.trailing, trailingInset)
-                    .opacity(copyIsVisible ? 1 : 0)
-                    .offset(y: copyIsVisible ? 0 : 12)
-                } else {
-                    VStack(alignment: .leading, spacing: 0) {
-                        Spacer(minLength: copyTopInset)
-
-                        LaunchPosterTextBlock(poster: poster)
-                    }
-                    .padding(.leading, leadingInset)
-                    .padding(.trailing, trailingInset)
-                    .padding(.bottom, bottomContentInset)
-                    .opacity(copyIsVisible ? 1 : 0)
-                    .offset(y: copyIsVisible ? 0 : 12)
-                }
-
-                Button(action: dismiss) {
-                    Text("跳过")
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-                        .padding(.horizontal, 14)
-                        .frame(minWidth: 44, minHeight: 44)
-                }
-                .foregroundStyle(.white)
-                .background(.black.opacity(0.58), in: Capsule())
-                .overlay {
-                    Capsule().stroke(.white.opacity(0.24), lineWidth: 0.5)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                .padding(.top, topControlInset)
-                .padding(.leading, leadingInset)
-                .padding(.trailing, trailingInset)
-                .accessibilityHint("立即进入首页")
-                .accessibilityIdentifier("launch-poster-skip")
-            }
-            .frame(width: proxy.size.width, height: proxy.size.height)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("launch-poster-canvas")
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
@@ -161,6 +44,141 @@ struct LaunchPosterView: View {
                 dismiss()
             } catch { }
         }
+    }
+}
+
+/// One presentation surface for the real launch and the administrator's scaled
+/// preview. Timing belongs to LaunchPosterView, never to this reusable canvas.
+struct LaunchPosterCanvas: View {
+    let poster: LaunchPosterContent
+    let size: CGSize
+    let safeAreaInsets: EdgeInsets
+    @Binding var artworkIsVisible: Bool
+    let dismiss: () -> Void
+    var imageTargetSize: CGSize? = nil
+    var isPreview = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var remoteImageIsVisible = false
+    // Copy must remain visible even while the remote image is loading.
+    @State private var copyIsVisible = true
+
+    var body: some View {
+        let topInset = safeAreaInsets.top
+        let bottomInset = safeAreaInsets.bottom
+        let horizontalSafeArea = (leading: safeAreaInsets.leading, trailing: safeAreaInsets.trailing)
+        let leadingInset = max(20, horizontalSafeArea.leading + 16)
+        let trailingInset = max(20, horizontalSafeArea.trailing + 16)
+        let topControlInset = topInset + 10
+        let bottomContentInset = bottomInset + (size.width > size.height ? 14 : 24)
+        let copyTopInset = topControlInset + 56
+        let copyAvailableHeight = max(
+            80,
+            size.height - copyTopInset - bottomContentInset
+        )
+        let needsScrollableCopy = size.width > size.height
+            || dynamicTypeSize.isAccessibilitySize
+
+        ZStack {
+            AppTheme.ink
+                .overlay {
+                    LinearGradient(
+                        colors: [.white.opacity(0.025), .clear, AppTheme.gold.opacity(0.08)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+            }
+
+            ZStack {
+                launchPlaceholder(in: size)
+
+                DownsampledAsyncImage(
+                    url: poster.imageURL,
+                    targetSize: imageTargetSize ?? size,
+                    maximumPixelSize: 2_880,
+                    showsRetryButton: false
+                ) { phase in
+                    if case .success(let image) = phase {
+                        launchArtwork(image, in: size)
+                            .opacity(remoteImageIsVisible ? 1 : 0)
+                            .onAppear {
+                                revealArtworkIfNeeded()
+                                if reduceMotion {
+                                    remoteImageIsVisible = true
+                                } else {
+                                    withAnimation(.easeOut(duration: 0.45)) {
+                                        remoteImageIsVisible = true
+                                    }
+                                }
+                            }
+                    }
+                }
+            }
+
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .clear, location: 0.5),
+                    .init(color: AppTheme.ink.opacity(0.94), location: 1),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            statusBarScrim(topInset: topInset, canvasHeight: size.height)
+
+            if needsScrollableCopy {
+                ScrollView(.vertical) {
+                    LaunchPosterTextBlock(poster: poster)
+                        .frame(minHeight: copyAvailableHeight, alignment: .bottom)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .scrollIndicators(.hidden)
+                .scrollBounceBehavior(.basedOnSize)
+                .padding(.top, copyTopInset)
+                .padding(.bottom, bottomContentInset)
+                .padding(.leading, leadingInset)
+                .padding(.trailing, trailingInset)
+                .opacity(copyIsVisible ? 1 : 0)
+                .offset(y: copyIsVisible ? 0 : 12)
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    Spacer(minLength: copyTopInset)
+
+                    LaunchPosterTextBlock(poster: poster)
+                }
+                .padding(.leading, leadingInset)
+                .padding(.trailing, trailingInset)
+                .padding(.bottom, bottomContentInset)
+                .opacity(copyIsVisible ? 1 : 0)
+                .offset(y: copyIsVisible ? 0 : 12)
+            }
+
+            Button(action: dismiss) {
+                Text("跳过")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .padding(.horizontal, 14)
+                    .frame(minWidth: 44, minHeight: 44)
+            }
+            .foregroundStyle(.white)
+            .background(.black.opacity(0.58), in: Capsule())
+            .overlay {
+                Capsule().stroke(.white.opacity(0.24), lineWidth: 0.5)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            .padding(.top, topControlInset)
+            .padding(.leading, leadingInset)
+            .padding(.trailing, trailingInset)
+            .accessibilityHint("立即进入首页")
+            .accessibilityIdentifier("launch-poster-skip")
+            .disabled(isPreview)
+            .accessibilityHidden(isPreview)
+        }
+        .frame(width: size.width, height: size.height)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("launch-poster-canvas")
+
     }
 
     private func revealArtworkIfNeeded() {
@@ -300,7 +318,19 @@ private struct LaunchPosterDismissTaskID: Hashable {
 }
 
 @MainActor
-private enum LaunchPosterWindowSafeArea {
+enum LaunchPosterWindowSafeArea {
+    static var windowSize: CGSize? { activeWindow?.bounds.size }
+
+    static func resolvedInsets(measured: EdgeInsets = EdgeInsets()) -> EdgeInsets {
+        let horizontal = horizontalInsets(measured: measured)
+        return EdgeInsets(
+            top: AppWindowMetrics.topInsetForLayout(measured: measured.top),
+            leading: horizontal.leading,
+            bottom: AppWindowMetrics.bottomInsetForLayout(measured: measured.bottom),
+            trailing: horizontal.trailing
+        )
+    }
+
     static func horizontalInsets(measured: EdgeInsets) -> (leading: CGFloat, trailing: CGFloat) {
         let fallback = activeWindow?.safeAreaInsets
         return (

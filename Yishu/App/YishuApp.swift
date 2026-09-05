@@ -52,7 +52,20 @@ struct YishuApp: App {
         }
     }
 
+    @ViewBuilder
     private var appContent: some View {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-preview-admin-launch-poster-for-testing") {
+            LaunchPosterAdminPreviewFixture()
+        } else {
+            configuredRoot
+        }
+#else
+        configuredRoot
+#endif
+    }
+
+    private var configuredRoot: some View {
         RootView()
             .environmentObject(portfolioStore)
             .environmentObject(favorites)

@@ -1219,6 +1219,44 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         recordPresentationGeometry("launch-poster", frame: verifyLaunchPosterCurrentWindow())
     }
 
+    func testAdministratorLaunchPreviewMatchesWindowAndUpdatesDraft() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-preview-admin-launch-poster-for-testing"]
+        app.launch()
+        let window = app.windows.firstMatch
+        let preview = app.descendants(matching: .any).matching(identifier: "admin-launch-poster-preview").firstMatch
+        let update = app.buttons["admin-launch-preview-update-draft"]
+        XCTAssertTrue(window.waitForExistence(timeout: 12))
+        XCTAssertTrue(preview.waitForExistence(timeout: 8), "后台海报缺少真实布局预览")
+        XCTAssertTrue(update.waitForExistence(timeout: 5))
+        print("ADMIN_PREVIEW_GEOMETRY window=\(window.frame) preview=\(preview.frame) edit=\(update.frame)")
+        XCTAssertTrue(update.isHittable, "缩小的预览不能挡住编辑操作")
+        XCTAssertGreaterThan(preview.frame.width, 0)
+        XCTAssertGreaterThan(preview.frame.height, 0)
+        XCTAssertEqual(preview.frame.width / preview.frame.height,
+                       window.frame.width / window.frame.height, accuracy: 0.015,
+                       "后台预览仍使用固定旧比例，没有跟随当前窗口")
+        XCTAssertGreaterThanOrEqual(preview.frame.minX, window.frame.minX - 1)
+        XCTAssertLessThanOrEqual(preview.frame.maxX, window.frame.maxX + 1)
+        XCTAssertGreaterThanOrEqual(preview.frame.minY, window.frame.minY - 1)
+        XCTAssertLessThanOrEqual(preview.frame.maxY, window.frame.maxY + 1)
+        XCTAssertTrue((preview.value as? String)?.contains("很高兴，在这里遇见你。") == true)
+        update.tap()
+        let updated = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value CONTAINS %@", "这是一条未发布的测试文案"),
+            object: preview
+        )
+        XCTAssertEqual(XCTWaiter.wait(for: [updated], timeout: 5), .completed,
+                       "编辑草稿后预览还停留在旧文案")
+        let vanished = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: preview)
+        vanished.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [vanished], timeout: 6), .completed,
+                       "后台预览错误启动了开屏自动关闭计时器")
+        XCTAssertFalse(app.buttons["launch-poster-skip"].exists,
+                       "后台缩略预览不应暴露可误触的跳过控件")
+        recordPresentationGeometry("admin-launch-preview", frame: window.frame)
+    }
+
     func testProtectedGalleryWorksInEveryActualWindowConfiguration() {
         recordPresentationGeometry("protected-gallery", frame: verifyProtectedGalleryCurrentWindow())
     }

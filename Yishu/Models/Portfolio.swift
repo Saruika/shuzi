@@ -40,6 +40,12 @@ struct ShowreelContent: Hashable, Codable {
     var tags: [String]
 }
 
+enum LaunchPosterDefaultCopy {
+    static let eyebrow = "东方美学"
+    static let title = "易姝"
+    static let subtitle = "很高兴，在这里遇见你。"
+}
+
 struct LaunchPosterContent: Identifiable, Hashable, Codable {
     var id: String
     var isEnabled: Bool
@@ -50,6 +56,27 @@ struct LaunchPosterContent: Identifiable, Hashable, Codable {
     var startsAt: Date
     var endsAt: Date
     var displaySeconds: Double
+
+    static func newDraft(
+        imageURL: URL,
+        now: Date = .now,
+        calendar: Calendar = .current
+    ) -> LaunchPosterContent {
+        let start = calendar.startOfDay(for: now)
+        let end = calendar.date(byAdding: .day, value: 30, to: start)
+            ?? start.addingTimeInterval(30 * 86_400)
+        return LaunchPosterContent(
+            id: UUID().uuidString.lowercased(),
+            isEnabled: true,
+            imageURL: imageURL,
+            eyebrow: LaunchPosterDefaultCopy.eyebrow,
+            title: LaunchPosterDefaultCopy.title,
+            subtitle: LaunchPosterDefaultCopy.subtitle,
+            startsAt: start,
+            endsAt: end,
+            displaySeconds: 2.5
+        )
+    }
 
     func isActive(at date: Date = .now) -> Bool {
         isEnabled && startsAt <= date && date < endsAt
@@ -239,9 +266,9 @@ enum ContentCatalog {
             imageURL: AppURL.make(
                 "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-01-mobile-20260902b.jpg"
             ),
-            eyebrow: "东方美学",
-            title: "易姝",
-            subtitle: "很高兴，在这里遇见你。",
+            eyebrow: LaunchPosterDefaultCopy.eyebrow,
+            title: LaunchPosterDefaultCopy.title,
+            subtitle: LaunchPosterDefaultCopy.subtitle,
             startsAt: Date(timeIntervalSince1970: 0),
             endsAt: Date(timeIntervalSince1970: 4_102_444_800),
             displaySeconds: 2.5
@@ -252,9 +279,9 @@ enum ContentCatalog {
             imageURL: AppURL.make(
                 "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-02-mobile-20260902b.jpg"
             ),
-            eyebrow: "东方美学",
-            title: "易姝",
-            subtitle: "很高兴，在这里遇见你。",
+            eyebrow: LaunchPosterDefaultCopy.eyebrow,
+            title: LaunchPosterDefaultCopy.title,
+            subtitle: LaunchPosterDefaultCopy.subtitle,
             startsAt: Date(timeIntervalSince1970: 0),
             endsAt: Date(timeIntervalSince1970: 4_102_444_800),
             displaySeconds: 2.5
@@ -265,9 +292,9 @@ enum ContentCatalog {
             imageURL: AppURL.make(
                 "\(launchPosterBaseURL)/yishu-launch-hanfu-lantern-03-mobile-20260902b.jpg"
             ),
-            eyebrow: "东方美学",
-            title: "易姝",
-            subtitle: "很高兴，在这里遇见你。",
+            eyebrow: LaunchPosterDefaultCopy.eyebrow,
+            title: LaunchPosterDefaultCopy.title,
+            subtitle: LaunchPosterDefaultCopy.subtitle,
             startsAt: Date(timeIntervalSince1970: 0),
             endsAt: Date(timeIntervalSince1970: 4_102_444_800),
             displaySeconds: 2.5

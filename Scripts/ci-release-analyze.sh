@@ -66,6 +66,11 @@ if strings "$executable" | grep -Eiq "$secret_pattern"; then
   exit 1
 fi
 
+if strings "$executable" | grep -Fq -- '-preview-admin-launch-poster-for-testing'; then
+  printf 'release-bundle-audit: administrator preview fixture found\n' >&2
+  exit 1
+fi
+
 printf 'release-bundle-audit: passed files=%s size_mb=%s\n' \
   "$(find "$app_path" -type f | wc -l | tr -d ' ')" \
   "$(du -sm "$app_path" | awk '{print $1}')"

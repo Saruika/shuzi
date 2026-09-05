@@ -769,7 +769,7 @@ struct AdminView: View {
                 launchPosterCard(poster)
             }
 
-            Text("上方会完整显示源图和文案安全区；真实开屏会根据设备方向自适应。建议使用 9:16 竖版照片，最后点击底部“保存并发布全部修改”。")
+            Text("上方按当前窗口比例预览开屏草稿，与实际开屏共用图片布局、字体和文案安全区；旋转设备可检查横竖屏。修改不会自动发布，请点击底部“保存并发布全部修改”。建议使用原始高清竖版照片。")
                 .font(.caption2)
                 .foregroundStyle(AppTheme.muted)
         }
@@ -799,7 +799,7 @@ struct AdminView: View {
             Toggle("启用这张海报", isOn: poster.isEnabled)
                 .tint(AppTheme.gold)
 
-            TextField("英文眉题", text: poster.eyebrow)
+            TextField("眉题（如东方美学）", text: poster.eyebrow)
             TextField("海报标题", text: poster.title)
             TextField("海报副标题", text: poster.subtitle)
 
@@ -1115,28 +1115,13 @@ struct AdminView: View {
         await performOperation(success: "开屏海报已上传，设置日期后等待发布") { contentLoadID in
             let media = try await uploadImage(item, prefix: "launch-poster")
             try ensureAdministratorOperationIsCurrent(contentLoadID)
-            let start = Calendar.current.startOfDay(for: .now)
-            let end = Calendar.current.date(byAdding: .day, value: 30, to: start)
-                ?? start.addingTimeInterval(30 * 86_400)
-            launchPosterDrafts.append(
-                LaunchPosterContent(
-                    id: UUID().uuidString.lowercased(),
-                    isEnabled: true,
-                    imageURL: media.sourceURL,
-                    eyebrow: "SEASONAL POSTER",
-                    title: "易姝",
-                    subtitle: "镜头之内，自有叙事。",
-                    startsAt: start,
-                    endsAt: end,
-                    displaySeconds: 2.5
-                )
-            )
+            launchPosterDrafts.append(.newDraft(imageURL: media.sourceURL))
         }
         selectedLaunchPoster = nil
     }
 
     private func replaceLaunchPoster(_ item: PhotosPickerItem, id: String) async {
-        await performOperation(success: "开屏图片已替换，原文案和投放日期保持不变") { contentLoadID in
+        await performOperation(success: "图片已替换到草稿，保存并发布后生效；原文案和日期不变") { contentLoadID in
             let media = try await uploadImage(item, prefix: "launch-poster-replacement")
             try ensureAdministratorOperationIsCurrent(contentLoadID)
             guard let index = launchPosterDrafts.firstIndex(where: { $0.id == id }) else {
@@ -1631,27 +1616,98 @@ private struct CollaborationInboxView: View {
     }
 }
 
-private struct LaunchPosterAdminPreview: View {
+struct LaunchPosterPreviewLayout {
+    let scale: CGFloat
+    let size: CGSize
+
+    init(viewport: CGSize, available: CGSize) {
+        guard viewport.width.isFinite, viewport.height.isFinite,
+              available.width.isFinite, available.height.isFinite,
+              viewport.width > 0, viewport.height > 0,
+              available.width > 0, available.height > 0 else {
+            scale = 0
+            size = .zero
+            return
+        }
+        scale = min(available.width / viewport.width, available.height / viewport.height, 1)
+        size = CGSize(width: viewport.width * scale, height: viewport.height * scale)
+    }
+}
+
+struct LaunchPosterAdminPreview: View {
     let poster: LaunchPosterContent
+    @State private var artworkIsVisible = false
 
     var body: some View {
-        ZStack {
-            AppTheme.elevatedInk
+        GeometryReader { proxy in
+            let viewport = LaunchPosterWindowSafeArea.windowSize ?? proxy.size
+            let layout = LaunchPosterPreviewLayout(viewport: viewport, available: proxy.size)
 
-            ZStack(alignment: .bottomLeading) {
-                AdminMediaPreview(url: poster.imageURL)
-                LinearGradient(
-                    colors: [.black.opacity(0.12), .clear, AppTheme.ink.opacity(0.92)],
-                    startPoint: .top,
-                    endPoint: .bottom
+            ZStack {
+                AppTheme.elevatedInk
+
+                // Scale a real window-sized canvas, not a separately restyled
+                // card. No launch timer or tappable skip control runs here.
+                LaunchPosterCanvas(
+                    poster: poster,
+                    size: viewport,
+                    safeAreaInsets: LaunchPosterWindowSafeArea.resolvedInsets(),
+                    artworkIsVisible: $artworkIsVisible,
+                    dismiss: {},
+                    imageTargetSize: layout.size,
+                    isPreview: true
                 )
-                LaunchPosterTextBlock(poster: poster, compact: true)
-                    .padding(18)
+                .frame(width: viewport.width, height: viewport.height)
+                .scaleEffect(layout.scale)
+                .frame(width: layout.size.width, height: layout.size.height)
+                .clipped()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+
+                // Cropped image descendants retain their uncropped AX bounds.
+                // Expose the bounded preview rectangle instead of those pixels.
+                Color.clear
+                    .frame(width: layout.size.width, height: layout.size.height)
+                    .contentShape(Rectangle())
+                    .allowsHitTesting(false)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("开屏草稿预览")
+                    .accessibilityValue("\(poster.eyebrow)，\(poster.title)，\(poster.subtitle)")
+                    .accessibilityIdentifier("admin-launch-poster-preview")
             }
-            .aspectRatio(9 / 16, contentMode: .fit)
+            .frame(width: proxy.size.width, height: proxy.size.height)
         }
     }
 }
+
+#if DEBUG
+/// An isolated preview fixture: no administrator session or publishing API.
+struct LaunchPosterAdminPreviewFixture: View {
+    @State private var poster = LaunchPosterContent.newDraft(
+        imageURL: ContentCatalog.launchPosters[0].imageURL
+    )
+
+    var body: some View {
+        VStack(spacing: 16) {
+            LaunchPosterAdminPreview(poster: poster)
+                .frame(maxHeight: 420)
+            Button("修改测试草稿") {
+                poster.eyebrow = "测试眉题"
+                poster.title = "新的测试标题"
+                poster.subtitle = "这是一条未发布的测试文案"
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(AppTheme.gold)
+            .foregroundStyle(AppTheme.ink)
+            .frame(minHeight: 44)
+            .accessibilityIdentifier("admin-launch-preview-update-draft")
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppTheme.ink)
+    }
+}
+#endif
 
 /// A neutral, aspect-preserving surface used exclusively by administrator
 /// editing screens. Centralizing this prevents fixed-height grids from silently
