@@ -102,6 +102,12 @@ struct RootView: View {
         }
         .tint(AppTheme.gold)
         .task { await restoreAccess() }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            guard phase == .active else { return }
+            // The system permission alert makes the scene inactive. This task
+            // must survive that transition to retain the user's answer.
+            Task { await pushNotifications.requestStartupAuthorizationIfNeeded() }
+        }
         .task(id: "\(fanAccount.profile?.status ?? "none"):\(fanAccount.profile?.requiresAccountSetup == true)") {
             await monitorApprovedAccess()
         }
@@ -111,7 +117,10 @@ struct RootView: View {
         .confirmationDialog(
             "接收重要通知？",
             isPresented: Binding(
-                get: { pushNotifications.shouldPresentAuthorizationRationale },
+                get: {
+                    hasResolvedAccess && !isLaunchPosterVisible
+                        && pushNotifications.shouldPresentAuthorizationRationale
+                },
                 set: { presented in
                     if !presented { pushNotifications.dismissAuthorizationRationale() }
                 }

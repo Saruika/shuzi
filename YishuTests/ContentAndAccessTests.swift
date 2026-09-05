@@ -1,7 +1,9 @@
 import XCTest
 import AuthenticationServices
+import Combine
 import SwiftUI
 import UIKit
+import UserNotifications
 import WeatherKit
 @testable import Yishu
 
@@ -14,6 +16,114 @@ private enum TestCredentialFixture {
 
     private static func makeValue(label: String) -> String {
         ["not", "a", "credential", label, "2026"].joined(separator: "-")
+    }
+}
+
+@MainActor
+private final class TestPushAuthorizationClient: PushAuthorizationClient {
+    enum Outcome {
+        case granted
+        case denied
+        case interrupted
+    }
+
+    var status: UNAuthorizationStatus
+    var outcomes: [Outcome]
+    var requestStarted: (() -> Void)?
+    var pauseRequest = false
+    private(set) var requestCount = 0
+    private var requestContinuation: CheckedContinuation<Void, Never>?
+
+    init(status: UNAuthorizationStatus = .notDetermined, outcomes: [Outcome] = []) {
+        self.status = status
+        self.outcomes = outcomes
+    }
+
+    func currentStatus() async -> UNAuthorizationStatus { status }
+
+    func requestAuthorization() async throws -> Bool {
+        requestCount += 1
+        if pauseRequest, requestCount == 1 {
+            await withCheckedContinuation { continuation in
+                requestContinuation = continuation
+                requestStarted?()
+            }
+        }
+        guard !outcomes.isEmpty else {
+            XCTFail("不应出现未配置的系统通知授权请求")
+            throw URLError(.unknown)
+        }
+        switch outcomes.removeFirst() {
+        case .granted:
+            status = .authorized
+            return true
+        case .denied:
+            status = .denied
+            return false
+        case .interrupted:
+            throw URLError(.cancelled)
+        }
+    }
+
+    func resumeRequest() {
+        let continuation = requestContinuation
+        requestContinuation = nil
+        continuation?.resume()
+    }
+}
+
+@MainActor
+private final class TestPushNotificationAccount: PushNotificationAccount {
+    struct BindingAttempt: Equatable {
+        let userID: String?
+        let generation: UInt64
+        let deviceToken: String
+    }
+
+    var pushEligibleUserID: String?
+    var pushSessionGeneration: UInt64 = 1
+    var hasPushEligibleSession: Bool { pushEligibleUserID != nil }
+    var hasPushUnbindingSession = true
+    var bindingFailuresRemaining = 0
+    var bindingRequiresSignIn = false
+    var pauseNextUnbind = false
+    var unbindStarted: (() -> Void)?
+    private(set) var bindingAttempts: [BindingAttempt] = []
+    private(set) var unbindCount = 0
+    private var unbindContinuation: CheckedContinuation<Void, Never>?
+
+    init(userID: String? = nil) {
+        pushEligibleUserID = userID
+    }
+
+    func bindPushDevice(deviceToken: String) async throws {
+        bindingAttempts.append(BindingAttempt(
+            userID: pushEligibleUserID,
+            generation: pushSessionGeneration,
+            deviceToken: deviceToken
+        ))
+        if bindingRequiresSignIn { throw FanAccountError.sessionExpired }
+        if bindingFailuresRemaining > 0 {
+            bindingFailuresRemaining -= 1
+            throw URLError(.notConnectedToInternet)
+        }
+    }
+
+    func unbindPushDevice() async throws {
+        unbindCount += 1
+        if pauseNextUnbind {
+            pauseNextUnbind = false
+            await withCheckedContinuation { continuation in
+                unbindContinuation = continuation
+                unbindStarted?()
+            }
+        }
+    }
+
+    func resumeUnbind() {
+        let continuation = unbindContinuation
+        unbindContinuation = nil
+        continuation?.resume()
     }
 }
 
@@ -2267,6 +2377,467 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testStartupPushPermissionRequestsOnceAndKeepsDeliveryOffBeforeLogin() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(outcomes: [.granted])
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        await coordinator.requestStartupAuthorizationIfNeeded()
+
+        XCTAssertEqual(client.requestCount, 1)
+        XCTAssertEqual(coordinator.authorizationStatus, .authorized)
+        XCTAssertFalse(coordinator.notificationsEnabled, "系统授权不能在未登录时开启账号推送")
+        XCTAssertNil(defaults.object(forKey: "push-notifications-enabled"))
+        let generationBeforeToken = coordinator.registrationGeneration
+        coordinator.receive(deviceToken: Data([0x12, 0x34]))
+        XCTAssertEqual(coordinator.registrationGeneration, generationBeforeToken,
+                       "未登录时必须忽略设备令牌，不能触发绑定")
+    }
+
+    @MainActor
+    func testStartupPushPermissionDoesNotRepeatAfterDenialOrEnableAnAccount() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(outcomes: [.denied])
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        PushStartupConsentPolicy.consume(
+            for: "first-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+
+        XCTAssertEqual(client.requestCount, 1)
+        XCTAssertEqual(coordinator.authorizationStatus, .denied)
+        XCTAssertFalse(coordinator.notificationsEnabled)
+        XCTAssertNil(defaults.object(forKey: "push-notifications-enabled"))
+    }
+
+    @MainActor
+    func testExistingSystemPushPermissionDoesNotImplyNewAccountConsent() async throws {
+        for status in [UNAuthorizationStatus.authorized, .provisional, .ephemeral] {
+            let defaults = try makePushStartupDefaults()
+            let client = TestPushAuthorizationClient(status: status)
+            let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+
+            await coordinator.requestStartupAuthorizationIfNeeded()
+            PushStartupConsentPolicy.consume(
+                for: "new-account", in: defaults,
+                preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+            )
+
+            XCTAssertEqual(client.requestCount, 0)
+            XCTAssertEqual(coordinator.authorizationStatus, status)
+            XCTAssertFalse(coordinator.notificationsEnabled)
+            XCTAssertNil(defaults.object(forKey: "push-notifications-enabled"),
+                         "设备已有系统权限不能被当成新账号主动同意接收推送")
+        }
+    }
+
+    @MainActor
+    func testStartupPushConsentSurvivesRelaunchAndIsConsumedByOnlyOneAccount() async throws {
+        let defaults = try makePushStartupDefaults()
+        let firstClient = TestPushAuthorizationClient(outcomes: [.granted])
+        let firstCoordinator = PushNotificationCoordinator(authorizationClient: firstClient, defaults: defaults)
+        await firstCoordinator.requestStartupAuthorizationIfNeeded()
+
+        let relaunchClient = TestPushAuthorizationClient(status: .authorized)
+        let relaunchedCoordinator = PushNotificationCoordinator(authorizationClient: relaunchClient, defaults: defaults)
+        await relaunchedCoordinator.requestStartupAuthorizationIfNeeded()
+        XCTAssertEqual(relaunchClient.requestCount, 0)
+        XCTAssertFalse(relaunchedCoordinator.notificationsEnabled)
+
+        PushStartupConsentPolicy.consume(
+            for: "first-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+        XCTAssertTrue(PushNotificationPreferencePolicy.isEnabled(
+            in: defaults, preferenceKey: "push-notifications-enabled",
+            associationKey: "push-notifications-enabled-user", userID: "first-account"
+        ))
+        PushStartupConsentPolicy.consume(
+            for: "second-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+        XCTAssertFalse(PushNotificationPreferencePolicy.isEnabled(
+            in: defaults, preferenceKey: "push-notifications-enabled",
+            associationKey: "push-notifications-enabled-user", userID: "second-account"
+        ), "B 账号不能继承 A 账号已经使用的启动授权")
+        XCTAssertTrue(PushNotificationPreferencePolicy.isEnabled(
+            in: defaults, preferenceKey: "push-notifications-enabled",
+            associationKey: "push-notifications-enabled-user", userID: "first-account"
+        ))
+    }
+
+    @MainActor
+    func testStartupPushPermissionPreservesBuild45LegacyOptOut() async throws {
+        let defaults = try makePushStartupDefaults()
+        defaults.set(false, forKey: "push-notifications-enabled")
+        let client = TestPushAuthorizationClient()
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        XCTAssertEqual(client.requestCount, 0)
+        XCTAssertTrue(PushNotificationPreferencePolicy.hasExplicitChoice(
+            in: defaults, preferenceKey: "push-notifications-enabled",
+            associationKey: "push-notifications-enabled-user", userID: "legacy-account"
+        ))
+        PushStartupConsentPolicy.recordGranted(in: defaults)
+        PushStartupConsentPolicy.consume(
+            for: "legacy-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+        XCTAssertFalse(defaults.bool(forKey: "push-notifications-enabled"))
+        XCTAssertNil(defaults.string(forKey: "push-notifications-enabled-user"))
+    }
+
+    func testStartupPushConsentRespectsAccountOptOutAndCannotLeakToNextAccount() throws {
+        let defaults = try makePushStartupDefaults()
+        PushNotificationPreferencePolicy.setEnabled(
+            false, for: "first-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+        PushStartupConsentPolicy.recordGranted(in: defaults)
+        PushStartupConsentPolicy.consume(
+            for: "first-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+        PushStartupConsentPolicy.consume(
+            for: "second-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+
+        for userID in ["first-account", "second-account"] {
+            XCTAssertFalse(PushNotificationPreferencePolicy.isEnabled(
+                in: defaults, preferenceKey: "push-notifications-enabled",
+                associationKey: "push-notifications-enabled-user", userID: userID
+            ))
+        }
+        XCTAssertTrue(PushNotificationPreferencePolicy.hasExplicitChoice(
+            in: defaults, preferenceKey: "push-notifications-enabled",
+            associationKey: "push-notifications-enabled-user", userID: "first-account"
+        ))
+        XCTAssertFalse(PushNotificationPreferencePolicy.hasExplicitChoice(
+            in: defaults, preferenceKey: "push-notifications-enabled",
+            associationKey: "push-notifications-enabled-user", userID: "second-account"
+        ))
+    }
+
+    func testClearingStartupPushConsentPreventsLaterImplicitOptIn() throws {
+        let defaults = try makePushStartupDefaults()
+        PushStartupConsentPolicy.recordGranted(in: defaults)
+        PushStartupConsentPolicy.clear(in: defaults)
+        PushStartupConsentPolicy.consume(
+            for: "first-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+        XCTAssertNil(defaults.object(forKey: "push-notifications-enabled"))
+    }
+
+    @MainActor
+    func testInterruptedStartupPushPermissionCanRetryWithoutPrematureOptIn() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(outcomes: [.interrupted, .granted])
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        PushStartupConsentPolicy.consume(
+            for: "first-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+        XCTAssertEqual(client.requestCount, 1)
+        XCTAssertEqual(coordinator.authorizationStatus, .notDetermined)
+        XCTAssertNil(defaults.object(forKey: "push-notifications-enabled"))
+
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        XCTAssertEqual(client.requestCount, 2)
+        XCTAssertEqual(coordinator.authorizationStatus, .authorized)
+        XCTAssertFalse(coordinator.notificationsEnabled)
+        PushStartupConsentPolicy.consume(
+            for: "first-account", in: defaults,
+            preferenceKey: "push-notifications-enabled", associationKey: "push-notifications-enabled-user"
+        )
+        XCTAssertTrue(PushNotificationPreferencePolicy.isEnabled(
+            in: defaults, preferenceKey: "push-notifications-enabled",
+            associationKey: "push-notifications-enabled-user", userID: "first-account"
+        ))
+    }
+
+    @MainActor
+    func testConcurrentStartupPushPermissionAttemptsShareOneSystemRequest() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(outcomes: [.granted])
+        let requestStarted = expectation(description: "第一条系统授权请求已经挂起")
+        client.pauseRequest = true
+        client.requestStarted = { requestStarted.fulfill() }
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+        let firstRequest = Task { await coordinator.requestStartupAuthorizationIfNeeded() }
+
+        await fulfillment(of: [requestStarted], timeout: 2)
+        guard client.requestCount == 1 else {
+            firstRequest.cancel()
+            client.resumeRequest()
+            return XCTFail("第一条授权请求应进入受控等待")
+        }
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        XCTAssertEqual(client.requestCount, 1, "多次前台生命周期事件只能产生一个系统授权弹窗")
+        XCTAssertFalse(coordinator.notificationsEnabled)
+        client.resumeRequest()
+        await firstRequest.value
+
+        XCTAssertEqual(coordinator.authorizationStatus, .authorized)
+        XCTAssertEqual(client.requestCount, 1)
+    }
+
+    @MainActor
+    func testPushCoordinatorBindsStartupConsentOnlyAfterEligibleLoginAndDeviceToken() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(outcomes: [.granted])
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+        let account = TestPushNotificationAccount()
+        defer { coordinator.accountContextDidChange(to: nil) }
+
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        await coordinator.synchronize(with: account)
+        XCTAssertFalse(coordinator.notificationsEnabled)
+        XCTAssertTrue(account.bindingAttempts.isEmpty, "未登录不得向服务器绑定设备")
+
+        account.pushEligibleUserID = "first-account"
+        account.pushSessionGeneration += 1
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.notificationsEnabled)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .connecting)
+        XCTAssertTrue(account.bindingAttempts.isEmpty, "系统授权不等于已获得 APNs 设备令牌")
+
+        coordinator.receive(deviceToken: Data([0x12, 0x34]))
+        await coordinator.synchronize(with: account)
+        XCTAssertEqual(account.bindingAttempts, [
+            TestPushNotificationAccount.BindingAttempt(
+                userID: "first-account", generation: 2, deviceToken: "1234"
+            ),
+        ])
+        XCTAssertTrue(coordinator.deviceRegistrationState == .ready)
+
+        await coordinator.synchronize(with: account)
+        XCTAssertEqual(account.bindingAttempts.count, 1, "正常的前台同步不能重复提交有效绑定")
+        account.pushEligibleUserID = "second-account"
+        account.pushSessionGeneration += 1
+        await coordinator.synchronize(with: account)
+        XCTAssertFalse(coordinator.notificationsEnabled, "切换账号不得继承已经消费的启动授权")
+        XCTAssertTrue(coordinator.deviceRegistrationState == .inactive)
+        coordinator.receive(deviceToken: Data([0x56, 0x78]))
+        await coordinator.synchronize(with: account)
+        XCTAssertEqual(account.bindingAttempts.count, 1, "未主动开启的新账号不得绑定迟到的设备令牌")
+    }
+
+    @MainActor
+    func testDelayedIneligiblePushUnbindCannotEraseNewAccountReadyState() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(status: .authorized)
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+        let account = TestPushNotificationAccount(userID: "first-account")
+        defer { coordinator.accountContextDidChange(to: nil) }
+        await coordinator.setNotificationsEnabled(true, for: account)
+        coordinator.receive(deviceToken: Data([0x12, 0x34]))
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .ready)
+
+        let unbindStarted = expectation(description: "旧的不合格会话解除绑定正在等待网络响应")
+        account.pushEligibleUserID = nil
+        account.pushSessionGeneration += 1
+        account.pauseNextUnbind = true
+        account.unbindStarted = { unbindStarted.fulfill() }
+        let oldSynchronization = Task { await coordinator.synchronize(with: account) }
+        await fulfillment(of: [unbindStarted], timeout: 2)
+        defer {
+            oldSynchronization.cancel()
+            account.resumeUnbind()
+        }
+        XCTAssertTrue(coordinator.deviceRegistrationState == .inactive)
+
+        account.pushEligibleUserID = "second-account"
+        account.pushSessionGeneration += 1
+        await coordinator.setNotificationsEnabled(true, for: account)
+        coordinator.receive(deviceToken: Data([0x56, 0x78]))
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .ready)
+        XCTAssertEqual(account.bindingAttempts.last?.userID, "second-account")
+
+        account.resumeUnbind()
+        await oldSynchronization.value
+        XCTAssertTrue(coordinator.notificationsEnabled, "旧解除绑定响应不能关闭新账号通知")
+        XCTAssertTrue(coordinator.deviceRegistrationState == .ready,
+                      "旧解除绑定响应不能清除新账号已经完成的设备连接")
+        await coordinator.synchronize(with: account)
+        XCTAssertEqual(account.bindingAttempts.count, 2,
+                       "旧响应不能清掉新绑定缓存并造成重复绑定")
+    }
+
+    @MainActor
+    func testPushCoordinatorCanRetryBothAPNsRegistrationAndServerBindingFailures() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(status: .authorized)
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+        let account = TestPushNotificationAccount(userID: "first-account")
+        defer { coordinator.accountContextDidChange(to: nil) }
+
+        await coordinator.setNotificationsEnabled(true, for: account)
+        coordinator.registrationFailed()
+        XCTAssertTrue(coordinator.deviceRegistrationState == .failed)
+        XCTAssertTrue(account.bindingAttempts.isEmpty)
+
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .connecting)
+        account.bindingFailuresRemaining = 1
+        coordinator.receive(deviceToken: Data([0x12, 0x34]))
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .failed,
+                      "服务器绑定失败不能显示设备已经连接")
+        XCTAssertEqual(account.bindingAttempts.count, 1)
+
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .ready)
+        XCTAssertEqual(account.bindingAttempts.count, 2)
+        XCTAssertEqual(account.bindingAttempts[0], account.bindingAttempts[1],
+                       "手动重试应使用同一账号与设备令牌")
+    }
+
+    @MainActor
+    func testExpiredPushBindingSessionRequiresSignInWithoutLoggingOutOrShowingNetworkFailure() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(status: .authorized)
+        let coordinator = PushNotificationCoordinator(
+            authorizationClient: client, defaults: defaults, registrationTimeout: .milliseconds(20)
+        )
+        let account = TestPushNotificationAccount(userID: "first-account")
+        account.bindingRequiresSignIn = true
+        defer { coordinator.accountContextDidChange(to: nil) }
+
+        await coordinator.setNotificationsEnabled(true, for: account)
+        coordinator.receive(deviceToken: Data([0x12, 0x34]))
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .requiresSignIn,
+                      "旧登录会话缺少推送绑定资料时必须提示重新登录")
+        XCTAssertTrue(coordinator.notificationsEnabled, "需要重新登录不等于用户关闭了通知")
+        XCTAssertTrue(account.hasPushEligibleSession, "推送绑定失败不得强制退出仍可浏览的账号")
+        XCTAssertEqual(account.bindingAttempts.count, 1)
+        XCTAssertEqual(account.unbindCount, 0)
+
+        let noNetworkFailure = expectation(description: "重新登录提示不能被旧连接超时覆盖")
+        noNetworkFailure.isInverted = true
+        let observation = coordinator.$deviceRegistrationState
+            .filter { $0 == .failed }
+            .sink { _ in noNetworkFailure.fulfill() }
+        defer { observation.cancel() }
+        await fulfillment(of: [noNetworkFailure], timeout: 0.08)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .requiresSignIn)
+
+        account.bindingRequiresSignIn = false
+        account.pushSessionGeneration += 1
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .ready,
+                      "用户重新登录取得完整会话后应可以完成通知绑定")
+        XCTAssertEqual(account.bindingAttempts.count, 2)
+        XCTAssertEqual(account.bindingAttempts.last?.generation, 2)
+    }
+
+    @MainActor
+    func testPushRegistrationWithoutCallbackTimesOutAndCanBeRetried() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(status: .authorized)
+        let coordinator = PushNotificationCoordinator(
+            authorizationClient: client, defaults: defaults, registrationTimeout: .milliseconds(20)
+        )
+        let account = TestPushNotificationAccount(userID: "first-account")
+        defer { coordinator.accountContextDidChange(to: nil) }
+        let timedOut = expectation(description: "没有 APNs 回调时连接状态应结束等待")
+        let observation = coordinator.$deviceRegistrationState
+            .filter { $0 == .failed }
+            .prefix(1)
+            .sink { _ in timedOut.fulfill() }
+        defer { observation.cancel() }
+
+        await coordinator.setNotificationsEnabled(true, for: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .connecting)
+        await fulfillment(of: [timedOut], timeout: 2)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .failed)
+        XCTAssertTrue(account.bindingAttempts.isEmpty)
+
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .connecting,
+                      "超时后手动重试必须重新进入连接状态")
+        coordinator.receive(deviceToken: Data([0x12, 0x34]))
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .ready)
+        XCTAssertEqual(account.bindingAttempts.count, 1)
+    }
+
+    @MainActor
+    func testPushRegistrationTimeoutSurvivesSameAccountSessionRotation() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(status: .authorized)
+        let coordinator = PushNotificationCoordinator(
+            authorizationClient: client, defaults: defaults, registrationTimeout: .milliseconds(100)
+        )
+        let account = TestPushNotificationAccount(userID: "first-account")
+        defer { coordinator.accountContextDidChange(to: nil) }
+        let timedOut = expectation(description: "同账号会话更新后仍应有有效的连接超时检测")
+        let observation = coordinator.$deviceRegistrationState
+            .filter { $0 == .failed }
+            .prefix(1)
+            .sink { _ in timedOut.fulfill() }
+        defer { observation.cancel() }
+
+        await coordinator.setNotificationsEnabled(true, for: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .connecting)
+        account.pushSessionGeneration += 1
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .connecting)
+        await fulfillment(of: [timedOut], timeout: 2)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .failed,
+                      "旧会话的超时任务不得阻止新会话离开无限等待状态")
+
+        await coordinator.synchronize(with: account)
+        coordinator.receive(deviceToken: Data([0x12, 0x34]))
+        await coordinator.synchronize(with: account)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .ready)
+        XCTAssertEqual(account.bindingAttempts.last?.generation, 2)
+    }
+
+    @MainActor
+    func testExplicitPushOptOutDuringStartupRequestCannotBeOverwrittenByItsReply() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(outcomes: [.granted])
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults)
+        let account = TestPushNotificationAccount(userID: "first-account")
+        defer { coordinator.accountContextDidChange(to: nil) }
+        let requestStarted = expectation(description: "系统授权等待期间可以记录账号关闭偏好")
+        client.pauseRequest = true
+        client.requestStarted = { requestStarted.fulfill() }
+        let startupRequest = Task { await coordinator.requestStartupAuthorizationIfNeeded() }
+        await fulfillment(of: [requestStarted], timeout: 2)
+        defer {
+            startupRequest.cancel()
+            client.resumeRequest()
+        }
+
+        await coordinator.setNotificationsEnabled(false, for: account)
+        client.resumeRequest()
+        await startupRequest.value
+        await coordinator.synchronize(with: account)
+        XCTAssertFalse(coordinator.notificationsEnabled)
+        XCTAssertTrue(account.bindingAttempts.isEmpty)
+
+        account.pushEligibleUserID = "second-account"
+        account.pushSessionGeneration += 1
+        await coordinator.synchronize(with: account)
+        XCTAssertFalse(coordinator.notificationsEnabled,
+                       "被明确关闭作废的迟到授权也不能再用于另一个账号")
+        XCTAssertTrue(account.bindingAttempts.isEmpty)
+    }
+
     func testAdminFanDirectoryQueryNormalizesRemoteSearchAndBoundsPagination() throws {
         let query = try AdminFanDirectoryQuery(
             search: "  易姝 HS-ABCD-1234  ",
@@ -2826,6 +3397,13 @@ final class ContentAndAccessTests: XCTestCase {
             WeatherFailurePresentation.message(for: URLError(.notConnectedToInternet)),
             "网络未连接"
         )
+    }
+
+    private func makePushStartupDefaults() throws -> UserDefaults {
+        let suiteName = "PushStartupAuthorizationTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        return defaults
     }
 
     private func makePortfolio(imageCount: Int) -> Portfolio {

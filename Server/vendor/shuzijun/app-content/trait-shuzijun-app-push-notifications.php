@@ -1151,11 +1151,14 @@ trait Shuzijun_App_Push_Notifications {
         );
         $candidate_install_hash = (string) ($candidate['installHash'] ?? '');
         $auth_method = (string) ($candidate['authMethod'] ?? 'password');
+        // Match the historical authentication default only for an absent
+        // scope. Explicit malformed values cannot acquire push ownership.
+        $scope = array_key_exists('scope', $candidate) ? $candidate['scope'] : 'normal';
         if ($user_id <= 0 || $created_at <= 0 || $created_at > $now + 60
             || $expires <= $now || $expires < $created_at
             || $expires - $created_at > self::FAN_SESSION_TTL + 60
             || $credential_epoch <= 0 || $recent_auth_until < 0
-            || (string) ($candidate['scope'] ?? '') !== 'normal'
+            || $scope !== 'normal'
             || !in_array($auth_method, array('password', 'apple'), true)
             || preg_match('/^[a-f0-9]{64}$/D', $candidate_install_hash) !== 1
             || !hash_equals($install_hash, $candidate_install_hash)
@@ -1171,6 +1174,7 @@ trait Shuzijun_App_Push_Notifications {
         $candidate['userID'] = $user_id;
         $candidate['createdAt'] = $created_at;
         $candidate['expires'] = $expires;
+        $candidate['scope'] = $scope;
         $candidate['credentialEpoch'] = $credential_epoch;
         $candidate['authMethod'] = $auth_method;
         $candidate['recentAuthUntil'] = $recent_auth_until;
@@ -1252,8 +1256,17 @@ trait Shuzijun_App_Push_Notifications {
             $install_hash,
             $now_timestamp
         );
-        if (!is_array($fresh_context)
-            || (int) $fresh_context['optionID'] !== $option_id
+        if (!is_array($fresh_context)) {
+            // Very early sessions lack creation time/session identity. A new
+            // login must establish those facts; never fabricate them just to
+            // make an old session eligible for push ownership.
+            return new WP_Error(
+                'fan_session_invalid',
+                '当前登录状态需要更新，请重新登录后开启消息通知。',
+                array('status' => 401)
+            );
+        }
+        if ((int) $fresh_context['optionID'] !== $option_id
             || (int) $fresh_context['userID'] !== $user_id
             || !hash_equals($token_hash, (string) $fresh_context['tokenHash'])
             || !hash_equals(

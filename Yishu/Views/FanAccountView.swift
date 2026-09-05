@@ -684,17 +684,50 @@ struct FanAccountView: View {
                                 .font(.subheadline.weight(.semibold))
                         }
                         .tint(AppTheme.gold)
-                        .disabled(pushNotifications.isUpdatingPreference)
+                        .disabled(pushNotifications.isUpdatingPreference || !account.hasPushEligibleSession)
                         .accessibilityIdentifier("fan-push-notification-toggle")
 
                         Text(
-                            pushNotifications.notificationsEnabled
+                            !account.hasPushEligibleSession
+                                ? "完成账号资料并处于待审批或已通过状态后，可开启消息通知。"
+                                : pushNotifications.notificationsEnabled
                                 ? "用于接收账号审批、合作进度和作品动态。可随时关闭；关闭后会从账号解绑此设备。"
                                 : "已关闭，此设备不再接收账号推送。"
                         )
                         .font(.caption)
                         .lineSpacing(4)
                         .foregroundStyle(AppTheme.muted)
+
+                        if pushNotifications.notificationsEnabled,
+                           pushNotifications.authorizationStatus == .authorized {
+                            switch pushNotifications.deviceRegistrationState {
+                            case .ready:
+                                Label("此设备已连接，可以接收账号通知。", systemImage: "checkmark.circle")
+                                    .font(.caption)
+                                    .foregroundStyle(AppTheme.muted)
+                            case .connecting:
+                                Label("正在连接通知服务…", systemImage: "antenna.radiowaves.left.and.right")
+                                    .font(.caption)
+                                    .foregroundStyle(AppTheme.muted)
+                            case .failed:
+                                Text("通知连接尚未完成，此设备暂时无法接收推送。")
+                                    .font(.caption)
+                                    .foregroundStyle(AppTheme.muted)
+                                Button("重新连接通知服务") {
+                                    Task { await pushNotifications.synchronize(with: account) }
+                                }
+                                .font(.caption.weight(.semibold))
+                                .frame(minHeight: 44)
+                                .accessibilityIdentifier("fan-push-notification-retry")
+                            case .requiresSignIn:
+                                Text("通知绑定需要更新登录凭据。请退出当前粉丝账号后重新登录，再开启消息通知。")
+                                    .font(.caption)
+                                    .foregroundStyle(AppTheme.muted)
+                                    .accessibilityIdentifier("fan-push-notification-sign-in-required")
+                            case .inactive:
+                                EmptyView()
+                            }
+                        }
 
                         if pushNotifications.notificationsEnabled,
                            pushNotifications.authorizationStatus == .denied {

@@ -2856,7 +2856,12 @@ trait Shuzijun_App_Fan_Identity {
         if (!empty($wpdb->last_error)) { return false; }
         return is_array($fresh_session)
             && (int) ($fresh_session['userID'] ?? 0) === $user_id
-            && (string) ($fresh_session['scope'] ?? '') === $required_scope
+            // Before scopes existed, authenticated password sessions were
+            // normal sessions. Preserve that exact legacy default while an
+            // explicitly empty, null or unknown scope still fails closed.
+            && (array_key_exists('scope', $fresh_session)
+                ? $fresh_session['scope']
+                : 'normal') === $required_scope
             && (int) ($fresh_session['expires'] ?? 0) > time()
             // Match authenticate_fan_session(): legacy normal sessions issued
             // before credential epochs existed belong to epoch 1 only. Any

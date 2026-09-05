@@ -3,6 +3,32 @@ import XCTest
 import Vision
 
 final class YishuUITests: XCTestCase {
+    /// Run on a fresh simulator so notification permission is not determined.
+    func testStartupAsksSystemNotificationPermissionBeforeLogin() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-skip-launch-poster-for-visual-testing",
+            "-disable-screen-protection-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+        ]
+        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launch()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let permissionAlert = springboard.alerts.firstMatch
+        XCTAssertTrue(permissionAlert.waitForExistence(timeout: 15), "未登录首次启动没有显示系统通知授权")
+        let allow = permissionAlert.buttons.matching(
+            NSPredicate(format: "label IN %@", ["Allow", "允许", "允許"])
+        ).firstMatch
+        XCTAssertTrue(allow.waitForExistence(timeout: 3), "系统授权框缺少允许按钮")
+        allow.tap()
+        XCTAssertTrue(element("access-gate-admin-entry", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(tabButton("首页", in: app).exists, "允许通知不得跳过账号登录")
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(element("access-gate-admin-entry", in: app).waitForExistence(timeout: 10))
+        XCTAssertFalse(permissionAlert.waitForExistence(timeout: 3), "已授权的下次启动不应重复弹窗")
+    }
+
     override func setUpWithError() throws {
         continueAfterFailure = false
         // The dedicated UI-configuration suite may finish on a landscape
@@ -19,6 +45,7 @@ final class YishuUITests: XCTestCase {
             "-bypass-access-gate-for-visual-testing",
         ]
         app.launchEnvironment["YISHU_FORCE_SCREEN_PROTECTION_COVER"] = "1"
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
         let window = app.windows.firstMatch
@@ -40,6 +67,7 @@ final class YishuUITests: XCTestCase {
             "-reset-fan-session-for-visual-testing",
             "-bypass-access-gate-for-visual-testing",
         ]
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
         let home = tabButton("首页", in: app)
@@ -83,6 +111,7 @@ final class YishuUITests: XCTestCase {
             "-bypass-access-gate-for-visual-testing",
             "-open-about-for-visual-testing",
         ]
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
         let aboutHeading = element("about-heading", in: app)
@@ -134,6 +163,7 @@ final class YishuUITests: XCTestCase {
             "-reset-fan-session-for-visual-testing",
         ]
         app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
         assertExists("fan-account-heading", in: app, timeout: 12)
@@ -154,6 +184,7 @@ final class YishuUITests: XCTestCase {
             "-simulate-apple-registration-for-visual-testing",
         ]
         app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
         assertExists("fan-apple-registration-required", in: app, timeout: 12)
@@ -175,6 +206,7 @@ final class YishuUITests: XCTestCase {
             "UICTContentSizeCategoryAccessibilityXXXL",
         ]
         app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
         let skip = element("launch-poster-skip", in: app)
@@ -209,6 +241,7 @@ final class YishuUITests: XCTestCase {
             "UICTContentSizeCategoryAccessibilityXXXL",
         ]
         app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
         let window = app.windows.firstMatch
@@ -594,6 +627,7 @@ final class YishuUITests: XCTestCase {
             "-open-portfolio-for-visual-testing",
             "-use-multi-image-gallery-for-visual-testing",
         ]
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
         assertExists("portfolio-heading", in: app, timeout: 12)
@@ -749,12 +783,18 @@ final class YishuUITests: XCTestCase {
 
         openTab("关于", in: app)
         assertExists("about-heading", in: app)
-        // On iPhone the first line of the biography initially sits behind the
-        // custom floating tab bar. iOS 26's audit reports that occlusion as a
-        // contrast failure, even though the rendered text/background contrast
-        // is sufficient. Audit after exposing the same content unobscured.
+        // A fixed swipe can leave the copyright paragraph below the floating
+        // tab bar. iOS 26 then audits a crop containing only the home indicator
+        // as that text's contrast. Establish complete visibility first, then
+        // retain the unfiltered contrast/clipping/hit-region/trait audit.
         if UIDevice.current.userInterfaceIdiom == .phone {
-            app.swipeUp()
+            let copyrightText = app.staticTexts.matching(
+                NSPredicate(
+                    format: "label BEGINSWITH %@",
+                    "本 App 展示的照片与影像均已取得合法展示授权"
+                )
+            ).firstMatch
+            scrollFullyAbovePhoneTabBar(copyrightText, in: app)
         }
         try auditPrimaryPageAccessibilityBaseline(pageNamed: "关于", in: app)
     }
@@ -774,6 +814,7 @@ final class YishuUITests: XCTestCase {
         for (key, value) in environment {
             app.launchEnvironment[key] = value
         }
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
         XCTAssertTrue(tabButton("首页", in: app).waitForExistence(timeout: 12), "主导航未出现")
         return app
@@ -1005,6 +1046,47 @@ final class YishuUITests: XCTestCase {
             app.swipeUp()
             attempts += 1
         }
+    }
+
+    private func scrollFullyAbovePhoneTabBar(
+        _ element: XCUIElement,
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertTrue(element.waitForExistence(timeout: 8), "待审计版权正文不存在", file: file, line: line)
+        let window = app.windows.firstMatch
+        let tabBar = app.tabBars.firstMatch
+        XCTAssertTrue(tabBar.waitForExistence(timeout: 3), "缺少底部导航边界", file: file, line: line)
+        guard window.exists, tabBar.exists, element.exists else { return }
+
+        for _ in 0..<8 {
+            let windowFrame = window.frame
+            let statusBar = app.statusBars.firstMatch
+            let top = statusBar.exists ? statusBar.frame.maxY + 8 : windowFrame.minY + 8
+            let bottom = min(tabBar.frame.minY, windowFrame.maxY) - 12
+            let visibleFrame = CGRect(
+                x: windowFrame.minX,
+                y: top,
+                width: windowFrame.width,
+                height: max(0, bottom - top)
+            )
+            let textFrame = element.frame
+            if !textFrame.isEmpty, visibleFrame.contains(textFrame) { return }
+
+            let overflow = textFrame.maxY > bottom
+                ? textFrame.maxY - bottom + 12
+                : textFrame.minY - top - 12
+            let movement = min(abs(overflow), visibleFrame.height * 0.5)
+                * (overflow >= 0 ? 1.0 : -1.0)
+            let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+                .withOffset(CGVector(dx: windowFrame.midX, dy: visibleFrame.midY))
+            start.press(
+                forDuration: 0.1,
+                thenDragTo: start.withOffset(CGVector(dx: 0, dy: -movement))
+            )
+        }
+        XCTFail("版权正文未能完整滚入底部导航上方，不能执行有效的对比度审计：\(element.frame)", file: file, line: line)
     }
 
     private func elementCenterIsVisible(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
@@ -1329,6 +1411,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             "-bypass-access-gate-for-visual-testing",
         ] + arguments
         app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
+        app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
         XCTAssertTrue(tabButton("首页", in: app).waitForExistence(timeout: 12), "主导航未出现")
         return app

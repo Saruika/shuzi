@@ -17,6 +17,7 @@ define('YISHU_ACCOUNT_ROLE_MARKER_TEST_PATH', $authority_test_path);
 define('HOUR_IN_SECONDS', 3600);
 define('DAY_IN_SECONDS', 86400);
 define('MINUTE_IN_SECONDS', 60);
+define('ARRAY_A', 'ARRAY_A');
 
 final class WP_Error {
     private string $code;
@@ -516,6 +517,83 @@ expect_true(
         && ($decoded_legacy_password['recentAuthUntil'] ?? null) === 0,
     '部署前密码会话只能按既有验证规则映射到 epoch 1'
 );
+$legacy_unscoped_session = $legacy_password_session;
+unset($legacy_unscoped_session['scope']);
+$legacy_unscoped_row = $legacy_row;
+$legacy_unscoped_row['option_value'] = serialize($legacy_unscoped_session);
+$decoded_unscoped_session = invoke_plugin_method(
+    'legacy_push_session_option_context',
+    array($legacy_unscoped_row, $legacy_install_hash, $legacy_now)
+);
+expect_true(
+    is_array($decoded_unscoped_session)
+        && ($decoded_unscoped_session['scope'] ?? null) === 'normal'
+        && ($decoded_unscoped_session['credentialEpoch'] ?? null) === 1,
+    '引入 scope 前的旧密码会话必须按 normal / epoch 1 初始化推送所有权'
+);
+foreach (array(null, '', false, 0, array(), 'unknown', 'onboarding', 'password_recovery', 'apple_onboarding') as $invalid_legacy_scope) {
+    $invalid_scope_session = $legacy_unscoped_session;
+    $invalid_scope_session['scope'] = $invalid_legacy_scope;
+    $invalid_scope_row = $legacy_row;
+    $invalid_scope_row['option_value'] = serialize($invalid_scope_session);
+    expect_same(
+        null,
+        invoke_plugin_method(
+            'legacy_push_session_option_context',
+            array($invalid_scope_row, $legacy_install_hash, $legacy_now)
+        ),
+        '显式无效或非 normal scope 不得借旧会话兼容规则获得推送所有权'
+    );
+}
+
+// A pre-directory session has no trustworthy creation time or session ID.
+// Migration must ask for sign-in, while a database outage remains retriable.
+$legacy_migration_original_db = $GLOBALS['wpdb'];
+$legacy_migration_db = new class {
+    public string $options = 'wp_options';
+    public string $users = 'wp_users';
+    public string $prefix = 'wp_';
+    public string $last_error = '';
+    public array $row = array();
+    public bool $fail_read = false;
+    public function prepare(string $query, ...$arguments): array {
+        return array('query' => $query, 'arguments' => $arguments);
+    }
+    public function get_row($prepared, $output) {
+        $this->last_error = $this->fail_read ? 'simulated_read_failure' : '';
+        return $this->fail_read ? null : $this->row;
+    }
+    public function get_var($prepared) { return null; }
+    public function get_results($prepared, $output): array { return array(); }
+    public function esc_like(string $value): string { return $value; }
+    public function query($prepared) {
+        throw new RuntimeException('缺少迁移依据的旧会话不得写入推送记录');
+    }
+};
+$GLOBALS['wpdb'] = $legacy_migration_db;
+foreach (array('createdAt', 'sessionID') as $missing_migration_field) {
+    $unmigratable_session = $legacy_unscoped_session;
+    unset($unmigratable_session[$missing_migration_field]);
+    $legacy_migration_db->row = $legacy_row;
+    $legacy_migration_db->row['option_value'] = serialize($unmigratable_session);
+    $migration_request_context = $unmigratable_session;
+    $migration_request_context['scope'] = 'normal';
+    $migration_request_context['tokenHash'] = $legacy_token_hash;
+    $migration_error = invoke_plugin_method(
+        'initialize_legacy_push_install_state',
+        array($migration_request_context, 42, $legacy_install_hash)
+    );
+    expect_error_code('fan_session_invalid', $migration_error, '缺少创建时间或会话标识必须明确要求重新登录');
+    expect_same(401, $migration_error->get_error_data()['status'] ?? null, '旧会话无法迁移应返回可操作的登录错误');
+}
+$legacy_migration_db->fail_read = true;
+$migration_storage_error = invoke_plugin_method(
+    'initialize_legacy_push_install_state',
+    array($migration_request_context, 42, $legacy_install_hash)
+);
+expect_error_code('push_storage_unavailable', $migration_storage_error, '真实数据库故障不得误报为需要重新登录');
+expect_same(503, $migration_storage_error->get_error_data()['status'] ?? null, '数据库故障应保留可重试状态');
+$GLOBALS['wpdb'] = $legacy_migration_original_db;
 
 // The worker must honor the absolute deadline stored with the notification.
 // Test mode returns before network I/O but only after payload/deadline checks.
@@ -1011,7 +1089,7 @@ expect_same(
         '2026-09-04-approval-v4',
     ),
     Shuzijun_App_Content_API::FAN_ACCEPTED_TRANSITIONAL_NEW_CONSENT_VERSIONS,
-    '1.5.12.1 新同意过渡只能精确接受 Build 42 v3 与 Build 45 v4'
+    '1.5.12.2 新同意过渡只能精确接受 Build 42 v3 与 Build 45 v4'
 );
 expect_same(
     array(
@@ -1048,7 +1126,7 @@ expect_true(
         && !Shuzijun_App_Content_API::fan_new_consent_version_is_accepted(array(
             '2026-08-31-approval-v2',
         )),
-    '1.5.12.1 新同意只能精确接受 v3/v4，v2、未知、缺失或非字符串必须失败'
+    '1.5.12.2 新同意只能精确接受 v3/v4，v2、未知、缺失或非字符串必须失败'
 );
 expect_true(
     Shuzijun_App_Content_API::fan_stored_consent_is_accepted(array(
@@ -1572,6 +1650,62 @@ expect_true(
     ) === true,
     '写入事务内的数据库复核应接受会话、资料、active 状态和权限一致的账号'
 );
+
+// Deployed pre-scope sessions still authenticate as normal/password/epoch 1.
+// Exercise the fresh database check used before binding, rather than just
+// testing the normalization expression in isolation.
+$unscoped_context = $revalidation_context;
+$unscoped_context['credentialEpoch'] = 1;
+$unscoped_stored_session = $unscoped_context;
+unset(
+    $unscoped_stored_session['scope'],
+    $unscoped_stored_session['credentialEpoch'],
+    $unscoped_stored_session['authMethod'],
+    $unscoped_stored_session['recentAuthUntil']
+);
+$revalidation_option = Shuzijun_App_Content_API::FAN_SESSION_OPTION_PREFIX . $revalidation_token_hash;
+$GLOBALS['yishu_test_options'][$revalidation_option] = $unscoped_stored_session;
+unset($GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][Shuzijun_App_Content_API::FAN_META_CREDENTIAL_EPOCH]);
+expect_true(
+    invoke_plugin_method('fan_session_context_is_current_from_database', array($unscoped_context, 'normal', true)) === true,
+    '缺失 scope 的未过期旧会话必须通过 normal 会话的事务内复核'
+);
+foreach (array('onboarding', 'password_recovery', 'apple_onboarding') as $non_normal_scope) {
+    expect_true(
+        invoke_plugin_method('fan_session_context_is_current_from_database', array($unscoped_context, $non_normal_scope, true)) === false,
+        '缺失 scope 的旧会话只能获得 normal 范围，不能升级为安全设置会话'
+    );
+}
+foreach (array(null, '', false, 0, array(), 'unknown', 'onboarding', 'password_recovery', 'apple_onboarding') as $invalid_stored_scope) {
+    $GLOBALS['yishu_test_options'][$revalidation_option] = $unscoped_stored_session;
+    $GLOBALS['yishu_test_options'][$revalidation_option]['scope'] = $invalid_stored_scope;
+    expect_true(
+        invoke_plugin_method('fan_session_context_is_current_from_database', array($unscoped_context, 'normal', true)) === false,
+        '显式空值、无效值及非 normal scope 必须在数据库复核时失败关闭'
+    );
+}
+foreach (array(
+    'userID' => $revalidation_user_id + 1,
+    'expires' => time() - 1,
+    'installHash' => str_repeat('d', 64),
+    'sessionID' => str_repeat('e', 32),
+    'authMethod' => 'apple',
+    'recentAuthUntil' => time() + 60,
+) as $mismatched_field => $mismatched_value) {
+    $GLOBALS['yishu_test_options'][$revalidation_option] = $unscoped_stored_session;
+    $GLOBALS['yishu_test_options'][$revalidation_option][$mismatched_field] = $mismatched_value;
+    expect_true(
+        invoke_plugin_method('fan_session_context_is_current_from_database', array($unscoped_context, 'normal', true)) === false,
+        '旧 scope 兼容不得放宽账号、到期、安装、会话或认证上下文一致性'
+    );
+}
+$GLOBALS['yishu_test_options'][$revalidation_option] = $unscoped_stored_session;
+$GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][Shuzijun_App_Content_API::FAN_META_CREDENTIAL_EPOCH] = 2;
+expect_true(
+    invoke_plugin_method('fan_session_context_is_current_from_database', array($unscoped_context, 'normal', true)) === false,
+    '密码或安全状态已推进到 epoch 2 时，缺失 scope/epoch 的旧会话仍必须失效'
+);
+$GLOBALS['yishu_test_options'][$revalidation_option] = $revalidation_context;
 $GLOBALS['wpdb']->user_meta_rows[$revalidation_user_id][
     Shuzijun_App_Content_API::FAN_META_STATUS
 ] = 'suspended';
@@ -2117,7 +2251,7 @@ $invitation_meta_source = ($invitation_meta_start === false || $invitation_meta_
     ? ''
     : substr($plugin_source, $invitation_meta_start, $invitation_meta_end - $invitation_meta_start);
 expect_true(
-    strpos($plugin_source, 'Version: 1.5.12.1') !== false
+    strpos($plugin_source, 'Version: 1.5.12.2') !== false
         && Shuzijun_App_Content_API::FAN_CAPABILITY === 'manage_yishu_fan_accounts'
         && Shuzijun_App_Content_API::FAN_INVITATION_TTL === 86400
         && Shuzijun_App_Content_API::FAN_ONBOARDING_SESSION_TTL === 600
@@ -2350,7 +2484,7 @@ expect_true(
         && strpos($plugin_source, "'https://appleid.apple.com/auth/keys'") !== false
         && strpos($plugin_source, "JWK::parseKeySet(\$filtered, 'RS256')") !== false
         && strpos($plugin_source, "(string) (\$headers->alg ?? '') !== 'RS256'") !== false
-        && strpos($plugin_source, 'Version: 1.5.12.1') !== false,
+        && strpos($plugin_source, 'Version: 1.5.12.2') !== false,
     'Apple 认证必须强制 authorization code 交换并用 RS256/JWKS 严格验证'
 );
 $apple_jwks_start = strpos($plugin_source, 'private static function fetch_apple_jwk_keys');

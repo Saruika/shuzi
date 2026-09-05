@@ -11,7 +11,9 @@ Scripts/ci-ios-tests.sh iPad
 Scripts/ci-release-analyze.sh
 ```
 
-测试脚本会自动选择当前 Xcode 中第一台可用的 iPhone 或 iPad 模拟器，不依赖固定的设备名称或 UDID。DerivedData 位于独立临时目录并在任务结束时自动清理，不会进入 Git。
+测试脚本会自动选择当前 Xcode 中可用的 iPhone 或 iPad 模拟器，优先 Pro Max / iPad Pro 13 英寸，不依赖固定 UDID。DerivedData 位于独立临时目录并在任务结束时自动清理，不会进入 Git。
+
+首次通知授权专项由 `Scripts/ci-notification-permission-test.sh` 根据普通目标的设备类型和系统版本创建一台全新模拟器，并以返回的精确 UUID 只运行 `testStartupAsksSystemNotificationPermissionBeforeLogin`。该专项先于任何单元测试 host 启动，硬断言未登录首次启动出现系统授权框、允许后仍需登录、再次启动不重复弹窗。成功或失败均清理自己创建的设备，普通全量测试复用构建产物并排除该专项；每次重跑都会新建设备，不能用复用模拟器的既有授权状态代替首次启动验收。两组 `.xcresult` 分别保留。
 
 UI 回归默认不保存截图附件，避免人物影像留在本地测试产物。只有在隔离的视觉验收环境中显式设置 `YISHU_UI_TEST_ATTACH_SCREENSHOTS=1` 时才会保留附件，任务结束后必须清理。
 
@@ -73,6 +75,13 @@ Server/tests/fan-api-smoke.sh
 - Release 构建完成后再次扫描实际 `.app` 包，确认没有私钥、云密钥、环境文件或意外打包的敏感资源。
 
 GitHub Actions 只有仓库内容读权限，不使用 Apple、腾讯云或服务器密钥；外部 Action 固定到完整 commit SHA。失败时保留七天 `.xcresult` 供排查。
+
+## Build 46 通知授权与设备绑定验收
+
+1. 对全新安装、Build 45 未操作通知、此前明确关闭和此前拒绝系统授权分别验收：前两者在系统状态未决定时于启动请求授权；明确关闭/拒绝不被自动推翻，不反复弹窗。已有系统授权但无账号 opt-in 不应被当成新的同意。
+2. 未登录允许系统通知后，注册/登录门禁仍有效且不能绑定设备；完成合规账号资料及登录后，启动同意只能被该账号消费一次并登记 APNs 设备。退出和换号后，下一账号不能继承这次同意。
+3. 用 TestFlight 真机允许通知并完成登录，确认设备绑定完成后管理员不再显示“用户暂无可用的推送设备”；向指定测试账号发送通知并确认接收，关闭通知、退出、换号和删号继续验证解绑。模拟器系统弹窗通过不能替代生产 APNs 投递验证。
+4. 单元回归用隔离 UserDefaults 和假授权客户端验证允许/拒绝、已有授权、旧版关闭、跨账号、失败重试及并发请求去重；UI 全量采用上文全新设备专项流程，不依赖不存在的 `simctl notifications reset`。单元测试进程不能传 `-skip-startup-notification-authorization-for-testing`，普通 UI 用例才使用该 Debug 参数。
 
 ## Build 45 发布前验收
 

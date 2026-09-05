@@ -66,7 +66,17 @@ trap cleanup EXIT
 
 result_root="${CI_RESULT_DIR:-${RUNNER_TEMP:-/tmp}/yishu-results}"
 mkdir -p "$result_root"
-result_bundle="$result_root/Yishu-${device_family}-$(date +%s).xcresult"
+result_root="$(cd "$result_root" && pwd -P)"
+run_id="$(date +%s)-$(uuidgen)"
+result_bundle="$result_root/Yishu-${device_family}-${run_id}.xcresult"
+
+# A reusable simulator may already have a notification decision. Run the
+# first-launch assertion on its own new device before any ordinary/unit tests,
+# then keep it out of the reused simulator's full suite. Both share build output.
+Scripts/ci-notification-permission-test.sh \
+  "$destination_id" \
+  "$temporary_root/DerivedData" \
+  "$result_root/Yishu-${device_family}-NotificationPermission-${run_id}.xcresult"
 
 # The shared UI suite keeps XCTest's system accessibility audit on iPhone.
 # On iPad it runs the deterministic safe-area, 44pt, Dynamic Type, VoiceOver
@@ -82,5 +92,6 @@ xcodebuild \
   -resultBundlePath "$result_bundle" \
   -parallel-testing-enabled NO \
   -enableCodeCoverage YES \
+  -skip-testing:YishuUITests/YishuUITests/testStartupAsksSystemNotificationPermissionBeforeLogin \
   COMPILER_INDEX_STORE_ENABLE=NO \
   test

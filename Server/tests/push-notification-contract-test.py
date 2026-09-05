@@ -30,7 +30,7 @@ def main() -> None:
     ios_push = IOS_PUSH.read_text(encoding="utf-8")
     combined = "\n".join((core, fan, push, identity, delivery))
 
-    assert "Version: 1.5.12.1" in entry
+    assert "Version: 1.5.12.2" in entry
     assert "v1.3.33-build45" in release
     assert "推送 Worker 尚未启用" in release
     for variable in (
@@ -41,7 +41,7 @@ def main() -> None:
     ):
         assert variable in release
 
-    # Server 1.5.12.1 is an explicit source-level bridge: Build 42 submits v3,
+    # Server 1.5.12.2 retains the source-level bridge: Build 42 submits v3,
     # Build 45 submits v4, and no option/filter can broaden the exact pair.
     assert "FAN_ACCEPTED_TRANSITIONAL_NEW_CONSENT_VERSIONS" in core
     bridge_versions = section(
@@ -368,7 +368,13 @@ def main() -> None:
     assert "UIApplication.shared.unregisterForRemoteNotifications()" in account_transition
     assert "await stopDeliveryLocally(unbindingFrom: account)" in preference_change
     assert "if enabled" in preference_change and "await synchronize(with: account)" in preference_change
-    assert "UIApplication.shared.registerForRemoteNotifications()" in synchronization
+    assert "beginDeviceRegistration(for: account)" in synchronization
+    device_registration = section(
+        ios_push,
+        "private func beginDeviceRegistration",
+        "private func scheduleBindingRefresh",
+    )
+    assert "UIApplication.shared.registerForRemoteNotifications()" in device_registration
 
     # Plain tokens cannot be persisted: authenticated ciphertext and a keyed
     # index are independently derived from an out-of-webroot server data key.
