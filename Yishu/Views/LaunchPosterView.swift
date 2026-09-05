@@ -154,12 +154,12 @@ struct LaunchPosterCanvas: View {
                 .offset(y: copyIsVisible ? 0 : 12)
             }
 
-            Button(action: dismiss) {
-                Text("跳过")
-                    .font(.caption.weight(.semibold))
-                    .lineLimit(1)
-                    .padding(.horizontal, 14)
-                    .frame(minWidth: 44, minHeight: 44)
+            Group {
+                if isPreview {
+                    skipLabel
+                } else {
+                    Button(action: dismiss) { skipLabel }
+                }
             }
             .foregroundStyle(.white)
             .background(.black.opacity(0.58), in: Capsule())
@@ -170,15 +170,22 @@ struct LaunchPosterCanvas: View {
             .padding(.top, topControlInset)
             .padding(.leading, leadingInset)
             .padding(.trailing, trailingInset)
-            .accessibilityHint("立即进入首页")
-            .accessibilityIdentifier("launch-poster-skip")
-            .disabled(isPreview)
+            .accessibilityHint(isPreview ? "" : "立即进入首页")
+            .accessibilityIdentifier(isPreview ? "admin-launch-poster-skip-decoration" : "launch-poster-skip")
             .accessibilityHidden(isPreview)
         }
         .frame(width: size.width, height: size.height)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("launch-poster-canvas")
 
+    }
+
+    private var skipLabel: some View {
+        Text("跳过")
+            .font(.caption.weight(.semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 14)
+            .frame(minWidth: 44, minHeight: 44)
     }
 
     private func revealArtworkIfNeeded() {

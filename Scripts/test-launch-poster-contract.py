@@ -11,7 +11,9 @@ for transform in ("artworkScale", ".scaleEffect(", ".rotationEffect(",
 assert ".opacity(remoteImageIsVisible ? 1 : 0)" in source
 assert "poster.displaySeconds" in source
 assert "pausesAutomaticDismissal" in source
-assert '.accessibilityIdentifier("launch-poster-skip")' in source
+assert '"admin-launch-poster-skip-decoration" : "launch-poster-skip"' in source
+assert 'Button(action: dismiss) { skipLabel }' in source
+assert 'if isPreview {\n                    skipLabel' in source
 assert ".scaledToFit()" in source and ".scaledToFill()" in source
 
 copy = source.split("struct LaunchPosterTextBlock: View {", 1)[1]
