@@ -25,42 +25,13 @@ struct AboutView: View {
         GeometryReader { scene in
             ZStack {
                 AppTheme.ink.ignoresSafeArea()
-                ScrollView {
-                    Group {
-                        if usesTwoColumnLayout {
-                            HStack(alignment: .top, spacing: 24) {
-                                portrait(captionBottomPadding: portraitCaptionInset)
-                                    .frame(
-                                        maxWidth: .infinity,
-                                        maxHeight: twoColumnPortraitHeight(in: scene),
-                                        alignment: .top
-                                    )
-                                profileDetails
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.top, 48)
-                            }
-                            .frame(maxWidth: 1_164)
-                            .padding(.horizontal, 24)
-                        } else {
-                            VStack(spacing: 0) {
-                                portrait(
-                                    captionBottomPadding: singleColumnCaptionBottomPadding(in: scene)
-                                )
-                                    .frame(maxWidth: 720)
-                                    .frame(maxWidth: .infinity)
-                                profileDetails
-                                    .frame(maxWidth: 720)
-                                    .frame(maxWidth: .infinity)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .top)
+                if UIDevice.current.userInterfaceIdiom == .pad,
+                   usesTwoColumnLayout(in: scene) {
+                    pinnedPortraitLayout(in: scene)
+                        .overlay(alignment: .bottom) { visibleBottomTestProbe }
+                } else {
+                    scrollingLayout(in: scene)
                 }
-                .scrollIndicators(.hidden)
-                .overlay(alignment: .bottom) {
-                    visibleBottomTestProbe
-                }
-                .floatingTabBarScrollClearance()
             }
         }
         .toolbar(.hidden, for: .navigationBar)
@@ -76,10 +47,78 @@ struct AboutView: View {
         }
     }
 
-    private var usesTwoColumnLayout: Bool {
+    private func pinnedPortraitLayout(in scene: GeometryProxy) -> some View {
+        let contentWidth = min(max(0, scene.size.width - 48), 1_164)
+        let columnWidth = max(0, (contentWidth - 24) / 2)
+        let portraitWidth = min(columnWidth, twoColumnPortraitHeight(in: scene) * portraitAspectRatio)
+
+        return HStack(alignment: .top, spacing: 24) {
+            // The portrait and its caption live outside every scroll view.
+            // Fit one shared 2:3 canvas to the current window, including after
+            // rotation or resizing; do not stretch or crop the photograph.
+            portrait(captionBottomPadding: portraitCaptionInset)
+                .frame(width: portraitWidth, height: portraitWidth / portraitAspectRatio)
+                .frame(width: columnWidth, alignment: .top)
+
+            ScrollView {
+                profileDetails
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 48)
+            }
+            .scrollIndicators(.hidden)
+            .floatingTabBarScrollClearance()
+            .accessibilityIdentifier("about-details-scroll")
+            .frame(width: columnWidth, height: max(0, scene.size.height))
+        }
+        .frame(width: contentWidth, height: max(0, scene.size.height), alignment: .top)
+        .padding(.horizontal, 24)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private func scrollingLayout(in scene: GeometryProxy) -> some View {
+        ScrollView {
+            Group {
+                if usesTwoColumnLayout(in: scene) {
+                    HStack(alignment: .top, spacing: 24) {
+                        portrait(captionBottomPadding: portraitCaptionInset)
+                            .frame(
+                                maxWidth: .infinity,
+                                maxHeight: twoColumnPortraitHeight(in: scene),
+                                alignment: .top
+                            )
+                        profileDetails
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 48)
+                    }
+                    .frame(maxWidth: 1_164)
+                    .padding(.horizontal, 24)
+                } else {
+                    VStack(spacing: 0) {
+                        portrait(
+                            captionBottomPadding: singleColumnCaptionBottomPadding(in: scene)
+                        )
+                            .frame(maxWidth: 720)
+                            .frame(maxWidth: .infinity)
+                        profileDetails
+                            .frame(maxWidth: 720)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .top)
+        }
+        .scrollIndicators(.hidden)
+        .overlay(alignment: .bottom) {
+            visibleBottomTestProbe
+        }
+        .floatingTabBarScrollClearance()
+    }
+
+    private func usesTwoColumnLayout(in scene: GeometryProxy) -> Bool {
         !dynamicTypeSize.isAccessibilitySize
             && dynamicTypeSize < .xxxLarge
             && (horizontalSizeClass == .regular || verticalSizeClass == .compact)
+            && (UIDevice.current.userInterfaceIdiom != .pad || scene.size.width >= 700)
     }
 
     private func twoColumnPortraitHeight(in scene: GeometryProxy) -> CGFloat {

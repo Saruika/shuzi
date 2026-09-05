@@ -1312,6 +1312,58 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         attachScreenshot(named: "adaptive-about", app: app)
     }
 
+    func testIPadAboutPortraitRemainsFixedWhileOnlyDetailsScroll() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            throw XCTSkip("固定双栏滚动是 iPad 专属行为")
+        }
+        let app = launchApp(arguments: ["-open-about-for-visual-testing"])
+        let window = app.windows.firstMatch
+        XCTAssertTrue(window.waitForExistence(timeout: 8))
+        guard window.frame.width >= 700 else {
+            throw XCTSkip("窄窗口使用可滚动的单列布局")
+        }
+        recordPresentationGeometry("about-pinned-scroll", frame: window.frame)
+        let portrait = element("about-portrait", in: app)
+        let role = element("about-role-summary", in: app)
+        let heading = element("about-heading", in: app)
+        XCTAssertTrue(portrait.waitForExistence(timeout: 8))
+        XCTAssertTrue(role.waitForExistence(timeout: 8))
+        XCTAssertTrue(heading.waitForExistence(timeout: 8))
+        let portraitBefore = portrait.frame
+        let roleBefore = role.frame
+        let headingBefore = heading.frame.minY
+        let details = app.scrollViews["about-details-scroll"].firstMatch
+        // The fallback also makes this regression fail against the former
+        // whole-page scroll view: dragging the right half moved both columns.
+        let scroll = details.exists ? details : app.scrollViews.firstMatch
+        let start = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.8))
+        let end = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.3))
+        start.press(forDuration: 0.05, thenDragTo: end)
+        XCTAssertLessThan(heading.frame.minY, headingBefore - 30, "右侧详情没有滚动")
+        XCTAssertEqual(portrait.frame.minY, portraitBefore.minY, accuracy: 1, "滚动右栏时左图跟着移动")
+        XCTAssertEqual(portrait.frame.maxY, portraitBefore.maxY, accuracy: 1, "滚动右栏时左图尺寸变化")
+        XCTAssertEqual(role.frame.minY, roleBefore.minY, accuracy: 1, "左侧职业介绍跟着滚动")
+
+        let headingAfter = heading.frame.minY
+        portrait.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.75))
+            .press(forDuration: 0.05, thenDragTo: portrait.coordinate(
+                withNormalizedOffset: CGVector(dx: 0.5, dy: 0.35)
+            ))
+        XCTAssertEqual(heading.frame.minY, headingAfter, accuracy: 1, "左图上的滑动不应驱动右栏")
+
+        let privacy = element("about-privacy-policy", in: app)
+        for _ in 0..<6 where !privacy.isHittable { scroll.swipeUp() }
+        XCTAssertTrue(privacy.isHittable, "右栏底部隐私入口无法滚动到达")
+        let lastLink = element("about-weather-legal-link", in: app)
+        for _ in 0..<6 where !lastLink.isHittable { scroll.swipeUp() }
+        XCTAssertTrue(lastLink.isHittable, "右栏最后的许可入口无法滚动到达")
+        XCTAssertEqual(portrait.frame.minY, portraitBefore.minY, accuracy: 1)
+        XCTAssertEqual(role.frame.minY, roleBefore.minY, accuracy: 1)
+        XCTAssertTrue(window.frame.contains(role.frame), "固定职业介绍超出窗口")
+        XCTAssertTrue(tabButton("首页", in: app).isHittable)
+        attachScreenshot(named: "adaptive-about-pinned-after-scroll", app: app)
+    }
+
     func testPortfolioSearchMatchesTheCurrentSceneConfiguration() {
         let app = launchApp(arguments: ["-open-portfolio-for-visual-testing"])
         let window = app.windows.firstMatch

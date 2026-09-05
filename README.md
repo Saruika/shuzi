@@ -4,6 +4,8 @@
 
 > 当前 TestFlight 内部测试版本：`1.3.35 (47)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
+最新客户端源码修正：[v1.3.35-build47.1](Server/releases/v1.3.35-build47.1.md)：iPad「关于」页左侧人物图与姓名、职业介绍固定，右侧详情独立滚动。该修正需要随新的 App 构建安装后生效，不是云端热更新；尚未上传新的 TestFlight 构建。
+
 最新相册内容更新：[v1.3.35-content.1](Server/releases/v1.3.35-content.1.md)（2026-09-05）：新增“灯影绮罗”“花庭清韵”，为“新中式”补充同套照片，共 10 册、70 张。云端更新，作品页下拉刷新即可，无需重装 TestFlight。
 
 ## 产品功能
