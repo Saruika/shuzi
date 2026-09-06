@@ -41,7 +41,7 @@ struct CreditsView: View {
             .floatingTabBarScrollClearance()
         }
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .themeNavigationChrome()
         .onAppear {
 #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments

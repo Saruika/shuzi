@@ -82,7 +82,7 @@ struct CollaborationInquiryView: View {
         .navigationTitle("合作邀约")
         .navigationBarTitleDisplayMode(.inline)
         .stableDetailTabBar()
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .themeNavigationChrome()
         .alert(item: $notice) { item in
             Alert(title: Text(item.title), message: Text(item.message), dismissButton: .default(Text("知道了")))
         }

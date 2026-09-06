@@ -1298,6 +1298,28 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(HomeHeroOverlayLayout(viewport: .zero, accessibilityText: false).image, .zero)
     }
 
+    func testEdgeToEdgeHeroKeepsControlsInsideDeviceAndTabSafeAreas() {
+        for viewport in [CGSize(width: 375, height: 667), CGSize(width: 440, height: 956),
+                         CGSize(width: 956, height: 440), CGSize(width: 1032, height: 1376),
+                         CGSize(width: 1376, height: 1032)] {
+            for insets in [EdgeInsets(top: 20, leading: 0, bottom: 49, trailing: 0),
+                           EdgeInsets(top: 62, leading: 0, bottom: 96, trailing: 0),
+                           EdgeInsets(top: 24, leading: 62, bottom: 83, trailing: 62)] {
+                let safe = CGRect(x: insets.leading, y: insets.top,
+                    width: viewport.width - insets.leading - insets.trailing,
+                    height: viewport.height - insets.top - insets.bottom)
+                for large in [false, true] {
+                    let layout = HomeHeroOverlayLayout(viewport: viewport,
+                        accessibilityText: large, safeAreaInsets: insets)
+                    XCTAssertEqual(layout.image, CGRect(origin: .zero, size: viewport))
+                    XCTAssertTrue(safe.contains(layout.weather))
+                    XCTAssertTrue(safe.contains(layout.caption))
+                    XCTAssertFalse(layout.weather.intersects(layout.caption))
+                }
+            }
+        }
+    }
+
     @MainActor
     func testLateHomeImageCompletionCannotRestoreRetiredOrBackgroundPhotos() {
         let oldURL = ContentCatalog.heroImages[0]

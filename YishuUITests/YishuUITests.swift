@@ -361,12 +361,140 @@ final class YishuUITests: XCTestCase {
         let bright = stride(from: 0, to: bytes.count, by: 4).filter {
             bytes[$0] > 200 && bytes[$0 + 1] > 200 && bytes[$0 + 2] > 200
         }.count
-        XCTAssertGreaterThan(Double(bright) / Double(width * rows), 0.65,
-                             "月白主题的首页状态栏背景仍被固定为黑色")
-        let dark = stride(from: 0, to: bytes.count, by: 4).filter {
-            bytes[$0] < 70 && bytes[$0 + 1] < 70 && bytes[$0 + 2] < 70
-        }.count
-        XCTAssertGreaterThan(dark, 80, "浅色首页必须使用可读的深色时间/系统图标")
+        XCTAssertGreaterThan(bright, 80, "照片背景上的白色时间/系统图标不可读")
+        var photographic = 0
+        for offset in stride(from: 0, to: bytes.count, by: 4) {
+            let red = Int(bytes[offset])
+            let green = Int(bytes[offset + 1])
+            let blue = Int(bytes[offset + 2])
+            if red > 80 && green > 80 && blue > 60 && green - blue > 8 {
+                photographic += 1
+            }
+        }
+        XCTAssertGreaterThan(Double(photographic) / Double(width * rows), 0.6,
+                             "顶部必须延续合成照片颜色，不能是黑色或月白实色条")
+    }
+
+    func testEdgeToEdgeHomeKeepsControlsSafeWithAndWithoutProtection() throws {
+        for protected in [false, true] {
+            let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", "ivory",
+                "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing",
+                "-expose-home-hero-state-for-visual-testing"], screenProtectionEnabled: protected)
+            let window = app.windows.firstMatch.frame
+            let photo = element("home-hero-actual-filled-image-0", in: app)
+            XCTAssertTrue(photo.waitForExistence(timeout: 8))
+            XCTAssertEqual(photo.frame.minY, window.minY, accuracy: 0.5,
+                           "photo=\(photo.frame), window=\(window), protected=\(protected), geometry=\(element("home-canvas-geometry", in: app).value ?? "missing")")
+            XCTAssertEqual(photo.frame.maxY, window.maxY, accuracy: 0.5,
+                           "photo=\(photo.frame), window=\(window), protected=\(protected)")
+            for identifier in ["home-weather", "home-open-portfolio", "home-hero-subtitle"] {
+                let control = element(identifier, in: app)
+                XCTAssertTrue(control.exists)
+                XCTAssertTrue(window.contains(control.frame))
+                if app.tabBars.firstMatch.exists {
+                    XCTAssertFalse(app.tabBars.firstMatch.frame.intersects(control.frame))
+                }
+                if app.statusBars.firstMatch.exists {
+                    XCTAssertFalse(app.statusBars.firstMatch.frame.intersects(control.frame))
+                }
+            }
+            app.terminate()
+        }
+    }
+
+    func testImmersiveHomeTypographyContrast() throws {
+        let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", "ivory",
+            "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"])
+        XCTAssertTrue(element("home-hero-title", in: app).waitForExistence(timeout: 8))
+        try app.performAccessibilityAudit(for: [.contrast, .textClipped, .trait]) { issue in
+            print("Home accessibility: \(issue.compactDescription); \(issue.element?.identifier ?? "system")")
+            return false
+        }
+    }
+
+    func testHomeRestoresNonzeroPageBeforeDisplayingIt() {
+        for index in [1, 4] {
+            let app = launchApp(arguments: ["-hold-home-remote-images-for-visual-testing",
+                "-disable-home-auto-advance-for-visual-testing",
+                "-expose-home-hero-state-for-visual-testing",
+                "-home-hero-selection-for-visual-testing", "\(index)"])
+            let window = app.windows.firstMatch.frame
+            let presentation = window.width > window.height ? "fitted" : "filled"
+            let photo = element("home-hero-actual-\(presentation)-image-\(index)", in: app)
+            XCTAssertTrue(photo.waitForExistence(timeout: 8))
+            XCTAssertTrue(window.insetBy(dx: -0.5, dy: -0.5).contains(photo.frame),
+                          "恢复页码与可见图片不一致：index=\(index), photo=\(photo.frame), window=\(window)")
+            app.terminate()
+        }
+    }
+
+    func testImmersiveThemeBackgroundCoversTabsAndPushedPages() throws {
+        for (theme, background) in [("ivory", UInt32(0xF4F0E8)), ("indigo", UInt32(0x131E32))] {
+            let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", theme,
+                "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"])
+            for title in ["作品", "影视", "收藏", "关于"] {
+                openTab(title, in: app)
+                try assertThemeAtSystemEdges(app, background: background, page: title)
+            }
+            let settings = element("about-settings", in: app)
+            scrollToElement(settings, in: app)
+            settings.tap()
+            XCTAssertTrue(element("user-settings", in: app).waitForExistence(timeout: 5))
+            try assertThemeAtSystemEdges(app, background: background, page: "设置")
+            let privacy = element("settings-privacy", in: app)
+            scrollToElement(privacy, in: app)
+            privacy.tap()
+            XCTAssertTrue(app.navigationBars["隐私政策"].waitForExistence(timeout: 5))
+            let privacyScreenshot = XCTAttachment(screenshot: app.screenshot())
+            privacyScreenshot.name = "immersive-privacy-\(theme)"
+            privacyScreenshot.lifetime = .keepAlways
+            add(privacyScreenshot)
+            try assertThemeAtSystemEdges(app, background: background, page: "隐私政策")
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            XCTAssertTrue(element("user-settings", in: app).waitForExistence(timeout: 5))
+            app.navigationBars.buttons.element(boundBy: 0).tap()
+            XCTAssertTrue(tabButton("首页", in: app).waitForExistence(timeout: 5))
+            app.terminate()
+        }
+    }
+
+    private func assertThemeAtSystemEdges(_ app: XCUIApplication, background: UInt32, page: String) throws {
+        let window = app.windows.firstMatch.frame
+        let screenshot = XCUIScreen.main.screenshot()
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let normalized = UIGraphicsImageRenderer(size: window.size, format: format).image { _ in
+            screenshot.image.draw(in: CGRect(origin: .zero, size: window.size))
+        }
+        let image = try XCTUnwrap(normalized.cgImage)
+        // System screenshots are rectangular (hardware corner masks are not
+        // included). Sample in both document margins, outside text glyphs and
+        // the centre home indicator; never average scrolling text as background.
+        // SE's compact status bar puts the battery close to y=2; its very
+        // first raster row is background, unlike that battery-glyph row.
+        for (y, height) in [(CGFloat(0), 1), (window.height - 6, 4)] {
+            for x in [CGFloat(8), window.width - 12] {
+                let width = 4
+                let crop = try XCTUnwrap(image.cropping(to: CGRect(x: x,
+                    y: y, width: CGFloat(width), height: CGFloat(height))))
+                var pixels = [UInt8](repeating: 0, count: width * height * 4)
+                try pixels.withUnsafeMutableBytes { buffer in
+                    let context = try XCTUnwrap(CGContext(data: buffer.baseAddress, width: width, height: height,
+                        bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                    context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+                }
+                var backgroundPixels = 0
+                for offset in stride(from: 0, to: pixels.count, by: 4) {
+                    let matches = [16, 8, 0].enumerated().allSatisfy { channel, shift in
+                        abs(Int(pixels[offset + channel]) - Int((background >> shift) & 0xff)) <= 18
+                    }
+                    if matches { backgroundPixels += 1 }
+                }
+                XCTAssertGreaterThan(Double(backgroundPixels) / Double(width * height), 0.65,
+                                     "\(page) 系统边缘未延续主题：x=\(x), y=\(y)")
+            }
+        }
     }
 
     func testAppleFirstUseStillRequiresRegistrationAndApproval() {
@@ -2097,7 +2225,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
 
     private func verifyHomeThemes(_ themes: [(String, UInt32)]) throws {
         var referencePhotoSamples: [[UInt8]]?
-        for (theme, expectedBackground) in themes {
+        for (theme, _) in themes {
             let app = launchApp(arguments: [
                 "-cn.com.shuzijun.yishu.appearance.v1", theme,
                 "-hold-home-remote-images-for-visual-testing",
@@ -2133,11 +2261,13 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
                                    "\(theme)：\(identifier) 被底部导航遮挡")
                 }
             }
-            XCTAssertTrue(window.contains(photo.frame), "\(theme)：照片被窗口裁切")
+            XCTAssertTrue(window.insetBy(dx: -0.5, dy: -0.5).contains(photo.frame),
+                          "\(theme)：照片被窗口裁切，window=\(window)，photo=\(photo.frame)")
             if window.height > window.width {
                 XCTAssertGreaterThanOrEqual(photo.frame.width / window.width, 0.98,
                                            "经典首页不应缩进成画廊照片框")
-                XCTAssertGreaterThanOrEqual(photo.frame.height / window.height, 0.70)
+                XCTAssertGreaterThanOrEqual(photo.frame.height / window.height, 0.995,
+                                           "照片必须覆盖状态栏及底部安全区")
             }
             let screenshot = XCUIScreen.main.screenshot()
             let format = UIGraphicsImageRendererFormat()
@@ -2167,9 +2297,8 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             }.sorted()
             XCTAssertGreaterThanOrEqual((luminances[pixelCount * 95 / 100] + 0.05)
                 / (luminances[pixelCount * 5 / 100] + 0.05), 4.5, "\(theme)：实际天气胶囊文字不清晰")
-            // Portrait retains a themed system-status area. Landscape hides
-            // that bar and the restored full-bleed artwork reaches y=0; that
-            // pixel must be photo color, not the old gallery's empty margin.
+            // The system regions must contain photograph pixels, not the
+            // previous solid theme strips. Use the synthetic artwork only.
             if window.height > window.width {
                 let crop = try XCTUnwrap(source.cropping(to: CGRect(x: window.width * 0.18, y: 2,
                                                                    width: window.width * 0.12, height: 4)))
@@ -2178,10 +2307,15 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
                     bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
                 context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-                for (index, shift) in [16, 8, 0].enumerated() {
-                    XCTAssertEqual(Double(pixel[index]), Double((expectedBackground >> shift) & 0xff),
-                                   accuracy: 14, "\(theme)：首页没有渲染所选主题；像素=\(pixel)")
-                }
+                XCTAssertGreaterThan(pixel[0], 80, "顶部出现黑边：\(pixel)")
+                XCTAssertGreaterThan(Int(pixel[1]) - Int(pixel[2]), 8,
+                                     "顶部没有显示照片颜色：\(pixel)")
+                let bottomCrop = try XCTUnwrap(source.cropping(to: CGRect(
+                    x: window.width * 0.25, y: window.height - 6, width: 4, height: 4)))
+                context.draw(bottomCrop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+                XCTAssertGreaterThan(pixel[1], 35, "底部安全区出现黑边：\(pixel)")
+                XCTAssertGreaterThan(Int(pixel[1]) - Int(pixel[2]), 5,
+                                     "底部没有延续照片：\(pixel)")
             }
             // Sample inside the actual photo, not a window coordinate that may
             // belong to a landscape safe area. In every configuration the

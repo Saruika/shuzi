@@ -19,7 +19,7 @@ struct AppAccessGateView: View {
     @State private var presentsAdminAccess = false
 
     var body: some View {
-        NavigationStack {
+        AppNavigationStack {
             FanAccountView(
                 isAccessGate: true,
                 externalAdminAccessPresented: presentsAdminAccess
@@ -1479,7 +1479,7 @@ private struct FanAccountSecurityView: View {
         }
         .navigationTitle(account.usesAppleSignIn ? "登录设备" : "账号安全")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .themeNavigationChrome()
         .task { await account.fetchSessions() }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { clearPasswords() }
@@ -1643,7 +1643,7 @@ struct FanAccessAdminView: View {
         }
         .navigationTitle("注册审批")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .themeNavigationChrome()
         .searchable(text: $searchText, prompt: "昵称、抖音 ID 或身份码")
         .task(
             id: FanDirectorySearchTaskID(
@@ -2282,7 +2282,7 @@ private struct FanAccessDetailView: View {
                 : (user.status == FanAccountStatus.pending.rawValue ? "审批申请" : "账号权限")
         )
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .themeNavigationChrome()
         .disabled(isSaving || isGeneratingRecovery || isChangingAdministrator)
         .confirmationDialog(
             pendingAdministratorChange?.administrator == true ? "授予 App 管理员身份？" : "撤销 App 管理员身份？",
@@ -2571,7 +2571,7 @@ private struct FanPushComposerView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        AppNavigationStack {
             Form {
                 Section {
                     LabeledContent("收件人", value: user.displayName)

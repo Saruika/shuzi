@@ -198,48 +198,42 @@ private struct AppAppearanceModifier: ViewModifier {
     func body(content: Content) -> some View {
         let theme = AppearanceStore.shared.theme
         content
+            .background { AppTheme.ink.ignoresSafeArea(.container) }
+            .scrollContentBackground(.hidden)
             .environment(\.colorScheme, theme.colorScheme)
             .preferredColorScheme(isAppRoot ? AppearanceStore.shared.systemColorScheme : theme.colorScheme)
             .foregroundStyle(theme.palette.text.color)
             .tint(theme.palette.accent.color)
+            .themeNavigationChrome()
     }
 }
 
 private struct ThemeNavigationChrome: ViewModifier {
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content
-            .toolbarColorScheme(AppearanceStore.shared.theme.colorScheme, for: .navigationBar)
-            .toolbarBackground(AppTheme.ink, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
+        if #available(iOS 26.0, *) {
+            content
+                .toolbarBackground(.automatic, for: .navigationBar, .tabBar)
+        } else {
+            content
+                .toolbarBackground(.ultraThinMaterial, for: .navigationBar, .tabBar)
+                .toolbarBackground(.automatic, for: .navigationBar, .tabBar)
+        }
     }
 }
 
-@MainActor
-enum AppAppearanceCoordinator {
-    static func updateLegacyTabBars() {
-        guard #unavailable(iOS 26.0) else { return }
-        let palette = AppearanceStore.shared.theme.palette
-        let appearance = UITabBarAppearance()
-        appearance.configureWithOpaqueBackground()
-        appearance.backgroundColor = palette.background.uiColor
-        for layout in [appearance.stackedLayoutAppearance, appearance.inlineLayoutAppearance,
-                       appearance.compactInlineLayoutAppearance] {
-            layout.normal.iconColor = palette.secondary.uiColor
-            layout.normal.titleTextAttributes = [.foregroundColor: palette.secondary.uiColor]
-            layout.selected.iconColor = palette.accent.uiColor
-            layout.selected.titleTextAttributes = [.foregroundColor: palette.accent.uiColor]
+/// Applies the same native chrome to root and pushed destinations. Do not
+/// ignore safe areas on the ScrollView itself: UIKit supplies scroll insets
+/// while allowing its content to move underneath the transparent bars.
+struct AppNavigationStack<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        NavigationStack {
+            content.themeNavigationChrome()
         }
-        UITabBar.appearance().standardAppearance = appearance
-        UITabBar.appearance().scrollEdgeAppearance = appearance
-        func update(_ view: UIView) {
-            if let bar = view as? UITabBar {
-                bar.standardAppearance = appearance
-                bar.scrollEdgeAppearance = appearance
-            }
-            view.subviews.forEach(update)
-        }
-        UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-            .flatMap(\.windows).forEach(update)
+        .background { AppTheme.ink.ignoresSafeArea(.container) }
+        .themeNavigationChrome()
     }
 }
 

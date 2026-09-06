@@ -1076,6 +1076,10 @@ struct SecureCaptureSurface<Content: View>: View {
                         .privacySensitive()
                         .protectedFromScreenCapture()
                 }
+                // The UIKit hosting surface must reach the window boundary;
+                // otherwise descendants cannot paint outside its safe frame.
+                // Its hosted SwiftUI content still receives UIKit safe insets.
+                .ignoresSafeArea(.container)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {

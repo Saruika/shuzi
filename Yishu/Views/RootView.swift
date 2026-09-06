@@ -134,7 +134,7 @@ struct RootView: View {
             SecureCaptureSurface(owner: .fullScreenPresentation, onExit: {
                 pushNotifications.clearPendingNotification()
             }) {
-                NavigationStack {
+                AppNavigationStack {
                     FanNotificationInboxView(
                         inbox: fanAccount.notificationStore,
                         initialNotificationID: pending.id
@@ -306,7 +306,7 @@ struct RootView: View {
     }
 
     private var usesDarkMediaCanvas: Bool {
-        hasResolvedAccess && canAccessAppContent && isLaunchPosterVisible
+        hasResolvedAccess && canAccessAppContent && (isLaunchPosterVisible || selectedTab == .home)
     }
 
     private var authorizedAppContent: some View {
@@ -318,30 +318,34 @@ struct RootView: View {
 
                 NavigationStack(path: $portfolioPath) {
                     PortfolioGridView()
+                        .themeNavigationChrome()
                 }
+                .background { AppTheme.ink.ignoresSafeArea(.container) }
+                .themeNavigationChrome()
                 .tag(AppTab.portfolio)
                 .tabItem { Label("作品", systemImage: "square.grid.2x2") }
 
                 if canViewVideo {
-                    NavigationStack {
+                    AppNavigationStack {
                         CreditsView()
                     }
                     .tag(AppTab.credits)
                     .tabItem { Label("影视", systemImage: "film.stack") }
                 }
 
-                NavigationStack {
+                AppNavigationStack {
                     FavoritesView(showPortfolio: { selectedTab = .portfolio })
                 }
                 .tag(AppTab.favorites)
                 .tabItem { Label("收藏", systemImage: "heart") }
 
-                NavigationStack {
+                AppNavigationStack {
                     visualAboutContent
                 }
                 .tag(AppTab.about)
                 .tabItem { Label("关于", systemImage: "person.crop.rectangle") }
             }
+            .themeNavigationChrome()
             if !hasPreparedLaunchPoster {
                 AppTheme.ink
                     .ignoresSafeArea()

@@ -22,8 +22,6 @@ struct YishuApp: App {
             diskCapacity: 0
         )
         URLCache.shared = cache
-
-        AppAppearanceCoordinator.updateLegacyTabBars()
     }
 
     var body: some Scene {
@@ -32,9 +30,6 @@ struct YishuApp: App {
                 appContent
             }
             .preferredColorScheme(AppearanceStore.shared.systemColorScheme)
-            .onChange(of: AppearanceStore.shared.theme) { _, _ in
-                AppAppearanceCoordinator.updateLegacyTabBars()
-            }
         }
     }
 

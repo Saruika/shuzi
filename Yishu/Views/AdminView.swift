@@ -13,7 +13,7 @@ struct AdminAccessView: View {
     var body: some View {
         Group {
             if hasLockedOnEntry {
-                NavigationStack {
+                AppNavigationStack {
                     AdminView()
                         .toolbar {
                             ToolbarItem(placement: .cancellationAction) {
@@ -153,7 +153,7 @@ struct AdminView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .stableDetailTabBar()
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .themeNavigationChrome()
         .task(id: admin.isAuthenticated) {
             if admin.isAuthenticated {
                 await loadAdministratorContent()
@@ -1411,7 +1411,7 @@ private struct CollaborationInboxView: View {
         }
         .navigationTitle("合作邀约")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .themeNavigationChrome()
         .task { await load() }
     }
 

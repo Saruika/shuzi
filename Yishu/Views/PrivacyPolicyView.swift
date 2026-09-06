@@ -92,7 +92,7 @@ struct PrivacyPolicyView: View {
         }
         .navigationTitle("隐私政策")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(AppTheme.ink, for: .navigationBar)
+        .themeNavigationChrome()
         .stableDetailTabBar()
     }
 

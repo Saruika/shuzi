@@ -80,20 +80,24 @@ struct HomeHeroOverlayLayout: Equatable {
     let caption: CGRect
     let isCompact: Bool
 
-    init(viewport: CGSize, accessibilityText: Bool) {
+    init(viewport: CGSize, accessibilityText: Bool, safeAreaInsets: EdgeInsets = EdgeInsets()) {
         let width = max(0, viewport.width)
         let height = max(0, viewport.height)
-        let inset = min(width / 8, height / 8, 22.0)
-        let gap = min(height / 12, 16.0)
-        let innerWidth = max(0, width - 2 * inset)
-        let innerHeight = max(0, height - 2 * inset)
+        let left = min(width, max(0, safeAreaInsets.leading))
+        let top = min(height, max(0, safeAreaInsets.top))
+        let safeWidth = max(0, width - left - max(0, safeAreaInsets.trailing))
+        let safeHeight = max(0, height - top - max(0, safeAreaInsets.bottom))
+        let inset = min(safeWidth / 8, safeHeight / 8, 22.0)
+        let gap = min(safeHeight / 12, 16.0)
+        let innerWidth = max(0, safeWidth - 2 * inset)
+        let innerHeight = max(0, safeHeight - 2 * inset)
         let header = min(44.0, innerHeight)
         isCompact = width > height || height < 620
         image = CGRect(x: 0, y: 0, width: width, height: height)
-        weather = CGRect(x: inset, y: inset, width: innerWidth, height: header)
+        weather = CGRect(x: left + inset, y: top + inset, width: innerWidth, height: header)
         let preferredCaption = accessibilityText ? 280.0 : (isCompact ? 136.0 : 242.0)
         let captionHeight = min(preferredCaption, max(0, innerHeight - header - gap))
-        caption = CGRect(x: inset, y: height - inset - captionHeight,
+        caption = CGRect(x: left + inset, y: top + safeHeight - inset - captionHeight,
                          width: innerWidth, height: captionHeight)
     }
 }
@@ -119,20 +123,34 @@ struct HomeView: View {
     let showPortfolio: () -> Void
 
     var body: some View {
-        GeometryReader { proxy in
-            ZStack {
-                AppTheme.ink.ignoresSafeArea()
+        GeometryReader { safeProxy in
+            // Only the photographic canvas ignores safe areas. Overlay slots
+            // still use the original TabView insets, including its bottom bar.
+            GeometryReader { proxy in
                 HeroPager(
                     imageURLs: portfolioStore.heroImages,
                     localWeather: localWeather,
                     viewport: proxy.size,
+                    safeAreaInsets: safeProxy.safeAreaInsets,
                     showPortfolio: showPortfolio
                 )
                     .frame(width: proxy.size.width, height: proxy.size.height)
+#if DEBUG
+                    .overlay(alignment: .topLeading) {
+                        if ProcessInfo.processInfo.arguments.contains("-expose-home-hero-state-for-visual-testing") {
+                            Color.clear.frame(width: 1, height: 1)
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityIdentifier("home-canvas-geometry")
+                                .accessibilityValue("safe=\(safeProxy.frame(in: .global)); insets=\(safeProxy.safeAreaInsets); full=\(proxy.frame(in: .global))")
+                                .allowsHitTesting(false)
+                        }
+                    }
+#endif
             }
+            .ignoresSafeArea(.container)
         }
         .toolbar(.hidden, for: .navigationBar)
-        .toolbarColorScheme(AppearanceStore.shared.theme.colorScheme, for: .tabBar)
+        .toolbarColorScheme(.dark, for: .tabBar)
         .task {
             localWeather.refreshIfAuthorized()
         }
@@ -176,6 +194,7 @@ private struct HeroPager: View {
     let imageURLs: [URL]
     let localWeather: LocalWeatherStore
     let viewport: CGSize
+    let safeAreaInsets: EdgeInsets
     let showPortfolio: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
@@ -216,53 +235,88 @@ private struct HeroPager: View {
             idiom: UIDevice.current.userInterfaceIdiom
         )
         let exposesVisualTestState = exposesHeroStateForVisualTesting
-        let layout = HomeHeroOverlayLayout(viewport: viewport, accessibilityText: dynamicTypeSize.isAccessibilitySize)
+        let layout = HomeHeroOverlayLayout(viewport: viewport,
+            accessibilityText: dynamicTypeSize.isAccessibilitySize, safeAreaInsets: safeAreaInsets)
 
         ZStack(alignment: .topLeading) {
-            TabView(selection: Binding(get: { playback.selection }, set: { playback.selection = $0 })) {
-                ForEach(slides.indices, id: \.self) { index in
-                    let url = slides[index]
-                    let loadsRemoteImage = !holdsRemoteImagesForVisualTesting
-                        && HomeHeroRenderPolicy.shouldLoadRemoteImage(
-                            at: index,
-                            selection: playback.selection,
-                            count: slides.count,
-                            presentation: presentation
-                        )
-                    let visualTestIdentifier = exposesVisualTestState
-                        && index == playback.selection
-                        ? "home-hero-actual-\(presentation == .fit ? "fitted" : "filled")-image-\(index)"
-                        : nil
+            ScrollViewReader { scrollProxy in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 0) {
+                        ForEach(slides.indices, id: \.self) { index in
+                            let url = slides[index]
+                            let loadsRemoteImage = !holdsRemoteImagesForVisualTesting
+                                && HomeHeroRenderPolicy.shouldLoadRemoteImage(
+                                    at: index,
+                                    selection: playback.selection,
+                                    count: slides.count,
+                                    presentation: presentation
+                                )
+                            let visualTestIdentifier = exposesVisualTestState
+                                && index == playback.selection
+                                ? "home-hero-actual-\(presentation == .fit ? "fitted" : "filled")-image-\(index)"
+                                : nil
 
-                    HeroSlideImage(
-                        url: url,
-                        loadsRemoteImage: loadsRemoteImage,
-                        usesVisualTestArtwork: holdsRemoteImagesForVisualTesting,
-                        presentation: presentation,
-                        visualTestIdentifier: visualTestIdentifier,
-                        preparedImage: playback.preparedImages[url],
-                        continuityImage: playback.landscapeContinuityImage,
-                        onImageLoaded: { loadedImage in
-                            playback.recordPreparedImage(loadedImage, for: url)
+                            HeroSlideImage(
+                                url: url,
+                                loadsRemoteImage: loadsRemoteImage,
+                                usesVisualTestArtwork: holdsRemoteImagesForVisualTesting,
+                                presentation: presentation,
+                                foregroundInsets: presentation == .fit ? safeAreaInsets : EdgeInsets(),
+                                visualTestIdentifier: visualTestIdentifier,
+                                preparedImage: playback.preparedImages[url],
+                                continuityImage: playback.landscapeContinuityImage,
+                                onImageLoaded: { loadedImage in
+                                    playback.recordPreparedImage(loadedImage, for: url)
+                                }
+                            )
+                                .frame(width: layout.image.width, height: layout.image.height)
+                                .clipped()
+                                .accessibilityHidden(!exposesVisualTestState)
+                                .id(index)
                         }
-                    )
-                        .frame(width: layout.image.width, height: layout.image.height)
-                        .clipped()
-                        .accessibilityHidden(!exposesVisualTestState)
-                        .tag(index)
+                    }
+                    .scrollTargetLayout()
+                }
+                .frame(width: layout.image.width, height: layout.image.height)
+                // Native iOS 17 paging avoids the nested page TabView's extra
+                // system-bar inset, which vertically shifted full-screen photos.
+                .scrollTargetBehavior(.paging)
+                .scrollPosition(id: Binding<Int?>(
+                    get: { playback.selection },
+                    set: { if let index = $0, slides.indices.contains(index) { playback.selection = index } }
+                ), anchor: .leading)
+                .scrollIndicators(.hidden)
+                .modifier(HomePhotoScrollEdges())
+                .ignoresSafeArea(.container)
+                .background(HomeTouchObserver { playback.isTouching = $0 })
+                .offset(x: layout.image.minX, y: layout.image.minY)
+                .onAppear {
+                    scrollProxy.scrollTo(playback.selection, anchor: .leading)
+                }
+                .onChange(of: viewport) { _, _ in
+                    // Retain the selected photograph when the real window rotates
+                    // or resizes; never leave the pager between two old widths.
+                    scrollProxy.scrollTo(playback.selection, anchor: .leading)
                 }
             }
-            .frame(width: layout.image.width, height: layout.image.height)
-            .tabViewStyle(.page(indexDisplayMode: .never))
-            .background(HomeTouchObserver { playback.isTouching = $0 })
-            .offset(x: layout.image.minX, y: layout.image.minY)
+
+            // A transparent, localized scrim keeps white system glyphs legible
+            // over changing photographs without a solid status-bar stripe.
+            LinearGradient(colors: [.black.opacity(0.28), .clear],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(width: viewport.width, height: safeAreaInsets.top + 24)
+                .allowsHitTesting(false)
 
             // Localized contrast for white type, not a theme-colored panel
             // across the photo. The centre and upper photograph stay clear.
-            LinearGradient(colors: [.clear, .black.opacity(0.48)],
-                           startPoint: .top, endPoint: .bottom)
-                .frame(width: viewport.width, height: layout.caption.height + 40)
-                .offset(y: max(0, viewport.height - layout.caption.height - 40))
+            LinearGradient(stops: [
+                .init(color: .clear, location: 0),
+                .init(color: .black.opacity(0.48), location: 0.35),
+                .init(color: .black.opacity(0.48), location: 1),
+            ], startPoint: .top, endPoint: .bottom)
+                .frame(width: viewport.width,
+                       height: viewport.height - max(0, layout.caption.minY - 40))
+                .offset(y: max(0, layout.caption.minY - 40))
                 .allowsHitTesting(false)
 
             weatherRow
@@ -672,6 +726,20 @@ private struct HeroPager: View {
     }
 }
 
+private struct HomePhotoScrollEdges: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            // A horizontal photo pager is not a vertically scrolling document.
+            // Keep the system's opaque edge fade off this photographic canvas;
+            // the native floating tab controls retain their own glass material.
+            content.scrollEdgeEffectHidden(true, for: [.top, .bottom])
+        } else {
+            content
+        }
+    }
+}
+
 /// Observe contact without competing with native scrolling.
 /// This recognizer never recognizes, prevents another recognizer or cancels
 /// delivery to controls. It works on the supported iOS 17+ range.
@@ -775,6 +843,7 @@ private struct HeroSlideImage: View {
     let loadsRemoteImage: Bool
     let usesVisualTestArtwork: Bool
     let presentation: HomeHeroPresentation
+    let foregroundInsets: EdgeInsets
     let visualTestIdentifier: String?
     let preparedImage: UIImage?
     let continuityImage: UIImage?
@@ -802,7 +871,7 @@ private struct HeroSlideImage: View {
         if presentation == .fit {
             let fittedSize = HomeHeroRenderPolicy.fittedSize(
                 sourceSize: sourceSize,
-                in: size
+                in: foregroundSize(in: size)
             )
             ZStack {
                 visualTestArtwork
@@ -811,12 +880,15 @@ private struct HeroSlideImage: View {
 
                 visualTestArtwork
                     .frame(width: fittedSize.width, height: fittedSize.height)
+                    .frame(width: foregroundSize(in: size).width, height: foregroundSize(in: size).height)
+                    .padding(foregroundInsets)
 
                 HomeHeroLayoutProbe(
                     identifier: visualTestIdentifier ?? "",
                     sourceSize: sourceSize
                 )
-                .frame(width: size.width, height: size.height)
+                .frame(width: foregroundSize(in: size).width, height: foregroundSize(in: size).height)
+                .padding(foregroundInsets)
             }
             .frame(width: size.width, height: size.height)
         } else {
@@ -996,13 +1068,22 @@ private struct HeroSlideImage: View {
         accessibilityIdentifier: String?
     ) -> some View {
         if let accessibilityIdentifier {
-            fittedArtwork(image, in: size, sourceSize: sourceSize)
+            fittedArtwork(image, in: foregroundSize(in: size), sourceSize: sourceSize)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("完整首页照片")
                 .accessibilityIdentifier(accessibilityIdentifier)
+                .frame(width: foregroundSize(in: size).width, height: foregroundSize(in: size).height)
+                .padding(foregroundInsets)
         } else {
-            fittedArtwork(image, in: size, sourceSize: sourceSize)
+            fittedArtwork(image, in: foregroundSize(in: size), sourceSize: sourceSize)
+                .frame(width: foregroundSize(in: size).width, height: foregroundSize(in: size).height)
+                .padding(foregroundInsets)
         }
+    }
+
+    private func foregroundSize(in size: CGSize) -> CGSize {
+        CGSize(width: max(0, size.width - foregroundInsets.leading - foregroundInsets.trailing),
+               height: max(0, size.height - foregroundInsets.top - foregroundInsets.bottom))
     }
 
     @ViewBuilder
