@@ -10,6 +10,17 @@ import Observation
 @testable import Yishu
 
 final class AppServiceEnvironmentTests: XCTestCase {
+    func testMatchingUserIDsDoNotMatchAcrossEnvironmentContexts() {
+        let production = FanNotificationContext(userID: "synthetic-user", sessionGeneration: 1)
+        let review = FanNotificationContext(userID: "synthetic-user", sessionGeneration: 1, environment: .review)
+        XCTAssertNotEqual(production, review)
+        XCTAssertEqual(Set([production, review]).count, 2)
+        XCTAssertNotEqual(
+            FanAdministratorContext(userID: "synthetic-user", sessionGeneration: 1),
+            FanAdministratorContext(userID: "synthetic-user", sessionGeneration: 1, environment: .review)
+        )
+    }
+
     func testEnvironmentsNeverAcceptEachOthersCredentialOrigins() {
         for environment in AppServiceEnvironment.allCases {
             XCTAssertTrue(environment.allowsAPIURL(environment.apiRoot))

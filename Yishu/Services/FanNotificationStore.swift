@@ -25,6 +25,13 @@ struct FanNotificationResponse: Decodable {
 struct FanNotificationContext: Equatable, Hashable {
     let userID: String
     let sessionGeneration: UInt64
+    let environment: AppServiceEnvironment
+
+    init(userID: String, sessionGeneration: UInt64, environment: AppServiceEnvironment = .production) {
+        self.userID = userID
+        self.sessionGeneration = sessionGeneration
+        self.environment = environment
+    }
 }
 
 struct PendingFanNotification: Identifiable, Equatable {

@@ -700,17 +700,25 @@ enum FanAppleDeletionEligibility {
 struct FanAdministratorContext: Equatable {
     let userID: String
     let sessionGeneration: UInt64
+    let environment: AppServiceEnvironment
+
+    init(userID: String, sessionGeneration: UInt64, environment: AppServiceEnvironment = .production) {
+        self.userID = userID
+        self.sessionGeneration = sessionGeneration
+        self.environment = environment
+    }
 }
 
 enum FanAdministratorEligibility {
     static func context(
         profile: FanProfile?, hasSessionToken: Bool, credentialAccessAllowed: Bool,
-        hasPendingAppleRegistration: Bool, sessionGeneration: UInt64, now: Date = .now
+        hasPendingAppleRegistration: Bool, sessionGeneration: UInt64, now: Date = .now,
+        environment: AppServiceEnvironment = .production
     ) -> FanAdministratorContext? {
         guard hasSessionToken, credentialAccessAllowed, !hasPendingAppleRegistration,
               let profile, profile.administratorBound, profile.isApproved(at: now),
               !profile.requiresAppleRegistration else { return nil }
-        return FanAdministratorContext(userID: profile.userID, sessionGeneration: sessionGeneration)
+        return FanAdministratorContext(userID: profile.userID, sessionGeneration: sessionGeneration, environment: environment)
     }
 }
 
@@ -738,7 +746,9 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
     @Published var errorMessage: String?
     @Published var noticeMessage: String?
 
-    private let apiRoot = AppURL.make("https://shuzijun.com.cn/wp-json")
+    let serviceEnvironment: AppServiceEnvironment
+    private let apiRoot: URL
+    private let keychain: FanAccountKeychain
     private let session: URLSession
     private let installID: UUID
     private var pushBindingGeneration: UInt64
@@ -778,7 +788,8 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
                 usesAppleSignIn: usesAppleSignIn, state: appleCredentialAccessState
             ),
             hasPendingAppleRegistration: appleRegistration != nil,
-            sessionGeneration: pushSessionGeneration
+            sessionGeneration: pushSessionGeneration,
+            environment: serviceEnvironment
         )
     }
     var administratorChanges: AnyPublisher<Void, Never> {
@@ -786,7 +797,8 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
     }
     func authorizeAdministratorRequest(_ request: inout URLRequest, context: FanAdministratorContext) throws {
         guard administratorContext == context, let token,
-              AppNetworkSecurityPolicy.isTrustedAdminRequestURL(request.url) else {
+              (serviceEnvironment.allowsAPIURL(request.url)
+                || serviceEnvironment.allowsMediaUploadURL(request.url)) else {
             throw AdminAPIError.invalidCredentials
         }
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -795,30 +807,33 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
     var notificationContext: FanNotificationContext? {
 #if DEBUG
         if FanNotificationUITestFixture.isEnabled {
-            return FanNotificationContext(userID: "11111111-2222-4333-8444-666666666666", sessionGeneration: 1)
+            return FanNotificationContext(userID: "11111111-2222-4333-8444-666666666666", sessionGeneration: 1, environment: serviceEnvironment)
         }
 #endif
         guard let userID = pushEligibleUserID else { return nil }
-        return FanNotificationContext(userID: userID, sessionGeneration: pushSessionGeneration)
+        return FanNotificationContext(userID: userID, sessionGeneration: pushSessionGeneration, environment: serviceEnvironment)
     }
     var hasPushUnbindingSession: Bool {
         token != nil && profile.map { $0.sessionExpiresAt > Date() } == true
     }
 
-    init() {
+    init(environment: AppServiceEnvironment = .production) {
+        serviceEnvironment = environment
+        apiRoot = environment.apiRoot
+        keychain = FanAccountKeychain(environment: environment)
         session = SecureURLSessionFactory.make(requestTimeout: 30, resourceTimeout: 45)
-        let installationState = FanAccountKeychain.loadOrCreateInstallationState()
+        let installationState = keychain.loadOrCreateInstallationState()
         installID = installationState.installID
         pushBindingGeneration = installationState.bindingGeneration
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-reset-fan-session-for-visual-testing") {
-            FanAccountKeychain.deleteToken()
-            FanAccountKeychain.deleteAppleUserID()
+            keychain.deleteToken()
+            keychain.deleteAppleUserID()
         }
 #endif
-        token = FanAccountKeychain.loadToken()
+        token = keychain.loadToken()
         if token != nil { pushSessionGeneration = 1 }
-        usesAppleSignIn = FanAccountKeychain.loadAppleUserID() != nil
+        usesAppleSignIn = keychain.loadAppleUserID() != nil
         appleCredentialAccessState = usesAppleSignIn ? .checking : .notRequired
         hasSavedSession = token != nil
 #if DEBUG
@@ -927,7 +942,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         )
         // Persist before starting the request. A terminated or reordered request
         // can therefore never reuse an older operation number for this install.
-        try FanAccountKeychain.saveInstallationState(state)
+        try keychain.saveInstallationState(state)
         pushBindingGeneration = next
         return String(next)
     }
@@ -1399,7 +1414,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
             appleCredentialAccessState = .notRequired
             return
         }
-        guard let localUserID = FanAccountKeychain.loadAppleUserID() else {
+        guard let localUserID = keychain.loadAppleUserID() else {
             scheduleBestEffortPushUnbindBeforeClearingSession()
             clearLocalSession()
             errorMessage = FanAccountError.appleCredentialUnavailable.errorDescription
@@ -2001,7 +2016,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
             throw FanAccountError.invalidResponse
         }
         let previousUserID = profile?.userID
-        try FanAccountKeychain.saveToken(response.token)
+        try keychain.saveToken(response.token)
         refreshGeneration &+= 1
         pushSessionGeneration &+= 1
         token = response.token
@@ -2039,11 +2054,11 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
             throw FanAccountError.invalidResponse
         }
 
-        try FanAccountKeychain.saveToken(response.token)
+        try keychain.saveToken(response.token)
         do {
-            try FanAccountKeychain.saveAppleUserID(localAppleUserID)
+            try keychain.saveAppleUserID(localAppleUserID)
         } catch {
-            FanAccountKeychain.deleteToken()
+            keychain.deleteToken()
             throw error
         }
         refreshGeneration &+= 1
@@ -2065,7 +2080,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         appleCredentialRetryTask?.cancel()
         appleCredentialRetryTask = nil
         appleCredentialRetryAttempt = 0
-        FanAccountKeychain.deleteAppleUserID()
+        keychain.deleteAppleUserID()
         usesAppleSignIn = false
         appleCredentialAccessState = .notRequired
     }
@@ -2098,7 +2113,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         pushSessionGeneration &+= 1
         sessionExpiryTask?.cancel()
         sessionExpiryTask = nil
-        FanAccountKeychain.deleteToken()
+        keychain.deleteToken()
         clearAppleCredentialReference()
         token = nil
         profile = nil
@@ -2175,7 +2190,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
                 }
         ) else { throw FanAccountError.invalidResponse }
         let endpoint = apiRoot.appending(path: path).appending(queryItems: queryItems)
-        guard AppNetworkSecurityPolicy.isTrustedAdminAPIURL(endpoint) else {
+        guard serviceEnvironment.allowsAPIURL(endpoint) else {
             throw FanAccountError.invalidResponse
         }
         var request = URLRequest(url: endpoint)
@@ -2213,7 +2228,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
             : 1024 * 1024
         guard data.count <= maximumResponseBytes,
               let http = response as? HTTPURLResponse,
-              AppNetworkSecurityPolicy.isTrustedAdminAPIURL(http.url) else {
+              serviceEnvironment.allowsAPIURL(http.url) else {
             throw FanAccountError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
@@ -2639,14 +2654,18 @@ private struct FanServerError: Decodable {
     let message: String?
 }
 
-private enum FanAccountKeychain {
-    private static let service = "cn.com.shuzijun.yishu.fan-account"
-    private static let installAccount = "installation-id"
-    private static let installationStateAccount = "installation-state-v2"
-    private static let tokenAccount = "session-token"
-    private static let appleUserAccount = "apple-user-id"
+private struct FanAccountKeychain {
+    private let service: String
+    private let installAccount = "installation-id"
+    private let installationStateAccount = "installation-state-v2"
+    private let tokenAccount = "session-token"
+    private let appleUserAccount = "apple-user-id"
 
-    static func loadOrCreateInstallationState() -> FanInstallationState {
+    init(environment: AppServiceEnvironment) {
+        service = environment.storageKey("cn.com.shuzijun.yishu.fan-account")
+    }
+
+    func loadOrCreateInstallationState() -> FanInstallationState {
         if let data = load(account: installationStateAccount) {
             if let state = try? JSONDecoder().decode(FanInstallationState.self, from: data),
                state.bindingGeneration <= PushBindingGenerationPolicy.maximum {
@@ -2676,13 +2695,13 @@ private enum FanAccountKeychain {
         return state
     }
 
-    static func saveInstallationState(_ state: FanInstallationState) throws {
+    func saveInstallationState(_ state: FanInstallationState) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         try save(try encoder.encode(state), account: installationStateAccount)
     }
 
-    static func loadToken() -> String? {
+    func loadToken() -> String? {
         guard let data = load(account: tokenAccount),
               let token = String(data: data, encoding: .utf8),
               token.range(
@@ -2692,15 +2711,15 @@ private enum FanAccountKeychain {
         return token
     }
 
-    static func saveToken(_ token: String) throws {
+    func saveToken(_ token: String) throws {
         try save(Data(token.utf8), account: tokenAccount)
     }
 
-    static func deleteToken() {
+    func deleteToken() {
         delete(account: tokenAccount)
     }
 
-    static func loadAppleUserID() -> String? {
+    func loadAppleUserID() -> String? {
         guard let data = load(account: appleUserAccount),
               data.count <= 4_096,
               let value = String(data: data, encoding: .utf8),
@@ -2709,18 +2728,18 @@ private enum FanAccountKeychain {
         return value
     }
 
-    static func saveAppleUserID(_ value: String) throws {
+    func saveAppleUserID(_ value: String) throws {
         guard !value.isEmpty, value.count <= 1_024 else {
             throw FanAccountError.invalidResponse
         }
         try save(Data(value.utf8), account: appleUserAccount)
     }
 
-    static func deleteAppleUserID() {
+    func deleteAppleUserID() {
         delete(account: appleUserAccount)
     }
 
-    private static func load(account: String) -> Data? {
+    private func load(account: String) -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -2735,7 +2754,7 @@ private enum FanAccountKeychain {
         return result as? Data
     }
 
-    private static func save(_ data: Data, account: String) throws {
+    private func save(_ data: Data, account: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -2754,7 +2773,7 @@ private enum FanAccountKeychain {
         guard status == errSecSuccess else { throw FanAccountError.unavailable }
     }
 
-    private static func delete(account: String) {
+    private func delete(account: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

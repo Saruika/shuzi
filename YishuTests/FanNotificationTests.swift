@@ -175,6 +175,36 @@ final class FanNotificationTests: XCTestCase {
         }
     }
 
+    func testEnvironmentSwitchClearsInboxAndRejectsLateReplyForMatchingIdentity() async {
+        for original in AppServiceEnvironment.allCases {
+            let destination: AppServiceEnvironment = original == .production ? .review : .production
+            let account = InboxTestAccount()
+            account.notificationContext = .init(userID: "same-synthetic-id", sessionGeneration: 1, environment: original)
+            account.pages = [page([message(1)])]
+            let inbox = store()
+            await inbox.refresh(using: account)
+            XCTAssertEqual(inbox.notifications.count, 1)
+
+            account.pages = [page([message(2)])]
+            account.pausePage = true
+            let started = expectation(description: "Original environment request began")
+            account.requestStarted = { started.fulfill() }
+            let pending = Task { await inbox.refresh(using: account) }
+            await fulfillment(of: [started], timeout: 2)
+            // Deliberately preserve user ID and generation: environment alone must fence this reply.
+            account.notificationContext = .init(userID: "same-synthetic-id", sessionGeneration: 1, environment: destination)
+            inbox.updateContext(account.notificationContext)
+            XCTAssertTrue(inbox.notifications.isEmpty)
+            XCTAssertEqual(inbox.unreadCount, 0)
+            account.resume()
+            await pending.value
+            XCTAssertTrue(inbox.notifications.isEmpty)
+            account.pages = [page([message(3)])]
+            await inbox.refresh(using: account)
+            XCTAssertEqual(inbox.notifications.map(\.id), [message(3).id])
+        }
+    }
+
     func testLateDetailReplyCannotMarkReadAfterAccountSwitch() async {
         let account = InboxTestAccount()
         account.message = message()
