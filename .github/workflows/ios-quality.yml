@@ -87,7 +87,9 @@ jobs:
             Server \
             Scripts/ci-supply-chain.py \
             Scripts/ci-test-summary.py \
-            Scripts/test-ci-test-summary.py
+            Scripts/test-ci-test-summary.py \
+            Scripts/check-distribution-package.py \
+            Scripts/test-distribution-package.py
           "$RUNNER_TEMP/yishu-quality-venv/bin/python" -m ruff check \
             --config Server/ruff.toml \
             --select I \
@@ -105,7 +107,8 @@ jobs:
             Server/entitlement-verifier \
             Server/operations \
             Scripts/ci-supply-chain.py \
-            Scripts/ci-test-summary.py
+            Scripts/ci-test-summary.py \
+            Scripts/check-distribution-package.py
 
       - name: Generate repository SBOMs
         run: |
