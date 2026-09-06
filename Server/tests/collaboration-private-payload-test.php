@@ -73,9 +73,14 @@ check_private_payload($cipher->fingerprint($digest) === $cipher->fingerprint($di
 check_private_payload($cipher->fingerprint($digest) !== $digest, 'raw hash not persisted');
 check_private_payload($cipher->fingerprint($digest) !== $other_key->fingerprint($digest), 'dedicated key binds fingerprint');
 refuses_private_payload(static fn() => $cipher->fingerprint('invalid'), 'invalid fingerprint input rejected');
-$fixture = sys_get_temp_dir() . '/yishu-cipher-key-' . bin2hex(random_bytes(12));
-mkdir($fixture, 0700);
-mkdir($fixture . '/web', 0700);
+// macOS may return /var/... or /tmp, whose ancestors are system symlinks.
+// Only the positive fixture uses the canonical spelling: production from_file
+// must continue rejecting a configured key path with any symlink component.
+$temporary_root = realpath(sys_get_temp_dir());
+check_private_payload(is_string($temporary_root) && is_dir($temporary_root), 'temporary root resolves');
+$fixture = $temporary_root . '/yishu-cipher-key-' . bin2hex(random_bytes(12));
+check_private_payload(mkdir($fixture, 0700), 'private fixture created exclusively');
+check_private_payload(mkdir($fixture . '/web', 0700), 'isolated document root created');
 $key_path = $fixture . '/data.key';
 try {
     file_put_contents($key_path, random_bytes(32));
@@ -92,6 +97,9 @@ try {
     chmod($key_path, 0600);
     symlink($key_path, $fixture . '/alias');
     check_private_payload($load($fixture . '/alias') === null, 'symlink key rejected');
+    symlink($fixture, $fixture . '/linked-parent');
+    check_private_payload($load($fixture . '/linked-parent/data.key') === null,
+        'symlink ancestor rejected even with private target and exact key bytes');
     check_private_payload($load($fixture . '/./data.key') === null, 'noncanonical path rejected');
     check_private_payload($load('relative.key') === null, 'relative path rejected');
     check_private_payload($load($fixture . '/web') === null, 'directory rejected');
@@ -103,7 +111,7 @@ try {
         check_private_payload($load() === null, 'incorrect key size rejected');
     }
 } finally {
-    foreach (array($fixture . '/alias', $key_path, $fixture . '/web/data.key') as $path) {
+    foreach (array($fixture . '/alias', $fixture . '/linked-parent', $key_path, $fixture . '/web/data.key') as $path) {
         if (is_link($path) || is_file($path)) { unlink($path); }
     }
     rmdir($fixture . '/web');

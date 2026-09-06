@@ -4,6 +4,12 @@
 
 本段优先于下方历史快照，正式上架目标仍未完成，未上传新的 TestFlight 包。
 
+- **#134 前置修正已验证，但又在 PHP 夹具失败**：011d690 / preview19 的运行器来源、
+  指纹契约、静态分析、SBOM、Python/Composer 依赖审计全部通过。仓库检查随后在
+  “私有密钥文件加载”测试失败，iPhone/iPad/Release 未执行。已在独立 Linux 临时目录
+  用软链接 TMPDIR 复现旧夹具失败；[preview20](Server/releases/v1.4.0-build4-review-env-preview20.md)
+  仅规范化正向夹具目录，保留生产拒绝软链接的行为，并新增软链接祖先拒绝断言。
+  修正后普通/软链接 TMPDIR 的 543 项断言均通过，其余 PHP 门禁在软链接 TMPDIR 下通过。
 - **最新云端 #133 已终态失败**：2026-09-07 06:51 使用 a6d9a0d / preview18 启动，
   工具链安装及来源采集成功，依赖策略验证成功，但当前工作流的指纹仍由契约引用
   Build 2 preflight13 旧记录，导致后续静态分析、iPhone/iPad/Release 全部跳过。
