@@ -654,6 +654,50 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(controller.scrollView.gestureRecognizerShouldBegin(controller.scrollView.panGestureRecognizer))
     }
 
+    func testGalleryMinorViewportResizePreservesZoomAndFocus() throws {
+        let url = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-photo.webp"))
+        let image = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "照片")
+        let controller = GalleryZoomViewController(image: image)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 1024, height: 690)
+        controller.viewDidLayoutSubviews()
+        controller.scrollView.setZoomScale(2, animated: false)
+        controller.scrollView.contentOffset = CGPoint(x: 200, y: 150)
+        let focus = CGPoint(x: CGFloat(712) / 2048, y: CGFloat(495) / 1380)
+        // UIScrollView aligns offsets to physical pixels. Sub-pixel decimal
+        // equality would reject correct focus preservation on a 2x/3x screen.
+        let pixel = 1 / max(1, controller.scrollView.traitCollection.displayScale)
+        for height: CGFloat in [658, 690, 658, 690] {
+            controller.view.frame.size.height = height
+            controller.viewDidLayoutSubviews()
+            XCTAssertEqual(controller.scrollView.zoomScale, 2, accuracy: 0.001,
+                           "状态栏/安全区改变不能把刚放大的照片突然恢复到 1x")
+            XCTAssertEqual(controller.scrollView.contentOffset.x, focus.x * 1024 * 2 - 512, accuracy: pixel)
+            XCTAssertEqual(controller.scrollView.contentOffset.y, focus.y * height * 2 - height / 2, accuracy: pixel,
+                           "同方向视口改变应保留正在看的区域")
+        }
+    }
+
+    func testGalleryUnzoomedResizeAndPhotoChangeKeepFullComposition() throws {
+        let url = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-photo.webp"))
+        let image = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "照片")
+        let controller = GalleryZoomViewController(image: image)
+        controller.loadViewIfNeeded()
+        for size in [CGSize(width: 820, height: 1100), CGSize(width: 700, height: 1068),
+                     CGSize(width: 820, height: 1100)] {
+            controller.view.frame.size = size
+            controller.viewDidLayoutSubviews()
+            XCTAssertEqual(controller.scrollView.zoomScale, 1)
+            XCTAssertEqual(controller.scrollView.contentOffset, .zero)
+            XCTAssertEqual(controller.scrollView.contentSize, size)
+        }
+        controller.scrollView.setZoomScale(4, animated: false)
+        controller.scrollView.contentOffset = CGPoint(x: 400, y: 500)
+        controller.update(image: PortfolioImage(id: 2, url: url, fullSizeURL: url, altText: "另一张照片"))
+        XCTAssertEqual(controller.scrollView.zoomScale, 1)
+        XCTAssertEqual(controller.scrollView.contentOffset, .zero)
+    }
+
     func testScreenProtectionDoesNotCoverColdLaunchBeforeFirstActiveState() {
         var state = ScreenProtectionPresentationState()
 

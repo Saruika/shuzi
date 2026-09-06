@@ -861,15 +861,34 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
         super.viewDidLayoutSubviews()
         let size = view.bounds.size
         guard size.width > 0, size.height > 0, size != viewportSize else { return }
+        let previousScale = scrollView.zoomScale
+        let preservesComposition = viewportSize.width > 0 && viewportSize.height > 0
+            && (viewportSize.width > viewportSize.height) == (size.width > size.height)
+        let focus = preservesComposition ? CGPoint(
+            x: (scrollView.contentOffset.x + viewportSize.width / 2) / (viewportSize.width * previousScale),
+            y: (scrollView.contentOffset.y + viewportSize.height / 2) / (viewportSize.height * previousScale)
+        ) : CGPoint(x: 0.5, y: 0.5)
         viewportSize = size
         scrollView.frame = view.bounds
-        // Rotation/window resizing returns to the complete 1x composition.
+        // Reset the canvas transform only while changing its base geometry.
+        // Status-bar/safe-area settling must not discard a user's pinch or pan.
+        // A change between portrait and landscape still shows the complete 1x image.
         scrollView.setZoomScale(1, animated: false)
         zoomCanvas.frame = CGRect(origin: .zero, size: size)
         artworkHost?.view.frame = zoomCanvas.bounds
         scrollView.contentSize = size
-        scrollView.contentOffset = .zero
         updateArtwork()
+        let restoredScale = preservesComposition ? previousScale : 1
+        scrollView.setZoomScale(restoredScale, animated: false)
+        scrollView.contentOffset = clampedContentOffset(CGPoint(
+            x: focus.x * size.width * restoredScale - size.width / 2,
+            y: focus.y * size.height * restoredScale - size.height / 2
+        ))
+        if pinch.state == .began || pinch.state == .changed {
+            // Continue from the resized geometry, not from the scale captured
+            // before rotation. Keep the recognizer and current touches alive.
+            pinchStartScale = restoredScale / max(pinch.scale, 0.001)
+        }
         updateAccessibility()
     }
 
@@ -915,16 +934,23 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
             )
             let scale = min(4, max(1, pinchStartScale * gesture.scale))
             scrollView.setZoomScale(scale, animated: false)
-            scrollView.contentOffset = CGPoint(
-                x: min(max(0, point.x * scale - anchor.x), max(0, scrollView.contentSize.width - scrollView.bounds.width)),
-                y: min(max(0, point.y * scale - anchor.y), max(0, scrollView.contentSize.height - scrollView.bounds.height))
-            )
+            scrollView.contentOffset = clampedContentOffset(CGPoint(
+                x: point.x * scale - anchor.x,
+                y: point.y * scale - anchor.y
+            ))
         case .ended, .cancelled, .failed:
             if scrollView.zoomScale < 1.05 { scrollView.setZoomScale(1, animated: false) }
             updateAccessibility()
         default:
             break
         }
+    }
+
+    private func clampedContentOffset(_ proposed: CGPoint) -> CGPoint {
+        CGPoint(
+            x: min(max(0, proposed.x), max(0, scrollView.contentSize.width - scrollView.bounds.width)),
+            y: min(max(0, proposed.y), max(0, scrollView.contentSize.height - scrollView.bounds.height))
+        )
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
