@@ -4,6 +4,15 @@
 
 本段优先于下方历史快照，正式上架目标仍未完成，未上传新的 TestFlight 包。
 
+- **真实公网图片连续性专项**：新增 iPad 同一 App 进程横屏→竖屏检查，不用重启隐藏状态问题。
+  iPad Pro 13-inch / iOS 26.5 两项真实网络用例共 48 次正反翻图均通过，0 失败、0 跳过，
+  包含横屏实际照片边界在窗口内的断言；证据为
+  `/tmp/yishu-review-environment.5a0FSm/preview21-ipad-live-media.xcresult`。
+  同一最终测试代码在 iPhone 17 Pro Max / iOS 26.5 的 1 项用例、16 次正反翻图也通过，
+  0 失败、0 跳过，结果为同目录 `preview21-phone-live-media.xcresult`。
+  该专项暂停自动轮播、使用 DEBUG 访问与截图保护测试开关，不替代真实登录、保护机制或弱网验收。
+  生产页面未改动，详细范围见 [preview21](Server/releases/v1.4.0-build4-review-env-preview21.md)。
+  云端 #135 的全部前置阶段现已通过，iPhone 全量测试正在运行，仍未取得完整通过结果。
 - **最新复验与云端启动**：原代码在全新 iPad Pro 13-inch / iOS 26.5 专项复验的两项
   用例、八次横竖屏/明暗执行全部通过，无失败或跳过，命令退出 0。证据为
   `/tmp/yishu-review-environment.5a0FSm/preview19-ipad-interruption-recheck.xcresult`。
@@ -90,7 +99,7 @@
   未移动活跃构建缓存、未修改 SMB 权限、未接触 Time Machine 数据。
 - **仍待完成**：支持 URL、最终截图/构建关联/审核说明、独立管理员演示端到端验收、Apple 登录与
   删号最终包验收、合作自动邮件与通知链路、ICP备案及权利/隐私申报事实核对。
-  GitHub 完整云端矩阵尚未证明通过，仍遵守每月 USD 20 上限；本轮未启动新付费云端运行。
+  GitHub 完整云端矩阵尚未证明通过，仍遵守每月 USD 20 上限；当前运行见本段顶部，未并行追加付费运行。
 
 ## 当前状态快照：2026-09-06（全屏背景候选更新，UTC+8）
 

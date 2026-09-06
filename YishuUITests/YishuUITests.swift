@@ -759,10 +759,40 @@ final class YishuUITests: XCTestCase {
         }
         let app = launchApp(arguments: ["-expose-home-hero-state-for-visual-testing",
                                        "-disable-home-auto-advance-for-visual-testing"])
+        verifyLiveHomePaging(in: app, expectsLandscape: false)
+    }
+
+    func testLiveIPadHomePhotosSurviveRotationAndBidirectionalPaging() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad,
+              ProcessInfo.processInfo.environment["YISHU_UI_TEST_LIVE_MEDIA"] == "1" else {
+            throw XCTSkip("真实横竖屏媒体专项需 iPad 并显式开启公网检查")
+        }
+        let app = launchApp(arguments: ["-expose-home-hero-state-for-visual-testing",
+                                       "-disable-home-auto-advance-for-visual-testing"])
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+        // Keep the SAME application and loaded media across rotation; relaunch
+        // would hide continuity failures caused by a changing viewport.
+        XCUIDevice.shared.orientation = .landscapeRight
+        verifyLiveHomePaging(in: app, expectsLandscape: true)
+        XCUIDevice.shared.orientation = .portrait
+        verifyLiveHomePaging(in: app, expectsLandscape: false)
+    }
+
+    private func verifyLiveHomePaging(in app: XCUIApplication, expectsLandscape: Bool) {
+        let window = app.windows.firstMatch
+        let geometry = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                let frame = window.frame
+                return frame.width > 0 && frame.height > 0 &&
+                    (expectsLandscape ? frame.width > frame.height : frame.height > frame.width)
+            }, object: window)
+        XCTAssertEqual(XCTWaiter.wait(for: [geometry], timeout: 8), .completed,
+                       "真实媒体检查未取得要求的窗口方向")
         let ready = element("home-hero-ready-count", in: app)
         let loaded = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "5"), object: ready)
         XCTAssertEqual(XCTWaiter.wait(for: [loaded], timeout: 40), .completed, "真实首页五张照片没有准备好")
         let page = element("home-hero-page-indicator", in: app)
+        XCTAssertEqual(page.value as? String, "第 1 张，共 5 张", "旋转后首页页码意外变化")
         let left = app.coordinate(withNormalizedOffset: CGVector(dx: 0.18, dy: 0.42))
         let right = app.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.42))
         for _ in 0..<2 {
@@ -773,6 +803,7 @@ final class YishuUITests: XCTestCase {
                 XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
                 XCTAssertTrue(element("home-hero-actual-\(app.windows.firstMatch.frame.width > app.windows.firstMatch.frame.height ? "fitted" : "filled")-image-\(index)", in: app).waitForExistence(timeout: 5))
                 XCTAssertFalse(element("artwork-image-retry", in: app).exists)
+                assertLivePhotoFrame(index, in: app, expectsLandscape: expectsLandscape)
             }
             for index in (0...3).reversed() {
                 left.press(forDuration: 0.05, thenDragTo: right)
@@ -781,7 +812,20 @@ final class YishuUITests: XCTestCase {
                 XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
                 XCTAssertTrue(element("home-hero-actual-\(app.windows.firstMatch.frame.width > app.windows.firstMatch.frame.height ? "fitted" : "filled")-image-\(index)", in: app).waitForExistence(timeout: 5))
                 XCTAssertFalse(element("artwork-image-retry", in: app).exists)
+                assertLivePhotoFrame(index, in: app, expectsLandscape: expectsLandscape)
             }
+        }
+    }
+
+    private func assertLivePhotoFrame(_ index: Int, in app: XCUIApplication, expectsLandscape: Bool) {
+        let mode = expectsLandscape ? "fitted" : "filled"
+        let photo = element("home-hero-actual-\(mode)-image-\(index)", in: app)
+        XCTAssertTrue(photo.waitForExistence(timeout: 5))
+        XCTAssertGreaterThan(photo.frame.width, 1)
+        XCTAssertGreaterThan(photo.frame.height, 1)
+        if expectsLandscape {
+            XCTAssertTrue(app.windows.firstMatch.frame.insetBy(dx: -1, dy: -1).contains(photo.frame),
+                          "真实横屏照片超出窗口，不能视为完整显示")
         }
     }
 
