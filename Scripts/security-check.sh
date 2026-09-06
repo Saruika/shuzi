@@ -82,6 +82,9 @@ if command -v php >/dev/null 2>&1; then
     php -l "$plugin_module" >/dev/null
   done < <(find Server/vendor/shuzijun/app-content -type f -name '*.php' -print0)
   php Server/tests/plugin-contract-test.php
+  for service_environment in unset production review invalid wrong-home; do
+    php Server/tests/service-environment-regression.php "$service_environment"
+  done
   php Server/tests/collaboration-schema-regression.php
   python3 Server/tests/collaboration-release-probe-test.py
 fi

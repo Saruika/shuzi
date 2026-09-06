@@ -372,7 +372,7 @@ trait Shuzijun_App_Content_Delivery {
         if (is_wp_error($launch_posters)) { $launch_posters = $defaults['launchPosters']; }
 
         $showreel_value = isset($stored['showreel']) && is_array($stored['showreel'])
-            ? array_merge($defaults['showreel'], $stored['showreel'])
+            ? array_merge(is_array($defaults['showreel']) ? $defaults['showreel'] : array(), $stored['showreel'])
             : $defaults['showreel'];
         $showreel = self::sanitize_showreel($showreel_value, $defaults['showreel']);
         if (is_wp_error($showreel)) { $showreel = $defaults['showreel']; }
@@ -391,7 +391,20 @@ trait Shuzijun_App_Content_Delivery {
         );
     }
 
+    /** Server-owned deployment selection; never read from a request or option. */
+    private static function app_service_environment() {
+        if (!defined('YISHU_APP_SERVICE_ENVIRONMENT')) { return 'production'; }
+        $mode = constant('YISHU_APP_SERVICE_ENVIRONMENT');
+        return is_string($mode) && in_array($mode, array('production', 'review'), true) ? $mode : 'invalid';
+    }
+
     private static function default_config() {
+        // An empty/malformed review configuration must not publish production
+        // media or resurrect production's default launch posters.
+        if (self::app_service_environment() !== 'production') {
+            return array('heroImages' => array(), 'aboutPortraitURL' => null,
+                'launchPosters' => array(), 'showreel' => null, 'dramas' => array());
+        }
         $hongguo = 'https://novelquickapp.com/s/wHlfrwqog1g/';
         return array(
             'heroImages' => array(
@@ -586,6 +599,9 @@ trait Shuzijun_App_Content_Delivery {
     }
 
     private static function sanitize_showreel($value, $fallback) {
+        $fallback = is_array($fallback) ? $fallback : array(
+            'eyebrow' => '', 'title' => '', 'summary' => '', 'durationLabel' => '', 'tags' => array()
+        );
         $video = self::trusted_media_url(isset($value['videoURL']) ? $value['videoURL'] : '');
         $poster = self::trusted_media_url(isset($value['posterURL']) ? $value['posterURL'] : '');
         if (!$video || !$poster) {
@@ -735,11 +751,14 @@ trait Shuzijun_App_Content_Delivery {
         if (!is_string($value)) { return ''; }
         if (strlen((string) $value) > 2048) { return ''; }
         $url = esc_url_raw((string) $value, array('https'));
-        if (wp_parse_url($url, PHP_URL_SCHEME) !== 'https') { return ''; }
-        if (wp_parse_url($url, PHP_URL_USER) || wp_parse_url($url, PHP_URL_PASS)) { return ''; }
-        if (wp_parse_url($url, PHP_URL_FRAGMENT)) { return ''; }
-        $port = wp_parse_url($url, PHP_URL_PORT);
-        return !$port || (int) $port === 443 ? $url : '';
+        $parts = wp_parse_url($url);
+        if (!is_array($parts) || ($parts['scheme'] ?? null) !== 'https') { return ''; }
+        // Presence matters: PHP treats the user "0", an empty user/password,
+        // an empty fragment and port 0 as false, not as missing components.
+        foreach (array('user', 'pass', 'fragment') as $component) {
+            if (array_key_exists($component, $parts)) { return ''; }
+        }
+        return !array_key_exists('port', $parts) || (int) $parts['port'] === 443 ? $url : '';
     }
 
     private static function sanitize_optional_media_url($value) {
@@ -759,6 +778,13 @@ trait Shuzijun_App_Content_Delivery {
         if (!$url) { return ''; }
         $host = strtolower((string) wp_parse_url($url, PHP_URL_HOST));
         $home_host = strtolower((string) wp_parse_url(home_url('/'), PHP_URL_HOST));
+        $environment = self::app_service_environment();
+        if ($environment !== 'production') {
+            // In review, neither a database home URL nor an existing host
+            // filter may broaden the fixed media boundary to production.
+            return $environment === 'review' && $home_host === 'review.shuzijun.com.cn'
+                && $host === 'review.shuzijun.com.cn' ? $url : '';
+        }
         $hosts = array_filter(array_unique(array(
             $home_host,
             'shuzijun.com.cn',
@@ -1048,6 +1074,9 @@ trait Shuzijun_App_Content_Delivery {
 
     /** Cloud inbox text is never substituted until this transport boundary. */
     private static function push_apns_payload($notification) {
+        $environment = self::app_service_environment();
+        if ($environment === 'invalid') { return null; }
+        if ($environment === 'review' && !self::trusted_media_url(home_url('/'))) { return null; }
         if (!is_array($notification) || !self::is_uuid_v4($notification['public_id'] ?? '')) {
             return null;
         }
@@ -1055,10 +1084,13 @@ trait Shuzijun_App_Content_Delivery {
         $title = $sensitive ? 'Hi，梳子' : ($notification['title'] ?? null);
         $body = $sensitive ? '有新消息，请登录查看' : ($notification['body'] ?? null);
         if (!is_string($title) || !is_string($body)) { return null; }
-        return wp_json_encode(array(
+        $payload = array(
             'aps' => array('alert' => array('title' => $title, 'body' => $body), 'sound' => 'default'),
             'notificationID' => (string) $notification['public_id'],
-        ), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        );
+        // Preserve the deployed production payload exactly for older clients.
+        if ($environment === 'review') { $payload['serviceEnvironment'] = 'review'; }
+        return wp_json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     }
 
     private static function send_push_to_apns($device_token, $notification) {
