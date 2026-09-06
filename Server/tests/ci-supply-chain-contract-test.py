@@ -24,7 +24,7 @@ SCRIPT = ROOT / "Scripts/ci-supply-chain.py"
 WORKFLOW = ROOT / ".github/workflows/ios-quality.yml"
 # Current reviewed materials get a new record; immutable historical releases
 # must not be rewritten to pretend they contained today's workflow/scripts.
-RELEASE_RECORD = ROOT / "Server/releases/v1.4.0-build2-preflight2.md"
+RELEASE_RECORD = ROOT / "Server/releases/v1.4.0-build2-preflight13.md"
 SPDX_SCHEMA_URL = (
     "https://raw.githubusercontent.com/spdx/spdx-spec/"
     "aadf3b0b8dbbabdb4d880b0fc714255fea436ff7/schemas/spdx-schema.json"
@@ -278,6 +278,15 @@ def test_workflow_text() -> None:
     assert "Server/" not in triggers and "**/*.md" not in triggers
     assert "pull_request:\n  workflow_dispatch:" in triggers
     assert "runs-on: macos-26" in text
+    # Keep sufficient bounded headroom for both serial device families and
+    # Release analysis; do not silently fall back to GitHub's longer default.
+    job_configuration = text.split("  quality:\n", 1)[1].split("    steps:\n", 1)[0]
+    timeout_lines = [line for line in job_configuration.splitlines() if "timeout-minutes:" in line]
+    assert timeout_lines == ["    timeout-minutes: 180"]
+    assert "Scripts/ci-ios-tests.sh iPhone" in text
+    assert "Scripts/ci-ios-tests.sh iPad" in text
+    assert "Scripts/ci-release-analyze.sh" in text
+    assert "continue-on-error:" not in text
     python_setup = text.split("- name: Set up audited Python", 1)[1].split("- name:", 1)[0]
     assert "python-version: ${{ env.CI_PYTHON_VERSION }}" in python_setup
     assert "architecture: arm64" in python_setup
@@ -326,7 +335,7 @@ def test_release_record() -> None:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         assert text.count(f"{name}={digest}") == 1
     assert text.count(f"SPDX_2_3_SCHEMA_SHA256={SPDX_SCHEMA_SHA256}") == 1
-    assert text.count("`v1.4.0-build2-preflight2`") == 1
+    assert text.count("`v1.4.0-build2-preflight13`") == 1
 
 
 def main() -> None:

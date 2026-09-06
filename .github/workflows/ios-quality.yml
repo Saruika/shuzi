@@ -33,9 +33,10 @@ jobs:
   quality:
     name: Security, iPhone and iPad
     runs-on: macos-26
-    # The full iPhone + iPad orientation/theme/gesture suites run serially.
-    # Keep every regression instead of timing out halfway through iPad checks.
-    timeout-minutes: 120
+    # Serial regression: observed cloud iPhone ~73m, local iPad ~45m, plus
+    # setup, analysis and artifact collection. Allow headroom without retries
+    # or removing tests. This execution cap does not raise the account budget.
+    timeout-minutes: 180
 
     steps:
       - name: Check out source
