@@ -4,6 +4,11 @@
 
 本段优先于下方历史快照，正式上架目标仍未完成，未上传新的 TestFlight 包。
 
+- **Build 4 实际发行包已准备并通过 Apple 上传前校验**：以干净 `32d7a9f` 归档并导出
+  `1.4.0 (4)`，实际签名/profile、生产 APNs、Apple 登录、WeatherKit、包内照片/密钥/测试内容
+  检查通过，`altool --validate-app` 退出 0。IPA 及归档已复制到用户 NAS 并核对一致。
+  详见 [实际包预检](Server/releases/v1.4.0-build4-package-preflight1.md)。
+  未上传 TestFlight，未过期旧包；ASC 正式构建仍未关联，支持 URL、审核说明仍缺。
 - **原生账号服务已连接独立后台验收**：`FanAccountStore` 与 `AdminSessionStore` 通过实际 HTTPS
   完成合成用户注册待审、正式审批、管理员绑定、旧管理会话撤销后立即拒绝、主动删号和删后登录拒绝。
   最终测试包括抖音留空拒绝、删后错误必须为凭据无效；iPhone 17 Pro Max / iOS 26.5 的 1 项
