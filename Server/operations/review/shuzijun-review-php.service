@@ -1,0 +1,31 @@
+[Unit]
+Description=Hi Shuzi isolated review PHP (private bootstrap)
+After=mysql.service
+Requires=mysql.service
+
+[Service]
+Type=simple
+User=shuzijun-review
+Group=shuzijun-review
+ExecStartPre=/usr/sbin/php-fpm8.3 -t --fpm-config /etc/shuzijun-review/php-fpm.conf
+ExecStart=/usr/sbin/php-fpm8.3 --fpm-config /etc/shuzijun-review/php-fpm.conf --nodaemonize
+RuntimeDirectory=shuzijun-review-php
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=3
+MemoryMax=512M
+TasksMax=32
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateNetwork=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+InaccessiblePaths=/var/www/html /etc/shuzijun/push
+ReadWritePaths=/srv/shuzijun-review/site/wp-content/uploads /srv/shuzijun-review/tmp

@@ -1,0 +1,32 @@
+[Unit]
+Description=Hi Shuzi isolated review HTTP (loopback only)
+After=shuzijun-review-php.service
+Requires=shuzijun-review-php.service
+
+[Service]
+Type=simple
+User=shuzijun-review
+Group=shuzijun-review
+ExecStart=/usr/sbin/nginx -c /etc/shuzijun-review/nginx.conf -p /srv/shuzijun-review
+RuntimeDirectory=shuzijun-review-web
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=3
+MemoryMax=64M
+TasksMax=16
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+CapabilityBoundingSet=
+IPAddressDeny=any
+IPAddressAllow=localhost
+InaccessiblePaths=/var/www/html /etc/shuzijun/push
+ReadWritePaths=/srv/shuzijun-review/tmp
+
