@@ -104,6 +104,7 @@ python3 Server/tests/sync-script-contract-test.py
 python3 Server/tests/sync-receipt-recovery-contract-test.py
 python3 Server/tests/sync-reconcile-generation7-service-contract-test.py
 python3 Server/tests/sync-scheduler-contract-test.py
+python3 Server/tests/sync-lock-contention-test.py
 python3 Server/tests/sync-release-deployer-contract-test.py
 python3 Server/tests/nginx-server-block-contract-test.py
 python3 Server/tests/install-build34-nginx-routing-contract-test.py

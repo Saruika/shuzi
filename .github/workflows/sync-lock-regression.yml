@@ -1,0 +1,30 @@
+name: Sync Lock Regression
+
+on:
+  push:
+    paths:
+      - 'Server/operations/repair-shuzijun-sync-lock-wait.py'
+      - 'Server/operations/sync-to-backup'
+      - 'Server/tests/sync-lock-contention-test.py'
+      - '.github/workflows/sync-lock-regression.yml'
+  pull_request:
+    paths:
+      - 'Server/operations/repair-shuzijun-sync-lock-wait.py'
+      - 'Server/operations/sync-to-backup'
+      - 'Server/tests/sync-lock-contention-test.py'
+      - '.github/workflows/sync-lock-regression.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-lock-contention:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # Same pin as iOS quality gate.
+        with:
+          persist-credentials: false
+      - name: Real shared/exclusive lock regression and 60-second deadline
+        run: python3 Server/tests/sync-lock-contention-test.py --require-linux --full-timeout
