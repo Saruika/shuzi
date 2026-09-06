@@ -9,6 +9,38 @@ import CoreLocation
 import Observation
 @testable import Yishu
 
+final class AppServiceEnvironmentTests: XCTestCase {
+    func testEnvironmentsNeverAcceptEachOthersCredentialOrigins() {
+        for environment in AppServiceEnvironment.allCases {
+            XCTAssertTrue(environment.allowsAPIURL(environment.apiRoot))
+            XCTAssertTrue(environment.allowsMediaUploadURL(environment.mediaUploadURL))
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            XCTAssertFalse(environment.allowsAPIURL(other.apiRoot))
+            XCTAssertFalse(environment.allowsMediaUploadURL(other.mediaUploadURL))
+            for raw in [
+                "http://\(environment.apiHost)/wp-json",
+                "https://\(environment.apiHost).example.invalid/wp-json",
+                "https://\(environment.apiHost):444/wp-json",
+                "https://other@\(environment.apiHost)/wp-json",
+                "https://\(environment.apiHost)/wp-json#fragment",
+                "https://\(environment.apiHost)/wp-json-extra",
+                "https://\(environment.apiHost)/wp-json/%2e%2e/wp-admin",
+                "https://\(environment.apiHost)/wp-json/a%2fb",
+                "https://\(environment.apiHost)/wp-json/%252e%252e/wp-admin",
+            ] {
+                XCTAssertFalse(environment.allowsAPIURL(URL(string: raw)), raw)
+            }
+        }
+    }
+
+    func testReviewStorageDoesNotReuseProductionKeys() {
+        for key in ["cn.com.shuzijun.yishu.fan-account", "portfolio-cache", "favorites", "recently-viewed"] {
+            XCTAssertEqual(AppServiceEnvironment.production.storageKey(key), key)
+            XCTAssertEqual(AppServiceEnvironment.review.storageKey(key), "review." + key)
+        }
+    }
+}
+
 @MainActor
 private final class BoundAdministratorTestAccount: FanAdministratorAccount {
     var administratorContext: FanAdministratorContext? = .init(userID: "test-user", sessionGeneration: 1)
