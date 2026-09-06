@@ -271,6 +271,7 @@ try {
     finally { check_wordpress_schema($wpdb->query("ALTER TABLE {$wpdb->usermeta} ENGINE=InnoDB") !== false, 'restore only the disposable fixture engine'); }
     check_wordpress_schema($bound($target) === $engine_before_binding, 'engine failure preserves role');
     check_wordpress_schema(!Shuzijun_App_Content_API::collaboration_phase1_enabled(), 'role API did not change collaboration fuse');
+    require __DIR__ . '/fan-administrator-media-wordpress-integration.php';
     wp_set_current_user(0);
     fwrite(STDOUT, 'fan-administrator-binding-wordpress: ' . ($checks - $binding_before_checks)
         . " assertions passed; actual roles, transactions, locks and REST dispatch; no live accounts\n");

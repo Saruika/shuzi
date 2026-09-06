@@ -77,6 +77,7 @@ if command -v php >/dev/null 2>&1; then
   php Server/tests/collaboration-private-payload-test.php
   php Server/tests/fan-bound-administrator-auth-test.php
   php -l Server/tests/fan-administrator-binding-wordpress-integration.php >/dev/null
+  php -l Server/tests/fan-administrator-media-wordpress-integration.php >/dev/null
   while IFS= read -r -d '' plugin_module; do
     php -l "$plugin_module" >/dev/null
   done < <(find Server/vendor/shuzijun/app-content -type f -name '*.php' -print0)
