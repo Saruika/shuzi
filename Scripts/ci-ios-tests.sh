@@ -70,28 +70,15 @@ result_root="$(cd "$result_root" && pwd -P)"
 run_id="$(date +%s)-$(uuidgen)"
 result_bundle="$result_root/Yishu-${device_family}-${run_id}.xcresult"
 
-# A reusable simulator may already have a notification decision. Run the
-# first-launch assertion on its own new device before any ordinary/unit tests,
-# then keep it out of the reused simulator's full suite. Both share build output.
+# Use the discovered simulator ONLY as a hardware/runtime template. The helper
+# runs first-launch authorization and the complete suite on one fresh device,
+# then deletes only that owned device. Unit hosts must not leave an unanswered
+# permission alert on a different simulator ahead of UI layout assertions.
+# The full suite keeps XCTest's system accessibility audit on iPhone. On iPad
+# it uses the existing deterministic safe-area, 44pt, Dynamic Type, VoiceOver
+# and actual UI-configuration checks rather than accepting framework error -56.
 Scripts/ci-notification-permission-test.sh \
   "$destination_id" \
   "$temporary_root/DerivedData" \
-  "$result_root/Yishu-${device_family}-NotificationPermission-${run_id}.xcresult"
-
-# The shared UI suite keeps XCTest's system accessibility audit on iPhone.
-# On iPad it runs the deterministic safe-area, 44pt, Dynamic Type, VoiceOver
-# and Apple UI-configuration layout contract instead, avoiding XCTest
-# framework error -56 without
-# skipping the accessibility gate or accepting an audit failure.
-xcodebuild \
-  -project Yishu.xcodeproj \
-  -scheme Yishu \
-  -configuration Debug \
-  -destination "platform=iOS Simulator,id=$destination_id" \
-  -derivedDataPath "$temporary_root/DerivedData" \
-  -resultBundlePath "$result_bundle" \
-  -parallel-testing-enabled NO \
-  -enableCodeCoverage YES \
-  -skip-testing:YishuUITests/YishuUITests/testStartupAsksSystemNotificationPermissionBeforeLogin \
-  COMPILER_INDEX_STORE_ENABLE=NO \
-  test
+  "$result_root/Yishu-${device_family}-NotificationPermission-${run_id}.xcresult" \
+  "$result_bundle"

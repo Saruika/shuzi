@@ -93,6 +93,7 @@ python3 Scripts/test-signout-contract.py
 python3 Scripts/test-apple-login-lifecycle-contract.py
 python3 Scripts/test-launch-poster-contract.py
 python3 Scripts/test-weather-privacy-contract.py
+python3 Scripts/test-ci-permission-isolation.py
 python3 Server/tests/app-content-release-contract-test.py
 python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py

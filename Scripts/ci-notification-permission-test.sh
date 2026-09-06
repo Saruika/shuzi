@@ -3,14 +3,15 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-if [[ $# != 3 ]]; then
-  printf 'usage: %s template-simulator-uuid derived-data-path result-bundle-path\n' "$0" >&2
+if [[ $# != 3 && $# != 4 ]]; then
+  printf 'usage: %s template-simulator-uuid derived-data-path permission-result-path [full-suite-result-path]\n' "$0" >&2
   exit 2
 fi
 
 template_id="$1"
 derived_data="$2"
 result_bundle="$3"
+full_suite_result="${4:-}"
 uuid_pattern='^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
 if [[ ! "$template_id" =~ $uuid_pattern ]]; then
   printf 'The template simulator must be an exact UUID.\n' >&2
@@ -18,6 +19,11 @@ if [[ ! "$template_id" =~ $uuid_pattern ]]; then
 fi
 if [[ "$derived_data" != /* || "$result_bundle" != /* || -e "$result_bundle" ]]; then
   printf 'Use absolute build/result paths and a new result-bundle path.\n' >&2
+  exit 2
+fi
+if [[ -n "$full_suite_result" && ( "$full_suite_result" != /* ||
+      -e "$full_suite_result" || "$full_suite_result" == "$result_bundle" ) ]]; then
+  printf 'The full suite needs its own new absolute result-bundle path.\n' >&2
   exit 2
 fi
 
@@ -68,6 +74,7 @@ if [[ ! "$created_id" =~ $uuid_pattern || "$created_id" == "$template_id" ]]; th
   exit 1
 fi
 printf 'Running first-launch notification permission on fresh simulator %s.\n' "$created_id"
+printf 'Test hardware: %s; runtime: %s.\n' "$device_type" "$runtime_id"
 xcrun simctl boot "$created_id"
 xcrun simctl bootstatus "$created_id" -b
 
@@ -85,3 +92,23 @@ xcodebuild \
   -only-testing:YishuUITests/YishuUITests/testStartupAsksSystemNotificationPermissionBeforeLogin \
   COMPILER_INDEX_STORE_ENABLE=NO \
   test
+
+if [[ -n "$full_suite_result" ]]; then
+  # Keep the full suite on this SAME freshly authorized device. Previously the
+  # caller switched back to the untouched template: its unit-test host opened
+  # an unanswered system permission alert that survived into layout tests.
+  # No tests are removed; only the dedicated first-launch test is not repeated.
+  printf 'Running full suite on the same authorized simulator %s.\n' "$created_id"
+  xcodebuild \
+    -project Yishu.xcodeproj \
+    -scheme Yishu \
+    -configuration Debug \
+    -destination "platform=iOS Simulator,id=$created_id" \
+    -derivedDataPath "$derived_data" \
+    -resultBundlePath "$full_suite_result" \
+    -parallel-testing-enabled NO \
+    -enableCodeCoverage YES \
+    -skip-testing:YishuUITests/YishuUITests/testStartupAsksSystemNotificationPermissionBeforeLogin \
+    COMPILER_INDEX_STORE_ENABLE=NO \
+    test
+fi
