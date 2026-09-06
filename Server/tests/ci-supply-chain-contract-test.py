@@ -24,7 +24,7 @@ SCRIPT = ROOT / "Scripts/ci-supply-chain.py"
 WORKFLOW = ROOT / ".github/workflows/ios-quality.yml"
 # Current reviewed materials get a new record; immutable historical releases
 # must not be rewritten to pretend they contained today's workflow/scripts.
-RELEASE_RECORD = ROOT / "Server/releases/v1.4.0-build2-preflight1.md"
+RELEASE_RECORD = ROOT / "Server/releases/v1.4.0-build2-preflight2.md"
 SPDX_SCHEMA_URL = (
     "https://raw.githubusercontent.com/spdx/spdx-spec/"
     "aadf3b0b8dbbabdb4d880b0fc714255fea436ff7/schemas/spdx-schema.json"
@@ -253,7 +253,7 @@ def test_local_provenance(temporary: Path) -> None:
     )
     assert record["runner"]["image_revision_strategy"] == "record-and-attest-every-run"
     assert record["toolchain"]["xcode_version"] == "26.6"
-    assert record["toolchain"]["python_version"] == "3.12.14"
+    assert record["toolchain"]["python_version"] == "3.13.15"
     assert len(record["toolchain"]["python_sha256"]) == 64
     assert record["toolchain"]["php_version"] == "8.3.6"
     assert record["toolchain"]["php_version_line_policy"] == "8.3"
@@ -278,6 +278,11 @@ def test_workflow_text() -> None:
     assert "Server/" not in triggers and "**/*.md" not in triggers
     assert "pull_request:\n  workflow_dispatch:" in triggers
     assert "runs-on: macos-26" in text
+    python_setup = text.split("- name: Set up audited Python", 1)[1].split("- name:", 1)[0]
+    assert "python-version: ${{ env.CI_PYTHON_VERSION }}" in python_setup
+    assert "architecture: arm64" in python_setup
+    assert "check-latest: false" in python_setup
+    assert "CI_PYTHON_VERSION: '3.13.15'" in text
     assert "CI_PHP_VERSION: '8.3'" in text
     assert "if: always()" in text
     assert "retention-days: 30" in text
@@ -321,7 +326,7 @@ def test_release_record() -> None:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         assert text.count(f"{name}={digest}") == 1
     assert text.count(f"SPDX_2_3_SCHEMA_SHA256={SPDX_SCHEMA_SHA256}") == 1
-    assert text.count("`v1.4.0-build2-preflight1`") == 1
+    assert text.count("`v1.4.0-build2-preflight2`") == 1
 
 
 def main() -> None:
