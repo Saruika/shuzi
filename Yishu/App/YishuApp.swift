@@ -48,6 +48,7 @@ struct YishuApp: App {
 
     private var configuredRoot: some View {
         RootView()
+            .environment(\.appServiceEnvironment, portfolioStore.serviceEnvironment)
             .environmentObject(portfolioStore)
             .environmentObject(favorites)
             .environmentObject(recentlyViewed)

@@ -642,7 +642,8 @@ struct GalleryViewer: View {
                             320,
                             Int(ceil(max(viewport.size.width, viewport.size.height) * displayScale))
                         )
-                    )
+                    ),
+                    environment: store.serviceEnvironment
                 )
             }
         }
@@ -723,14 +724,16 @@ struct GalleryViewer: View {
 struct ProgressiveGalleryArtwork: View, Equatable {
     let image: PortfolioImage
     let targetSize: CGSize
+    let serviceEnvironment: AppServiceEnvironment
 
-    init(image: PortfolioImage, targetSize: CGSize) {
+    init(image: PortfolioImage, targetSize: CGSize, environment: AppServiceEnvironment = .production) {
         self.image = image
         self.targetSize = targetSize
+        serviceEnvironment = environment
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.image == rhs.image && lhs.targetSize == rhs.targetSize
+        lhs.image == rhs.image && lhs.targetSize == rhs.targetSize && lhs.serviceEnvironment == rhs.serviceEnvironment
     }
 
     var body: some View {
@@ -760,18 +763,20 @@ struct ProgressiveGalleryArtwork: View, Equatable {
         }
         .frame(width: targetSize.width, height: targetSize.height)
         .clipped()
+        .environment(\.appServiceEnvironment, serviceEnvironment)
     }
 }
 
 private struct ZoomableArtwork: UIViewControllerRepresentable {
     let image: PortfolioImage
+    @Environment(\.appServiceEnvironment) private var serviceEnvironment
 
     func makeUIViewController(context: Context) -> GalleryZoomViewController {
-        GalleryZoomViewController(image: image)
+        GalleryZoomViewController(image: image, environment: serviceEnvironment)
     }
 
     func updateUIViewController(_ controller: GalleryZoomViewController, context: Context) {
-        controller.update(image: image)
+        controller.update(image: image, environment: serviceEnvironment)
     }
 }
 
@@ -781,6 +786,7 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
     let scrollView = GalleryZoomScrollView()
     private let zoomCanvas = UIView()
     private var image: PortfolioImage
+    private(set) var serviceEnvironment: AppServiceEnvironment
     private var viewportSize: CGSize = .zero
     private var artworkHost: UIHostingController<EquatableView<ProgressiveGalleryArtwork>>?
     private var zoomAccessibility: GalleryZoomAccessibilityElement?
@@ -791,8 +797,9 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
     private(set) var contentUpdateCount = 0
 #endif
 
-    init(image: PortfolioImage) {
+    init(image: PortfolioImage, environment: AppServiceEnvironment = .production) {
         self.image = image
+        serviceEnvironment = environment
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -822,7 +829,7 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
         scrollView.addSubview(zoomCanvas)
 
         let host = UIHostingController(rootView: ProgressiveGalleryArtwork(
-            image: image, targetSize: .zero
+            image: image, targetSize: .zero, environment: serviceEnvironment
         ).equatable())
         host.view.backgroundColor = .clear
         addChild(host)
@@ -892,9 +899,10 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
         updateAccessibility()
     }
 
-    func update(image: PortfolioImage) {
-        guard self.image != image else { return }
+    func update(image: PortfolioImage, environment: AppServiceEnvironment = .production) {
+        guard self.image != image || serviceEnvironment != environment else { return }
         self.image = image
+        serviceEnvironment = environment
         guard isViewLoaded else { return }
         scrollView.setZoomScale(1, animated: false)
         scrollView.contentOffset = .zero
@@ -905,7 +913,7 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
     private func updateArtwork() {
         guard viewportSize.width > 0, viewportSize.height > 0 else { return }
         artworkHost?.rootView = ProgressiveGalleryArtwork(
-            image: image, targetSize: viewportSize
+            image: image, targetSize: viewportSize, environment: serviceEnvironment
         ).equatable()
 #if DEBUG
         contentUpdateCount += 1

@@ -9,6 +9,135 @@ import CoreLocation
 import Observation
 @testable import Yishu
 
+private actor ImagePipelineTestLoader {
+    let data: Data
+    let responseURL: URL?
+    let delayed: Bool
+    let onRequest: @Sendable (Int) -> Void
+    private(set) var requests: [URLRequest] = []
+    private var pending: [Int: CheckedContinuation<(Data, URLResponse), Error>] = [:]
+
+    init(data: Data, responseURL: URL? = nil, delayed: Bool = false,
+         onRequest: @escaping @Sendable (Int) -> Void = { _ in }) {
+        self.data = data; self.responseURL = responseURL; self.delayed = delayed; self.onRequest = onRequest
+    }
+
+    func load(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        let index = requests.count
+        requests.append(request)
+        if !delayed { onRequest(index); return try reply(to: request) }
+        // Intentionally ignore cancellation to model a reply already delivered
+        // by the network while a workspace/memory purge is taking place.
+        return try await withCheckedThrowingContinuation {
+            pending[index] = $0
+            onRequest(index)
+        }
+    }
+
+    func complete(_ index: Int) throws {
+        guard requests.indices.contains(index), let continuation = pending.removeValue(forKey: index) else { return }
+        continuation.resume(returning: try reply(to: requests[index]))
+    }
+
+    func cancelPending() {
+        let continuations = pending.values
+        pending.removeAll()
+        for continuation in continuations { continuation.resume(throwing: CancellationError()) }
+    }
+
+    private func reply(to request: URLRequest) throws -> (Data, URLResponse) {
+        guard let url = responseURL ?? request.url,
+              let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+                  headerFields: ["Content-Type": "image/png", "Content-Length": String(data.count)]) else {
+            throw ArtworkImageLoadError.invalidResponse
+        }
+        return (data, response)
+    }
+}
+
+@MainActor
+final class ArtworkEnvironmentPipelineTests: XCTestCase {
+    private func fixture() throws -> Data {
+        let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
+            UIColor.blue.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        }
+        return try XCTUnwrap(image.pngData())
+    }
+
+    func testPipelineRejectsOtherEnvironmentBeforeLoadingAndKeepsMemoryCacheScoped() async throws {
+        for environment in AppServiceEnvironment.allCases {
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            let loader = ImagePipelineTestLoader(data: try fixture())
+            let pipeline = ArtworkImagePipeline(environment: environment) { try await loader.load($0) }
+            let url = AppURL.make("https://\(environment.mediaHost)/test/image.png")
+            let foreign = AppURL.make("https://\(other.mediaHost)/test/image.png")
+            do { _ = try await pipeline.image(for: foreign, maxPixelSize: 320); XCTFail("Foreign image was requested") }
+            catch { XCTAssertEqual(error as? ArtworkImageLoadError, .invalidResponse) }
+            let before = await loader.requests
+            XCTAssertTrue(before.isEmpty)
+            let first = try await pipeline.image(for: url, maxPixelSize: 320)
+            let cached = try await pipeline.image(for: url, maxPixelSize: 320)
+            XCTAssertTrue(first === cached)
+            let requests = await loader.requests
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(requests.first?.url, url)
+            XCTAssertNil(requests.first?.value(forHTTPHeaderField: "Authorization"))
+            let foreignPreview = await pipeline.cachedPreview(for: foreign)
+            XCTAssertNil(foreignPreview)
+            await pipeline.purgeMemory()
+            let previewAfterPurge = await pipeline.cachedPreview(for: url)
+            XCTAssertNil(previewAfterPurge)
+        }
+    }
+
+    func testPipelineRejectsImageResponseFromOtherEnvironment() async throws {
+        for environment in AppServiceEnvironment.allCases {
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            let url = AppURL.make("https://\(environment.mediaHost)/test/image.png")
+            let loader = ImagePipelineTestLoader(data: try fixture(), responseURL: AppURL.make("https://\(other.mediaHost)/test/image.png"))
+            let pipeline = ArtworkImagePipeline(environment: environment) { try await loader.load($0) }
+            do { _ = try await pipeline.image(for: url, maxPixelSize: 320); XCTFail("Foreign response was decoded") }
+            catch { XCTAssertEqual(error as? ArtworkImageLoadError, .invalidResponse) }
+            let cached = await pipeline.cachedPreview(for: url)
+            XCTAssertNil(cached)
+            let requests = await loader.requests
+            XCTAssertEqual(requests.count, 1)
+        }
+    }
+
+    func testPurgedLateImageCannotRepopulateCacheOrEraseReplacementFlight() async throws {
+        for environment in AppServiceEnvironment.allCases {
+            let firstStarted = expectation(description: "Old image request started: \(environment)")
+            let replacementStarted = expectation(description: "Replacement started: \(environment)")
+            let loader = ImagePipelineTestLoader(data: try fixture(), delayed: true) { index in
+                if index == 0 { firstStarted.fulfill() }
+                if index == 1 { replacementStarted.fulfill() }
+            }
+            let pipeline = ArtworkImagePipeline(environment: environment) { try await loader.load($0) }
+            let url = AppURL.make("https://\(environment.mediaHost)/test/image.png")
+            let old = Task { try await pipeline.image(for: url, maxPixelSize: 320) }
+            await fulfillment(of: [firstStarted], timeout: 5)
+            await pipeline.purgeMemory()
+            let replacement = Task { try await pipeline.image(for: url, maxPixelSize: 320) }
+            await fulfillment(of: [replacementStarted], timeout: 5)
+            try await loader.complete(0)
+            do { _ = try await old.value; XCTFail("Purged request returned an image") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            let latePreview = await pipeline.cachedPreview(for: url)
+            XCTAssertNil(latePreview)
+            try await loader.complete(1)
+            let loaded = try await replacement.value
+            let cached = try await pipeline.image(for: url, maxPixelSize: 320)
+            XCTAssertTrue(loaded === cached)
+            let requests = await loader.requests
+            XCTAssertEqual(requests.count, 2)
+            await pipeline.purgeMemory()
+            await loader.cancelPending()
+        }
+    }
+}
+
 final class AppServiceEnvironmentTests: XCTestCase {
     func testMatchingUserIDsDoNotMatchAcrossEnvironmentContexts() {
         let production = FanNotificationContext(userID: "synthetic-user", sessionGeneration: 1)
@@ -772,6 +901,26 @@ final class ContentAndAccessTests: XCTestCase {
             image: PortfolioImage(id: 1, url: preview, fullSizeURL: updatedFull, altText: "照片"),
             targetSize: size
         ))
+        XCTAssertNotEqual(original, ProgressiveGalleryArtwork(image: photo, targetSize: size, environment: .review))
+    }
+
+    @MainActor
+    func testGalleryZoomHostPreservesEnvironmentUntilExplicitReplacement() {
+        let url = AppURL.make("https://example.invalid/synthetic-image.png")
+        let photo = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "合成测试")
+        let controller = GalleryZoomViewController(image: photo, environment: .review)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 430, height: 760)
+        controller.viewDidLayoutSubviews()
+        XCTAssertEqual(controller.serviceEnvironment, .review)
+        let initialUpdates = controller.contentUpdateCount
+        controller.update(image: photo, environment: .review)
+        XCTAssertEqual(controller.contentUpdateCount, initialUpdates)
+        controller.scrollView.setZoomScale(2, animated: false)
+        controller.update(image: photo, environment: .production)
+        XCTAssertEqual(controller.serviceEnvironment, .production)
+        XCTAssertEqual(controller.contentUpdateCount, initialUpdates + 1)
+        XCTAssertEqual(controller.scrollView.zoomScale, 1)
     }
 
     func testGalleryAccessibilityReadsTheCurrentNativeZoomScale() throws {

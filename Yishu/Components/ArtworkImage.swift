@@ -4,6 +4,17 @@ import OSLog
 import SwiftUI
 import UIKit
 
+private struct AppServiceEnvironmentKey: EnvironmentKey {
+    static let defaultValue: AppServiceEnvironment = .production
+}
+
+extension EnvironmentValues {
+    var appServiceEnvironment: AppServiceEnvironment {
+        get { self[AppServiceEnvironmentKey.self] }
+        set { self[AppServiceEnvironmentKey.self] = newValue }
+    }
+}
+
 enum ArtworkImageLoadError: Error, Equatable {
     case invalidResponse
     case httpStatus(Int)
@@ -66,8 +77,12 @@ enum ArtworkImageLifecyclePolicy {
 /// before SwiftUI scales it, which is expensive for the 2560 px portfolio
 /// artwork. This pipeline creates a thumbnail close to the actual view size and
 /// coalesces duplicate requests made by adjacent carousel/gallery views.
-private actor ArtworkImagePipeline {
+actor ArtworkImagePipeline {
     static let shared = ArtworkImagePipeline()
+    private static let review = ArtworkImagePipeline(environment: .review)
+    static func pipeline(for environment: AppServiceEnvironment) -> ArtworkImagePipeline {
+        environment == .production ? shared : review
+    }
     private static let maximumResponseBytes: Int64 = 20 * 1024 * 1024
     private static let maximumPixelDimension: Int64 = 30_000
     private static let maximumPixelCount: Int64 = 200_000_000
@@ -84,26 +99,46 @@ private actor ArtworkImagePipeline {
         cache.totalCostLimit = 24 * 1024 * 1024
         return cache
     }()
-    private var inFlight: [String: Task<UIImage, Error>] = [:]
+    private struct Flight {
+        let id = UUID()
+        let task: Task<UIImage, Error>
+    }
+    private var inFlight: [String: Flight] = [:]
+    private var generation: UInt64 = 0
+    private let environment: AppServiceEnvironment
+    private let dataLoader: (@Sendable (URLRequest) async throws -> (Data, URLResponse))?
     private let session = SecureURLSessionFactory.make(
         requestTimeout: 8,
         resourceTimeout: 30
     )
 
+    init(environment: AppServiceEnvironment = .production,
+         dataLoader: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil) {
+        self.environment = environment
+        self.dataLoader = dataLoader
+    }
+
     func image(for url: URL, maxPixelSize: Int) async throws -> UIImage {
-        guard ContentSecurityPolicy.isTrustedMediaURL(url) else {
+        try Task.checkCancellation()
+        guard ContentSecurityPolicy.isTrustedMediaURL(url, environment: environment) else {
             throw ArtworkImageLoadError.invalidResponse
         }
         let bucket = min(3_000, max(320, ((maxPixelSize + 159) / 160) * 160))
         let key = "\(url.absoluteString)#\(bucket)"
+        let requestGeneration = generation
         if let cached = cache.object(forKey: key as NSString) {
             return cached
         }
         if let existing = inFlight[key] {
-            return try await existing.value
+            let image = try await existing.task.value
+            try Task.checkCancellation()
+            guard requestGeneration == generation else { throw CancellationError() }
+            return image
         }
 
         let imageSession = session
+        let dataLoader = dataLoader
+        let environment = environment
         let task = Task.detached(priority: .utility) { () throws -> UIImage in
             var latestError: Error = URLError(.unknown)
             for attempt in 1...ArtworkImageRetryPolicy.maximumAttempts {
@@ -120,9 +155,12 @@ private actor ArtworkImagePipeline {
                     )
                     request.setValue("Yishu-iOS/2.1", forHTTPHeaderField: "User-Agent")
 
-                    let (data, response) = try await imageSession.data(for: request)
+                    let (data, response): (Data, URLResponse)
+                    if let dataLoader { (data, response) = try await dataLoader(request) }
+                    else { (data, response) = try await imageSession.data(for: request) }
+                    try Task.checkCancellation()
                     guard let http = response as? HTTPURLResponse,
-                          ContentSecurityPolicy.matchesRequestedMediaURL(http.url, requestedURL: url) else {
+                          ContentSecurityPolicy.matchesRequestedMediaURL(http.url, requestedURL: url, environment: environment) else {
                         throw ArtworkImageLoadError.invalidResponse
                     }
                     guard (200..<300).contains(http.statusCode) else {
@@ -153,6 +191,7 @@ private actor ArtworkImagePipeline {
                           ) else {
                         throw ArtworkImageLoadError.decodeFailed
                     }
+                    try Task.checkCancellation()
                     return UIImage(cgImage: cgImage)
                 } catch is CancellationError {
                     throw CancellationError()
@@ -172,10 +211,14 @@ private actor ArtworkImagePipeline {
             }
             throw latestError
         }
-        inFlight[key] = task
+        let flight = Flight(task: task)
+        inFlight[key] = flight
 
         do {
             let image = try await task.value
+            guard requestGeneration == generation, inFlight[key]?.id == flight.id else {
+                throw CancellationError()
+            }
             let cost = image.cgImage.map { $0.bytesPerRow * $0.height } ?? 0
             cache.setObject(image, forKey: key as NSString, cost: cost)
             previewCache.setObject(
@@ -184,24 +227,30 @@ private actor ArtworkImagePipeline {
                 cost: cost
             )
             inFlight[key] = nil
+            try Task.checkCancellation()
             return image
         } catch {
-            inFlight[key] = nil
-            AppDiagnostics.shared.recordImageLoadFailure(
-                category: ArtworkImageRetryPolicy.diagnosticCode(for: error)
-            )
+            // A cancelled old flight must not erase a replacement for the same URL.
+            if inFlight[key]?.id == flight.id { inFlight[key] = nil }
+            if !(error is CancellationError) {
+                AppDiagnostics.shared.recordImageLoadFailure(
+                    category: ArtworkImageRetryPolicy.diagnosticCode(for: error)
+                )
+            }
             throw error
         }
     }
 
     func cachedPreview(for url: URL) -> UIImage? {
-        previewCache.object(forKey: url.absoluteString as NSString)
+        guard ContentSecurityPolicy.isTrustedMediaURL(url, environment: environment) else { return nil }
+        return previewCache.object(forKey: url.absoluteString as NSString)
     }
 
     func purgeMemory() {
+        generation &+= 1
         cache.removeAllObjects()
         previewCache.removeAllObjects()
-        inFlight.values.forEach { $0.cancel() }
+        inFlight.values.forEach { $0.task.cancel() }
         inFlight.removeAll()
     }
 
@@ -219,12 +268,13 @@ private actor ArtworkImagePipeline {
 
 enum ArtworkImagePrefetcher {
     static func prefetch(urls: [URL], maxPixelSize: Int,
+                         environment: AppServiceEnvironment = .production,
                          onImageLoaded: (@MainActor (URL, UIImage) -> Void)? = nil) async {
         let uniqueURLs = Array(Set(urls))
         await withTaskGroup(of: Void.self) { group in
             for url in uniqueURLs {
                 group.addTask {
-                    if let image = try? await ArtworkImagePipeline.shared.image(
+                    if let image = try? await ArtworkImagePipeline.pipeline(for: environment).image(
                         for: url,
                         maxPixelSize: maxPixelSize
                     ), !Task.isCancelled {
@@ -236,7 +286,9 @@ enum ArtworkImagePrefetcher {
     }
 
     static func purgeMemory() async {
-        await ArtworkImagePipeline.shared.purgeMemory()
+        for environment in AppServiceEnvironment.allCases {
+            await ArtworkImagePipeline.pipeline(for: environment).purgeMemory()
+        }
     }
 }
 
@@ -250,8 +302,10 @@ struct DownsampledAsyncImage<Content: View>: View {
 
     @Environment(\.displayScale) private var displayScale
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.appServiceEnvironment) private var serviceEnvironment
     @State private var image: UIImage?
     @State private var loadedURL: URL?
+    @State private var loadedEnvironment: AppServiceEnvironment?
     @State private var error: Error?
     @State private var retryGeneration = 0
 
@@ -280,7 +334,7 @@ struct DownsampledAsyncImage<Content: View>: View {
 
     private var requestID: String {
         guard let url else { return "missing" }
-        return "\(url.absoluteString)#\(maxPixelSize)#\(retryGeneration)"
+        return "\(serviceEnvironment.rawValue)#\(url.absoluteString)#\(maxPixelSize)#\(retryGeneration)"
     }
 
     var body: some View {
@@ -311,18 +365,20 @@ struct DownsampledAsyncImage<Content: View>: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: requestID) {
-            if loadedURL != url {
+            if loadedURL != url || loadedEnvironment != serviceEnvironment {
                 image = nil
                 loadedURL = nil
+                loadedEnvironment = nil
             }
             error = nil
             guard let url, maxPixelSize > 0 else { return }
-            if let cachedPreview = await ArtworkImagePipeline.shared.cachedPreview(for: url) {
+            let pipeline = ArtworkImagePipeline.pipeline(for: serviceEnvironment)
+            if let cachedPreview = await pipeline.cachedPreview(for: url) {
                 guard !Task.isCancelled else { return }
                 publish(cachedPreview, for: url)
             }
             do {
-                let loaded = try await ArtworkImagePipeline.shared.image(
+                let loaded = try await pipeline.image(
                     for: url,
                     maxPixelSize: maxPixelSize
                 )
@@ -356,13 +412,16 @@ struct DownsampledAsyncImage<Content: View>: View {
         let shouldNotify = image !== loadedImage || loadedURL != url
         image = loadedImage
         loadedURL = url
+        loadedEnvironment = serviceEnvironment
         if shouldNotify {
             onImageLoaded?(loadedImage)
         }
     }
 
     private var phase: AsyncImagePhase {
-        if let image { return .success(Image(uiImage: image)) }
+        if let image, loadedEnvironment == serviceEnvironment {
+            return .success(Image(uiImage: image))
+        }
         if let error { return .failure(error) }
         return .empty
     }
@@ -1116,7 +1175,7 @@ struct ScreenshotProtectedContent: UIViewControllerRepresentable {
 
     func makeUIViewController(context: Context) -> SecureHostingContainerController {
         SecureHostingContainerController(
-            rootView: content,
+            rootView: AnyView(content.environment(\.appServiceEnvironment, context.environment.appServiceEnvironment)),
             fallbackView: fallback,
             stateObserver: context.coordinator.didTransition(to:)
         )
@@ -1126,7 +1185,7 @@ struct ScreenshotProtectedContent: UIViewControllerRepresentable {
         _ controller: SecureHostingContainerController,
         context: Context
     ) {
-        controller.update(rootView: content)
+        controller.update(rootView: AnyView(content.environment(\.appServiceEnvironment, context.environment.appServiceEnvironment)))
     }
 
     static func dismantleUIViewController(

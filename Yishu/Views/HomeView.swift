@@ -202,6 +202,7 @@ private struct HeroPager: View {
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.appServiceEnvironment) private var serviceEnvironment
     @State private var playback = HomeHeroPlaybackState(selection: HeroPager.visualTestInitialSelection)
 
     private var slides: [URL] {
@@ -211,7 +212,7 @@ private struct HeroPager: View {
         if holdsRemoteImagesForVisualTesting {
             return ContentCatalog.heroImages
         }
-        return imageURLs.isEmpty ? ContentCatalog.heroImages : imageURLs
+        return imageURLs.isEmpty && serviceEnvironment == .production ? ContentCatalog.heroImages : imageURLs
     }
 
     private var shouldAutoAdvance: Bool {
@@ -343,6 +344,7 @@ private struct HeroPager: View {
                         Int(ceil(max(layout.image.width, layout.image.height) * displayScale))
                     )
                 ),
+                environment: serviceEnvironment,
                 onImageLoaded: { url, image in
                     playback.recordPreparedImage(image, for: url)
                 }
