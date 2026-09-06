@@ -4,6 +4,12 @@
 
 本段优先于下方历史快照，正式上架目标仍未完成，未上传新的 TestFlight 包。
 
+- **最新复验与云端启动**：原代码在全新 iPad Pro 13-inch / iOS 26.5 专项复验的两项
+  用例、八次横竖屏/明暗执行全部通过，无失败或跳过，命令退出 0。证据为
+  `/tmp/yishu-review-environment.5a0FSm/preview19-ipad-interruption-recheck.xcresult`。
+  这不证明原模拟器退出根因已解决，也不覆盖最终全量测试或真实公网媒体。
+  07:12 使用 3808d11 / preview20 启动 [#135](https://github.com/Saruika/shuzi/actions/runs/34066201816)，
+  已回读 In progress，非完成证明；运行前预算核对 USD 9.90 / USD 20、Stop usage Yes。
 - **#134 前置修正已验证，但又在 PHP 夹具失败**：011d690 / preview19 的运行器来源、
   指纹契约、静态分析、SBOM、Python/Composer 依赖审计全部通过。仓库检查随后在
   “私有密钥文件加载”测试失败，iPhone/iPad/Release 未执行。已在独立 Linux 临时目录
@@ -67,7 +73,7 @@
   主题配置在 setup 获取活跃应用时出现 AX -25218。最终失败用例为完整 iPad 首页构图
   `testHomeHeroKeepsTheFullIPadCompositionAndNeverTurnsBlank` 和
   `testHomeIndigoAndIvoryMatchThePage`。关闭原因仍未证实，不归因布局或直接当作可忽略。
-  已保存原始失败结果，并启动同代码、同硬件/系统的新建模拟器专项复验，尚未获得专项终态。
+  已保存原始失败结果；同代码、同硬件/系统的新建模拟器专项复验八次执行已通过，见本段顶部。
   preview17–19 不改变该轮 Swift 产物；专项复验不能将这轮完整失败改记为通过。
 - **发行签名已单独核对**：历史实际导出包 `1.4.0 (3)` 的生产 APNs、Apple 登录、WeatherKit 与签名
   检查通过，不代表 Build 4 已导出。新增 [preview18](Server/releases/v1.4.0-build4-review-env-preview18.md)
