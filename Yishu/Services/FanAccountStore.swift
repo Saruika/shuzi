@@ -1,4 +1,5 @@
 import AuthenticationServices
+import Combine
 import Foundation
 import Security
 
@@ -61,6 +62,8 @@ struct FanProfile: Codable, Equatable {
     let passwordRecoveryExpiresAt: Date?
     let accountSource: String
     let requiresAppleRegistration: Bool
+    /// Presentation hint only. The management endpoint independently verifies the role.
+    let administratorBound: Bool
 
     init(
         userID: String,
@@ -76,7 +79,8 @@ struct FanProfile: Codable, Equatable {
         requiresPasswordChange: Bool = false,
         passwordRecoveryExpiresAt: Date? = nil,
         accountSource: String = FanAccountSource.password.rawValue,
-        requiresAppleRegistration: Bool = false
+        requiresAppleRegistration: Bool = false,
+        administratorBound: Bool = false
     ) {
         self.userID = userID
         self.identityCode = identityCode
@@ -92,6 +96,7 @@ struct FanProfile: Codable, Equatable {
         self.passwordRecoveryExpiresAt = passwordRecoveryExpiresAt
         self.accountSource = accountSource
         self.requiresAppleRegistration = requiresAppleRegistration
+        self.administratorBound = administratorBound
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -109,6 +114,7 @@ struct FanProfile: Codable, Equatable {
         case passwordRecoveryExpiresAt
         case accountSource
         case requiresAppleRegistration
+        case administratorBound
     }
 
     init(from decoder: Decoder) throws {
@@ -148,6 +154,7 @@ struct FanProfile: Codable, Equatable {
             Bool.self,
             forKey: .requiresAppleRegistration
         ) ?? false
+        administratorBound = try container.decodeIfPresent(Bool.self, forKey: .administratorBound) ?? false
     }
 
     var accountStatus: FanAccountStatus? { FanAccountStatus(rawValue: status) }
@@ -689,8 +696,32 @@ enum FanAppleDeletionEligibility {
     }
 }
 
+struct FanAdministratorContext: Equatable {
+    let userID: String
+    let sessionGeneration: UInt64
+}
+
+enum FanAdministratorEligibility {
+    static func context(
+        profile: FanProfile?, hasSessionToken: Bool, credentialAccessAllowed: Bool,
+        hasPendingAppleRegistration: Bool, sessionGeneration: UInt64, now: Date = .now
+    ) -> FanAdministratorContext? {
+        guard hasSessionToken, credentialAccessAllowed, !hasPendingAppleRegistration,
+              let profile, profile.administratorBound, profile.isApproved(at: now),
+              !profile.requiresAppleRegistration else { return nil }
+        return FanAdministratorContext(userID: profile.userID, sessionGeneration: sessionGeneration)
+    }
+}
+
 @MainActor
-final class FanAccountStore: ObservableObject, FanNotificationAccount {
+protocol FanAdministratorAccount: AnyObject {
+    var administratorContext: FanAdministratorContext? { get }
+    var administratorChanges: AnyPublisher<Void, Never> { get }
+    func authorizeAdministratorRequest(_ request: inout URLRequest, context: FanAdministratorContext) throws
+}
+
+@MainActor
+final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdministratorAccount {
     @Published private(set) var profile: FanProfile? {
         didSet { notificationStore.updateContext(notificationContext) }
     }
@@ -739,6 +770,27 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount {
         )
     }
     var hasPushEligibleSession: Bool { pushEligibleUserID != nil }
+    var administratorContext: FanAdministratorContext? {
+        FanAdministratorEligibility.context(
+            profile: profile, hasSessionToken: token != nil,
+            credentialAccessAllowed: FanAppleCredentialAccessPolicy.canUseValidServerSession(
+                usesAppleSignIn: usesAppleSignIn, state: appleCredentialAccessState
+            ),
+            hasPendingAppleRegistration: appleRegistration != nil,
+            sessionGeneration: pushSessionGeneration
+        )
+    }
+    var administratorChanges: AnyPublisher<Void, Never> {
+        objectWillChange.eraseToAnyPublisher()
+    }
+    func authorizeAdministratorRequest(_ request: inout URLRequest, context: FanAdministratorContext) throws {
+        guard administratorContext == context, let token,
+              AppNetworkSecurityPolicy.isTrustedAdminRequestURL(request.url) else {
+            throw AdminAPIError.invalidCredentials
+        }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(installID.uuidString.lowercased(), forHTTPHeaderField: "X-Yishu-Install-ID")
+    }
     var notificationContext: FanNotificationContext? {
 #if DEBUG
         if FanNotificationUITestFixture.isEnabled {

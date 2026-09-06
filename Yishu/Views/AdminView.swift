@@ -90,6 +90,7 @@ enum SafeIdentifiedBinding {
 
 struct AdminView: View {
     @EnvironmentObject private var admin: AdminSessionStore
+    @EnvironmentObject private var fanAccount: FanAccountStore
     @EnvironmentObject private var store: PortfolioStore
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -293,6 +294,16 @@ struct AdminView: View {
             }
 
             VStack(spacing: 14) {
+                if fanAccount.administratorContext != nil {
+                    Button {
+                        Task { await admin.signIn(using: fanAccount) }
+                    } label: {
+                        Label("使用当前账号进入管理", systemImage: "person.crop.circle.badge.checkmark")
+                            .frame(maxWidth: .infinity, minHeight: 48)
+                    }
+                    .disabled(admin.isWorking)
+                    .accessibilityIdentifier("admin-use-bound-account")
+                }
                 TextField("管理员账号", text: $username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()

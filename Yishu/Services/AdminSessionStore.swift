@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import Security
 
 enum AppUserRole: Equatable {
@@ -457,6 +458,10 @@ final class AdminSessionStore: ObservableObject {
     @Published var errorMessage: String?
 
     private var credential: AdminCredential?
+    private weak var boundAccount: (any FanAdministratorAccount)?
+    private var boundContext: FanAdministratorContext?
+    private var boundAccountObservation: AnyCancellable?
+    private let jsonLoader: ((URLRequest) async throws -> (Data, URLResponse))?
     private var authenticatedUntil: Date?
     private var expirationTask: Task<Void, Never>?
     private var authenticationGeneration: UInt64 = 0
@@ -466,13 +471,23 @@ final class AdminSessionStore: ObservableObject {
     private let session: URLSession
 
     var isAuthenticated: Bool {
-        guard credential != nil,
+        guard hasCurrentAuthenticationSource,
               AdminSessionSecurityPolicy.isFresh(expiresAt: authenticatedUntil),
               case .administrator = role else { return false }
         return true
     }
 
-    init() {
+    var isIndependentAdministrator: Bool { isAuthenticated && boundContext == nil }
+
+    private var hasCurrentAuthenticationSource: Bool {
+        if let boundContext {
+            return boundAccount?.administratorContext == boundContext
+        }
+        return credential != nil
+    }
+
+    init(jsonLoader: ((URLRequest) async throws -> (Data, URLResponse))? = nil) {
+        self.jsonLoader = jsonLoader
         session = SecureURLSessionFactory.make(
             requestTimeout: 120,
             resourceTimeout: 180
@@ -532,8 +547,59 @@ final class AdminSessionStore: ObservableObject {
         errorMessage = nil
     }
 
+    /// Use the existing installation-bound session, never a second stored password.
+    func signIn(using account: any FanAdministratorAccount) async {
+        lock()
+        guard let context = account.administratorContext else {
+            errorMessage = "当前账号尚未获得管理员授权，或尚未完成资料与审批。"
+            return
+        }
+        boundAccount = account
+        boundContext = context
+        let generation = authenticationGeneration
+        let operationID = UUID()
+        signInOperationID = operationID
+        isWorking = true
+        boundAccountObservation = account.administratorChanges.sink { [weak self] in
+            // ObservableObject announces before mutation. Recheck after that mutation;
+            // request construction and response validation also check synchronously.
+            Task { @MainActor [weak self] in
+                guard let self, self.authenticationGeneration == generation else { return }
+                if !self.hasCurrentAuthenticationSource { self.lock() }
+                else { self.objectWillChange.send() }
+            }
+        }
+        defer {
+            if signInOperationID == operationID {
+                signInOperationID = nil
+                isWorking = false
+            }
+        }
+        do {
+            let response: AdminSessionResponse = try await authorizedJSON(
+                path: "shuzijun/v1/app-admin/session", method: "GET", authenticationProbe: true
+            )
+            guard generation == authenticationGeneration else { return }
+            guard boundContext == context, account.administratorContext == context else {
+                lock()
+                return
+            }
+            guard response.authenticated == true, response.role == "yishu_content_manager",
+                  !response.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw AdminAPIError.invalidResponse
+            }
+            establishSession(displayName: response.displayName)
+            errorMessage = nil
+        } catch {
+            guard generation == authenticationGeneration else { return }
+            lock()
+            errorMessage = (error as? AdminAPIError)?.errorDescription
+                ?? AdminAPIError.networkUnavailable.errorDescription
+        }
+    }
+
     /// Immediately invalidates the local administrator unlock. The server still
-    /// independently checks the Application Password and capability on every
+    /// independently checks the Basic or installation-bound session and capability on every
     /// request; this prevents a previously unlocked phone from silently reusing it.
     func lock() {
         authenticationGeneration &+= 1
@@ -542,6 +608,10 @@ final class AdminSessionStore: ObservableObject {
         expirationTask?.cancel()
         expirationTask = nil
         credential = nil
+        boundAccountObservation?.cancel()
+        boundAccountObservation = nil
+        boundAccount = nil
+        boundContext = nil
         authenticatedUntil = nil
         role = .visitor
     }
@@ -920,7 +990,11 @@ final class AdminSessionStore: ObservableObject {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            if let jsonLoader {
+                (data, response) = try await jsonLoader(request)
+            } else {
+                (data, response) = try await session.data(for: request)
+            }
         } catch {
             throw AdminAPIError.networkUnavailable
         }
@@ -946,7 +1020,10 @@ final class AdminSessionStore: ObservableObject {
             lock()
             throw AdminAPIError.invalidCredentials
         }
-        guard let credential else { throw AdminAPIError.invalidCredentials }
+        guard hasCurrentAuthenticationSource else {
+            lock()
+            throw AdminAPIError.invalidCredentials
+        }
         guard !path.isEmpty,
               !path.hasPrefix("/"),
               !path.contains(".."),
@@ -956,7 +1033,6 @@ final class AdminSessionStore: ObservableObject {
               ["GET", "POST"].contains(method) else {
             throw AdminAPIError.invalidResponse
         }
-        let token = Data("\(credential.username):\(credential.applicationPassword)".utf8).base64EncodedString()
         let endpointRoot = path == "wp/v2/media" ? mediaUploadRoot : apiRoot
         let baseEndpoint = endpointRoot.appending(path: path)
         var components = URLComponents(
@@ -972,7 +1048,14 @@ final class AdminSessionStore: ObservableObject {
         request.httpMethod = method
         request.timeoutInterval = 120
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+        if let boundContext, let boundAccount {
+            try boundAccount.authorizeAdministratorRequest(&request, context: boundContext)
+        } else if let credential {
+            let token = Data("\(credential.username):\(credential.applicationPassword)".utf8).base64EncodedString()
+            request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+        } else {
+            throw AdminAPIError.invalidCredentials
+        }
         request.setValue("Yishu-iOS-Admin/1.0", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
@@ -1072,7 +1155,10 @@ final class AdminSessionStore: ObservableObject {
     }
 
     private func validateActiveRequest(generation: UInt64) throws {
-        guard credential != nil,
+        if generation == authenticationGeneration, !hasCurrentAuthenticationSource {
+            lock()
+        }
+        guard hasCurrentAuthenticationSource,
               AdminSessionSecurityPolicy.canAcceptResponse(
                 requestGeneration: generation,
                 currentGeneration: authenticationGeneration,
@@ -1113,6 +1199,8 @@ private struct AdminCredential: Codable, Equatable {
 
 private struct AdminSessionResponse: Decodable {
     let displayName: String
+    let authenticated: Bool?
+    let role: String?
 }
 
 struct AppContentUpdate: Encodable {

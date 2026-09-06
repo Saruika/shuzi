@@ -205,12 +205,12 @@ struct RootView: View {
         .onChange(of: fanAccount.profile?.status) { _, status in
             if fanAccount.isApproved || shouldBypassAccessGate {
                 Task { await prepareAuthorizedContentIfNeeded() }
-            } else if !adminSession.isAuthenticated {
+            } else if !adminSession.isIndependentAdministrator {
                 resetProtectedPresentation()
             }
         }
         .onChange(of: fanAccount.profile?.requiresAccountSetup) { _, requiresSetup in
-            if requiresSetup == true, !adminSession.isAuthenticated {
+            if requiresSetup == true, !adminSession.isIndependentAdministrator {
                 resetProtectedPresentation()
             } else if fanAccount.isApproved || shouldBypassAccessGate {
                 Task { await prepareAuthorizedContentIfNeeded() }
@@ -219,7 +219,7 @@ struct RootView: View {
         .onChange(of: fanAccount.appleCredentialAccessState) { _, state in
             if fanAccount.isApproved || shouldBypassAccessGate {
                 Task { await prepareAuthorizedContentIfNeeded() }
-            } else if state != .notRequired, !adminSession.isAuthenticated {
+            } else if state != .notRequired, !adminSession.isIndependentAdministrator {
                 resetProtectedPresentation()
             }
         }

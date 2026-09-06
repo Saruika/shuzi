@@ -48,6 +48,20 @@ foreach (array(Shuzijun_App_Content_API::CAPABILITY, Shuzijun_App_Content_API::F
 }
 check_wordpress_schema(!$manages($request, 'manage_options'), 'App admin is not a WordPress super administrator');
 check_wordpress_schema(!user_can($id, 'manage_options'), 'role binding did not grant site-wide administration');
+// The existing REST pre-dispatch hook authenticates the App bearer before the
+// core media controller checks upload_files. Verify the actual integration,
+// not an assumed need for an additional upload endpoint. No file is uploaded.
+$media_request = new WP_REST_Request('POST', '/wp/v2/media');
+$media_request->set_header('Authorization', 'Bearer ' . $token);
+$media_request->set_header('X-Yishu-Install-ID', $install);
+wp_set_current_user(0);
+check_wordpress_schema(Shuzijun_App_Content_API::block_public_catalog_routes(null, null, $media_request) === null,
+    'real media pre-dispatch accepts an approved bound administrator');
+check_wordpress_schema(get_current_user_id() === $id, 'media controller receives actual bearer actor');
+$media_controller = new WP_REST_Attachments_Controller('attachment');
+check_wordpress_schema($media_controller->create_item_permissions_check($media_request) === true,
+    'core media create permission accepts scoped upload_files without site editing rights');
+check_wordpress_schema(!current_user_can('edit_others_posts'), 'media upload does not grant editing other posts');
 check_wordpress_schema(Shuzijun_App_Content_API::can_access_app_content($request) === true, 'bound user still accesses fan content');
 foreach (array('pending', 'rejected', 'suspended') as $status) {
     update_user_meta($id, Shuzijun_App_Content_API::FAN_META_STATUS, $status);
@@ -72,6 +86,8 @@ foreach (array('onboarding', 'password_recovery', 'apple_onboarding') as $scope)
 }
 update_option($option, $session, false);
 $user->remove_role(Shuzijun_App_Content_API::ROLE);
+check_wordpress_schema(is_wp_error(Shuzijun_App_Content_API::block_public_catalog_routes(null, null, $media_request)),
+    'revoked administrator cannot enter the media controller');
 check_wordpress_schema(!$manages($request, Shuzijun_App_Content_API::CAPABILITY), 'role removal takes effect on the next request');
 check_wordpress_schema(Shuzijun_App_Content_API::can_access_app_content($request) === true, 'revoking admin does not remove approved fan access');
 check_wordpress_schema(get_user_meta($id, Shuzijun_App_Content_API::FAN_META_UUID, true) === $uuid, 'identity survives admin revocation');

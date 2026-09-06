@@ -9,6 +9,211 @@ import CoreLocation
 import Observation
 @testable import Yishu
 
+@MainActor
+private final class BoundAdministratorTestAccount: FanAdministratorAccount {
+    var administratorContext: FanAdministratorContext? = .init(userID: "test-user", sessionGeneration: 1)
+    let changes = PassthroughSubject<Void, Never>()
+    var administratorChanges: AnyPublisher<Void, Never> { changes.eraseToAnyPublisher() }
+    func authorizeAdministratorRequest(_ request: inout URLRequest, context: FanAdministratorContext) throws {
+        guard administratorContext == context else { throw AdminAPIError.invalidCredentials }
+        request.setValue("Bearer synthetic-session", forHTTPHeaderField: "Authorization")
+        request.setValue("synthetic-installation", forHTTPHeaderField: "X-Yishu-Install-ID")
+    }
+}
+
+@MainActor
+final class BoundAdministratorSessionTests: XCTestCase {
+    func testRoleHintNeverBypassesApprovalIdentityOrSessionRequirements() throws {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let base: [String: Any] = [
+            "userID": "00000000-0000-4000-8000-000000000001", "identityCode": "HS-ABCD-2345",
+            "displayName": "测试", "douyinID": "test_douyin", "installationCode": "IN-ABC-234",
+            "permissions": ["gallery_full"], "status": "active",
+            "sessionExpiresAt": "2099-01-01T00:00:00Z", "administratorBound": true,
+        ]
+        func decode(_ values: [String: Any]) throws -> FanProfile {
+            try decoder.decode(FanProfile.self, from: JSONSerialization.data(withJSONObject: values))
+        }
+        let profile = try decode(base)
+        func eligible(_ profile: FanProfile?, token: Bool = true, credential: Bool = true,
+                      pendingApple: Bool = false) -> FanAdministratorContext? {
+            FanAdministratorEligibility.context(profile: profile, hasSessionToken: token,
+                credentialAccessAllowed: credential, hasPendingAppleRegistration: pendingApple,
+                sessionGeneration: 4)
+        }
+        XCTAssertEqual(eligible(profile)?.sessionGeneration, 4)
+        XCTAssertNil(eligible(nil))
+        XCTAssertNil(eligible(profile, token: false))
+        XCTAssertNil(eligible(profile, credential: false))
+        XCTAssertNil(eligible(profile, pendingApple: true))
+        let changes: [[String: Any]] = [
+            ["administratorBound": false], ["status": "pending"], ["status": "suspended"],
+            ["status": "rejected"], ["douyinID": ""], ["requiresAccountSetup": true],
+            ["requiresPasswordChange": true], ["requiresAppleRegistration": true],
+            ["sessionExpiresAt": "2000-01-01T00:00:00Z"],
+        ]
+        for change in changes {
+            XCTAssertNil(eligible(try decode(base.merging(change) { _, new in new })), "\(change)")
+        }
+        var legacy = base
+        legacy.removeValue(forKey: "administratorBound")
+        XCTAssertNil(eligible(try decode(legacy)))
+        XCTAssertThrowsError(try decode(base.merging(["administratorBound": "true"]) { _, new in new }))
+    }
+
+    private func reply(_ request: URLRequest, status: Int = 200, body: String? = nil) throws -> (Data, URLResponse) {
+        let url = try XCTUnwrap(request.url)
+        let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status,
+            httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+        return (Data((body ?? #"{"authenticated":true,"role":"yishu_content_manager","displayName":"测试管理员"}"#).utf8), response)
+    }
+
+    func testBoundAccountMustPassServerProbeAndNeverBecomesIndependentAdministrator() async throws {
+        let account = BoundAdministratorTestAccount()
+        var requests = [URLRequest]()
+        let admin = AdminSessionStore { request in
+            requests.append(request)
+            return try self.reply(request)
+        }
+        XCTAssertFalse(admin.isAuthenticated)
+        await admin.signIn(using: account)
+        XCTAssertTrue(admin.isAuthenticated)
+        XCTAssertFalse(admin.isIndependentAdministrator)
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.url?.path, "/wp-json/shuzijun/v1/app-admin/session")
+        XCTAssertEqual(requests.first?.value(forHTTPHeaderField: "Authorization"), "Bearer synthetic-session")
+        XCTAssertEqual(requests.first?.value(forHTTPHeaderField: "X-Yishu-Install-ID"), "synthetic-installation")
+        XCTAssertEqual(requests.first?.value(forHTTPHeaderField: "Cache-Control"), "no-store")
+        admin.signOut()
+        XCTAssertFalse(admin.isAuthenticated)
+    }
+
+    func testMissingLocalEligibilityNeverSendsManagementRequest() async {
+        let account = BoundAdministratorTestAccount()
+        account.administratorContext = nil
+        var calls = 0
+        let admin = AdminSessionStore { request in
+            calls += 1
+            return try self.reply(request)
+        }
+        await admin.signIn(using: account)
+        XCTAssertFalse(admin.isAuthenticated)
+        XCTAssertEqual(calls, 0)
+    }
+
+    func testLegacyAdministratorStillUsesSeparateBasicAuthentication() async throws {
+        var authorization: String?
+        var installation: String?
+        let admin = AdminSessionStore { request in
+            authorization = request.value(forHTTPHeaderField: "Authorization")
+            installation = request.value(forHTTPHeaderField: "X-Yishu-Install-ID")
+            return try self.reply(request)
+        }
+        await admin.signIn(username: "synthetic-manager", applicationPassword: UUID().uuidString)
+        XCTAssertTrue(admin.isIndependentAdministrator)
+        XCTAssertTrue(authorization?.hasPrefix("Basic ") == true)
+        XCTAssertNil(installation)
+        admin.lock()
+    }
+
+    func testLateProbeCannotUnlockForReplacementAccount() async throws {
+        let account = BoundAdministratorTestAccount()
+        let admin = AdminSessionStore { request in
+            account.administratorContext = .init(userID: "other-user", sessionGeneration: 2)
+            return try self.reply(request)
+        }
+        await admin.signIn(using: account)
+        XCTAssertFalse(admin.isAuthenticated)
+        XCTAssertFalse(admin.isWorking)
+        admin.lock()
+    }
+
+    func testRevocationAndSameUserSessionReplacementInvalidateBeforeNextRequest() async throws {
+        for replacement in [nil, FanAdministratorContext(userID: "test-user", sessionGeneration: 2),
+                            FanAdministratorContext(userID: "other-user", sessionGeneration: 1)] {
+            let account = BoundAdministratorTestAccount()
+            var calls = 0
+            let admin = AdminSessionStore { request in
+                calls += 1
+                return try self.reply(request)
+            }
+            await admin.signIn(using: account)
+            XCTAssertTrue(admin.isAuthenticated)
+            // No publisher notification needed to prevent a request with stale credentials.
+            account.administratorContext = replacement
+            XCTAssertFalse(admin.isAuthenticated)
+            do {
+                _ = try await admin.fetchFeatureCapabilities()
+                XCTFail("Stale account sent a management request")
+            } catch { XCTAssertEqual(calls, 1) }
+            admin.lock()
+        }
+    }
+
+    func testServerDenialAndMisleadingSuccessDoNotUnlock() async throws {
+        for (status, body) in [(403, #"{"code":"forbidden","message":"无权限"}"#),
+                               (200, #"{"displayName":"未验证"}"#),
+                               (200, #"{"authenticated":true,"role":"subscriber","displayName":"普通用户"}"#)] {
+            let account = BoundAdministratorTestAccount()
+            let admin = AdminSessionStore { request in try self.reply(request, status: status, body: body) }
+            await admin.signIn(using: account)
+            XCTAssertFalse(admin.isAuthenticated)
+            XCTAssertNotNil(admin.errorMessage)
+        }
+    }
+
+    func testLateProbeCannotUnlockAfterLogout() async throws {
+        let account = BoundAdministratorTestAccount()
+        var admin: AdminSessionStore?
+        let store = AdminSessionStore { request in
+            admin?.signOut()
+            return try self.reply(request)
+        }
+        admin = store
+        await store.signIn(using: account)
+        XCTAssertFalse(store.isAuthenticated)
+        XCTAssertFalse(store.isWorking)
+    }
+
+    func testAccountPublisherLocksVisibleManagementState() async throws {
+        let account = BoundAdministratorTestAccount()
+        let admin = AdminSessionStore { request in try self.reply(request) }
+        await admin.signIn(using: account)
+        let locked = expectation(description: "Account removal publishes locked role")
+        let observation = admin.$role.dropFirst().sink { role in
+            if role == .visitor { locked.fulfill() }
+        }
+        account.changes.send()
+        account.administratorContext = nil
+        await fulfillment(of: [locked], timeout: 2)
+        XCTAssertFalse(admin.isAuthenticated)
+        observation.cancel()
+    }
+
+    func testLateManagementResponseCannotCrossAccountBoundary() async throws {
+        let account = BoundAdministratorTestAccount()
+        var calls = 0
+        let admin = AdminSessionStore { request in
+            calls += 1
+            if calls > 1 {
+                account.administratorContext = .init(userID: "other-user", sessionGeneration: 2)
+                return try self.reply(request, body: #"{"collaborationEnabled":false}"#)
+            }
+            return try self.reply(request)
+        }
+        await admin.signIn(using: account)
+        do {
+            _ = try await admin.fetchFeatureCapabilities()
+            XCTFail("Old account response was accepted")
+        } catch let error as AdminAPIError {
+            guard case .invalidCredentials = error else { return XCTFail("Wrong rejection: \(error)") }
+        }
+        XCTAssertFalse(admin.isAuthenticated)
+        admin.lock()
+    }
+}
+
 private enum TestCredentialFixture {
     static let currentValue = makeValue(label: "current")
     static let replacementValue = makeValue(label: "replacement")
@@ -2351,6 +2556,7 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(profile.passwordRecoveryExpiresAt)
         XCTAssertEqual(profile.accountSource, FanAccountSource.password.rawValue)
         XCTAssertFalse(profile.requiresAppleRegistration)
+        XCTAssertFalse(profile.administratorBound)
         XCTAssertTrue(profile.isApproved)
         XCTAssertFalse(admin.requiresAccountSetup)
         XCTAssertNil(admin.invitationExpiresAt)
