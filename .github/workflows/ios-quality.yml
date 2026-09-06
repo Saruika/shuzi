@@ -85,7 +85,9 @@ jobs:
           "$RUNNER_TEMP/yishu-quality-venv/bin/python" -m ruff check \
             --config Server/ruff.toml \
             Server \
-            Scripts/ci-supply-chain.py
+            Scripts/ci-supply-chain.py \
+            Scripts/ci-test-summary.py \
+            Scripts/test-ci-test-summary.py
           "$RUNNER_TEMP/yishu-quality-venv/bin/python" -m ruff check \
             --config Server/ruff.toml \
             --select I \
@@ -102,7 +104,8 @@ jobs:
             --exclude Server/tests,Server/vendor \
             Server/entitlement-verifier \
             Server/operations \
-            Scripts/ci-supply-chain.py
+            Scripts/ci-supply-chain.py \
+            Scripts/ci-test-summary.py
 
       - name: Generate repository SBOMs
         run: |
@@ -136,22 +139,41 @@ jobs:
         run: composer audit --locked --working-dir=Server
 
       - name: Validate repository security boundary
+        id: preflight
         run: Scripts/security-check.sh
 
       - name: Test iPhone pages
+        id: iphone
         env:
           CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
         run: Scripts/ci-ios-tests.sh iPhone
 
       - name: Test iPad pages
+        id: ipad
+        # Do not hide iPad failures behind a failed iPhone run. The original
+        # failure still fails this job; cancellation and preflight failure stop
+        # expensive native work. No retries or continue-on-error are used.
+        if: ${{ !cancelled() && steps.preflight.outcome == 'success' }}
         env:
           CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
         run: Scripts/ci-ios-tests.sh iPad
 
       - name: Run Swift compiler analysis and audit Release bundle
+        id: release
+        if: ${{ !cancelled() && steps.preflight.outcome == 'success' }}
         env:
           CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
         run: Scripts/ci-release-analyze.sh
+
+      - name: Summarize native test evidence
+        if: always()
+        env:
+          CI_RESULT_DIR: ${{ runner.temp }}/yishu-results
+          CI_PREFLIGHT_OUTCOME: ${{ steps.preflight.outcome }}
+          CI_IPHONE_OUTCOME: ${{ steps.iphone.outcome }}
+          CI_IPAD_OUTCOME: ${{ steps.ipad.outcome }}
+          CI_RELEASE_OUTCOME: ${{ steps.release.outcome }}
+        run: python3 Scripts/ci-test-summary.py
 
       - name: Preserve runner provenance and SBOMs
         if: always()
