@@ -41,6 +41,12 @@ DDL、字段/索引修复、SQL 失败不写 ready、修复后恢复，以及错
 运行时证据；PII 处理、保留/删除、认证邮件和并发双节点演练仍未完成。
 不能据此开启合作提交或宣称自动邮件已送达。
 
+后续隔离回归发现并复现：收件箱列表查询失败后，随后的计数查询会重置
+`wpdb->last_error`，从而返回错误的“成功但空列表”。候选 1.5.13.2 在每次查询后
+立即核验，并严格检查 COUNT 返回值，不把 null、无效类型或溢出值转换为 0。
+扩展后的真实 WordPress 回归为 64 项，覆盖带/不带状态筛选的列表故障、计数故障、
+异常空计数及恢复。见 [修正记录](releases/v1.4.0-build2-preflight4.md)；尚未部署。
+
 ```bash
 php Server/tests/collaboration-schema-regression.php
 # 仅测试环境：Unix socket 认证；自建随机空库并在 finally 精确销毁。

@@ -351,7 +351,12 @@ trait Shuzijun_App_Collaboration {
                 $per_page,
                 $offset
             ), ARRAY_A);
-            $total = (int) $wpdb->get_var($wpdb->prepare(
+            // wpdb resets last_error on the next query. A failed list read
+            // must not be turned into a successful, misleading empty inbox.
+            if (!is_array($rows) || !empty($wpdb->last_error)) {
+                return self::collaboration_storage_error();
+            }
+            $total = $wpdb->get_var($wpdb->prepare(
                 "SELECT COUNT(*) FROM {$tables['requests']} WHERE status = %s",
                 $status
             ));
@@ -361,9 +366,15 @@ trait Shuzijun_App_Collaboration {
                 $per_page,
                 $offset
             ), ARRAY_A);
-            $total = (int) $wpdb->get_var("SELECT COUNT(*) FROM {$tables['requests']}");
+            if (!is_array($rows) || !empty($wpdb->last_error)) {
+                return self::collaboration_storage_error();
+            }
+            $total = $wpdb->get_var("SELECT COUNT(*) FROM {$tables['requests']}");
         }
-        if (!is_array($rows) || !empty($wpdb->last_error)) {
+        if (!empty($wpdb->last_error)
+            || (!is_string($total) && !is_int($total))
+            || preg_match('/^[0-9]+$/D', (string) $total) !== 1
+            || (string) (int) $total !== (string) $total) {
             return self::collaboration_storage_error();
         }
         $items = array();
@@ -374,7 +385,7 @@ trait Shuzijun_App_Collaboration {
             'requests' => $items,
             'page' => $page,
             'perPage' => $per_page,
-            'total' => $total,
+            'total' => (int) $total,
             'statuses' => self::collaboration_request_statuses(),
         ));
         self::set_private_no_store_headers($response);

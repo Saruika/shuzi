@@ -60,6 +60,7 @@ try {
     define('WP_HTTP_BLOCK_EXTERNAL', true);
     define('WP_DEBUG', false);
     define('WP_DEBUG_LOG', false);
+    define('WP_DISABLE_FATAL_ERROR_HANDLER', true);
     define('WP_CACHE', false);
     define('WP_CONTENT_DIR', dirname($core) . '/empty-content');
     define('WP_PLUGIN_DIR', WP_CONTENT_DIR . '/plugins');
@@ -99,6 +100,9 @@ try {
         public const COLLABORATION_SCHEMA_VERSION = 1;
         public static function collaboration_phase1_enabled(): bool { return true; }
         public static function account_authority_enabled(): bool { return true; }
+        // Read-only inbox tests use the isolated class, never a production
+        // feature constant or an actual mail transport.
+        private static function collaboration_mail_transport_ready(): bool { return true; }
         private static function acquire_named_fan_lock($kind, $name) {
             global $wpdb;
             $lock = 'fixture-schema-' . substr(hash('sha256', DB_NAME), 0, 48);
@@ -178,6 +182,43 @@ try {
         check_wordpress_schema($run() && $ready(), 'explicit test repair is revalidated');
     }
 
+    foreach (array('', 'received') as $status) {
+        $request = new WP_REST_Request('GET');
+        $request->set_param('status', $status);
+        $result = CollaborationWordPressSchemaHarness::list_collaboration_requests($request);
+        check_wordpress_schema($result instanceof WP_REST_Response && $result->get_status() === 200,
+            'a genuinely empty inbox remains a successful response');
+        check_wordpress_schema($result->get_data()['requests'] === array() && $result->get_data()['total'] === 0,
+            'genuine empty inbox has exactly zero items and count');
+        foreach (array('rows', 'count', 'null_count') as $fault) {
+            $count_queries = 0;
+            $injected_queries = 0;
+            $inject = static function ($query) use ($fault, &$count_queries, &$injected_queries) {
+                $is_rows = str_starts_with($query, 'SELECT r.*, o.status AS mail_status');
+                $is_count = str_starts_with($query, 'SELECT COUNT(*) FROM fixture_yishu_collaboration_requests');
+                if ($is_count) { ++$count_queries; }
+                if (($fault === 'rows' && $is_rows) || ($fault !== 'rows' && $is_count)) {
+                    ++$injected_queries;
+                    return $fault === 'null_count' ? 'SELECT NULL' : 'SYNTHETIC_FIXTURE_INVALID_SQL';
+                }
+                return $query;
+            };
+            add_filter('query', $inject, 99);
+            try {
+                $result = CollaborationWordPressSchemaHarness::list_collaboration_requests($request);
+                check_wordpress_schema(is_wp_error($result) && $result->get_error_code() === 'collaboration_storage_unavailable',
+                    'failed or invalid query must not become an empty successful inbox: ' . $fault);
+                check_wordpress_schema($injected_queries === 1, 'exactly one real query received the synthetic fault');
+                check_wordpress_schema($fault !== 'rows' || $count_queries === 0,
+                    'do not issue another query that can erase the list error');
+            } finally {
+                remove_filter('query', $inject, 99);
+            }
+            $result = CollaborationWordPressSchemaHarness::list_collaboration_requests($request);
+            check_wordpress_schema($result instanceof WP_REST_Response && $result->get_status() === 200,
+                'inbox can retry normally after the synthetic failure');
+        }
+    }
     check_wordpress_schema($wpdb->get_var('SELECT DATABASE()') === $database, 'test database remained isolated');
     check_wordpress_schema(!class_exists('Shuzijun_App_Content_API', false), 'production API entry never loaded');
     check_wordpress_schema(!wp_next_scheduled('yishu_sweep_collaboration_outbox')
