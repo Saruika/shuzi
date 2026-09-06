@@ -1583,8 +1583,16 @@ trait Shuzijun_App_Fan_Endpoints {
     }
 
     public static function can_access_app_content(WP_REST_Request $request) {
-        if (self::authenticate_content_manager($request)) { return true; }
+        // An App-bound administrator is still a fan account: approval, Douyin
+        // setup and session revocation must never be bypassed by its role.
+        // Preserve the separate legacy WordPress administrator login path.
+        if (!preg_match('/^Bearer(?:\\s|$)/i', trim((string) $request->get_header('authorization')))
+            && self::authenticate_content_manager($request)) { return true; }
 
+        return self::can_access_approved_fan_content($request);
+    }
+
+    private static function can_access_approved_fan_content(WP_REST_Request $request) {
         self::$fan_session_context = null;
         $context = self::authenticate_fan_session($request);
         if (is_wp_error($context)) { return $context; }
@@ -2638,7 +2646,34 @@ trait Shuzijun_App_Fan_Endpoints {
     }
 
     private static function authenticate_manager_for_capability($request, $capability) {
-        if (current_user_can($capability)) { return true; }
+        if ($request instanceof WP_REST_Request
+            && preg_match('/^Bearer(?:\\s|$)/i', trim((string) $request->get_header('authorization')))) {
+            // Authenticate the installed App session before checking roles,
+            // even if another callback already populated the WP current user.
+            // This path never accepts a role or target identity from the client.
+            $access = self::can_access_approved_fan_content($request);
+            if ($access !== true) {
+                self::$fan_session_context = null;
+                wp_set_current_user(0);
+                return false;
+            }
+            $user = get_userdata((int) self::$fan_session_context['userID']);
+            return $user instanceof WP_User
+                && in_array(self::ROLE, (array) $user->roles, true)
+                && in_array($capability, array(
+                    self::CAPABILITY, self::FAN_CAPABILITY,
+                    self::PUSH_CAPABILITY, self::COLLABORATION_CAPABILITY,
+                ), true)
+                && user_can($user, $capability);
+        }
+        // A fan account must use its installation-bound App session, even if
+        // it also has a WP cookie or Application Password. Otherwise those
+        // older credentials could bypass approval/setup/session revocation.
+        if ((!$request instanceof WP_REST_Request
+                || trim((string) $request->get_header('authorization')) === '')
+            && self::legacy_manager_user_is_allowed(wp_get_current_user(), $capability)) {
+            return true;
+        }
         if (!$request instanceof WP_REST_Request) { return false; }
 
         $authorization = trim((string) $request->get_header('authorization'));
@@ -2659,11 +2694,17 @@ trait Shuzijun_App_Fan_Endpoints {
         add_filter('wp_is_application_passwords_available', '__return_true', PHP_INT_MAX);
         $user = wp_authenticate_application_password(null, $username, $password);
         remove_filter('wp_is_application_passwords_available', '__return_true', PHP_INT_MAX);
-        if (is_wp_error($user) || !$user instanceof WP_User || !user_can($user, $capability)) {
+        if (!self::legacy_manager_user_is_allowed($user, $capability)) {
             return false;
         }
         wp_set_current_user($user->ID);
         return true;
+    }
+
+    private static function legacy_manager_user_is_allowed($user, $capability) {
+        return $user instanceof WP_User
+            && !get_user_meta((int) $user->ID, self::FAN_META_UUID, true)
+            && user_can($user, $capability);
     }
 
 }

@@ -77,6 +77,7 @@ try {
     $_SERVER['REQUEST_URI'] = '/';
     $_SERVER['SERVER_PROTOCOL'] = 'HTTP/1.1';
     $_SERVER['SERVER_PORT'] = '443';
+    $_SERVER['REMOTE_ADDR'] = '127.0.0.1';
     $_SERVER['HTTPS'] = 'on';
     require ABSPATH . 'wp-settings.php';
     require ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -225,6 +226,9 @@ try {
     require __DIR__ . '/collaboration-wordpress-payload-integration.php';
     check_wordpress_schema($wpdb->get_var('SELECT DATABASE()') === $database, 'test database remained isolated');
     check_wordpress_schema(!class_exists('Shuzijun_App_Content_API', false), 'production API entry never loaded');
+    // After the isolated collaboration harness checks, load only the class
+    // definitions to exercise real account/session policy without init().
+    require __DIR__ . '/fan-bound-administrator-wordpress-integration.php';
     check_wordpress_schema(!wp_next_scheduled('yishu_sweep_collaboration_outbox')
         && !wp_next_scheduled('yishu_process_collaboration_outbox'), 'no collaboration worker scheduled');
     fwrite(STDOUT, 'collaboration-wordpress-schema: ' . $checks . ' assertions passed; WordPress 7.1; MySQL '
