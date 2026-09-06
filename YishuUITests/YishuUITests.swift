@@ -2012,15 +2012,35 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
     }
 
     func testAboutLayoutMatchesTheCurrentSceneConfiguration() {
-        let app = launchApp(arguments: [
+        verifyAboutCanvasCurrentConfiguration(imageFailure: false)
+    }
+
+    func testAboutImageFailureKeepsCaptionWithinActualCanvas() {
+        verifyAboutCanvasCurrentConfiguration(imageFailure: true)
+    }
+
+    private func verifyAboutCanvasCurrentConfiguration(imageFailure: Bool) {
+        var arguments = [
             "-open-about-for-visual-testing",
             "-expose-about-visible-bottom-for-visual-testing",
-        ])
+            "-expose-about-portrait-canvas-for-testing",
+        ]
+        if imageFailure {
+            arguments.append("-fail-artwork-for-visual-testing")
+        } else {
+            // Exercise an actual decoded 2:3 image, not another accidental
+            // network-failure placeholder. Fixture is DEBUG-only and in RAM.
+            arguments.append("-use-deterministic-gallery-images-for-testing")
+        }
+        let app = launchApp(arguments: arguments)
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的应用窗口")
 
         let heading = element("about-heading", in: app)
-        let portrait = element("about-portrait", in: app)
+        // SwiftUI forwards the image identifier to its retry button when
+        // loading fails. Measure the real canvas in BOTH success and failure
+        // states, just as the large-text About regressions already do.
+        let portrait = element("about-portrait-canvas", in: app)
         let roleSummary = element("about-role-summary", in: app)
         let visibleBottom = element("about-visible-bottom", in: app)
         XCTAssertTrue(heading.waitForExistence(timeout: 8), "当前 UI 配置下关于页标题没有出现")
@@ -2028,6 +2048,21 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         XCTAssertTrue(roleSummary.waitForExistence(timeout: 8), "当前 UI 配置下职业说明没有出现")
         XCTAssertTrue(visibleBottom.waitForExistence(timeout: 8), "当前 UI 配置下缺少可见区域边界")
         XCTAssertEqual(roleSummary.label, "短剧演员 / 模特 / 视频创作者")
+        if imageFailure {
+            let retry = app.buttons["about-portrait"].firstMatch
+            XCTAssertTrue(retry.waitForExistence(timeout: 8),
+                           "必须实际进入图片加载失败状态，不能用正常图片代替失败验收")
+            XCTAssertTrue(portrait.frame.contains(retry.frame), "图片重试按钮超出人物画布")
+        } else {
+            XCTAssertTrue(app.images["about-portrait"].firstMatch.waitForExistence(timeout: 8),
+                          "正常状态必须实际显示解码后的图片")
+            XCTAssertFalse(app.buttons["about-portrait"].exists,
+                           "不能把加载失败的重试按钮当作正常图片验收")
+        }
+        let imageDescription = element("about-portrait", in: app).debugDescription
+        let stateName = imageFailure ? "failed" : "loaded"
+        print("ABOUT_CANVAS failure=\(imageFailure) canvas=\(portrait.frame) role=\(roleSummary.frame) image=\(imageDescription)")
+        attachScreenshot(named: "adaptive-about-before-boundary-assertions-\(stateName)", app: app)
 
         let scene = window.frame
         let expectsTwoColumns = scene.width >= 700 || scene.width > scene.height

@@ -538,6 +538,48 @@ private enum TestCredentialFixture {
 
 @MainActor
 final class AdministratorBindingTests: XCTestCase {
+    func testOrdinaryAdminRequestsDoNotShareLargeUploadDeadlinesOrCaches() {
+        let json = AdminTransportPolicy.makeJSONSession()
+        let upload = AdminTransportPolicy.makeUploadSession()
+        defer { json.invalidateAndCancel(); upload.invalidateAndCancel() }
+        XCTAssertFalse(json === upload)
+        XCTAssertEqual(json.configuration.timeoutIntervalForRequest, 30)
+        XCTAssertEqual(json.configuration.timeoutIntervalForResource, 45)
+        XCTAssertEqual(upload.configuration.timeoutIntervalForRequest, 120)
+        XCTAssertEqual(upload.configuration.timeoutIntervalForResource, 180)
+        for transport in [json, upload] {
+            XCTAssertNil(transport.configuration.urlCache)
+            XCTAssertNil(transport.configuration.urlCredentialStorage)
+            XCTAssertEqual(transport.configuration.requestCachePolicy, .reloadIgnoringLocalCacheData)
+        }
+        XCTAssertEqual(AdminTransportPolicy.requestTimeout(path: "wp/v2/media"), 120)
+        for path in ["shuzijun/v1/app-admin/session", "shuzijun/v1/app-admin/fans",
+                     "shuzijun/v1/app-content", "shuzijun/v1/app-admin/push-notifications"] {
+            XCTAssertEqual(AdminTransportPolicy.requestTimeout(path: path), 30)
+        }
+    }
+
+    func testTimedOutAdministratorMutationIsNotAutomaticallyRetriedOrReportedSuccessful() async throws {
+        let account = BoundAdministratorTestAccount()
+        var calls = 0
+        let admin = AdminSessionStore { request in
+            calls += 1
+            XCTAssertEqual(request.timeoutInterval, 30)
+            if calls == 1 { return try self.response(request, body: self.sessionBody) }
+            throw URLError(.timedOut)
+        }
+        await admin.signIn(using: account)
+        do {
+            _ = try await admin.updateFanAdministrator(.init(user: user(), administrator: true))
+            XCTFail("Timed-out mutation was reported successful")
+        } catch let error as AdminAPIError {
+            guard case .networkUnavailable = error else { return XCTFail("Unexpected failure") }
+        }
+        XCTAssertEqual(calls, 2, "Do not retry a write whose server outcome is unknown")
+        XCTAssertTrue(admin.isAuthenticated, "Network outage is not credential revocation")
+        admin.retireForEnvironmentSwitch()
+    }
+
     private func user(bound: Bool? = false, revision: Int? = 7, status: String = "active",
                       douyin: String = "test_douyin", userID: String = "00000000-0000-4000-8000-000000000001") -> AdminFanUser {
         AdminFanUser(userID: userID, identityCode: "HS-ABCD-2345", displayName: "测试用户",
@@ -597,6 +639,7 @@ final class AdministratorBindingTests: XCTestCase {
             var calls = 0
             let admin = AdminSessionStore { request in
                 calls += 1
+                XCTAssertEqual(request.timeoutInterval, 30)
                 if calls == 1 { return try self.response(request, body: self.sessionBody) }
                 XCTAssertEqual(request.httpMethod, "POST")
                 XCTAssertEqual(request.url?.path, "/wp-json/shuzijun/v1/app-admin/fans/\(before.userID)/administrator")

@@ -452,6 +452,23 @@ struct AdminPushNotificationResponse: Decodable, Equatable {
     let deviceCount: Int
 }
 
+enum AdminTransportPolicy {
+    static let jsonRequestTimeout: TimeInterval = 30
+    static let uploadRequestTimeout: TimeInterval = 120
+
+    static func makeJSONSession() -> URLSession {
+        SecureURLSessionFactory.make(requestTimeout: jsonRequestTimeout, resourceTimeout: 45)
+    }
+
+    static func makeUploadSession() -> URLSession {
+        SecureURLSessionFactory.make(requestTimeout: uploadRequestTimeout, resourceTimeout: 180)
+    }
+
+    static func requestTimeout(path: String) -> TimeInterval {
+        path == "wp/v2/media" ? uploadRequestTimeout : jsonRequestTimeout
+    }
+}
+
 @MainActor
 final class AdminSessionStore: ObservableObject {
     private static let sessionLifetime: TimeInterval = 5 * 60
@@ -474,6 +491,7 @@ final class AdminSessionStore: ObservableObject {
     private let apiRoot: URL
     private let mediaUploadRoot: URL
     private let session: URLSession
+    private let uploadSession: URLSession
 
     var isAuthenticated: Bool {
         guard hasCurrentAuthenticationSource,
@@ -502,10 +520,10 @@ final class AdminSessionStore: ObservableObject {
         apiRoot = environment.apiRoot
         mediaUploadRoot = environment.mediaUploadRoot
         self.jsonLoader = jsonLoader
-        session = SecureURLSessionFactory.make(
-            requestTimeout: 120,
-            resourceTimeout: 180
-        )
+        // Short account/permission JSON calls must not inherit large-media
+        // upload deadlines. Both transports remain ephemeral and isolated.
+        session = AdminTransportPolicy.makeJSONSession()
+        uploadSession = AdminTransportPolicy.makeUploadSession()
         // Builds before 1.3.18 stored the complete WordPress Application
         // Password and restored it without user interaction. Delete that
         // legacy item during migration and keep new credentials in memory only.
@@ -568,6 +586,7 @@ final class AdminSessionStore: ObservableObject {
     func retireForEnvironmentSwitch() {
         signOut()
         session.invalidateAndCancel()
+        uploadSession.invalidateAndCancel()
     }
 
     /// Use the existing installation-bound session, never a second stored password.
@@ -657,7 +676,7 @@ final class AdminSessionStore: ObservableObject {
         let responseData: Data
         let response: URLResponse
         do {
-            (responseData, response) = try await session.upload(for: request, from: data)
+            (responseData, response) = try await uploadSession.upload(for: request, from: data)
         } catch {
             throw AdminAPIError.networkUnavailable
         }
@@ -695,7 +714,7 @@ final class AdminSessionStore: ObservableObject {
         let responseData: Data
         let response: URLResponse
         do {
-            (responseData, response) = try await session.upload(for: request, fromFile: fileURL)
+            (responseData, response) = try await uploadSession.upload(for: request, fromFile: fileURL)
         } catch {
             throw AdminAPIError.networkUnavailable
         }
@@ -1100,7 +1119,7 @@ final class AdminSessionStore: ObservableObject {
         }
         var request = URLRequest(url: endpoint)
         request.httpMethod = method
-        request.timeoutInterval = 120
+        request.timeoutInterval = AdminTransportPolicy.requestTimeout(path: path)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         if let boundContext, let boundAccount {
             try boundAccount.authorizeAdministratorRequest(&request, context: boundContext)
