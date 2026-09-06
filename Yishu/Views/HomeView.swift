@@ -462,6 +462,9 @@ private struct HeroPager: View {
             .foregroundStyle(.white)
             .shadow(color: .black.opacity(0.65), radius: 3, y: 1)
             .fixedSize(horizontal: false, vertical: true)
+            // A feathered, text-sized scrim supports the smaller role line on
+            // bright portraits. It adds no capsule, panel or full-photo veil.
+            .background { Color.black.opacity(0.24).blur(radius: 4) }
             .accessibilityIdentifier("home-hero-subtitle")
     }
 
@@ -497,7 +500,10 @@ private struct HeroPager: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 11)
                 .padding(.vertical, 7)
-                .background(.black.opacity(0.65), in: Capsule())
+                // This small control sits over changing, sometimes very bright
+                // photographs. Keep its caption legible independently of the
+                // photo, without darkening the full-screen artwork itself.
+                .background(.black.opacity(0.80), in: Capsule())
                 .overlay {
                     Capsule()
                         .stroke(.white.opacity(0.30), lineWidth: 0.5)
@@ -917,14 +923,29 @@ private struct HeroSlideImage: View {
 
     private var visualTestArtwork: some View {
         LinearGradient(
-            colors: [
-                Color(red: 0.72, green: 0.79, blue: 0.70),
-                Color(red: 0.88, green: 0.82, blue: 0.64),
-                Color(red: 0.30, green: 0.40, blue: 0.34),
-            ],
+            colors: visualTestColors,
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
+    }
+
+    private var visualTestColors: [Color] {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-home-hero-varied-colors-for-visual-testing") {
+            let palettes: [[Color]] = [
+                [.white, .white], [.black, .black],
+                [Color(red: 0.92, green: 0.83, blue: 0.66), .white],
+                [Color(red: 0.68, green: 0.82, blue: 0.91), Color(red: 0.15, green: 0.23, blue: 0.35)],
+                [Color(red: 0.91, green: 0.69, blue: 0.76), Color(red: 0.25, green: 0.37, blue: 0.29)],
+            ]
+            return palettes[(ContentCatalog.heroImages.firstIndex(of: url) ?? 0) % palettes.count]
+        }
+#endif
+        return [
+            Color(red: 0.72, green: 0.79, blue: 0.70),
+            Color(red: 0.88, green: 0.82, blue: 0.64),
+            Color(red: 0.30, green: 0.40, blue: 0.34),
+        ]
     }
 
     @ViewBuilder

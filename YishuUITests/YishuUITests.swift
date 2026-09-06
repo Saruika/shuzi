@@ -412,6 +412,36 @@ final class YishuUITests: XCTestCase {
         }
     }
 
+    func testHomeCaptionsRemainReadableAcrossWeeklyPhotoChanges() throws {
+        // Content changes weekly: a readable first photograph is not enough.
+        // Synthetic per-slide artwork keeps this independent of CDN timing.
+        for theme in ["blackGold", "ivory"] {
+            for index in 0..<5 {
+                let app = launchApp(arguments: [
+                    "-cn.com.shuzijun.yishu.appearance.v1", theme,
+                    "-hold-home-remote-images-for-visual-testing",
+                    "-home-hero-varied-colors-for-visual-testing",
+                    "-disable-home-auto-advance-for-visual-testing",
+                    "-home-hero-selection-for-visual-testing", "\(index)",
+                    "-expose-home-hero-state-for-visual-testing",
+                ])
+                let indicator = element("home-hero-page-indicator", in: app)
+                XCTAssertEqual(indicator.value as? String, "第 \(index + 1) 张，共 5 张")
+                XCTAssertTrue(element("home-weather", in: app).isHittable)
+                let subtitle = element("home-hero-subtitle", in: app)
+                XCTAssertTrue(subtitle.isHittable, "不能通过隐藏副标题使对比度检查通过")
+                XCTAssertEqual(subtitle.label, "短剧演员 · 模特 · 视频创作者")
+                try XCTContext.runActivity(named: "\(theme) · 照片 \(index + 1) 文案对比度") { _ in
+                    try app.performAccessibilityAudit(for: [.contrast, .textClipped, .trait]) { issue in
+                        print("Weekly photo audit: \(issue.compactDescription); element=\(issue.element?.label ?? "unresolved")")
+                        return false
+                    }
+                }
+                app.terminate()
+            }
+        }
+    }
+
     func testHomeRestoresNonzeroPageBeforeDisplayingIt() {
         for index in [1, 4] {
             let app = launchApp(arguments: ["-hold-home-remote-images-for-visual-testing",

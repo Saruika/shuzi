@@ -4,7 +4,9 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-**管理员登录候选补丁：[v1.4.0-build4-preview2](Server/releases/v1.4.0-build4-preview2.md)。** 独立管理员和绑定用户现在共用严格的服务器身份响应校验；HTTP 200 或显示姓名本身不能解锁管理界面。当前账号进入管理、授予和撤销的步骤见 [管理员绑定使用说明](ADMIN_USER_GUIDE.md)。尚未上传 TestFlight，也未给任何真实用户提权。
+**最新可读性候选：[v1.4.0-build4-preview3](Server/releases/v1.4.0-build4-preview3.md)。** 完整 iPhone 回归发现天气文字对比度失败，已修正胶囊局部底色；新增五种换图背景检查，修正纯白背景下角色说明的局部对比度，不扩大照片渐变或改动布局。专项、Release 分析和历史失败均留证，完整最终矩阵仍待结束，尚未上传新包。
+
+**管理员登录候选补丁：[v1.4.0-build4-preview2](Server/releases/v1.4.0-build4-preview2.md)。** 独立管理员和绑定用户现在共用严格的服务器身份响应校验；HTTP 200 或显示姓名本身不能解锁管理界面。当前账号进入管理、授予和撤销的步骤见 [管理员绑定使用说明](ADMIN_USER_GUIDE.md)。尚未上传 TestFlight。此后已按用户明确指定，为一个已审批账号绑定 App 管理员并回读审计；未授予网站超级管理员，仍需真实 App 端到端验收。
 
 **最新客户端候选：[v1.4.0-build4-preview1](Server/releases/v1.4.0-build4-preview1.md)。** 保留 1.3 大图风格，统一全屏主题背景与原生透明/磨砂栏位，修正首页分页容器偏移、底部深色遮罩及非首张启动定位。主流 iPhone、iPad 与带 Home 键机型的专项证据、失败诊断与复验记录见候选报告；不把模拟器专项当作全部功能或真机验收。本次尚未上传 TestFlight，也未过期旧包。全局配置及 Tab/push 示例见 [沉浸式界面说明](DESIGN_IMMERSIVE_CHROME.md)。
 
