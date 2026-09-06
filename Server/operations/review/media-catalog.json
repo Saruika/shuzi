@@ -1,0 +1,17 @@
+{
+  "provenance": "Existing artist-selected production photographs, visually inspected on 2026-09-07; no AI generation, enhancement or local App image storage.",
+  "albums": [
+    {"key": "magnolia", "title": "玉兰青衣（审核演示）", "subtitle": "同一造型与拍摄主题的古风影像", "eyebrow": "审核演示"},
+    {"key": "lantern", "title": "汉服灯影（审核演示）", "subtitle": "同一套汉服灯影作品，不混入其他造型", "eyebrow": "审核演示"}
+  ],
+  "images": [
+    {"key":"magnolia-01","album":"magnolia","source":"2026/08/yishu-magnolia-hero-01-nas-1943-20260829.jpg","sha256":"919dee21c95b11469f11e8bed5217d3b8dba5a93b5ca6bd3411e65fd6e3d7bdd"},
+    {"key":"magnolia-02","album":"magnolia","source":"2026/08/yishu-magnolia-hero-02-nas-1938-20260829.jpg","sha256":"38ee6099cefc5afc01f38ac076ababa6a0436c67a0baa33997091908ffb5912b"},
+    {"key":"magnolia-03","album":"magnolia","source":"2026/08/yishu-magnolia-hero-03-nas-1940-20260829.jpg","sha256":"4c64a7981daf0e6652309d398e3268259fb1aa6b718ed5230809d3cff853f2e6"},
+    {"key":"magnolia-04","album":"magnolia","source":"2026/08/yishu-magnolia-hero-04-nas-1942-20260829.jpg","sha256":"b7f9f33e393343ba2c2000f2d2bf3a2a0743c6d8f66df6ec07f0670f36064787"},
+    {"key":"magnolia-05","album":"magnolia","source":"2026/08/yishu-magnolia-hero-05-nas-1939-20260829.jpg","sha256":"67a20bdcf31593d1eb1da6aba61dd2cacf009326c7742680b1c61d24310c867a"},
+    {"key":"lantern-01","album":"lantern","source":"2026/09/yishu-launch-hanfu-lantern-01-mobile-20260902b.jpg","sha256":"840a39a16dcc9adcd6bee32a6cb37e268c5d9cf0175303432b7bf47cb04720da"},
+    {"key":"lantern-02","album":"lantern","source":"2026/09/yishu-launch-hanfu-lantern-02-mobile-20260902b.jpg","sha256":"a5edf81896bc5c39b70faef1135c44534c09e78c3fab90c94f2bf3dc42140645"},
+    {"key":"lantern-03","album":"lantern","source":"2026/09/yishu-launch-hanfu-lantern-03-mobile-20260902b.jpg","sha256":"cf0b79fe187339d08c98bd3c4d1df14b63d3a77110edc169b19f98fd5778bef5"}
+  ]
+}

@@ -92,3 +92,35 @@ HTTPS 入口加入 HSTS、no-store、noindex 等响应头，并覆盖访客自�
 当前仍为 `configuration-in-progress`：外部发信、Apple 与 APNs 主动阻断，媒体和最终账号
 尚未交付。后台的 bootstrap-state.json 中 `publicReady=false` 指完整业务尚未就绪，不能被
 解释为现在没有 HTTPS 端口；公开网络状态以本节与 preview11 发布记录为准。
+
+## 媒体阶段（preview12，当前状态）
+
+审核实例现已配置 8 张照片、2 本相册、5 张首页轮播图、3 张开屏海报及关于页照片。
+素材仅取自已经选用的玉兰青衣、汉服灯影两套作品，人工视觉复核后固定原文件 SHA-256；
+不复制用户数据库，不调用 AI，不做超分辨率修复，也不将照片复制到 Mac 或 App 包中。
+WordPress 可按标准流程生成展示用缩略图，但上传原始 JPEG 必须保持字节一致。
+
+`prepare-review-catalog.py` 默认只读校验固定来源、尺寸范围和哈希，以及审核相册为空。
+在服务器受保护的代码目录中执行 `--apply` 才会取得专用互斥锁并写入独立审核库：
+
+```sh
+sudo python3 Server/operations/prepare-review-catalog.py
+sudo python3 Server/operations/prepare-review-catalog.py --apply
+```
+
+脚本先通过正常注册和审批建立临时用户，再绑定 App 管理员角色，用实际 HTTPS 媒体上传、
+相册与配置接口发布，不用数据库直写模拟上传成功。撤销角色后确认旧会话不能继续上传或修改，
+但仍可完整浏览 8 张照片。仅本次新对象转交私有站点维护身份后，再通过用户侧接口删除临时用户。
+失败只恢复本次配置和新对象；已有素材或完成回执存在时拒绝重跑，不清空相册。
+
+非敏感 `catalog-seed-state.json` 包含原图哈希、媒体 ID、分组和配置；其中检查清单记录提交前
+49 项，临时用户删除成功为提交后的第 50 项。临时私有文件与 Application Password 已清理。
+不要输出 `catalog-private-*.json`；中断时先检查恢复记录，不直接重新运行。
+
+生命周期验收已改为比较实际配置的审核相册，而不是假定空库；仍严格检查全部图片来自审核域名。
+填充相册后真实 HTTPS 注册、审批、绑定/撤销、删号流程 78 项检查通过（其中包含逐 URL 隔离断言）。
+本机 6 项素材边界测试与原有 18 项部署测试通过。
+
+这只是媒体与账号接口验收。Test1/Test2 最终资料、App 显式入口和演示标识、Apple 登录/撤销、
+独立推送与发信，以及完整 iPhone/iPad UI 验收仍未完成；健康状态继续标记配置中。
+没有上传新的 TestFlight，也没有提交 App Store 审核。

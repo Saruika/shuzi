@@ -16,6 +16,7 @@ import socket
 import ssl
 import time
 import uuid
+from urllib.parse import urlsplit
 
 spec = importlib.util.spec_from_file_location('bootstrap', Path(__file__).with_name('provision-review-bootstrap.py'))
 bootstrap = importlib.util.module_from_spec(spec)
@@ -69,6 +70,26 @@ def request(path, method='GET', body=None, auth=None, install=None):
         connection.close()
 
 
+def catalog_snapshot(data):
+    """Compare ordinary access to the actual configured isolated catalog."""
+    snapshot = {key: data[key] for key in ('heroImages', 'launchPosters', 'aboutPortraitURL', 'portfolios')}
+    urls = list(snapshot['heroImages'])
+    if snapshot['aboutPortraitURL']:
+        urls.append(snapshot['aboutPortraitURL'])
+    urls.extend(poster['imageURL'] for poster in snapshot['launchPosters'])
+    for album in snapshot['portfolios']:
+        if album['coverURL']:
+            urls.append(album['coverURL'])
+        for photo in album['images']:
+            urls.extend((photo['url'], photo['fullSizeURL']))
+    for value in urls:
+        parsed = urlsplit(value)
+        check(parsed.scheme == 'https' and parsed.netloc == 'review.shuzijun.com.cn'
+              and parsed.path.startswith('/wp-content/uploads/') and not parsed.query and not parsed.fragment,
+              'catalog media remains inside review origin')
+    return snapshot
+
+
 def main():
     global HTTPS_EDGE
     parser = argparse.ArgumentParser(description=__doc__)
@@ -105,6 +126,9 @@ def main():
     bootstrap.write_new(private_path, json.dumps(record), 0o600)
     deleted = False
     try:
+        status, configured = request('app-content', auth=basic)
+        check(status == 200, 'configured review catalog readable by owner')
+        baseline = catalog_snapshot(configured)
         status, _ = request('app-admin/fans')
         check(status in (401, 403), 'anonymous administration denied')
         registration = {'displayName': 'Disposable review acceptance', 'douyinID': '',
@@ -131,8 +155,7 @@ def main():
         check(status == 200, 'authorized administrator can approve')
         status, data = request('app-content', auth=token, install=installation)
         check(status == 200, 'approved user can open App content')
-        check(data['heroImages'] == [] and data['portfolios'] == [] and data['aboutPortraitURL'] is None,
-              'empty review does not import production photos')
+        check(catalog_snapshot(data) == baseline, 'approved fan receives configured review catalog without production fallback')
         status, _ = request('app-admin/session', auth=token, install=installation)
         check(status in (401, 403), 'approved ordinary user still cannot administer')
         binding = {'administrator': True, 'expectedAdministrator': False, 'expectedRevision': 0}
