@@ -747,6 +747,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
     @Published var noticeMessage: String?
 
     let serviceEnvironment: AppServiceEnvironment
+    private var isRetired = false
     private let apiRoot: URL
     private let keychain: FanAccountKeychain
     private let session: URLSession
@@ -1835,6 +1836,16 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         }
     }
 
+    /// A workspace is never reused after switching away. Local access is
+    /// cleared before signOut's first suspension; only its frozen cleanup
+    /// requests may still use the old session, then transport is invalidated.
+    func retireForEnvironmentSwitch() async {
+        guard !isRetired else { return }
+        isRetired = true
+        await signOut()
+        session.invalidateAndCancel()
+    }
+
     func deleteAccount(currentPassword: String) async {
         guard let expectedToken = token, let existingProfile = profile else {
             errorMessage = FanAccountError.sessionExpired.errorDescription
@@ -2173,6 +2184,10 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         authorizationToken: String? = nil,
         queryItems: [URLQueryItem] = []
     ) async throws -> T {
+        guard !isRetired || (authorizationToken != nil && (
+            (path == "shuzijun/v1/fan/logout" && method == "POST")
+                || (path == "shuzijun/v1/fan/push-device" && method == "DELETE")
+        )) else { throw FanAccountError.sessionExpired }
         guard !path.isEmpty, !path.hasPrefix("/"), !path.contains(".."),
               !path.contains("?"), !path.contains("#"),
               ["DELETE", "GET", "POST"].contains(method) else {

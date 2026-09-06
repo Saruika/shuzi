@@ -565,6 +565,11 @@ final class AdminSessionStore: ObservableObject {
         errorMessage = nil
     }
 
+    func retireForEnvironmentSwitch() {
+        signOut()
+        session.invalidateAndCancel()
+    }
+
     /// Use the existing installation-bound session, never a second stored password.
     func signIn(using account: any FanAdministratorAccount) async {
         lock()

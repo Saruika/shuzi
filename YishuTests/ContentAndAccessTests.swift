@@ -887,7 +887,217 @@ private final class TestPushNotificationAccount: PushNotificationAccount {
     }
 }
 
+@MainActor
+private final class TestAppWorkspace: AppWorkspaceLifecycle {
+    let serviceEnvironment: AppServiceEnvironment
+    var events: (String) -> Void
+    var waitForRetirement = false
+    var retirementStarted: (() -> Void)?
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(environment: AppServiceEnvironment, events: @escaping (String) -> Void) {
+        serviceEnvironment = environment
+        self.events = events
+    }
+    func activate() { events("activate-\(serviceEnvironment.rawValue)") }
+    func retire() async {
+        events("retire-start-\(serviceEnvironment.rawValue)")
+        if waitForRetirement {
+            await withCheckedContinuation {
+                continuation = $0
+                retirementStarted?()
+            }
+        }
+        events("retire-end-\(serviceEnvironment.rawValue)")
+    }
+    func finishRetirement() { continuation?.resume(); continuation = nil }
+}
+
 final class ContentAndAccessTests: XCTestCase {
+    @MainActor
+    func testRetiredContentStoreCannotApplyLateManifestOrRestoreItsCache() async throws {
+        let store = PortfolioStore(environment: .review)
+        let manifest = try environmentManifest(.review)
+        let refresh = store.beginContentRefresh()
+        XCTAssertTrue(store.completeContentRefresh(refresh, with: manifest))
+        XCTAssertFalse(store.portfolios.isEmpty)
+        let pending = store.beginContentRefresh()
+        store.retireForEnvironmentSwitch()
+        XCTAssertFalse(store.completeContentRefresh(pending, with: manifest))
+        store.applyPublishedManifest(manifest)
+        await store.restoreCachedContent(allowVideo: true)
+        XCTAssertTrue(store.portfolios.isEmpty)
+        XCTAssertTrue(store.heroImages.isEmpty)
+        XCTAssertNil(store.showreel)
+        XCTAssertNil(store.selectLaunchPosterForColdLaunch(allowsBundledPreview: true))
+        let retry = store.beginContentRefresh()
+        XCTAssertFalse(store.isRefreshing)
+        XCTAssertFalse(store.completeContentRefresh(retry, with: manifest))
+        XCTAssertEqual(store.contentOrigin, .bundled)
+    }
+
+    @MainActor
+    func testWorkspaceSwitchSerializesCleanupAndRecreatesServicesEvenAfterCallerCancellation() async {
+        var events: [String] = []
+        let coordinator = AppWorkspaceCoordinator { environment in
+            events.append("create-\(environment.rawValue)")
+            return TestAppWorkspace(environment: environment) { events.append($0) }
+        }
+        let original = coordinator.current
+        XCTAssertEqual(events, ["create-production", "activate-production"])
+        let unchanged = await coordinator.switchEnvironment(to: .production)
+        XCTAssertFalse(unchanged)
+        original.waitForRetirement = true
+        let started = expectation(description: "Old workspace teardown suspended")
+        original.retirementStarted = { started.fulfill() }
+        let switching = Task { await coordinator.switchEnvironment(to: .review) }
+        await fulfillment(of: [started], timeout: 2)
+        XCTAssertTrue(coordinator.isSwitching)
+        XCTAssertTrue(coordinator.current === original)
+        XCTAssertEqual(events.last, "retire-start-production")
+        let concurrent = await coordinator.switchEnvironment(to: .production)
+        XCTAssertFalse(concurrent)
+        switching.cancel()
+        original.finishRetirement()
+        let changed = await switching.value
+        XCTAssertTrue(changed)
+        XCTAssertFalse(coordinator.isSwitching)
+        XCTAssertEqual(coordinator.current.serviceEnvironment, .review)
+        XCTAssertEqual(events, ["create-production", "activate-production", "retire-start-production",
+            "retire-end-production", "create-review", "activate-review"])
+        let returned = await coordinator.switchEnvironment(to: .production)
+        XCTAssertTrue(returned)
+        XCTAssertFalse(coordinator.current === original, "回到正式环境必须创建新服务，不能复用已退役会话")
+    }
+
+    @MainActor
+    func testNotificationRouterKeepsLegacyProductionAndExplicitReviewPayloadsSeparate() throws {
+        let defaults = try makePushStartupDefaults()
+        let router = PushNotificationRouter()
+        func make(_ environment: AppServiceEnvironment) -> PushNotificationCoordinator {
+            PushNotificationCoordinator(authorizationClient: TestPushAuthorizationClient(), defaults: defaults,
+                registrationClient: TestPushDeviceRegistrationClient(), environment: environment)
+        }
+        let production = make(.production)
+        let review = make(.review)
+        let id = "11111111-2222-4333-8444-555555555555"
+        router.activate(production)
+        XCTAssertTrue(router.receiveNotification(userInfo: ["notificationID": id], opened: true))
+        XCTAssertEqual(production.pendingNotification?.id, id)
+        router.activate(review)
+        XCTAssertTrue(production.isRetired)
+        XCTAssertNil(production.pendingNotification)
+        XCTAssertFalse(router.receiveNotification(userInfo: ["notificationID": id], opened: true))
+        XCTAssertNil(review.pendingNotification)
+        XCTAssertTrue(router.receiveNotification(userInfo: ["notificationID": id, "serviceEnvironment": "review"], opened: true))
+        XCTAssertEqual(review.pendingNotification?.id, id)
+        let receipt = review.notificationReceiptGeneration
+        for invalid: Any in ["unknown", 1, "", "production"] {
+            XCTAssertFalse(router.receiveNotification(userInfo: ["notificationID": id, "serviceEnvironment": invalid], opened: true))
+        }
+        XCTAssertFalse(router.receiveNotification(userInfo: ["notificationID": "not-an-id", "serviceEnvironment": "review"], opened: true))
+        XCTAssertEqual(review.notificationReceiptGeneration, receipt)
+        router.deactivate(production)
+        XCTAssertTrue(router.activeCoordinator === review, "旧环境不能取消当前路由")
+        router.deactivate(review)
+        XCTAssertFalse(router.receiveNotification(userInfo: ["notificationID": id, "serviceEnvironment": "review"], opened: true))
+        let next = make(.review)
+        router.activate(next)
+        XCTAssertNil(next.pendingNotification, "切换间隙的旧消息不能在新账号环境中重放")
+        next.retire()
+        router.activate(production)
+        XCTAssertFalse(router.activeCoordinator === production, "不能激活退役协调器")
+        review.retire()
+    }
+
+    @MainActor
+    func testColdNotificationTapWaitsForFirstWorkspaceWithoutSelectingAnEnvironment() throws {
+        let defaults = try makePushStartupDefaults()
+        for initialEnvironment in AppServiceEnvironment.allCases {
+            let router = PushNotificationRouter()
+            let id = "11111111-2222-4333-8444-555555555555"
+            XCTAssertTrue(router.receiveNotification(userInfo: ["notificationID": id], opened: true))
+            XCTAssertNil(router.activeCoordinator)
+            let coordinator = PushNotificationCoordinator(authorizationClient: TestPushAuthorizationClient(),
+                defaults: defaults, registrationClient: TestPushDeviceRegistrationClient(), environment: initialEnvironment)
+            router.activate(coordinator)
+            XCTAssertEqual(coordinator.pendingNotification?.id, initialEnvironment == .production ? id : nil)
+            coordinator.retire()
+        }
+    }
+
+    @MainActor
+    func testRetiredPushCoordinatorCannotConsumeLateAuthorizationOrAcceptMoreWork() async throws {
+        let defaults = try makePushStartupDefaults()
+        let client = TestPushAuthorizationClient(outcomes: [.granted])
+        let registration = TestPushDeviceRegistrationClient()
+        let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults,
+            registrationClient: registration)
+        let started = expectation(description: "Authorization suspended")
+        client.pauseRequest = true
+        client.requestStarted = { started.fulfill() }
+        let authorizing = Task { await coordinator.requestStartupAuthorizationIfNeeded() }
+        await fulfillment(of: [started], timeout: 2)
+        coordinator.retire()
+        coordinator.retire()
+        let unregistrations = registration.unregistrationCount
+        client.resumeRequest()
+        await authorizing.value
+        let account = TestPushNotificationAccount(userID: "old-user")
+        await coordinator.setNotificationsEnabled(true, for: account)
+        await coordinator.synchronize(with: account)
+        await coordinator.requestAuthorizationAfterRationale(for: account)
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        coordinator.receive(deviceToken: Data([0x12, 0x34]))
+        coordinator.registrationFailed()
+        coordinator.receiveNotification(userInfo: ["notificationID": "11111111-2222-4333-8444-555555555555"], opened: true)
+        XCTAssertTrue(coordinator.isRetired)
+        XCTAssertTrue(coordinator.deviceRegistrationState == .inactive)
+        XCTAssertFalse(coordinator.notificationsEnabled)
+        XCTAssertNil(coordinator.pendingNotification)
+        XCTAssertNil(defaults.object(forKey: "push-notifications-startup-consent-pending"))
+        XCTAssertNil(defaults.object(forKey: "push-notifications-enabled"))
+        XCTAssertEqual(client.requestCount, 1)
+        XCTAssertEqual(registration.registrationCount, 0)
+        XCTAssertEqual(registration.unregistrationCount, unregistrations)
+        XCTAssertTrue(account.bindingAttempts.isEmpty)
+        XCTAssertEqual(account.unbindCount, 0)
+    }
+
+    @MainActor
+    func testRetiredLateBindingCannotUnregisterOrReplaceNewWorkspaceBinding() async throws {
+        let defaults = try makePushStartupDefaults()
+        let registration = TestPushDeviceRegistrationClient()
+        func make() -> PushNotificationCoordinator {
+            PushNotificationCoordinator(authorizationClient: TestPushAuthorizationClient(status: .authorized),
+                defaults: defaults, registrationClient: registration)
+        }
+        let old = make()
+        let account = TestPushNotificationAccount(userID: "same-user")
+        await old.setNotificationsEnabled(true, for: account)
+        old.receive(deviceToken: Data([0x12, 0x34]))
+        let started = expectation(description: "Old binding suspended")
+        account.pauseNextBinding = true
+        account.bindingStarted = { started.fulfill() }
+        let binding = Task { await old.synchronize(with: account) }
+        await fulfillment(of: [started], timeout: 2)
+        old.retire()
+        let next = make()
+        defer { next.retire() }
+        let newAccount = TestPushNotificationAccount(userID: "same-user")
+        await next.synchronize(with: newAccount)
+        next.receive(deviceToken: Data([0x12, 0x34]))
+        await next.synchronize(with: newAccount)
+        XCTAssertTrue(next.deviceRegistrationState == .ready)
+        let unregistrations = registration.unregistrationCount
+        account.resumeBinding()
+        await binding.value
+        XCTAssertTrue(old.deviceRegistrationState == .inactive)
+        XCTAssertTrue(next.deviceRegistrationState == .ready)
+        XCTAssertEqual(registration.unregistrationCount, unregistrations)
+        XCTAssertEqual(newAccount.bindingAttempts.count, 1)
+    }
+
     func testInlineVideoContextRejectsOtherWorkspaceAndTracksReplacedOrRemovedVideo() throws {
         for environment in AppServiceEnvironment.allCases {
             let other: AppServiceEnvironment = environment == .production ? .review : .production

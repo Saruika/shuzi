@@ -3,12 +3,9 @@ import SwiftUI
 @main
 struct YishuApp: App {
     @UIApplicationDelegateAdaptor(YishuApplicationDelegate.self) private var applicationDelegate
-    @StateObject private var portfolioStore = PortfolioStore()
-    @StateObject private var favorites = FavoritesStore()
-    @StateObject private var recentlyViewed = RecentlyViewedStore()
-    @StateObject private var adminSession = AdminSessionStore()
-    @StateObject private var fanAccount = FanAccountStore()
-    @StateObject private var pushNotifications = PushNotificationCoordinator.shared
+    @StateObject private var workspaces = AppWorkspaceCoordinator {
+        AppServiceWorkspace(environment: $0)
+    }
     @State private var localWeather = LocalWeatherStore()
 
     init() {
@@ -28,10 +25,34 @@ struct YishuApp: App {
         WindowGroup {
             SecureCaptureSurface(owner: .appRoot) {
                 appContent
+#if DEBUG
+                    .overlay(alignment: .bottom) {
+                        if ProcessInfo.processInfo.arguments.contains("-workspace-switch-for-testing") {
+                            workspaceTestControls
+                        }
+                    }
+#endif
             }
             .preferredColorScheme(AppearanceStore.shared.systemColorScheme)
         }
     }
+
+#if DEBUG
+    private var workspaceTestControls: some View {
+        HStack {
+            Text(workspaces.current.serviceEnvironment.rawValue)
+                .accessibilityIdentifier("workspace-test-environment")
+            Button("测试切换演示") { Task { await workspaces.switchEnvironment(to: .review) } }
+                .accessibilityIdentifier("workspace-test-review")
+            Button("测试切换正式") { Task { await workspaces.switchEnvironment(to: .production) } }
+                .accessibilityIdentifier("workspace-test-production")
+        }
+        .font(.caption)
+        .padding(10)
+        .background(.regularMaterial)
+        .disabled(workspaces.isSwitching)
+    }
+#endif
 
     @ViewBuilder
     private var appContent: some View {
@@ -46,15 +67,27 @@ struct YishuApp: App {
 #endif
     }
 
+    @ViewBuilder
     private var configuredRoot: some View {
-        RootView()
-            .environment(\.appServiceEnvironment, portfolioStore.serviceEnvironment)
-            .environmentObject(portfolioStore)
-            .environmentObject(favorites)
-            .environmentObject(recentlyViewed)
-            .environmentObject(adminSession)
-            .environmentObject(fanAccount)
-            .environmentObject(pushNotifications)
-            .environment(localWeather)
+        if workspaces.isSwitching {
+            ZStack {
+                AppTheme.ink.ignoresSafeArea()
+                ProgressView("正在切换环境…")
+                    .foregroundStyle(AppTheme.warmWhite)
+            }
+        } else {
+            let workspace = workspaces.current
+            RootView()
+                .id(ObjectIdentifier(workspace))
+                .environment(\.appServiceEnvironment, workspace.serviceEnvironment)
+                .environmentObject(workspace.portfolioStore)
+                .environmentObject(workspace.favorites)
+                .environmentObject(workspace.recentlyViewed)
+                .environmentObject(workspace.adminSession)
+                .environmentObject(workspace.fanAccount)
+                .environmentObject(workspace.pushNotifications)
+                .environmentObject(workspaces)
+                .environment(localWeather)
+        }
     }
 }

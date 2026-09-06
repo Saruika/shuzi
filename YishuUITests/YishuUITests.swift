@@ -3,6 +3,26 @@ import XCTest
 import Vision
 
 final class YishuUITests: XCTestCase {
+    func testWorkspaceSwitchRecreatesRootAndClosesPreviousDetails() {
+        let app = launchApp(arguments: ["-workspace-switch-for-testing", "-open-about-for-visual-testing"])
+        let settings = element("about-settings", in: app)
+        scrollToElement(settings, in: app)
+        settings.tap()
+        XCTAssertTrue(element("user-settings", in: app).waitForExistence(timeout: 8))
+        let environment = element("workspace-test-environment", in: app)
+        XCTAssertEqual(environment.label, "production")
+        element("workspace-test-review", in: app).tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "review"), object: environment)], timeout: 12), .completed)
+        XCTAssertFalse(element("user-settings", in: app).exists, "旧设置导航不能挂在新环境上")
+        XCTAssertTrue(tabButton("关于", in: app).waitForExistence(timeout: 8))
+        element("workspace-test-production", in: app).tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "production"), object: environment)], timeout: 12), .completed)
+        XCTAssertFalse(element("user-settings", in: app).exists)
+        XCTAssertTrue(tabButton("关于", in: app).waitForExistence(timeout: 8))
+    }
+
     func testAdministratorBindingRequiresConfirmationAndCanRevoke() {
         let app = launchAdministratorBindingFixture()
         let action = element("fan-change-administrator", in: app)

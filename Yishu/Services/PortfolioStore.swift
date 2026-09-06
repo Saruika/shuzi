@@ -105,6 +105,7 @@ final class PortfolioStore: ObservableObject {
     private var contentRefreshID: UUID?
     private var cacheRestoreGeneration = UUID()
     let serviceEnvironment: AppServiceEnvironment
+    private var isRetired = false
 
     init(environment: AppServiceEnvironment = .production) {
         serviceEnvironment = environment
@@ -129,6 +130,7 @@ final class PortfolioStore: ObservableObject {
     @discardableResult
     func beginContentRefresh() -> UUID {
         let refreshID = UUID()
+        guard !isRetired else { return refreshID }
         contentRefreshID = refreshID
         isRefreshing = true
         statusMessage = nil
@@ -137,7 +139,7 @@ final class PortfolioStore: ObservableObject {
 
     @discardableResult
     func completeContentRefresh(_ refreshID: UUID, with manifest: AppContentManifest) -> Bool {
-        guard contentRefreshID == refreshID else { return false }
+        guard !isRetired, contentRefreshID == refreshID else { return false }
         guard ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else {
             failContentRefresh(refreshID)
             return false
@@ -172,13 +174,13 @@ final class PortfolioStore: ObservableObject {
     /// Disk reads and JSON decoding stay off the main actor. The subsequent
     /// authenticated refresh replaces this snapshot with the latest approved content.
     func restoreCachedContent(allowVideo: Bool) async {
-        guard contentOrigin == .bundled else { return }
+        guard !isRetired, contentOrigin == .bundled else { return }
         let generation = cacheRestoreGeneration
         let environment = serviceEnvironment
         let cache = await withCheckedContinuation { continuation in
             Self.cacheQueue.async { continuation.resume(returning: Self.loadCache(environment: environment)) }
         }
-        guard !Task.isCancelled, generation == cacheRestoreGeneration,
+        guard !isRetired, !Task.isCancelled, generation == cacheRestoreGeneration,
               contentOrigin == .bundled,
               let cache,
               !cache.portfolios.isEmpty else { return }
@@ -214,7 +216,7 @@ final class PortfolioStore: ObservableObject {
         defaults: UserDefaults = .standard,
         allowsBundledPreview: Bool = false
     ) -> LaunchPosterContent? {
-        guard contentOrigin == .network || allowsBundledPreview else { return nil }
+        guard !isRetired, contentOrigin == .network || allowsBundledPreview else { return nil }
         let selected = LaunchPosterSelectionPolicy.select(
             from: launchPosters,
             at: date,
@@ -227,7 +229,7 @@ final class PortfolioStore: ObservableObject {
     }
 
     func applyPublishedManifest(_ manifest: AppContentManifest) {
-        guard manifest.schemaVersion == 1,
+        guard !isRetired, manifest.schemaVersion == 1,
               !manifest.portfolios.isEmpty,
               ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else { return }
         cacheRestoreGeneration = UUID()
@@ -262,6 +264,7 @@ final class PortfolioStore: ObservableObject {
     /// response arrives. This method only removes content; granting a permission
     /// still requires a fresh, server-authorized manifest.
     func enforcePermissionScope(canViewFullGallery: Bool, canViewVideo: Bool) {
+        guard !isRetired else { return }
         var didReduceScope = false
         if !canViewFullGallery {
             portfolios = Self.permissionScopedPreviewPortfolios(from: portfolios)
@@ -295,6 +298,12 @@ final class PortfolioStore: ObservableObject {
         statusMessage = nil
         contentOrigin = .bundled
         Self.removeCacheInBackground(environment: serviceEnvironment)
+    }
+
+    func retireForEnvironmentSwitch() {
+        guard !isRetired else { return }
+        isRetired = true
+        discardProtectedContent()
     }
 
 #if DEBUG

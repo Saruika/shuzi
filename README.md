@@ -4,6 +4,8 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
+**独立审核环境候选：[v1.4.0-build4-review-env-preview8](Server/releases/v1.4.0-build4-review-env-preview8.md)。** 已合入现有交互修复，并接入按环境创建整组服务、切换时退出/销毁旧根页面、推送回调路由与迟到结果隔离。本轮两端各 240 项单元与 5 项重点 UI 回归通过，另有全新模拟器首次通知授权通过；验证边界见版本记录。正式默认来源及页面内容不变，演示后台、Release 入口与 Test2 尚未交付，未上传新测试包；详见 [审核环境进度](REVIEW_ENVIRONMENT.md)。
+
 **最新交互候选：[v1.4.0-build4-preview4](Server/releases/v1.4.0-build4-preview4.md)。** 修复封面失败后嵌套重试按钮抢占相册点击，强化天气局部可读性，并纠正关于页把重试按钮当作整张照片的测量错误。iPad 原 8 个失败用例及新增故障测试共 12 次配置执行通过；iPhone 210 单元 + 4 UI 通过，Release 分析通过。保留原矩阵失败及所有诊断证据，不等于最终全量/真机验收，未上传新包。隐私网址、审核联系人及普通账号已交付 ASC；独立管理员演示仍待完成，见 [上架就绪记录](APP_STORE_READINESS.md)。
 
 **历史可读性候选：[v1.4.0-build4-preview3](Server/releases/v1.4.0-build4-preview3.md)。** 新增五种換图背景检查，修正纯白背景下角色说明的局部对比度。其后完整矩阵已结束：iPhone 通过，iPad 失败项的诊断与修复见最新交互候选；不再处于等待终态的状态。

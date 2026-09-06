@@ -244,8 +244,8 @@ extension FanAccountStore: PushNotificationAccount {}
 
 @MainActor
 final class PushNotificationCoordinator: ObservableObject {
-    static let shared = PushNotificationCoordinator()
     let serviceEnvironment: AppServiceEnvironment
+    private(set) var isRetired = false
     private var preferenceKey: String { serviceEnvironment.storageKey("push-notifications-enabled") }
     private var associationKey: String { serviceEnvironment.storageKey("push-notifications-enabled-user") }
 
@@ -322,6 +322,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     func receive(deviceToken data: Data) {
+        guard !isRetired else { return }
         guard isAcceptingDeviceTokens else {
             deviceToken = nil
             boundContext = nil
@@ -341,6 +342,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     func receiveNotification(userInfo: [AnyHashable: Any], opened: Bool) {
+        guard !isRetired else { return }
         guard let rawID = userInfo["notificationID"] as? String,
               let id = FanNotificationValidation.canonicalID(rawID) else { return }
         notificationReceiptGeneration &+= 1
@@ -350,6 +352,7 @@ final class PushNotificationCoordinator: ObservableObject {
     func clearPendingNotification() { pendingNotification = nil }
 
     func registrationFailed() {
+        guard !isRetired else { return }
         guard isAcceptingDeviceTokens, let account = registrationAccount,
               deviceRegistrationState != .requiresSignIn,
               recoveryContext == currentRecoveryContext(for: account) else { return }
@@ -366,6 +369,7 @@ final class PushNotificationCoordinator: ObservableObject {
     /// System permission is app-wide and may be requested before login. Device
     /// registration and server binding still require an eligible fan session.
     func requestStartupAuthorizationIfNeeded() async {
+        guard !isRetired else { return }
 #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-skip-startup-notification-authorization-for-testing") {
             return
@@ -379,6 +383,7 @@ final class PushNotificationCoordinator: ObservableObject {
             registrationGeneration &+= 1
         }
         authorizationStatus = await authorizationClient.currentStatus()
+        guard !isRetired else { return }
         // A stored false is an explicit opt-out, including Build 45's legacy
         // opt-out without an account association. Never undo it on upgrade.
         let hasOptedOut = defaults.object(forKey: preferenceKey) != nil
@@ -387,7 +392,7 @@ final class PushNotificationCoordinator: ObservableObject {
         do {
             let granted = try await authorizationClient.requestAuthorization()
             authorizationStatus = await authorizationClient.currentStatus()
-            if granted, generation == preferenceGeneration {
+            if granted, !isRetired, generation == preferenceGeneration {
                 PushStartupConsentPolicy.recordGranted(in: defaults, environment: serviceEnvironment)
             }
         } catch {
@@ -409,7 +414,7 @@ final class PushNotificationCoordinator: ObservableObject {
     ) async {
         // Each coordinator owns one immutable workspace. Reject a mismatched
         // account before changing preferences, registering, binding or unbinding.
-        guard account.serviceEnvironment == serviceEnvironment else { return }
+        guard !isRetired, account.serviceEnvironment == serviceEnvironment else { return }
         guard let eligibleUserID = account.pushEligibleUserID else {
             accountContextDidChange(to: nil)
             shouldPresentAuthorizationRationale = false
@@ -439,7 +444,7 @@ final class PushNotificationCoordinator: ObservableObject {
 
         guard !isRequestingAuthorization else { return }
         let status = await authorizationClient.currentStatus()
-        guard !Task.isCancelled,
+        guard !isRetired, !Task.isCancelled,
               account.pushEligibleUserID == eligibleUserID,
               account.pushSessionGeneration == sessionGeneration else { return }
         authorizationStatus = status
@@ -479,7 +484,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     func requestAuthorizationAfterRationale(for account: any PushNotificationAccount) async {
-        guard account.serviceEnvironment == serviceEnvironment else { return }
+        guard !isRetired, account.serviceEnvironment == serviceEnvironment else { return }
         shouldPresentAuthorizationRationale = false
         guard !isRequestingAuthorization, notificationsEnabled,
               let userID = account.pushEligibleUserID,
@@ -493,7 +498,7 @@ final class PushNotificationCoordinator: ObservableObject {
         do {
             let granted = try await authorizationClient.requestAuthorization()
             let status = await authorizationClient.currentStatus()
-            guard account.pushEligibleUserID == userID,
+            guard !isRetired, account.pushEligibleUserID == userID,
                   account.pushSessionGeneration == sessionGeneration,
                   accountUserID == userID else { return }
             authorizationStatus = status
@@ -505,7 +510,7 @@ final class PushNotificationCoordinator: ObservableObject {
                 await stopDeliveryLocally(unbindingFrom: account)
             }
         } catch {
-            guard account.pushEligibleUserID == userID,
+            guard !isRetired, account.pushEligibleUserID == userID,
                   account.pushSessionGeneration == sessionGeneration else { return }
             // Notification permission is optional and never blocks App access,
             // but an indeterminate result must stop delivery fail closed.
@@ -518,6 +523,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     func accountContextDidChange(to userID: String?) {
+        guard !isRetired else { return }
         guard accountUserID != userID else { return }
         // A tap received before any account is known may wait for first login;
         // a tap associated with an existing account must never follow a switch.
@@ -555,7 +561,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     func setNotificationsEnabled(_ enabled: Bool, for account: any PushNotificationAccount) async {
-        guard account.serviceEnvironment == serviceEnvironment else { return }
+        guard !isRetired, account.serviceEnvironment == serviceEnvironment else { return }
         guard let userID = account.pushEligibleUserID else { return }
         accountContextDidChange(to: userID)
         preferenceGeneration &+= 1
@@ -581,7 +587,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private func bindIfPossible(to account: any PushNotificationAccount) async {
-        guard account.serviceEnvironment == serviceEnvironment else { return }
+        guard !isRetired, account.serviceEnvironment == serviceEnvironment else { return }
         guard let userID = account.pushEligibleUserID,
               let deviceToken,
               PushDeviceTokenPolicy.isValid(deviceToken) else { return }
@@ -603,7 +609,7 @@ final class PushNotificationCoordinator: ObservableObject {
         }
         do {
             try await account.bindPushDevice(deviceToken: deviceToken)
-            guard account.pushEligibleUserID == userID,
+            guard !isRetired, account.pushEligibleUserID == userID,
                   account.pushSessionGeneration == sessionGeneration,
                   self.deviceToken == deviceToken,
                   notificationsEnabled else {
@@ -622,7 +628,7 @@ final class PushNotificationCoordinator: ObservableObject {
             registrationTimeoutTask = nil
             scheduleBindingRefresh(for: account)
         } catch {
-            guard account.pushEligibleUserID == userID,
+            guard !isRetired, account.pushEligibleUserID == userID,
                   account.pushSessionGeneration == sessionGeneration,
                   notificationsEnabled else { return }
             registrationTimeoutTask?.cancel()
@@ -640,7 +646,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private func stopDeliveryLocally(unbindingFrom account: any PushNotificationAccount) async {
-        guard account.serviceEnvironment == serviceEnvironment else { return }
+        guard !isRetired, account.serviceEnvironment == serviceEnvironment else { return }
         // Reject callbacks before the network await so a late APNs registration
         // can never resurrect a denied, revoked, switched or signed-out context.
         isAcceptingDeviceTokens = false
@@ -663,7 +669,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private func beginDeviceRegistration(for account: any PushNotificationAccount) {
-        guard account.serviceEnvironment == serviceEnvironment else { return }
+        guard !isRetired, account.serviceEnvironment == serviceEnvironment else { return }
         let hasCurrentBinding = boundContext.map {
             $0.userID == account.pushEligibleUserID
                 && $0.fanSessionGeneration == account.pushSessionGeneration
@@ -683,7 +689,7 @@ final class PushNotificationCoordinator: ObservableObject {
                     guard let timeout = self?.registrationTimeout else { return }
                     guard let sleeper = self?.sleeper else { return }
                     do { try await sleeper.sleep(for: timeout) } catch { return }
-                    guard !Task.isCancelled, let self, let account,
+                    guard !Task.isCancelled, let self, !self.isRetired, let account,
                           account.pushEligibleUserID == userID,
                           account.pushSessionGeneration == sessionGeneration,
                           self.deviceRegistrationState == .connecting else { return }
@@ -698,7 +704,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private func currentRecoveryContext(for account: any PushNotificationAccount) -> RecoveryContext? {
-        guard account.serviceEnvironment == serviceEnvironment,
+        guard !isRetired, account.serviceEnvironment == serviceEnvironment,
               let userID = account.pushEligibleUserID else { return nil }
         return RecoveryContext(
             userID: userID,
@@ -715,7 +721,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private func scheduleRecovery(for account: any PushNotificationAccount) {
-        guard notificationsEnabled, isAcceptingDeviceTokens,
+        guard !isRetired, notificationsEnabled, isAcceptingDeviceTokens,
               accountUserID == account.pushEligibleUserID,
               let context = currentRecoveryContext(for: account),
               recoveryContext == context,
@@ -750,9 +756,85 @@ final class PushNotificationCoordinator: ObservableObject {
             } catch {
                 return
             }
-            guard !Task.isCancelled, let self, let account else { return }
+            guard !Task.isCancelled, let self, !self.isRetired, let account else { return }
             await self.synchronize(with: account, resetRecoveryBudget: false)
         }
+    }
+
+    /// Terminal shutdown for a discarded workspace. Do not erase the user's
+    /// stored preference, but invalidate every old callback and retry task.
+    func retire() {
+        guard !isRetired else { return }
+        isRetired = true
+        preferenceGeneration &+= 1
+        accountUserID = nil
+        notificationsEnabled = false
+        isAcceptingDeviceTokens = false
+        deviceToken = nil
+        boundContext = nil
+        registrationAccount = nil
+        recoveryContext = nil
+        needsSynchronization = false
+        deviceRegistrationState = .inactive
+        shouldPresentAuthorizationRationale = false
+        clearPendingNotification()
+        registrationTimeoutTask?.cancel()
+        registrationTimeoutTask = nil
+        bindingRefreshTask?.cancel()
+        bindingRefreshTask = nil
+        cancelRecovery(resetAttempts: true)
+        registrationClient.unregister()
+    }
+}
+
+/// APNs is app-wide, but authenticated inboxes and bindings are workspace-owned.
+/// Legacy unlabelled payloads belong to production only; a payload never changes
+/// the selected workspace or supplies credentials for reading its message.
+@MainActor
+final class PushNotificationRouter {
+    static let shared = PushNotificationRouter()
+    private(set) weak var activeCoordinator: PushNotificationCoordinator?
+    private var hasActivated = false
+    private var startupMessage: (environment: AppServiceEnvironment, id: String)?
+
+    func activate(_ coordinator: PushNotificationCoordinator) {
+        guard !coordinator.isRetired else { return }
+        if activeCoordinator !== coordinator { activeCoordinator?.retire() }
+        activeCoordinator = coordinator
+        hasActivated = true
+        if let message = startupMessage, message.environment == coordinator.serviceEnvironment {
+            coordinator.receiveNotification(userInfo: ["notificationID": message.id], opened: true)
+        }
+        startupMessage = nil
+    }
+
+    func deactivate(_ coordinator: PushNotificationCoordinator) {
+        guard activeCoordinator === coordinator else { return }
+        activeCoordinator = nil
+    }
+
+    func receive(deviceToken: Data) { activeCoordinator?.receive(deviceToken: deviceToken) }
+    func registrationFailed() { activeCoordinator?.registrationFailed() }
+
+    @discardableResult
+    func receiveNotification(userInfo: [AnyHashable: Any], opened: Bool) -> Bool {
+        let environment: AppServiceEnvironment
+        if let raw = userInfo["serviceEnvironment"] {
+            guard let raw = raw as? String, let parsed = AppServiceEnvironment(rawValue: raw) else { return false }
+            environment = parsed
+        } else {
+            environment = .production
+        }
+        guard let id = userInfo["notificationID"] as? String,
+              FanNotificationValidation.canonicalID(id) != nil else { return false }
+        if !hasActivated, activeCoordinator == nil, opened {
+            startupMessage = (environment, id)
+            return true
+        }
+        guard let coordinator = activeCoordinator, !coordinator.isRetired,
+              coordinator.serviceEnvironment == environment else { return false }
+        coordinator.receiveNotification(userInfo: userInfo, opened: opened)
+        return true
     }
 }
 
@@ -770,24 +852,24 @@ final class YishuApplicationDelegate: NSObject, UIApplicationDelegate, UNUserNot
         _ application: UIApplication,
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
-        PushNotificationCoordinator.shared.receive(deviceToken: deviceToken)
+        PushNotificationRouter.shared.receive(deviceToken: deviceToken)
     }
 
     func application(
         _ application: UIApplication,
         didFailToRegisterForRemoteNotificationsWithError error: Error
     ) {
-        PushNotificationCoordinator.shared.registrationFailed()
+        PushNotificationRouter.shared.registrationFailed()
     }
 
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        PushNotificationCoordinator.shared.receiveNotification(
+        let accepted = PushNotificationRouter.shared.receiveNotification(
             userInfo: notification.request.content.userInfo, opened: false
         )
-        return [.banner, .list, .sound]
+        return accepted ? [.banner, .list, .sound] : []
     }
 
     func userNotificationCenter(
@@ -796,7 +878,7 @@ final class YishuApplicationDelegate: NSObject, UIApplicationDelegate, UNUserNot
     ) async {
         // Only a canonical opaque ID crosses into navigation. Title/body/URL
         // payload fields are never trusted as the authenticated message detail.
-        PushNotificationCoordinator.shared.receiveNotification(
+        PushNotificationRouter.shared.receiveNotification(
             userInfo: response.notification.request.content.userInfo, opened: true
         )
     }
