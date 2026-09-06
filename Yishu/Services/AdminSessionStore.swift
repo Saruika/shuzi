@@ -470,8 +470,9 @@ final class AdminSessionStore: ObservableObject {
     private var expirationTask: Task<Void, Never>?
     private var authenticationGeneration: UInt64 = 0
     private var signInOperationID: UUID?
-    private let apiRoot = AppURL.make("https://shuzijun.com.cn/wp-json")
-    private let mediaUploadRoot = AppURL.make("https://www.shuzijun.com.cn/wp-json")
+    let serviceEnvironment: AppServiceEnvironment
+    private let apiRoot: URL
+    private let mediaUploadRoot: URL
     private let session: URLSession
 
     var isAuthenticated: Bool {
@@ -487,12 +488,19 @@ final class AdminSessionStore: ObservableObject {
 
     private var hasCurrentAuthenticationSource: Bool {
         if let boundContext {
-            return boundAccount?.administratorContext == boundContext
+            return boundContext.environment == serviceEnvironment
+                && boundAccount?.administratorContext == boundContext
         }
         return credential != nil
     }
 
-    init(jsonLoader: ((URLRequest) async throws -> (Data, URLResponse))? = nil) {
+    init(
+        environment: AppServiceEnvironment = .production,
+        jsonLoader: ((URLRequest) async throws -> (Data, URLResponse))? = nil
+    ) {
+        serviceEnvironment = environment
+        apiRoot = environment.apiRoot
+        mediaUploadRoot = environment.mediaUploadRoot
         self.jsonLoader = jsonLoader
         session = SecureURLSessionFactory.make(
             requestTimeout: 120,
@@ -501,7 +509,7 @@ final class AdminSessionStore: ObservableObject {
         // Builds before 1.3.18 stored the complete WordPress Application
         // Password and restored it without user interaction. Delete that
         // legacy item during migration and keep new credentials in memory only.
-        LegacyAdminKeychain.delete()
+        LegacyAdminKeychain.delete(environment: environment)
     }
 
     func signIn(username: String, applicationPassword: String) async {
@@ -560,7 +568,7 @@ final class AdminSessionStore: ObservableObject {
     /// Use the existing installation-bound session, never a second stored password.
     func signIn(using account: any FanAdministratorAccount) async {
         lock()
-        guard let context = account.administratorContext else {
+        guard let context = account.administratorContext, context.environment == serviceEnvironment else {
             errorMessage = "当前账号尚未获得管理员授权，或尚未完成资料与审批。"
             return
         }
@@ -1075,7 +1083,7 @@ final class AdminSessionStore: ObservableObject {
         )
         components?.queryItems = queryItems.isEmpty ? nil : queryItems
         guard let endpoint = components?.url else { throw AdminAPIError.invalidResponse }
-        guard AppNetworkSecurityPolicy.isTrustedAdminRequestURL(endpoint) else {
+        guard serviceEnvironment.allowsAPIURL(endpoint) || serviceEnvironment.allowsMediaUploadURL(endpoint) else {
             throw AdminAPIError.invalidResponse
         }
         var request = URLRequest(url: endpoint)
@@ -1106,7 +1114,7 @@ final class AdminSessionStore: ObservableObject {
     ) throws -> T {
         guard data.count <= 8 * 1024 * 1024 else { throw AdminAPIError.invalidResponse }
         guard let http = response as? HTTPURLResponse,
-              AppNetworkSecurityPolicy.isTrustedAdminRequestURL(http.url) else {
+              (serviceEnvironment.allowsAPIURL(http.url) || serviceEnvironment.allowsMediaUploadURL(http.url)) else {
             throw AdminAPIError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
@@ -1360,10 +1368,10 @@ private enum LegacyAdminKeychain {
     private static let service = "cn.com.shuzijun.yishu.wordpress-admin"
     private static let account = "wordpress-content-manager"
 
-    static func delete() {
+    static func delete(environment: AppServiceEnvironment) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: environment.storageKey(service),
             kSecAttrAccount as String: account,
         ]
         SecItemDelete(query as CFDictionary)

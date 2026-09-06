@@ -145,6 +145,98 @@ final class BoundAdministratorSessionTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
+    func testOtherEnvironmentCannotSendAnAdministratorProbe() async {
+        for environment in AppServiceEnvironment.allCases {
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            let account = BoundAdministratorTestAccount()
+            account.administratorContext = .init(userID: "test-user", sessionGeneration: 1, environment: other)
+            var calls = 0
+            let admin = AdminSessionStore(environment: environment) { request in
+                calls += 1
+                return try self.reply(request)
+            }
+            await admin.signIn(using: account)
+            XCTAssertEqual(calls, 0)
+            XCTAssertFalse(admin.isAuthenticated)
+            XCTAssertNotNil(admin.errorMessage)
+        }
+    }
+
+    func testAdministratorProbeUsesOnlyItsSelectedEnvironment() async {
+        for environment in AppServiceEnvironment.allCases {
+            let account = BoundAdministratorTestAccount()
+            account.administratorContext = .init(userID: "test-user", sessionGeneration: 1, environment: environment)
+            var requests = [URLRequest]()
+            let admin = AdminSessionStore(environment: environment) { request in
+                requests.append(request)
+                return try self.reply(request)
+            }
+            await admin.signIn(using: account)
+            XCTAssertTrue(admin.isAuthenticated)
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(requests.first?.url?.host, environment.apiHost)
+            XCTAssertEqual(requests.first?.url?.path, "/wp-json/shuzijun/v1/app-admin/session")
+            XCTAssertEqual(requests.first?.value(forHTTPHeaderField: "Authorization"), "Bearer synthetic-session")
+            admin.lock()
+        }
+    }
+
+    func testAdministratorRejectsSuccessfulResponseFromOtherEnvironment() async throws {
+        for environment in AppServiceEnvironment.allCases {
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            let account = BoundAdministratorTestAccount()
+            account.administratorContext = .init(userID: "test-user", sessionGeneration: 1, environment: environment)
+            let admin = AdminSessionStore(environment: environment) { request in
+                let (data, _) = try self.reply(request)
+                let response = try XCTUnwrap(HTTPURLResponse(
+                    url: other.apiRoot.appending(path: "shuzijun/v1/app-admin/session"),
+                    statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+                return (data, response)
+            }
+            await admin.signIn(using: account)
+            XCTAssertFalse(admin.isAuthenticated)
+            XCTAssertNotNil(admin.errorMessage)
+        }
+    }
+
+    func testEnvironmentReplacementInvalidatesMatchingAdministratorIdentity() async throws {
+        for environment in AppServiceEnvironment.allCases {
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            let account = BoundAdministratorTestAccount()
+            account.administratorContext = .init(userID: "test-user", sessionGeneration: 1, environment: environment)
+            var calls = 0
+            let admin = AdminSessionStore(environment: environment) { request in
+                calls += 1
+                return try self.reply(request)
+            }
+            await admin.signIn(using: account)
+            XCTAssertTrue(admin.isAuthenticated)
+            account.administratorContext = .init(userID: "test-user", sessionGeneration: 1, environment: other)
+            XCTAssertFalse(admin.isAuthenticated)
+            do {
+                _ = try await admin.fetchFeatureCapabilities()
+                XCTFail("Cross-environment replacement sent a management request")
+            } catch { XCTAssertEqual(calls, 1) }
+            admin.lock()
+        }
+    }
+
+    func testIndependentAdministratorUsesSelectedEnvironment() async {
+        for environment in AppServiceEnvironment.allCases {
+            var requests = [URLRequest]()
+            let admin = AdminSessionStore(environment: environment) { request in
+                requests.append(request)
+                return try self.reply(request)
+            }
+            await admin.signIn(username: "synthetic-manager", applicationPassword: UUID().uuidString)
+            XCTAssertTrue(admin.isIndependentAdministrator)
+            XCTAssertEqual(requests.count, 1)
+            XCTAssertEqual(requests.first?.url?.host, environment.apiHost)
+            XCTAssertTrue(requests.first?.value(forHTTPHeaderField: "Authorization")?.hasPrefix("Basic ") == true)
+            admin.lock()
+        }
+    }
+
     func testLegacyAdministratorStillUsesSeparateBasicAuthentication() async throws {
         var authorization: String?
         var installation: String?

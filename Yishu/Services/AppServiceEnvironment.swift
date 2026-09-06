@@ -28,7 +28,8 @@ enum AppServiceEnvironment: String, CaseIterable, Sendable {
     }
 
     var apiRoot: URL { AppURL.make("https://\(apiHost)/wp-json") }
-    var mediaUploadURL: URL { AppURL.make("https://\(mediaHost)/wp-json/wp/v2/media") }
+    var mediaUploadRoot: URL { AppURL.make("https://\(mediaHost)/wp-json") }
+    var mediaUploadURL: URL { mediaUploadRoot.appending(path: "wp/v2/media") }
 
     /// Preserve existing production keys; never migrate production credentials to review.
     func storageKey(_ productionKey: String) -> String {
