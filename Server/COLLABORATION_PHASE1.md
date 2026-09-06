@@ -32,8 +32,13 @@ define('YISHU_ENABLE_COLLABORATION_PHASE1', true);
 新回归执行实际 dormant trait，不加载 API 入口或生产 WordPress 配置。
 默认 486 项元数据/故障断言；独立 MySQL 8.0.46 临时空库通过 28 项 DDL、
 缺表/错误字段及索引、唯一性、事务回滚断言，并精确清理测试库。
-这只是第 1 项的增量证据：集成夹具执行真实 DDL 和元数据，而非完整 WordPress
-`dbDelta` 升级运行时；PII 处理、保留/删除、认证邮件和并发双节点演练仍未完成。
+上述首轮夹具执行真实 DDL 和元数据，不加载完整 WordPress。后续已另补独立的
+WordPress 7.1/MySQL 8.0.46 运行时验证：校验官方核心文件后，从空数据库启动真正
+的 WordPress 和 `wpdb`，执行真实 `dbDelta`。36 项断言覆盖首次建表、重复升级无
+DDL、字段/索引修复、SQL 失败不写 ready、修复后恢复，以及错误引擎/前缀索引
+失败关闭；独立宿主网络拒绝测试通过，测试数据库清理后数量为零。
+见 [WordPress 集成记录](releases/v1.4.0-build2-preflight3.md)。这仍只是第 1 项的
+运行时证据；PII 处理、保留/删除、认证邮件和并发双节点演练仍未完成。
 不能据此开启合作提交或宣称自动邮件已送达。
 
 ```bash
@@ -42,6 +47,14 @@ php Server/tests/collaboration-schema-regression.php
 # 不接受生产库名、不读取 wp-config、不发送邮件或推送。
 php Server/tests/collaboration-schema-regression.php --mysql
 ```
+
+`Server/tests/collaboration-wordpress-schema-integration.php` 为显式 Linux 集成测试，
+不能直接针对线上 WordPress 路径执行。必须先在 `/tmp/yishu-wordpress-schema.XXXXXX`
+形式的全新目录下载、校验 WordPress 7.1，将该目录设为 root 所有且 `0700`、核心
+文件不可由组/其他用户写入，并在 `PrivateNetwork=yes`、禁止访问生产 Webroot/配置
+和 MySQL 数据目录的 systemd 沙箱中运行。测试只通过本地 Unix socket 自建随机空库，
+不接受已有数据库名、不加载 `wp-config.php` 或插件，不注册合作 API，也不发送邮件。
+具体已执行的隔离参数与范围见上述发布记录；缺少隔离条件时拒绝执行，不伪造通过。
 
 1. **InnoDB 和 schema 实证**：安装后逐表校验引擎、完整字段、字段类型、三个唯一索引及普通索引；不能只检查表名存在。必须检查 `dbDelta` 结果，并在引擎或索引不符合时失败关闭，不得声称事务或幂等已成立。
 2. **PII 日志抑制**：联系人、联系方式、组织、城市、预算和项目说明不得出现在 WordPress/PHP/MySQL 错误日志、`$wpdb->last_query`、邮件失败日志、安全 action 或运维输出。需要可验证的屏蔽方案和故障测试。
