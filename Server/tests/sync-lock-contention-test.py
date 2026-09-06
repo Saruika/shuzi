@@ -9,6 +9,7 @@ import hashlib
 import os
 from pathlib import Path
 import runpy
+import stat
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,18 @@ if '--require-linux' in sys.argv:
 
 
 class SourceContract(unittest.TestCase):
+    def test_published_executable_is_not_group_or_world_writable(self):
+        with tempfile.TemporaryDirectory(prefix='sync-publish-mode-') as temporary:
+            target = Path(temporary) / 'fixture-sender'
+            payload = b'#!/bin/bash\ntrue\n'
+            with mock.patch.dict(SPEC['publish'].__globals__, {'TARGET': target}):
+                SPEC['publish'](payload)
+            mode = stat.S_IMODE(target.stat().st_mode)
+            self.assertEqual(mode, 0o755)
+            self.assertEqual(mode & 0o022, 0)
+            self.assertEqual(target.read_bytes(), payload)
+            self.assertEqual(list(Path(temporary).glob('.sync-lock-wait-*')), [])
+
     def test_only_the_single_reviewed_boundary_changes(self):
         raw=b'prefix\n'+SPEC['OLD_LOCK']+b'suffix\n'
         expected=b'prefix\n'+SPEC['NEW_LOCK']+b'suffix\n'

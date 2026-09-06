@@ -77,6 +77,7 @@ if command -v php >/dev/null 2>&1; then
     php -l "$plugin_module" >/dev/null
   done < <(find Server/vendor/shuzijun/app-content -type f -name '*.php' -print0)
   php Server/tests/plugin-contract-test.php
+  php Server/tests/collaboration-schema-regression.php
 fi
 
 if command -v composer >/dev/null 2>&1; then

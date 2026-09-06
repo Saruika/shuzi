@@ -128,7 +128,10 @@ def publish(data: bytes) -> None:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(data)
             stream.flush()
-            os.fchmod(stream.fileno(), 0o755)
+            # main verifies root ownership, trusted parents and the full source
+            # digest. This non-secret executable must retain the installed 0755
+            # contract; group/other receive no write permission. See regression.
+            os.fchmod(stream.fileno(), 0o755)  # nosec B103
             os.fsync(stream.fileno())
         command(['/bin/bash', '-n', str(pending)])
         os.replace(pending, TARGET)

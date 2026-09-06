@@ -24,7 +24,7 @@ SCRIPT = ROOT / "Scripts/ci-supply-chain.py"
 WORKFLOW = ROOT / ".github/workflows/ios-quality.yml"
 # Current reviewed materials get a new record; immutable historical releases
 # must not be rewritten to pretend they contained today's workflow/scripts.
-RELEASE_RECORD = ROOT / "Server/releases/v1.4.0-build1-preview.1.md"
+RELEASE_RECORD = ROOT / "Server/releases/v1.4.0-build2-preflight1.md"
 SPDX_SCHEMA_URL = (
     "https://raw.githubusercontent.com/spdx/spdx-spec/"
     "aadf3b0b8dbbabdb4d880b0fc714255fea436ff7/schemas/spdx-schema.json"
@@ -272,6 +272,11 @@ def test_local_provenance(temporary: Path) -> None:
 
 def test_workflow_text() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
+    assert "persist-credentials: false" in text
+    triggers = text.split("permissions:", 1)[0]
+    assert triggers.count("paths-ignore:") == 1
+    assert "Server/" not in triggers and "**/*.md" not in triggers
+    assert "pull_request:\n  workflow_dispatch:" in triggers
     assert "runs-on: macos-26" in text
     assert "CI_PHP_VERSION: '8.3'" in text
     assert "if: always()" in text
@@ -316,7 +321,7 @@ def test_release_record() -> None:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         assert text.count(f"{name}={digest}") == 1
     assert text.count(f"SPDX_2_3_SCHEMA_SHA256={SPDX_SCHEMA_SHA256}") == 1
-    assert text.count("`v1.4.0-build1-preview.1`") == 1
+    assert text.count("`v1.4.0-build2-preflight1`") == 1
 
 
 def main() -> None:

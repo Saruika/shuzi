@@ -1566,7 +1566,9 @@ expect_true(
         && strpos($collaboration_schema_source, 'UNIQUE KEY fan_submission (fan_user_id, submission_id)') !== false
         && strpos($collaboration_schema_source, 'UNIQUE KEY dedupe_key (dedupe_key)') !== false
         && strpos($collaboration_schema_source, 'UNIQUE KEY request_channel (request_id, channel)') !== false
-        && strpos($collaboration_schema_source, 'dbDelta($requests_sql)') !== false
+        && strpos($collaboration_schema_source, 'array($requests_sql, $outbox_sql, $audit_sql)') !== false
+        && strpos($collaboration_schema_source, '$changes = dbDelta($schema_sql)') !== false
+        && strpos($collaboration_schema_source, '!is_array($changes) || !empty($wpdb->last_error)') !== false
         && strpos($collaboration_schema_source, 'self::account_authority_enabled()') !== false,
     '合作邀约、Outbox 和审计必须使用权威节点创建的 InnoDB 专用表与唯一键'
 );

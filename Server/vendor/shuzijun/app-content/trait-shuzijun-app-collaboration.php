@@ -92,9 +92,22 @@ trait Shuzijun_App_Collaboration {
                 KEY request_created (request_id, created_at),
                 KEY event_created (event, created_at)
             ) ENGINE=InnoDB {$charset};";
-            dbDelta($requests_sql);
-            dbDelta($outbox_sql);
-            dbDelta($audit_sql);
+            // dbDelta describes attempted changes; its return value is not a
+            // transaction/schema guarantee. Check each call before another
+            // query can clear last_error, then verify the actual metadata.
+            foreach (array($requests_sql, $outbox_sql, $audit_sql) as $schema_sql) {
+                $changes = dbDelta($schema_sql);
+                if (!is_array($changes) || !empty($wpdb->last_error)) {
+                    do_action('yishu_collaboration_security_audit', 'schema_creation_failed');
+                    return false;
+                }
+                foreach ($changes as $change) {
+                    if (!is_string($change)) {
+                        do_action('yishu_collaboration_security_audit', 'schema_creation_failed');
+                        return false;
+                    }
+                }
+            }
             if (!self::collaboration_tables_exist()) {
                 do_action('yishu_collaboration_security_audit', 'schema_creation_failed');
                 return false;
@@ -107,6 +120,9 @@ trait Shuzijun_App_Collaboration {
             return $saved
                 || (int) get_option(self::COLLABORATION_SCHEMA_OPTION, 0)
                     === self::COLLABORATION_SCHEMA_VERSION;
+        } catch (Throwable $error) {
+            do_action('yishu_collaboration_security_audit', 'schema_creation_failed');
+            return false;
         } finally {
             self::release_named_fan_lock($lock);
         }
@@ -838,12 +854,17 @@ trait Shuzijun_App_Collaboration {
 
     private static function collaboration_table_names() {
         global $wpdb;
-        if (!isset($wpdb) || !isset($wpdb->prefix)) { return array(); }
-        return array(
+        if (!isset($wpdb) || !isset($wpdb->prefix) || !is_string($wpdb->prefix)
+            || preg_match('/^[A-Za-z0-9_]+$/D', $wpdb->prefix) !== 1) { return array(); }
+        $tables = array(
             'requests' => $wpdb->prefix . 'yishu_collaboration_requests',
             'outbox' => $wpdb->prefix . 'yishu_collaboration_outbox',
             'audit' => $wpdb->prefix . 'yishu_collaboration_audit',
         );
+        foreach ($tables as $table) {
+            if (strlen($table) > 64) { return array(); }
+        }
+        return $tables;
     }
 
     private static function collaboration_tables() {
@@ -853,17 +874,186 @@ trait Shuzijun_App_Collaboration {
 
     private static function collaboration_tables_exist() {
         if (!self::collaboration_phase1_enabled()) { return false; }
+        return self::collaboration_schema_matches(self::collaboration_tables());
+    }
+
+    /** Read metadata only; never repair an incompatible live table implicitly. */
+    private static function collaboration_schema_matches($tables) {
         global $wpdb;
-        $tables = self::collaboration_tables();
-        if (!$tables || !isset($wpdb) || !method_exists($wpdb, 'get_var')
+        $expected = self::collaboration_schema_contract();
+        if (!is_array($tables) || array_keys($tables) !== array_keys($expected)
+            || !isset($wpdb) || !method_exists($wpdb, 'get_row')
+            || !method_exists($wpdb, 'get_results')
             || !method_exists($wpdb, 'prepare') || !method_exists($wpdb, 'esc_like')) {
             return false;
         }
-        foreach ($tables as $table) {
-            $found = $wpdb->get_var($wpdb->prepare('SHOW TABLES LIKE %s', $wpdb->esc_like($table)));
-            if (!is_string($found) || !hash_equals($table, $found)) { return false; }
+        try {
+            foreach ($tables as $name => $table) {
+                // Identifiers cannot use value placeholders. Only admit the
+                // WordPress prefix grammar and MySQL's 64-character limit.
+                if (!is_string($table) || preg_match('/^[A-Za-z0-9_]{1,64}$/D', $table) !== 1) {
+                    return false;
+                }
+                $status = $wpdb->get_row($wpdb->prepare(
+                    'SHOW TABLE STATUS LIKE %s', $wpdb->esc_like($table)
+                ), ARRAY_A);
+                if (!empty($wpdb->last_error) || !is_array($status)
+                    || ($status['Name'] ?? null) !== $table
+                    || strcasecmp((string) ($status['Engine'] ?? ''), 'InnoDB') !== 0) {
+                    return false;
+                }
+                $columns = $wpdb->get_results("SHOW FULL COLUMNS FROM `{$table}`", ARRAY_A);
+                if (!empty($wpdb->last_error)
+                    || !self::collaboration_columns_match($columns, $expected[$name]['columns'])) {
+                    return false;
+                }
+                $indexes = $wpdb->get_results("SHOW INDEX FROM `{$table}`", ARRAY_A);
+                if (!empty($wpdb->last_error)
+                    || !self::collaboration_indexes_match($indexes, $expected[$name]['indexes'])) {
+                    return false;
+                }
+            }
+        } catch (Throwable $error) {
+            // Neither SQL nor an exception message belongs in an audit event.
+            return false;
         }
         return true;
+    }
+
+    private static function collaboration_columns_match($rows, $expected) {
+        if (!is_array($rows) || count($rows) !== count($expected)) { return false; }
+        $seen = array();
+        foreach ($rows as $row) {
+            if (!is_array($row)) { return false; }
+            foreach (array('Field', 'Type', 'Null', 'Default', 'Extra') as $key) {
+                if (!array_key_exists($key, $row)) { return false; }
+            }
+            $name = $row['Field'];
+            if (!is_string($name) || !isset($expected[$name]) || isset($seen[$name])
+                || !is_string($row['Type'])) { return false; }
+            // MySQL 8 may omit integer display widths; MariaDB retains them.
+            // Width is cosmetic, unlike unsigned, precision or string length.
+            $type = preg_replace('/^(bigint|smallint)\([0-9]+\)/', '$1', strtolower($row['Type']));
+            $default = $row['Default'];
+            if (is_int($default)) { $default = (string) $default; }
+            if (array($type, $row['Null'], $default, $row['Extra']) !== $expected[$name]) {
+                return false;
+            }
+            $seen[$name] = true;
+        }
+        return count($seen) === count($expected);
+    }
+
+    private static function collaboration_indexes_match($rows, $expected) {
+        if (!is_array($rows)) { return false; }
+        $actual = array();
+        foreach ($rows as $row) {
+            if (!is_array($row)) { return false; }
+            foreach (array('Key_name', 'Non_unique', 'Seq_in_index', 'Column_name', 'Sub_part', 'Index_type') as $key) {
+                if (!array_key_exists($key, $row)) { return false; }
+            }
+            $name = $row['Key_name'];
+            $sequence = (string) $row['Seq_in_index'];
+            if (!is_string($name) || !isset($expected[$name])
+                || preg_match('/^[1-9][0-9]*$/D', $sequence) !== 1
+                || (string) $row['Non_unique'] !== $expected[$name][0]
+                || !is_string($row['Column_name']) || $row['Sub_part'] !== null
+                || strtoupper((string) $row['Index_type']) !== 'BTREE'
+                || (isset($row['Visible']) && $row['Visible'] !== 'YES')
+                || (isset($row['Ignored']) && $row['Ignored'] !== 'NO')
+                || (isset($row['Collation']) && $row['Collation'] !== 'A')
+                || isset($actual[$name][(int) $sequence])) {
+                return false;
+            }
+            $actual[$name][(int) $sequence] = $row['Column_name'];
+        }
+        if (count($actual) !== count($expected)) { return false; }
+        foreach ($expected as $name => $contract) {
+            $columns = $actual[$name] ?? array();
+            ksort($columns, SORT_NUMERIC);
+            if (array_keys($columns) !== range(1, count($contract[1]))
+                || array_values($columns) !== $contract[1]) { return false; }
+        }
+        return true;
+    }
+
+    /** [type, nullable, default, extra]; indexes: [non_unique, ordered columns]. */
+    private static function collaboration_schema_contract() {
+        $id = array('bigint unsigned', 'NO', null, 'auto_increment');
+        $reference = array('bigint unsigned', 'NO', null, '');
+        $timestamp = array('datetime', 'NO', null, '');
+        return array(
+            'requests' => array(
+                'columns' => array(
+                    'id' => $id,
+                    'public_id' => array('char(36)', 'NO', null, ''),
+                    'submission_id' => array('char(36)', 'NO', null, ''),
+                    'fan_user_id' => $reference,
+                    'install_hash' => array('char(64)', 'NO', null, ''),
+                    'network_hash' => array('char(64)', 'NO', null, ''),
+                    'contact_name' => array('varchar(120)', 'NO', null, ''),
+                    'contact_method' => array('varchar(255)', 'NO', null, ''),
+                    'organization' => array('varchar(160)', 'NO', '', ''),
+                    'project_type' => array('varchar(40)', 'NO', null, ''),
+                    'city' => array('varchar(120)', 'NO', '', ''),
+                    'preferred_date' => array('date', 'YES', null, ''),
+                    'budget' => array('varchar(120)', 'NO', '', ''),
+                    'details' => array('text', 'NO', null, ''),
+                    'payload_hash' => array('char(64)', 'NO', null, ''),
+                    'status' => array('varchar(24)', 'NO', 'received', ''),
+                    'status_updated_by' => array('bigint unsigned', 'YES', null, ''),
+                    'version' => array('bigint unsigned', 'NO', '1', ''),
+                    'created_at' => $timestamp,
+                    'updated_at' => $timestamp,
+                ),
+                'indexes' => array(
+                    'PRIMARY' => array('0', array('id')),
+                    'public_id' => array('0', array('public_id')),
+                    'fan_submission' => array('0', array('fan_user_id', 'submission_id')),
+                    'status_created' => array('1', array('status', 'created_at')),
+                    'fan_created' => array('1', array('fan_user_id', 'created_at')),
+                ),
+            ),
+            'outbox' => array(
+                'columns' => array(
+                    'id' => $id,
+                    'request_id' => $reference,
+                    'channel' => array('varchar(32)', 'NO', null, ''),
+                    'dedupe_key' => array('char(64)', 'NO', null, ''),
+                    'status' => array('varchar(20)', 'NO', 'pending', ''),
+                    'attempts' => array('smallint unsigned', 'NO', '0', ''),
+                    'next_attempt_at' => $timestamp,
+                    'lease_token' => array('char(32)', 'YES', null, ''),
+                    'lease_until' => array('datetime', 'YES', null, ''),
+                    'last_error_code' => array('varchar(80)', 'NO', '', ''),
+                    'created_at' => $timestamp,
+                    'updated_at' => $timestamp,
+                ),
+                'indexes' => array(
+                    'PRIMARY' => array('0', array('id')),
+                    'dedupe_key' => array('0', array('dedupe_key')),
+                    'due_jobs' => array('1', array('status', 'next_attempt_at')),
+                    'request_channel' => array('0', array('request_id', 'channel')),
+                ),
+            ),
+            'audit' => array(
+                'columns' => array(
+                    'id' => $id,
+                    'request_id' => $reference,
+                    'actor_type' => array('varchar(20)', 'NO', null, ''),
+                    'actor_id' => array('bigint unsigned', 'NO', '0', ''),
+                    'event' => array('varchar(64)', 'NO', null, ''),
+                    'result' => array('varchar(32)', 'NO', null, ''),
+                    'metadata_json' => array('text', 'NO', null, ''),
+                    'created_at' => $timestamp,
+                ),
+                'indexes' => array(
+                    'PRIMARY' => array('0', array('id')),
+                    'request_created' => array('1', array('request_id', 'created_at')),
+                    'event_created' => array('1', array('event', 'created_at')),
+                ),
+            ),
+        );
     }
 
     private static function collaboration_storage_ready() {

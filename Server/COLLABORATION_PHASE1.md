@@ -25,6 +25,24 @@ define('YISHU_ENABLE_COLLABORATION_PHASE1', true);
 
 ## 允许开启前必须全部完成的门槛
 
+2026-09-06 候选增量（**仍保持生产硬关闭**）：已补齐完整 schema 元数据校验，
+覆盖 InnoDB、全部列的类型/长度/nullable/default/auto_increment，以及所有主键、
+唯一键和普通索引的完整字段/顺序/前缀/可见性。逐次检查 `dbDelta` 的返回形状和
+即时数据库错误，再读取真实元数据；异常、部分成功或不兼容表不能写入 ready 版本。
+新回归执行实际 dormant trait，不加载 API 入口或生产 WordPress 配置。
+默认 486 项元数据/故障断言；独立 MySQL 8.0.46 临时空库通过 28 项 DDL、
+缺表/错误字段及索引、唯一性、事务回滚断言，并精确清理测试库。
+这只是第 1 项的增量证据：集成夹具执行真实 DDL 和元数据，而非完整 WordPress
+`dbDelta` 升级运行时；PII 处理、保留/删除、认证邮件和并发双节点演练仍未完成。
+不能据此开启合作提交或宣称自动邮件已送达。
+
+```bash
+php Server/tests/collaboration-schema-regression.php
+# 仅测试环境：Unix socket 认证；自建随机空库并在 finally 精确销毁。
+# 不接受生产库名、不读取 wp-config、不发送邮件或推送。
+php Server/tests/collaboration-schema-regression.php --mysql
+```
+
 1. **InnoDB 和 schema 实证**：安装后逐表校验引擎、完整字段、字段类型、三个唯一索引及普通索引；不能只检查表名存在。必须检查 `dbDelta` 结果，并在引擎或索引不符合时失败关闭，不得声称事务或幂等已成立。
 2. **PII 日志抑制**：联系人、联系方式、组织、城市、预算和项目说明不得出现在 WordPress/PHP/MySQL 错误日志、`$wpdb->last_query`、邮件失败日志、安全 action 或运维输出。需要可验证的屏蔽方案和故障测试。
 3. **保留期和删号级联**：明确数据最短/最长保留期，实现定时清理；粉丝在 App 中删除账号时，请求表、Outbox、审计、备份、导出和邮件副本必须按审批后的规则删除或不可逆匿名化，并完成重试/幂等设计。
