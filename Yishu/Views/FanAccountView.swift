@@ -2021,6 +2021,12 @@ private struct FanAccessDetailView: View {
     @State private var passwordRecovery: AdminFanPasswordRecovery?
     @State private var recoveryPasteboardValue: String?
     @State private var errorMessage: String?
+    @State private var isChangingAdministrator = false
+    @State private var showAdministratorConfirmation = false
+    @State private var pendingAdministratorChange: AdminFanAdministratorUpdate?
+    @State private var administratorNotice: String?
+    @State private var administratorNeedsRefresh = false
+    @State private var administratorViewIsActive = true
     let catalog: [AdminFanPermissionDefinition]
     let canSendPushNotifications: Bool
     let onUpdate: (AdminFanUser) -> Void
@@ -2130,6 +2136,10 @@ private struct FanAccessDetailView: View {
                                     .foregroundStyle(AppTheme.ink)
                             }
                         }
+                    }
+
+                    if admin.canManageFanAdministrators {
+                        administratorSection
                     }
 
                     if !user.requiresIdentityCompletion,
@@ -2273,7 +2283,23 @@ private struct FanAccessDetailView: View {
         )
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(AppTheme.ink, for: .navigationBar)
-        .disabled(isSaving || isGeneratingRecovery)
+        .disabled(isSaving || isGeneratingRecovery || isChangingAdministrator)
+        .confirmationDialog(
+            pendingAdministratorChange?.administrator == true ? "授予 App 管理员身份？" : "撤销 App 管理员身份？",
+            isPresented: $showAdministratorConfirmation,
+            titleVisibility: .visible,
+            presenting: pendingAdministratorChange
+        ) { change in
+            Button(change.administrator ? "确认授予" : "确认撤销",
+                   role: change.administrator ? nil : .destructive) {
+                Task { await changeAdministrator(change) }
+            }
+            Button("取消", role: .cancel) { pendingAdministratorChange = nil }
+        } message: { change in
+            Text(change.administrator
+                 ? "将为 \(user.displayName)（\(user.identityCode)）开放内容发布、用户审批、通知和管理员分配能力，不授予网站整站控制权。"
+                 : "将移除 \(user.displayName)（\(user.identityCode)）的管理能力，保留其普通用户身份和已有审批状态。")
+        }
         .confirmationDialog(
             "撤销该粉丝的旧密码和全部会话？",
             isPresented: $showRecoveryConfirmation,
@@ -2291,12 +2317,138 @@ private struct FanAccessDetailView: View {
                 .environmentObject(admin)
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { clearPasswordRecoverySecret() }
+            if phase != .active {
+                clearPasswordRecoverySecret()
+                showAdministratorConfirmation = false
+                pendingAdministratorChange = nil
+            }
         }
         .onChange(of: admin.isAuthenticated) { _, authenticated in
-            if !authenticated { clearPasswordRecoverySecret() }
+            if !authenticated {
+                clearPasswordRecoverySecret()
+                showAdministratorConfirmation = false
+                pendingAdministratorChange = nil
+            }
         }
-        .onDisappear { clearPasswordRecoverySecret() }
+        .onAppear { administratorViewIsActive = true }
+        .onDisappear {
+            administratorViewIsActive = false
+            showAdministratorConfirmation = false
+            pendingAdministratorChange = nil
+            clearPasswordRecoverySecret()
+        }
+    }
+
+    private var administratorSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("App 管理员")
+                .font(.system(.title2, design: .serif))
+                .accessibilityAddTraits(.isHeader)
+            Text(user.administratorBound.map { $0 ? "已绑定管理员身份" : "普通用户" } ?? "需要刷新管理员状态")
+                .font(.subheadline.weight(.semibold))
+                .accessibilityIdentifier("fan-administrator-state")
+            if user.userID == admin.boundAdministratorUserID {
+                Text("不能修改自己的管理员身份，请由另一位管理员处理。")
+                    .font(.caption).foregroundStyle(AppTheme.muted)
+            } else if let bound = user.administratorBound, !administratorNeedsRefresh {
+                Button {
+                    Task { await prepareAdministratorChange(desired: !bound) }
+                } label: {
+                    Label(bound ? "撤销管理员身份" : "授予管理员身份", systemImage: "person.crop.circle.badge.checkmark")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .disabled((try? AdminFanAdministratorUpdate(user: user, administrator: !bound)) == nil)
+                .accessibilityIdentifier("fan-change-administrator")
+                if !bound && (user.status != FanAccountStatus.active.rawValue || user.requiresIdentityCompletion || user.requiresPasswordChange) {
+                    Text("请先完成账号资料、抖音 ID 和审批，再授予管理员身份。")
+                        .font(.caption).foregroundStyle(AppTheme.muted)
+                }
+            }
+            if administratorNeedsRefresh || user.administratorBound == nil {
+                Button("刷新管理员状态") { Task { await refreshAdministratorState() } }
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("fan-refresh-administrator")
+            }
+            if let administratorNotice {
+                Text(administratorNotice).font(.caption).foregroundStyle(AppTheme.gold)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+        }
+    }
+
+    private func prepareAdministratorChange(desired: Bool) async {
+        guard admin.canManageFanAdministrators, !isSaving, !isGeneratingRecovery, !isChangingAdministrator else { return }
+        isChangingAdministrator = true
+        defer { isChangingAdministrator = false }
+        do {
+            let fresh = try await admin.fetchFanUser(userID: user.userID)
+            guard administratorViewIsActive, scenePhase == .active, admin.canManageFanAdministrators else { return }
+            user = fresh
+            onUpdate(fresh)
+            administratorNeedsRefresh = false
+            guard fresh.administratorBound != desired else {
+                administratorNotice = "已刷新，对方当前已是所选身份，无需重复操作。"
+                return
+            }
+            pendingAdministratorChange = try AdminFanAdministratorUpdate(user: fresh, administrator: desired)
+            errorMessage = nil
+            administratorNotice = nil
+            showAdministratorConfirmation = true
+        } catch {
+            administratorNeedsRefresh = true
+            errorMessage = (error as? AdminAPIError)?.errorDescription ?? "无法核对用户状态，请刷新后重试。"
+        }
+    }
+
+    private func changeAdministrator(_ change: AdminFanAdministratorUpdate) async {
+        guard admin.canManageFanAdministrators, !isChangingAdministrator,
+              !isSaving, !isGeneratingRecovery, scenePhase == .active,
+              administratorViewIsActive, change.userID == user.userID else { return }
+        pendingAdministratorChange = nil
+        isChangingAdministrator = true
+        defer { isChangingAdministrator = false }
+        do {
+            let fresh = try await admin.updateFanAdministrator(change)
+            guard administratorViewIsActive, admin.isAuthenticated else { return }
+            user = fresh
+            onUpdate(fresh)
+            administratorNeedsRefresh = false
+            administratorNotice = change.administrator ? "已授予管理员身份。" : "已撤销管理员身份。"
+            errorMessage = nil
+        } catch {
+            guard administratorViewIsActive else { return }
+            administratorNeedsRefresh = true
+            administratorNotice = nil
+            errorMessage = (error as? AdminAPIError)?.errorDescription ?? "操作结果暂时无法确认，请刷新状态。"
+            // A timeout may follow a committed write. Refresh only; never retry a mutation automatically.
+            if let fresh = try? await admin.fetchFanUser(userID: change.userID),
+               administratorViewIsActive, admin.isAuthenticated {
+                user = fresh
+                onUpdate(fresh)
+                administratorNeedsRefresh = false
+                administratorNotice = "已读取最新状态，请核对后再决定是否操作。"
+            }
+        }
+    }
+
+    private func refreshAdministratorState() async {
+        guard admin.canManageFanAdministrators, !isChangingAdministrator else { return }
+        isChangingAdministrator = true
+        defer { isChangingAdministrator = false }
+        do {
+            let fresh = try await admin.fetchFanUser(userID: user.userID)
+            guard administratorViewIsActive, admin.isAuthenticated else { return }
+            user = fresh
+            onUpdate(fresh)
+            administratorNeedsRefresh = false
+            errorMessage = nil
+            administratorNotice = "管理员状态已刷新。"
+        } catch {
+            administratorNeedsRefresh = true
+            errorMessage = (error as? AdminAPIError)?.errorDescription ?? "刷新失败，请稍后重试。"
+        }
     }
 
     private func permissionBinding(_ code: String) -> Binding<Bool> {
@@ -2684,3 +2836,65 @@ private struct AccountTextFieldStyle: TextFieldStyle {
             .modifier(ThemeInputChrome())
     }
 }
+
+#if DEBUG
+/// In-memory UI fixture. No production account, credential, endpoint mutation or file upload.
+@MainActor
+private final class AdministratorBindingUIFixture: ObservableObject {
+    @Published var writes = 0
+    private(set) var user = AdminFanUser(
+        userID: "00000000-0000-4000-8000-000000000001", identityCode: "HS-ABCD-2345",
+        displayName: "管理员绑定测试用户", douyinID: "fixture_douyin", permissions: ["gallery_full"],
+        status: "active", registeredAt: Date(timeIntervalSince1970: 1_700_000_000), reviewedAt: nil,
+        administratorBound: false, administratorRevision: 7
+    )
+    func load(_ request: URLRequest) async throws -> (Data, URLResponse) {
+        guard let url = request.url else { throw AdminAPIError.invalidResponse }
+        var code = 200
+        let body: Data
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        if url.path.hasSuffix("/app-admin/session") {
+            body = Data(#"{"authenticated":true,"role":"yishu_content_manager","displayName":"测试管理员","canManageFanAdministrators":true}"#.utf8)
+        } else if url.path.hasSuffix("/administrator"), request.httpMethod == "POST",
+                  let data = request.httpBody,
+                  let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let desired = payload["administrator"] as? Bool {
+            writes += 1
+            let conflict = ProcessInfo.processInfo.arguments.contains("-fan-administrator-conflict-for-testing") && writes == 1
+            user = AdminFanUser(userID: user.userID, identityCode: user.identityCode,
+                displayName: user.displayName, douyinID: user.douyinID, permissions: user.permissions,
+                status: user.status, registeredAt: user.registeredAt, reviewedAt: nil,
+                administratorBound: conflict ? true : desired, administratorRevision: (user.administratorRevision ?? 7) + 1)
+            if conflict {
+                code = 409
+                body = Data(#"{"code":"fan_admin_conflict","message":"管理员身份已被其他操作修改，请刷新后重试。"}"#.utf8)
+            } else { body = try encoder.encode(["user": user]) }
+        } else if url.path.hasSuffix("/fans/\(user.userID)"), request.httpMethod == "GET" {
+            body = try encoder.encode(["user": user])
+        } else { throw AdminAPIError.invalidResponse }
+        guard let response = HTTPURLResponse(url: url, statusCode: code, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]) else { throw AdminAPIError.invalidResponse }
+        return (body, response)
+    }
+}
+
+struct FanAdministratorBindingTestScreen: View {
+    @StateObject private var fixture: AdministratorBindingUIFixture
+    @StateObject private var admin: AdminSessionStore
+    init() {
+        let fixture = AdministratorBindingUIFixture()
+        _fixture = StateObject(wrappedValue: fixture)
+        _admin = StateObject(wrappedValue: AdminSessionStore(jsonLoader: fixture.load))
+    }
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("writes=\(fixture.writes)").accessibilityIdentifier("fixture-admin-binding-writes")
+            FanAccessDetailView(user: fixture.user, catalog: [], canSendPushNotifications: false, onUpdate: { _ in })
+                .environmentObject(admin)
+        }
+        .task { await admin.signIn(username: "synthetic-ui-manager", applicationPassword: UUID().uuidString) }
+        .onDisappear { admin.lock() }
+    }
+}
+#endif

@@ -3,6 +3,58 @@ import XCTest
 import Vision
 
 final class YishuUITests: XCTestCase {
+    func testAdministratorBindingRequiresConfirmationAndCanRevoke() {
+        let app = launchAdministratorBindingFixture()
+        let action = element("fan-change-administrator", in: app)
+        XCTAssertTrue(action.waitForExistence(timeout: 12))
+        scrollToElement(action, in: app)
+        action.tap()
+        let confirm = app.buttons["确认授予"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        XCTAssertEqual(element("fixture-admin-binding-writes", in: app).label, "writes=0")
+        confirm.tap()
+        let state = element("fan-administrator-state", in: app)
+        XCTAssertTrue(state.waitForExistence(timeout: 5))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "已绑定管理员身份"), object: state)], timeout: 5), .completed,
+            app.debugDescription)
+        scrollToElement(action, in: app)
+        action.tap()
+        let revoke = app.buttons["确认撤销"].firstMatch
+        XCTAssertTrue(revoke.waitForExistence(timeout: 5))
+        XCTAssertEqual(element("fixture-admin-binding-writes", in: app).label, "writes=1")
+        revoke.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "普通用户"), object: state)], timeout: 5), .completed,
+            app.debugDescription)
+        XCTAssertEqual(element("fixture-admin-binding-writes", in: app).label, "writes=2")
+    }
+
+    func testAdministratorBindingConflictRefreshesWithoutSecondMutation() {
+        let app = launchAdministratorBindingFixture(conflict: true)
+        let action = element("fan-change-administrator", in: app)
+        XCTAssertTrue(action.waitForExistence(timeout: 12))
+        scrollToElement(action, in: app)
+        action.tap()
+        let confirm = app.buttons["确认授予"].firstMatch
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5))
+        confirm.tap()
+        let notice = app.staticTexts["已读取最新状态，请核对后再决定是否操作。"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 5))
+        XCTAssertEqual(element("fan-administrator-state", in: app).label, "已绑定管理员身份")
+        XCTAssertEqual(element("fixture-admin-binding-writes", in: app).label, "writes=1")
+    }
+
+    private func launchAdministratorBindingFixture(conflict: Bool = false) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = ["-skip-launch-poster-for-visual-testing", "-reset-fan-session-for-visual-testing",
+            "-bypass-access-gate-for-visual-testing", "-open-fan-administrator-for-testing",
+            "-skip-startup-notification-authorization-for-testing"]
+        if conflict { app.launchArguments.append("-fan-administrator-conflict-for-testing") }
+        app.launch()
+        return app
+    }
+
     /// Run on a fresh simulator so notification permission is not determined.
     func testStartupAsksSystemNotificationPermissionBeforeLogin() {
         let app = XCUIApplication()

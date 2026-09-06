@@ -26,6 +26,7 @@ enum AdminAPIError: LocalizedError {
     case fileTooLarge
     case unsupportedFileType
     case networkUnavailable
+    case administratorConflict
     case server(String)
 
     var errorDescription: String? {
@@ -46,6 +47,8 @@ enum AdminAPIError: LocalizedError {
             return "仅支持 JPEG、PNG、HEIC、WebP 图片或 MP4、MOV 视频。"
         case .networkUnavailable:
             return "无法安全连接内容服务器，请检查网络后重试。"
+        case .administratorConflict:
+            return "管理员身份已被其他操作修改，请刷新后重新确认。"
         case .server(let message):
             return message
         }
@@ -456,6 +459,7 @@ final class AdminSessionStore: ObservableObject {
     @Published private(set) var role: AppUserRole = .visitor
     @Published private(set) var isWorking = false
     @Published var errorMessage: String?
+    @Published private var serverCanManageFanAdministrators = false
 
     private var credential: AdminCredential?
     private weak var boundAccount: (any FanAdministratorAccount)?
@@ -478,6 +482,8 @@ final class AdminSessionStore: ObservableObject {
     }
 
     var isIndependentAdministrator: Bool { isAuthenticated && boundContext == nil }
+    var canManageFanAdministrators: Bool { isAuthenticated && serverCanManageFanAdministrators }
+    var boundAdministratorUserID: String? { isAuthenticated ? boundContext?.userID : nil }
 
     private var hasCurrentAuthenticationSource: Bool {
         if let boundContext {
@@ -532,7 +538,8 @@ final class AdminSessionStore: ObservableObject {
             )
             guard attemptGeneration == authenticationGeneration,
                   credential == candidate else { return }
-            establishSession(displayName: session.displayName)
+            establishSession(displayName: session.displayName,
+                             canManageFanAdministrators: session.canManageFanAdministrators == true)
             errorMessage = nil
         } catch {
             guard attemptGeneration == authenticationGeneration else { return }
@@ -588,7 +595,8 @@ final class AdminSessionStore: ObservableObject {
                   !response.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw AdminAPIError.invalidResponse
             }
-            establishSession(displayName: response.displayName)
+            establishSession(displayName: response.displayName,
+                             canManageFanAdministrators: response.canManageFanAdministrators == true)
             errorMessage = nil
         } catch {
             guard generation == authenticationGeneration else { return }
@@ -612,6 +620,7 @@ final class AdminSessionStore: ObservableObject {
         boundAccountObservation = nil
         boundAccount = nil
         boundContext = nil
+        serverCanManageFanAdministrators = false
         authenticatedUntil = nil
         role = .visitor
     }
@@ -838,6 +847,29 @@ final class AdminSessionStore: ObservableObject {
             throw AdminAPIError.invalidResponse
         }
         return response.passwordRecovery
+    }
+
+    func fetchFanUser(userID: String) async throws -> AdminFanUser {
+        let uuid = try AdminFanAdministratorUpdate.canonicalUserID(userID)
+        let response: AdminFanAccessUpdateResponse = try await authorizedJSON(
+            path: "shuzijun/v1/app-admin/fans/\(uuid)", method: "GET"
+        )
+        guard response.user.userID == uuid, FanAccountValidation.isValidAdminFanUser(response.user) else {
+            throw AdminAPIError.invalidResponse
+        }
+        return response.user
+    }
+
+    func updateFanAdministrator(_ update: AdminFanAdministratorUpdate) async throws -> AdminFanUser {
+        guard canManageFanAdministrators, boundAdministratorUserID != update.userID else {
+            throw AdminAPIError.insufficientPermission
+        }
+        let response: AdminFanAccessUpdateResponse = try await authorizedJSON(
+            path: "shuzijun/v1/app-admin/fans/\(update.userID)/administrator",
+            method: "POST", body: try JSONEncoder().encode(update)
+        )
+        guard update.accepts(response.user) else { throw AdminAPIError.invalidResponse }
+        return response.user
     }
 
     func updateFanAccess(
@@ -1099,6 +1131,9 @@ final class AdminSessionStore: ObservableObject {
                 }
                 throw AdminAPIError.insufficientPermission
             }
+            if http.statusCode == 409, serverError?.code == "fan_admin_conflict" {
+                throw AdminAPIError.administratorConflict
+            }
             throw AdminAPIError.server(
                 safeServerMessage(serverError?.message, statusCode: http.statusCode)
             )
@@ -1136,8 +1171,9 @@ final class AdminSessionStore: ObservableObject {
             : String(normalized.prefix(180))
     }
 
-    private func establishSession(displayName: String) {
+    private func establishSession(displayName: String, canManageFanAdministrators: Bool) {
         let expiry = Date().addingTimeInterval(Self.sessionLifetime)
+        serverCanManageFanAdministrators = canManageFanAdministrators
         authenticatedUntil = expiry
         role = .administrator(displayName: displayName)
         expirationTask?.cancel()
@@ -1201,6 +1237,46 @@ private struct AdminSessionResponse: Decodable {
     let displayName: String
     let authenticated: Bool?
     let role: String?
+    let canManageFanAdministrators: Bool?
+}
+
+struct AdminFanAdministratorUpdate: Encodable, Equatable {
+    let userID: String
+    let administrator: Bool
+    let expectedAdministrator: Bool
+    let expectedRevision: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case administrator, expectedAdministrator, expectedRevision
+    }
+
+    init(user: AdminFanUser, administrator: Bool) throws {
+        userID = try Self.canonicalUserID(user.userID)
+        guard FanAccountValidation.isValidAdminFanUser(user),
+              let previous = user.administratorBound, let revision = user.administratorRevision,
+              revision >= 0, revision < Int.max,
+              !administrator || (user.status == FanAccountStatus.active.rawValue
+                && !user.requiresIdentityCompletion && !user.requiresPasswordChange
+                && FanAccountValidation.isCompleteDouyinID(user.douyinID)) else {
+            throw AdminAPIError.invalidResponse
+        }
+        self.administrator = administrator
+        expectedAdministrator = previous
+        expectedRevision = revision
+    }
+
+    static func canonicalUserID(_ value: String) throws -> String {
+        let uuid = value.lowercased()
+        guard uuid.range(of: #"^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"#,
+                         options: .regularExpression) != nil else { throw AdminAPIError.invalidResponse }
+        return uuid
+    }
+
+    func accepts(_ user: AdminFanUser) -> Bool {
+        user.userID == userID && FanAccountValidation.isValidAdminFanUser(user)
+            && user.administratorBound == administrator
+            && user.administratorRevision == expectedRevision + (administrator == expectedAdministrator ? 0 : 1)
+    }
 }
 
 struct AppContentUpdate: Encodable {

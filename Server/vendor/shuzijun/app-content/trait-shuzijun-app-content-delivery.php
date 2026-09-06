@@ -138,6 +138,8 @@ trait Shuzijun_App_Content_Delivery {
             'username' => $user->user_login,
             'displayName' => $user->display_name,
             'role' => self::ROLE,
+            'canManageFanAdministrators' => self::account_authority_enabled()
+                && self::administrator_actor_has_full_app_capabilities($user),
         ));
         $response->header('Cache-Control', 'private, no-store');
         return $response;

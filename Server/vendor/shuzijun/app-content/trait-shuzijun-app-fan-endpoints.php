@@ -2443,6 +2443,24 @@ trait Shuzijun_App_Fan_Endpoints {
         }
     }
 
+    public static function get_fan_access(WP_REST_Request $request) {
+        if (!self::authenticate_manager_for_capability($request, self::FAN_CAPABILITY)) {
+            return new WP_Error('fan_admin_forbidden', '请重新验证管理员身份。', array('status' => 403));
+        }
+        $uuid = $request->get_url_params()['uuid'] ?? null;
+        if (!is_string($uuid) || !preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/D', $uuid)) {
+            return new WP_Error('fan_not_found', '用户不存在。', array('status' => 404));
+        }
+        $users = get_users(array('number' => 2, 'fields' => 'all',
+            'meta_key' => self::FAN_META_UUID, 'meta_value' => $uuid));
+        if (count($users) !== 1 || !$users[0] instanceof WP_User) {
+            return new WP_Error('fan_not_found', '用户不存在。', array('status' => 404));
+        }
+        $response = rest_ensure_response(array('user' => self::fan_admin_profile($users[0])));
+        $response->header('Cache-Control', 'private, no-store');
+        return $response;
+    }
+
     public static function list_fans(WP_REST_Request $request) {
         $search = sanitize_text_field((string) $request->get_param('search'));
         if (self::text_length($search) > 80) {

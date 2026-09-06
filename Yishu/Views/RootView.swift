@@ -10,6 +10,7 @@ private enum AppTab: Hashable {
 }
 
 private enum VisualTestingDestination {
+    case fanAdministrator
     case admin
     case collaboration
 }
@@ -60,7 +61,9 @@ struct RootView: View {
         visualPortfolioTitle = title
         let destination: VisualTestingDestination?
 #if DEBUG
-        if arguments.contains("-open-admin-for-visual-testing") {
+        if arguments.contains("-open-fan-administrator-for-testing") {
+            destination = .fanAdministrator
+        } else if arguments.contains("-open-admin-for-visual-testing") {
             destination = .admin
         } else if arguments.contains("-open-collaboration-for-visual-testing") {
             destination = .collaboration
@@ -400,6 +403,8 @@ struct RootView: View {
     private var visualAboutContent: some View {
 #if DEBUG
         switch visualTestingDestination {
+        case .fanAdministrator:
+            FanAdministratorBindingTestScreen()
         case .admin:
             AdminView()
         case .collaboration:

@@ -227,6 +227,150 @@ private enum TestCredentialFixture {
 }
 
 @MainActor
+final class AdministratorBindingTests: XCTestCase {
+    private func user(bound: Bool? = false, revision: Int? = 7, status: String = "active",
+                      douyin: String = "test_douyin", userID: String = "00000000-0000-4000-8000-000000000001") -> AdminFanUser {
+        AdminFanUser(userID: userID, identityCode: "HS-ABCD-2345", displayName: "测试用户",
+                     douyinID: douyin, permissions: ["gallery_full"], status: status,
+                     registeredAt: Date(timeIntervalSince1970: 1_700_000_000), reviewedAt: nil,
+                     administratorBound: bound, administratorRevision: revision)
+    }
+
+    private func response(_ request: URLRequest, code: Int = 200, body: Data) throws -> (Data, URLResponse) {
+        let url = try XCTUnwrap(request.url)
+        return (body, try XCTUnwrap(HTTPURLResponse(url: url, statusCode: code, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"])))
+    }
+
+    private func profileBody(_ user: AdminFanUser) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(["user": user])
+    }
+
+    private let sessionBody = Data(#"{"authenticated":true,"role":"yishu_content_manager","displayName":"测试管理员","canManageFanAdministrators":true}"#.utf8)
+
+    func testRequestRequiresKnownRevisionAndContainsOnlyExplicitBindingFields() throws {
+        let update = try AdminFanAdministratorUpdate(user: user(), administrator: true)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(update)) as? [String: Any])
+        XCTAssertEqual(Set(body.keys), ["administrator", "expectedAdministrator", "expectedRevision"])
+        XCTAssertEqual(body["administrator"] as? Bool, true)
+        XCTAssertEqual(body["expectedAdministrator"] as? Bool, false)
+        XCTAssertEqual(body["expectedRevision"] as? Int, 7)
+        for invalid in [user(bound: nil, revision: nil), user(bound: nil), user(revision: nil),
+                        user(revision: -1), user(revision: Int.max), user(status: "pending"),
+                        user(status: "suspended"), user(douyin: ""), user(userID: "../other")] {
+            XCTAssertThrowsError(try AdminFanAdministratorUpdate(user: invalid, administrator: true))
+        }
+        XCTAssertNoThrow(try AdminFanAdministratorUpdate(user: user(bound: true, status: "suspended"), administrator: false))
+        XCTAssertFalse(FanAccountValidation.isValidAdminFanUser(user(bound: true, revision: nil)))
+        XCTAssertTrue(FanAccountValidation.isValidAdminFanUser(user(bound: nil, revision: nil)))
+    }
+
+    func testResponseMustMatchUserDesiredRoleAndExactRevision() throws {
+        let change = try AdminFanAdministratorUpdate(user: user(), administrator: true)
+        XCTAssertTrue(change.accepts(user(bound: true, revision: 8)))
+        XCTAssertFalse(change.accepts(user(bound: true, revision: 7)))
+        XCTAssertFalse(change.accepts(user(bound: true, revision: 9)))
+        XCTAssertFalse(change.accepts(user(bound: false, revision: 8)))
+        XCTAssertFalse(change.accepts(user(bound: true, revision: 8,
+                                         userID: "00000000-0000-4000-8000-000000000002")))
+        let noop = try AdminFanAdministratorUpdate(user: user(bound: true), administrator: true)
+        XCTAssertTrue(noop.accepts(user(bound: true)))
+    }
+
+    func testGrantAndRevokeUseServerCapabilityAndExpectedState() async throws {
+        for desired in [true, false] {
+            let account = BoundAdministratorTestAccount()
+            let before = user(bound: !desired)
+            let after = user(bound: desired, revision: 8)
+            var calls = 0
+            let admin = AdminSessionStore { request in
+                calls += 1
+                if calls == 1 { return try self.response(request, body: self.sessionBody) }
+                XCTAssertEqual(request.httpMethod, "POST")
+                XCTAssertEqual(request.url?.path, "/wp-json/shuzijun/v1/app-admin/fans/\(before.userID)/administrator")
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+                XCTAssertEqual(body["administrator"] as? Bool, desired)
+                XCTAssertEqual(body["expectedRevision"] as? Int, 7)
+                return try self.response(request, body: self.profileBody(after))
+            }
+            await admin.signIn(using: account)
+            XCTAssertTrue(admin.canManageFanAdministrators)
+            let result = try await admin.updateFanAdministrator(.init(user: before, administrator: desired))
+            XCTAssertEqual(result, after)
+            XCTAssertEqual(calls, 2)
+            admin.lock()
+            XCTAssertFalse(admin.canManageFanAdministrators)
+        }
+    }
+
+    func testMissingCapabilityAndSelfChangeAreRejectedBeforeMutation() async throws {
+        for selfChange in [false, true] {
+            let account = BoundAdministratorTestAccount()
+            if selfChange { account.administratorContext = .init(userID: user().userID, sessionGeneration: 1) }
+            var calls = 0
+            let admin = AdminSessionStore { request in
+                calls += 1
+                let body = selfChange ? self.sessionBody
+                    : Data(#"{"authenticated":true,"role":"yishu_content_manager","displayName":"旧服务端"}"#.utf8)
+                return try self.response(request, body: body)
+            }
+            await admin.signIn(using: account)
+            do {
+                _ = try await admin.updateFanAdministrator(.init(user: user(), administrator: true))
+                XCTFail("Unauthorized mutation was allowed")
+            } catch { XCTAssertEqual(calls, 1) }
+            admin.lock()
+        }
+    }
+
+    func testConflictIsNotRetriedAndDoesNotLockValidAdministrator() async throws {
+        let account = BoundAdministratorTestAccount()
+        var calls = 0
+        let admin = AdminSessionStore { request in
+            calls += 1
+            if calls == 1 { return try self.response(request, body: self.sessionBody) }
+            return try self.response(request, code: 409,
+                body: Data(#"{"code":"fan_admin_conflict","message":"refresh required"}"#.utf8))
+        }
+        await admin.signIn(using: account)
+        do {
+            _ = try await admin.updateFanAdministrator(.init(user: user(), administrator: true))
+            XCTFail("Conflict was treated as success")
+        } catch let error as AdminAPIError {
+            guard case .administratorConflict = error else { return XCTFail("Wrong error: \(error)") }
+        }
+        XCTAssertEqual(calls, 2)
+        XCTAssertTrue(admin.isAuthenticated)
+        admin.lock()
+    }
+
+    func testRefreshUsesExactUserAndRejectsDifferentUserResponse() async throws {
+        for wrongUser in [false, true] {
+            let account = BoundAdministratorTestAccount()
+            let target = user()
+            var calls = 0
+            let admin = AdminSessionStore { request in
+                calls += 1
+                if calls == 1 { return try self.response(request, body: self.sessionBody) }
+                XCTAssertEqual(request.httpMethod, "GET")
+                XCTAssertEqual(request.url?.path, "/wp-json/shuzijun/v1/app-admin/fans/\(target.userID)")
+                let returned = wrongUser ? self.user(userID: "00000000-0000-4000-8000-000000000002") : target
+                return try self.response(request, body: self.profileBody(returned))
+            }
+            await admin.signIn(using: account)
+            do {
+                let result = try await admin.fetchFanUser(userID: target.userID)
+                XCTAssertFalse(wrongUser)
+                XCTAssertEqual(result, target)
+            } catch { XCTAssertTrue(wrongUser) }
+            admin.lock()
+        }
+    }
+}
+
+@MainActor
 private final class TestPushAuthorizationClient: PushAuthorizationClient {
     enum Outcome {
         case granted

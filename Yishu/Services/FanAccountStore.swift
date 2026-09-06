@@ -428,6 +428,7 @@ enum FanAccountValidation {
 
     static func isValidAdminFanUser(_ user: AdminFanUser) -> Bool {
         guard UUID(uuidString: user.userID) != nil,
+              user.hasConsistentAdministratorBinding,
               normalizedIdentityCode(user.identityCode) == user.identityCode,
               let source = FanAccountSource(rawValue: user.accountSource),
               FanAccountStatus(rawValue: user.status) != nil else { return false }
@@ -2304,6 +2305,8 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
     let passwordRecoveryExpiresAt: Date?
     let accountSource: String
     let requiresAppleRegistration: Bool
+    let administratorBound: Bool?
+    let administratorRevision: Int?
 
     init(
         userID: String,
@@ -2319,7 +2322,9 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
         requiresPasswordChange: Bool = false,
         passwordRecoveryExpiresAt: Date? = nil,
         accountSource: String = FanAccountSource.password.rawValue,
-        requiresAppleRegistration: Bool = false
+        requiresAppleRegistration: Bool = false,
+        administratorBound: Bool? = nil,
+        administratorRevision: Int? = nil
     ) {
         self.userID = userID
         self.identityCode = identityCode
@@ -2335,6 +2340,8 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
         self.passwordRecoveryExpiresAt = passwordRecoveryExpiresAt
         self.accountSource = accountSource
         self.requiresAppleRegistration = requiresAppleRegistration
+        self.administratorBound = administratorBound
+        self.administratorRevision = administratorRevision
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -2352,6 +2359,8 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
         case passwordRecoveryExpiresAt
         case accountSource
         case requiresAppleRegistration
+        case administratorBound
+        case administratorRevision
     }
 
     init(from decoder: Decoder) throws {
@@ -2388,9 +2397,18 @@ struct AdminFanUser: Codable, Identifiable, Equatable {
             Bool.self,
             forKey: .requiresAppleRegistration
         ) ?? false
+        administratorBound = try container.decodeIfPresent(Bool.self, forKey: .administratorBound)
+        administratorRevision = try container.decodeIfPresent(Int.self, forKey: .administratorRevision)
     }
 
     var id: String { userID }
+    var hasConsistentAdministratorBinding: Bool {
+        switch (administratorBound, administratorRevision) {
+        case (nil, nil): true // Legacy server: no grant/revoke control.
+        case (.some, .some(let revision)): revision >= 0
+        default: false
+        }
+    }
     var requiresIdentityCompletion: Bool {
         requiresAccountSetup || requiresAppleRegistration || douyinID.isEmpty
     }

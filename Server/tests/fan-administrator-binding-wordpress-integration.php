@@ -59,6 +59,39 @@ try {
     $actor = $make_fan(true);
     $target = $make_fan();
     $ordinary = $make_fan();
+    $read_request = static function (array $caller, array $subject): WP_REST_Request {
+        $read = new WP_REST_Request('GET', '/shuzijun/v1/app-admin/fans/' . $subject['uuid']);
+        $read->set_header('Authorization', 'Bearer ' . $caller['token']);
+        $read->set_header('X-Yishu-Install-ID', $caller['install']);
+        $read->set_url_params(array('uuid' => $subject['uuid']));
+        return $read;
+    };
+    $read = $read_request($actor, $target);
+    check_wordpress_schema(Shuzijun_App_Content_API::can_manage_fans($read) === true, 'full actor may read exact fan');
+    check_wordpress_schema(Shuzijun_App_Content_API::session()->get_data()['canManageFanAdministrators'] === true,
+        'session advertises full administrator allocation capability');
+    $read->set_query_params(array('uuid' => $ordinary['uuid']));
+    $read_response = Shuzijun_App_Content_API::get_fan_access($read);
+    check_wordpress_schema($read_response instanceof WP_REST_Response
+        && $read_response->get_data()['user']['userID'] === $target['uuid'], 'query cannot redirect exact user refresh');
+    check_wordpress_schema($read_response->get_data()['user']['administratorBound'] === false
+        && $read_response->get_data()['user']['administratorRevision'] === 0, 'fresh read supplies binding and revision');
+    check_wordpress_schema($read_response->get_headers()['Cache-Control'] === 'private, no-store', 'user refresh is not cacheable');
+    $assert_binding_error(Shuzijun_App_Content_API::get_fan_access($read_request($ordinary, $target)),
+        'fan_admin_forbidden', 'ordinary user cannot read administrative profile');
+    check_wordpress_schema(Shuzijun_App_Content_API::session()->get_data()['canManageFanAdministrators'] === false,
+        'ordinary current user never advertises allocation capability');
+    Shuzijun_App_Content_API::can_manage_fans($read);
+    file_put_contents($marker, "standby\n");
+    check_wordpress_schema(Shuzijun_App_Content_API::session()->get_data()['canManageFanAdministrators'] === false,
+        'standby session does not advertise writes');
+    file_put_contents($marker, "authority\n");
+    $invalid_read = $read_request($actor, $target);
+    $invalid_read->set_url_params(array('uuid' => 'invalid'));
+    $assert_binding_error(Shuzijun_App_Content_API::get_fan_access($invalid_read), 'fan_not_found', 'malformed target rejects refresh');
+    update_user_meta($ordinary['id'], Shuzijun_App_Content_API::FAN_META_UUID, $target['uuid']);
+    $assert_binding_error(Shuzijun_App_Content_API::get_fan_access($read), 'fan_not_found', 'duplicate identity rejects refresh');
+    update_user_meta($ordinary['id'], Shuzijun_App_Content_API::FAN_META_UUID, $ordinary['uuid']);
     $call = static function (array $caller, array $subject, $desired, $expected) use ($binding_request) {
         wp_set_current_user(0);
         return Shuzijun_App_Content_API::update_fan_administrator($binding_request($caller, $subject, $desired, $expected));
@@ -211,6 +244,11 @@ try {
 
     add_action('rest_api_init', array(Shuzijun_App_Content_API::class, 'register_routes'));
     $server = rest_get_server();
+    $read_route = $server->dispatch($read_request($actor, $target));
+    check_wordpress_schema($read_route->get_status() === 200 && $read_route->get_data()['user']['userID'] === $target['uuid'],
+        'registered GET route reads exact fan profile');
+    $anonymous_read = $server->dispatch(new WP_REST_Request('GET', '/shuzijun/v1/app-admin/fans/' . $target['uuid']));
+    check_wordpress_schema($anonymous_read->get_status() >= 400, 'GET route denies anonymous profile reads');
     wp_set_current_user(0);
     $anonymous = new WP_REST_Request('PATCH', '/shuzijun/v1/app-admin/fans/' . $target['uuid'] . '/administrator');
     $anonymous->set_param('administrator', true);

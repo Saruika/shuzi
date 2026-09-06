@@ -542,9 +542,16 @@ final class Shuzijun_App_Content_API {
         ));
 
         register_rest_route('shuzijun/v1', '/app-admin/fans/(?P<uuid>[a-f0-9-]{36})', array(
-            'methods' => WP_REST_Server::EDITABLE,
-            'callback' => array(__CLASS__, 'update_fan_access'),
-            'permission_callback' => array(__CLASS__, 'can_manage_fans'),
+            array(
+                'methods' => WP_REST_Server::READABLE,
+                'callback' => array(__CLASS__, 'get_fan_access'),
+                'permission_callback' => array(__CLASS__, 'can_manage_fans'),
+            ),
+            array(
+                'methods' => WP_REST_Server::EDITABLE,
+                'callback' => array(__CLASS__, 'update_fan_access'),
+                'permission_callback' => array(__CLASS__, 'can_manage_fans'),
+            ),
         ));
 
         register_rest_route('shuzijun/v1', '/app-admin/fans/(?P<uuid>[a-f0-9-]{36})/administrator', array(
