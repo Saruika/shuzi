@@ -4,7 +4,9 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-**最新审核后台进度：[v1.4.0-build4-review-env-preview10](Server/releases/v1.4.0-build4-review-env-preview10.md)。** 主节点已建立仅本机访问的独立数据库、运行身份、WordPress 和 PHP/nginx 服务。23 项真实注册/审批/管理员绑定与撤销/删号检查通过，临时合成账号和凭据已清除；未复制正式用户或修改正式服务。14 项本地部署边界检查通过。仍无公开 DNS/HTTPS、授权媒体、Test2 或 Release 审核入口，不是可交付的公开审核后台，也未上传 TestFlight。
+**最新审核后台进度：[v1.4.0-build4-review-env-preview11](Server/releases/v1.4.0-build4-review-env-preview11.md)。** 独立子域名与专用 HTTPS 已通，HTTP 只跳转 HTTPS；带部署 hook 的证书续期演练通过。真实 HTTPS 入口的 23 项账号流程通过，并验证独立访客限流与代理身份覆盖。现仍为配置中，授权媒体、最终审核账号、Apple/发信/推送和 App Release 入口待完成；不是整套审核环境验收完成，未上传 TestFlight。
+
+**私有后台引导记录：[v1.4.0-build4-review-env-preview10](Server/releases/v1.4.0-build4-review-env-preview10.md)。** 主节点已建立独立数据库、运行身份、WordPress 和 PHP/nginx 服务。23 项真实注册/审批/管理员绑定与撤销/删号检查通过，临时合成账号和凭据已清除；未复制正式用户或修改正式业务模块。14 项本地部署边界检查通过。该阶段仅本机访问，后续公开 HTTPS 进度见 preview11。
 
 **审核业务模块候选：[v1.4.0-build4-review-env-preview9](Server/releases/v1.4.0-build4-review-env-preview9.md)。** 服务端 1.5.13.8 补齐审核模式的默认素材、媒体来源和通知环境字段隔离，修复 URL 分量判断与首次视频配置边界。117 项新增 PHP 断言、完整 PHP 契约回归及本地检查脚本通过；发布摘要已更新且未放宽验证。当时未部署；其后的私有部署进度见 preview10，正式后台仍未更新。
 

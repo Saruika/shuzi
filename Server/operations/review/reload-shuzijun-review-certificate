@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ ${RENEWED_LINEAGE:-} == /etc/letsencrypt/live/review.shuzijun.com.cn ]] || exit 0
+/usr/sbin/nginx -t
+/usr/bin/systemctl reload nginx

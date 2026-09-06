@@ -63,3 +63,32 @@ Password，验证抖音必填、待审禁入、自批拒绝、正式审批、免
 仍需独立域名 HTTPS、授权演示素材、媒体上传/发布/删除验收、Apple 登录与撤销、独立推送和
 邮件配置、持久运行监控、App 显式入口与持续演示标识，以及 Test1/Test2 最终交付。
 不可为了展示可用而隐藏未完成业务，也不可对审核员身份提供不同业务逻辑。
+
+## HTTPS 阶段（preview11，当前状态）
+
+上段的“仍需 HTTPS”是引导阶段记录；现已新增 `review` A 记录与专用 nginx vhost，外网 HTTPS
+和固定主机名校验通过，公开入口仅反向代理独立实例，不访问正式站点目录。
+HTTP 的 ACME 路径用于证书验证，其余请求仅重定向到固定 HTTPS 域名；不接受 HTTP 登录/管理。
+
+`deploy-edge.sh challenge /absolute/assets` 只接受不存在的审核 vhost；证书签发后执行
+`deploy-edge.sh https /absolute/assets` 只接受精确匹配的 challenge 前置文件。
+应用配置前取得既有站点维护锁，失败恢复本次审核 vhost；不覆盖其他域名配置，不重启 nginx。
+
+证书通过 [Certbot webroot](https://eff-certbot.readthedocs.io/en/stable/using.html#webroot)
+方式签发，专属 webroot 为 `/var/lib/shuzijun-review-acme`，证书 lineage 为
+`/etc/letsencrypt/live/review.shuzijun.com.cn`。续期部署 hook 为 root:root 0755 的
+`/usr/local/sbin/reload-shuzijun-review-certificate`，仅匹配该 lineage 时语法检查并 reload。
+复用已启用的 `certbot.timer`；真实 dry-run 含部署 hook 已成功，不另建重复调度器。
+
+HTTPS 入口加入 HSTS、no-store、noindex 等响应头，并覆盖访客自填的代理身份。
+内部 realip 只信任回环连接；实际 PHP location 执行按访客计数的限流。
+规则依据 [nginx realip 文档](https://nginx.org/en/docs/http/ngx_http_realip_module.html)，
+通过 `check-review-proxy.py` 的 76 次回环接口无账号请求实际验证，不向公网执行压力测试。
+
+`accept-review-bootstrap.py --apply --https` 使用 CA 验证与正确 SNI 的本机 HTTPS 连接验证
+公开 vhost。23 项流程已通过，外网健康与 HTTP 跳转也单独通过；没有将本机 TLS 检查等同于
+真实 iPhone/iPad 或 Apple 登录验收。独立服务已加入 multi-user.target 启动依赖。
+
+当前仍为 `configuration-in-progress`：外部发信、Apple 与 APNs 主动阻断，媒体和最终账号
+尚未交付。后台的 bootstrap-state.json 中 `publicReady=false` 指完整业务尚未就绪，不能被
+解释为现在没有 HTTPS 端口；公开网络状态以本节与 preview11 发布记录为准。

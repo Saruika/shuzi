@@ -137,6 +137,42 @@ class ReviewBootstrapTests(unittest.TestCase):
         self.assertIn("--prompt=admin_password", source)
         self.assertNotIn('--admin_password=', source)
 
+    def test_https_edge_preserves_auth_and_overwrites_forwarded_identity(self):
+        config = (SERVER / 'operations/review/edge-https.conf').read_text()
+        for required in ('proxy_pass http://127.0.0.1:18089;',
+                         'proxy_set_header Authorization $http_authorization;',
+                         'proxy_set_header X-Yishu-Install-ID $http_x_yishu_install_id;',
+                         'proxy_set_header X-Yishu-Client-IP $remote_addr;',
+                         'return 308 https://review.shuzijun.com.cn$request_uri;',
+                         'proxy_cache off;', 'proxy_intercept_errors off;'):
+            self.assertIn(required, config)
+        self.assertNotIn('proxy_set_header X-Yishu-Client-IP $http_', config)
+        self.assertNotIn('/var/www/html/', config)
+        self.assertIn('/live/review.shuzijun.com.cn/fullchain.pem', config)
+
+    def test_client_limits_apply_at_final_fastcgi_location(self):
+        config = (SERVER / 'operations/review/nginx.conf').read_text()
+        self.assertIn('set_real_ip_from 127.0.0.1;', config)
+        self.assertIn('real_ip_header X-Yishu-Client-IP;', config)
+        final = config.split('location = /index.php {', 1)[1].split('}', 1)[0]
+        self.assertIn('limit_req zone=review_api burst=20 nodelay;', final)
+        self.assertIn('limit_req_status 429;', final)
+
+    def test_challenge_phase_cannot_proxy_application(self):
+        config = (SERVER / 'operations/review/edge-challenge.conf').read_text()
+        self.assertNotIn('proxy_pass', config)
+        self.assertIn('location / { return 503; }', config)
+        self.assertIn('/.well-known/acme-challenge/', config)
+
+    def test_deployer_targets_only_review_and_checks_exact_predecessor(self):
+        source = (SERVER / 'operations/review/deploy-edge.sh').read_text()
+        self.assertIn('target=/etc/nginx/sites-available/shuzijun-review.conf', source)
+        self.assertIn('enabled=/etc/nginx/sites-enabled/shuzijun-review.conf', source)
+        self.assertIn('cmp --silent "$target" "$assets/edge-challenge.conf"', source)
+        self.assertIn('flock -w 30 -x 9', source)
+        self.assertIn('trap restore EXIT', source)
+        self.assertNotIn('restart nginx', source)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

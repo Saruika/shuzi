@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
+import ssl
 import time
 import uuid
 
@@ -19,6 +21,22 @@ spec = importlib.util.spec_from_file_location('bootstrap', Path(__file__).with_n
 bootstrap = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bootstrap)
 checks = []
+HTTPS_EDGE = False
+
+
+class LocalReviewTLS(http.client.HTTPSConnection):
+    """Local edge connection with normal CA and review hostname verification."""
+    def __init__(self):
+        self.review_context = ssl.create_default_context()
+        super().__init__('review.shuzijun.com.cn', 443, timeout=15, context=self.review_context)
+
+    def connect(self):
+        raw = socket.create_connection(('127.0.0.1', 443), timeout=15)
+        try:
+            self.sock = self.review_context.wrap_socket(raw, server_hostname='review.shuzijun.com.cn')
+        except BaseException:
+            raw.close()
+            raise
 
 
 def check(condition, label):
@@ -34,7 +52,7 @@ def wp_eval(code):
 
 
 def request(path, method='GET', body=None, auth=None, install=None):
-    connection = http.client.HTTPConnection('127.0.0.1', 18089, timeout=15)
+    connection = LocalReviewTLS() if HTTPS_EDGE else http.client.HTTPConnection('127.0.0.1', 18089, timeout=15)
     headers = {'Host': 'review.shuzijun.com.cn', 'Content-Type': 'application/json'}
     if auth:
         headers['Authorization'] = auth
@@ -52,9 +70,12 @@ def request(path, method='GET', body=None, auth=None, install=None):
 
 
 def main():
+    global HTTPS_EDGE
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true', required=True)
-    parser.parse_args()
+    parser.add_argument('--https', action='store_true', help='Exercise public TLS vhost locally with CA/hostname verification')
+    args = parser.parse_args()
+    HTTPS_EDGE = args.https
     if os.geteuid() != 0:
         raise RuntimeError('Root is needed for local acceptance credential custody')
     state = json.loads((bootstrap.CONFIG / 'bootstrap-state.json').read_text())
@@ -143,10 +164,11 @@ def main():
     final_count = int(wp_eval("global $wpdb; echo $wpdb->get_var(\"SELECT COUNT(*) FROM {$wpdb->users}\");"))
     check(initial == final_count, 'no disposable user left in database')
     report = {'passed': len(checks), 'checks': checks, 'timestamp': int(time.time()),
-              'publicReady': False, 'test2Created': False, 'manifest': state['manifest']}
+              'publicReady': False, 'test2Created': False, 'manifest': state['manifest'],
+              'transport': 'verified-https-edge' if HTTPS_EDGE else 'private-http'}
     bootstrap.write_new(bootstrap.CONFIG / ('acceptance-' + uuid.uuid4().hex + '.json'),
                         json.dumps(report, indent=2) + '\n', 0o644)
-    print(f'review-bootstrap-acceptance: {len(checks)} real checks passed; disposable account and credential removed')
+    print(f'review-bootstrap-acceptance: {len(checks)} real checks passed ({report["transport"]}); disposable account and credential removed')
 
 
 if __name__ == '__main__':
