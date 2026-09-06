@@ -1107,7 +1107,7 @@ final class ContentAndAccessTests: XCTestCase {
         }
     }
 
-    func testHomeHeroShowsTheFullPhotoInEveryWindow() {
+    func testHomeHeroRestoresPortraitFillAndRetainsLandscapeFit() {
         XCTAssertEqual(
             HomeHeroRenderPolicy.presentation(
                 for: CGSize(width: 1_366, height: 1_024),
@@ -1120,7 +1120,7 @@ final class ContentAndAccessTests: XCTestCase {
                 for: CGSize(width: 1_024, height: 1_366),
                 idiom: .pad
             ),
-            .fit
+            .fill
         )
         XCTAssertEqual(
             HomeHeroRenderPolicy.presentation(
@@ -1134,7 +1134,7 @@ final class ContentAndAccessTests: XCTestCase {
                 for: CGSize(width: 430, height: 932),
                 idiom: .phone
             ),
-            .fit
+            .fill
         )
     }
 
@@ -1269,21 +1269,23 @@ final class ContentAndAccessTests: XCTestCase {
             updated: [], selection: 4), 0)
     }
 
-    func testGallerySlotsKeepEveryWeeklyPhotoClearOfTextAndWeather() {
+    func testClassicHeroFillsViewportAndKeepsOverlayControlsInsideIt() {
         let sources = [CGSize(width: 959, height: 1440), CGSize(width: 1440, height: 959),
                        CGSize(width: 1200, height: 1200), CGSize(width: 2400, height: 600)]
         for viewport in [CGSize(width: 320, height: 480), CGSize(width: 375, height: 547),
                          CGSize(width: 440, height: 762), CGSize(width: 740, height: 310),
                          CGSize(width: 834, height: 1100), CGSize(width: 1376, height: 910)] {
             for largeText in [false, true] {
-                let layout = HomeGalleryLayout(viewport: viewport, accessibilityText: largeText)
+                let layout = HomeHeroOverlayLayout(viewport: viewport, accessibilityText: largeText)
                 for frame in [layout.image, layout.caption, layout.weather] {
                     XCTAssertTrue(CGRect(origin: .zero, size: viewport).contains(frame))
                     XCTAssertGreaterThan(frame.width, 0)
                     XCTAssertGreaterThan(frame.height, 0)
                 }
-                XCTAssertFalse(layout.image.intersects(layout.caption))
-                XCTAssertFalse(layout.image.intersects(layout.weather))
+                XCTAssertEqual(layout.image, CGRect(origin: .zero, size: viewport),
+                               "经典首页图片必须铺满内容区，不能退回独立画廊照片框")
+                XCTAssertTrue(layout.image.contains(layout.caption))
+                XCTAssertTrue(layout.image.contains(layout.weather))
                 XCTAssertFalse(layout.caption.intersects(layout.weather))
                 for source in sources {
                     let fitted = HomeHeroRenderPolicy.fittedSize(sourceSize: source, in: layout.image.size)
@@ -1293,7 +1295,7 @@ final class ContentAndAccessTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(HomeGalleryLayout(viewport: .zero, accessibilityText: false).image, .zero)
+        XCTAssertEqual(HomeHeroOverlayLayout(viewport: .zero, accessibilityText: false).image, .zero)
     }
 
     @MainActor
@@ -1960,19 +1962,20 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(MediaTheme.warmWhite, original.text.color)
     }
 
-    func testHomeGalleryLayoutDoesNotDependOnTheSelectedPhotoOrTheme() {
+    func testClassicHeroLayoutDoesNotDependOnTheSelectedPhotoOrTheme() {
         for largeText in [false, true] {
-            let portrait = HomeGalleryLayout(viewport: CGSize(width: 834, height: 1100),
+            let portrait = HomeHeroOverlayLayout(viewport: CGSize(width: 834, height: 1100),
                                              accessibilityText: largeText)
-            let landscape = HomeGalleryLayout(viewport: CGSize(width: 1194, height: 740),
+            let landscape = HomeHeroOverlayLayout(viewport: CGSize(width: 1194, height: 740),
                                               accessibilityText: largeText)
-            XCTAssertFalse(portrait.isSideBySide)
-            XCTAssertGreaterThan(portrait.caption.minY, portrait.image.maxY)
-            XCTAssertTrue(landscape.isSideBySide)
-            XCTAssertGreaterThan(landscape.caption.minX, landscape.image.maxX)
+            XCTAssertFalse(portrait.isCompact)
+            XCTAssertGreaterThan(portrait.caption.minY, portrait.image.midY)
+            XCTAssertTrue(landscape.isCompact)
+            XCTAssertGreaterThan(landscape.caption.minY, landscape.image.midY)
+            XCTAssertEqual(landscape.image.width, 1194)
             // Recreating a slot has no image- or theme-dependent measurement
             // that could trigger the old first-frame resizing effect.
-            XCTAssertEqual(portrait, HomeGalleryLayout(viewport: CGSize(width: 834, height: 1100),
+            XCTAssertEqual(portrait, HomeHeroOverlayLayout(viewport: CGSize(width: 834, height: 1100),
                                                        accessibilityText: largeText))
         }
     }

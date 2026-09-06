@@ -12,9 +12,9 @@ enum HomeHeroRenderPolicy {
         for viewport: CGSize,
         idiom: UIUserInterfaceIdiom
     ) -> HomeHeroPresentation {
-        // A weekly selection can contain portrait, landscape and square art.
-        // Cropping must not depend on the particular photograph selected today.
-        .fit
+        // Restore the 1.3 full-bleed portrait presentation. Landscape windows
+        // still fit the entire photograph instead of cropping it to a face.
+        viewport.width > viewport.height ? .fit : .fill
     }
 
     static func fittedSize(sourceSize: CGSize, in viewport: CGSize) -> CGSize {
@@ -74,38 +74,27 @@ enum HomeHeroRenderPolicy {
 
 /// Slots depend only on the safe viewport and text size, never image content
 /// or a delayed geometry preference. A new image cannot move the whole page.
-struct HomeGalleryLayout: Equatable {
+struct HomeHeroOverlayLayout: Equatable {
     let image: CGRect
     let weather: CGRect
     let caption: CGRect
-    let isSideBySide: Bool
+    let isCompact: Bool
 
     init(viewport: CGSize, accessibilityText: Bool) {
         let width = max(0, viewport.width)
         let height = max(0, viewport.height)
-        let inset = min(width / 8, height / 8, width >= 700 ? 24.0 : 16.0)
-        let gap = min(height / 12, height < 620 ? 10.0 : 16.0)
+        let inset = min(width / 8, height / 8, 22.0)
+        let gap = min(height / 12, 16.0)
         let innerWidth = max(0, width - 2 * inset)
         let innerHeight = max(0, height - 2 * inset)
         let header = min(44.0, innerHeight)
-        isSideBySide = width >= 600 && width > height
-
-        if isSideBySide {
-            let copyWidth = min(360, max(240, innerWidth * 0.31))
-            let photoWidth = max(0, innerWidth - copyWidth - gap * 2)
-            image = CGRect(x: inset, y: inset, width: photoWidth, height: innerHeight)
-            let copyX = image.maxX + gap * 2
-            weather = CGRect(x: copyX, y: inset, width: copyWidth, height: header)
-            caption = CGRect(x: copyX, y: weather.maxY + gap, width: copyWidth,
-                             height: max(0, innerHeight - header - gap))
-        } else {
-            weather = CGRect(x: inset, y: inset, width: innerWidth, height: header)
-            let preferredCaption = accessibilityText ? 244.0 : (height < 620 ? 132.0 : 152.0)
-            let captionHeight = min(preferredCaption, max(0, innerHeight - header - 2 * gap) * 0.48)
-            let photoHeight = max(0, innerHeight - header - captionHeight - 2 * gap)
-            image = CGRect(x: inset, y: weather.maxY + gap, width: innerWidth, height: photoHeight)
-            caption = CGRect(x: inset, y: image.maxY + gap, width: innerWidth, height: captionHeight)
-        }
+        isCompact = width > height || height < 620
+        image = CGRect(x: 0, y: 0, width: width, height: height)
+        weather = CGRect(x: inset, y: inset, width: innerWidth, height: header)
+        let preferredCaption = accessibilityText ? 280.0 : (isCompact ? 136.0 : 242.0)
+        let captionHeight = min(preferredCaption, max(0, innerHeight - header - gap))
+        caption = CGRect(x: inset, y: height - inset - captionHeight,
+                         width: innerWidth, height: captionHeight)
     }
 }
 
@@ -227,7 +216,7 @@ private struct HeroPager: View {
             idiom: UIDevice.current.userInterfaceIdiom
         )
         let exposesVisualTestState = exposesHeroStateForVisualTesting
-        let layout = HomeGalleryLayout(viewport: viewport, accessibilityText: dynamicTypeSize.isAccessibilitySize)
+        let layout = HomeHeroOverlayLayout(viewport: viewport, accessibilityText: dynamicTypeSize.isAccessibilitySize)
 
         ZStack(alignment: .topLeading) {
             TabView(selection: Binding(get: { playback.selection }, set: { playback.selection = $0 })) {
@@ -268,12 +257,20 @@ private struct HeroPager: View {
             .background(HomeTouchObserver { playback.isTouching = $0 })
             .offset(x: layout.image.minX, y: layout.image.minY)
 
+            // Localized contrast for white type, not a theme-colored panel
+            // across the photo. The centre and upper photograph stay clear.
+            LinearGradient(colors: [.clear, .black.opacity(0.48)],
+                           startPoint: .top, endPoint: .bottom)
+                .frame(width: viewport.width, height: layout.caption.height + 40)
+                .offset(y: max(0, viewport.height - layout.caption.height - 40))
+                .allowsHitTesting(false)
+
             weatherRow
                 .frame(width: layout.weather.width, height: layout.weather.height)
                 .offset(x: layout.weather.minX, y: layout.weather.minY)
 
-            galleryCaption(in: layout)
-                .frame(width: layout.caption.width, height: layout.caption.height)
+            heroCaption(in: layout)
+                .frame(width: layout.caption.width, height: layout.caption.height, alignment: .bottomLeading)
                 .offset(x: layout.caption.minX, y: layout.caption.minY)
 
             homeHeroVisualTestControls(
@@ -349,39 +346,56 @@ private struct HeroPager: View {
         }
     }
 
-    private func galleryCaption(in layout: HomeGalleryLayout) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: layout.isSideBySide ? 18 : 8) {
-                    heroTitle(font: .system(layout.isSideBySide ? .largeTitle : .title2, design: .serif),
-                              multiline: layout.isSideBySide)
-                    heroSubtitle
+    private func heroCaption(in layout: HomeHeroOverlayLayout) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Spacer(minLength: 0)
+            if dynamicTypeSize.isAccessibilitySize {
+                ScrollView(.vertical) {
+                    heroCopy(compact: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(minHeight: layout.isSideBySide ? max(0, layout.caption.height - 84) : nil,
-                       alignment: .center)
+                .scrollBounceBehavior(.basedOnSize)
+                .accessibilityIdentifier("home-hero-copy-scroll")
+                heroActions.padding(.top, 12)
+            } else if layout.isCompact && viewport.width >= 600 {
+                HStack(alignment: .bottom, spacing: 18) {
+                    heroCopy(compact: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .trailing, spacing: 12) {
+                        portfolioButton
+                        pageIndicator
+                    }
+                }
+            } else {
+                heroCopy(compact: layout.isCompact)
+                heroActions.padding(.top, layout.isCompact ? 12 : 26)
             }
-            .scrollBounceBehavior(.basedOnSize)
-            .scrollIndicators(.visible)
-            .accessibilityIdentifier("home-hero-copy-scroll")
-
-            HStack(spacing: 12) {
-                portfolioButton
-                Spacer(minLength: 0)
-                pageIndicator
-            }
-            // Keep this row comfortably tappable without sacrificing the
-            // whole photograph at AX sizes. The copy above remains scrollable.
-            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         }
-        .foregroundStyle(AppTheme.warmWhite)
+        .foregroundStyle(.white)
+    }
+
+    private func heroCopy(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compact ? 8 : 15) {
+            heroTitle(font: .system(compact ? .title : .largeTitle, design: .serif),
+                      multiline: !compact)
+            heroSubtitle
+        }
+    }
+
+    private var heroActions: some View {
+        HStack(spacing: 14) {
+            portfolioButton
+            pageIndicator
+        }
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
     }
 
     private func heroTitle(font: Font, multiline: Bool) -> some View {
         Text(multiline ? "镜头之内，\n自有叙事。" : "镜头之内，自有叙事。")
             .font(font)
             .lineSpacing(multiline ? 4 : 2)
-            .foregroundStyle(AppTheme.warmWhite)
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.55), radius: 3, y: 1)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityAddTraits(.isHeader)
             .accessibilityIdentifier("home-hero-title")
@@ -391,7 +405,8 @@ private struct HeroPager: View {
         Text("短剧演员 · 模特 · 视频创作者")
             .font(.footnote.weight(.medium))
             .tracking(0.9)
-            .foregroundStyle(AppTheme.warmWhite)
+            .foregroundStyle(.white)
+            .shadow(color: .black.opacity(0.65), radius: 3, y: 1)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityIdentifier("home-hero-subtitle")
     }
@@ -405,8 +420,8 @@ private struct HeroPager: View {
             .font(.subheadline.weight(.semibold))
             .padding(.horizontal, 20)
             .frame(minHeight: 44)
-            .background(AppTheme.warmWhite)
-            .foregroundStyle(AppTheme.ink)
+            .background(.white)
+            .foregroundStyle(.black)
             .clipShape(Capsule())
         }
         .fixedSize(horizontal: true, vertical: false)
@@ -425,13 +440,13 @@ private struct HeroPager: View {
         Button { openWeatherOrSettings() } label: {
             weatherSummary
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(AppTheme.warmWhite)
+                .foregroundStyle(.white)
                 .padding(.horizontal, 11)
                 .padding(.vertical, 7)
-                .background(AppTheme.elevatedInk, in: Capsule())
+                .background(.black.opacity(0.65), in: Capsule())
                 .overlay {
                     Capsule()
-                        .stroke(AppTheme.line, lineWidth: 0.5)
+                        .stroke(.white.opacity(0.30), lineWidth: 0.5)
                 }
                 .shadow(color: AppTheme.surfaceShadow, radius: 6, y: 2)
                 .frame(minHeight: 44)
@@ -448,8 +463,8 @@ private struct HeroPager: View {
                 )
         }
         .buttonStyle(.plain)
-        // This compact utility now lives outside the photograph. VoiceOver
-        // receives the complete weather summary even at the capped text size.
+        // Keep this photographic overlay compact; VoiceOver still receives
+        // the complete weather summary at all text sizes.
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         .accessibilityIdentifier("home-weather")
         .accessibilityElement(children: .ignore)
@@ -474,15 +489,14 @@ private struct HeroPager: View {
     }
 
     private var pageIndicator: some View {
-        HStack(spacing: 8) {
-            Text(String(format: "%02d", playback.selection + 1))
-                .foregroundStyle(AppTheme.warmWhite)
-            Rectangle().fill(AppTheme.line).frame(width: 24, height: 1)
-                .accessibilityHidden(true)
-            Text(String(format: "%02d", slides.count))
-                .foregroundStyle(AppTheme.muted)
+        HStack(spacing: 7) {
+            ForEach(slides.indices, id: \.self) { index in
+                Capsule()
+                    .fill(index == playback.selection ? MediaTheme.warmWhite : .white.opacity(0.35))
+                    .frame(width: index == playback.selection ? 18 : 5, height: 5)
+                    .animation(reduceMotion ? nil : .easeInOut, value: playback.selection)
+            }
         }
-        .font(.caption.monospacedDigit())
         .frame(minWidth: 44, minHeight: 44, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
@@ -791,7 +805,9 @@ private struct HeroSlideImage: View {
                 in: size
             )
             ZStack {
-                fittedBackground(in: size)
+                visualTestArtwork
+                    .frame(width: size.width, height: size.height)
+                    .blur(radius: 24, opaque: true)
 
                 visualTestArtwork
                     .frame(width: fittedSize.width, height: fittedSize.height)
@@ -806,6 +822,9 @@ private struct HeroSlideImage: View {
         } else {
             visualTestArtwork
                 .frame(width: size.width, height: size.height)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("首页照片")
+                .accessibilityIdentifier(visualTestIdentifier ?? "")
         }
 #else
         placeholder
@@ -885,7 +904,7 @@ private struct HeroSlideImage: View {
                 case .success(let image):
                     if usesFittedPresentation {
                         ZStack {
-                            fittedBackground(in: size)
+                            fittedBackground(image, in: size)
                             fittedForeground(
                                 image,
                                 in: size,
@@ -937,7 +956,7 @@ private struct HeroSlideImage: View {
     ) -> some View {
         if usesFittedPresentation {
             ZStack {
-                fittedBackground(in: size)
+                fittedBackground(image, in: size)
                 fittedForeground(
                     image,
                     in: size,
@@ -948,6 +967,15 @@ private struct HeroSlideImage: View {
         } else {
             filledArtwork(image, in: size)
         }
+    }
+
+    private func fittedBackground(_ image: Image, in size: CGSize) -> some View {
+        image.resizable()
+            .scaledToFill()
+            .frame(width: size.width, height: size.height)
+            .blur(radius: 24, opaque: true)
+            .overlay { Color.black.opacity(0.18) }
+            .clipped()
     }
 
     private func filledArtwork(_ image: Image, in size: CGSize) -> some View {

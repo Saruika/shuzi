@@ -593,7 +593,7 @@ final class YishuUITests: XCTestCase {
                 let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 \(index + 1) 张，共 5 张"), object: page)
                 XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 2), .completed)
                 XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
-                XCTAssertTrue(element("home-hero-actual-fitted-image-\(index)", in: app).waitForExistence(timeout: 5))
+                XCTAssertTrue(element("home-hero-actual-\(app.windows.firstMatch.frame.width > app.windows.firstMatch.frame.height ? "fitted" : "filled")-image-\(index)", in: app).waitForExistence(timeout: 5))
                 XCTAssertFalse(element("artwork-image-retry", in: app).exists)
             }
             for index in (0...3).reversed() {
@@ -601,7 +601,7 @@ final class YishuUITests: XCTestCase {
                 let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "第 \(index + 1) 张，共 5 张"), object: page)
                 XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 2), .completed)
                 XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
-                XCTAssertTrue(element("home-hero-actual-fitted-image-\(index)", in: app).waitForExistence(timeout: 5))
+                XCTAssertTrue(element("home-hero-actual-\(app.windows.firstMatch.frame.width > app.windows.firstMatch.frame.height ? "fitted" : "filled")-image-\(index)", in: app).waitForExistence(timeout: 5))
                 XCTAssertFalse(element("artwork-image-retry", in: app).exists)
             }
         }
@@ -2116,12 +2116,17 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             assertMinimumTapTarget(element("home-open-portfolio", in: app), named: "查看作品")
             let title = element("home-hero-title", in: app)
             XCTAssertTrue(title.waitForExistence(timeout: 5))
-            let photo = element("home-hero-actual-fitted-image-0", in: app)
+            if window.height > window.width {
+                XCTAssertEqual(title.frame.minX - window.minX, 22, accuracy: 1,
+                               "经典首页文案必须靠左，不能居中成画廊说明")
+            }
+            let photo = heroPhoto(0, in: app)
             XCTAssertTrue(photo.waitForExistence(timeout: 5))
             for identifier in ["home-hero-title", "home-hero-subtitle", "home-weather", "home-open-portfolio"] {
                 let control = element(identifier, in: app)
                 XCTAssertTrue(control.exists)
-                XCTAssertFalse(photo.frame.intersects(control.frame), "\(theme)：\(identifier) 遮挡照片")
+                // Classic 1.3 deliberately overlays copy on the full photo.
+                // Keep every overlay inside the safe window and above tabs.
                 XCTAssertTrue(window.contains(control.frame), "\(theme)：\(identifier) 超出窗口")
                 if app.tabBars.firstMatch.exists {
                     XCTAssertFalse(app.tabBars.firstMatch.frame.intersects(control.frame),
@@ -2129,6 +2134,11 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
                 }
             }
             XCTAssertTrue(window.contains(photo.frame), "\(theme)：照片被窗口裁切")
+            if window.height > window.width {
+                XCTAssertGreaterThanOrEqual(photo.frame.width / window.width, 0.98,
+                                           "经典首页不应缩进成画廊照片框")
+                XCTAssertGreaterThanOrEqual(photo.frame.height / window.height, 0.70)
+            }
             let screenshot = XCUIScreen.main.screenshot()
             let format = UIGraphicsImageRendererFormat()
             format.scale = 1
@@ -2157,19 +2167,25 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             }.sorted()
             XCTAssertGreaterThanOrEqual((luminances[pixelCount * 95 / 100] + 0.05)
                 / (luminances[pixelCount * 5 / 100] + 0.05), 4.5, "\(theme)：实际天气胶囊文字不清晰")
-            let crop = try XCTUnwrap(source.cropping(to: CGRect(x: window.width * 0.18, y: 2,
-                                                               width: window.width * 0.12, height: 4)))
-            var pixel = [UInt8](repeating: 0, count: 4)
-            let context = try XCTUnwrap(CGContext(data: &pixel, width: 1, height: 1,
-                bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-            context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
-            for (index, shift) in [16, 8, 0].enumerated() {
-                XCTAssertEqual(Double(pixel[index]), Double((expectedBackground >> shift) & 0xff),
-                               accuracy: 14, "\(theme)：首页没有渲染所选主题；像素=\(pixel)")
+            // Portrait retains a themed system-status area. Landscape hides
+            // that bar and the restored full-bleed artwork reaches y=0; that
+            // pixel must be photo color, not the old gallery's empty margin.
+            if window.height > window.width {
+                let crop = try XCTUnwrap(source.cropping(to: CGRect(x: window.width * 0.18, y: 2,
+                                                                   width: window.width * 0.12, height: 4)))
+                var pixel = [UInt8](repeating: 0, count: 4)
+                let context = try XCTUnwrap(CGContext(data: &pixel, width: 1, height: 1,
+                    bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+                for (index, shift) in [16, 8, 0].enumerated() {
+                    XCTAssertEqual(Double(pixel[index]), Double((expectedBackground >> shift) & 0xff),
+                                   accuracy: 14, "\(theme)：首页没有渲染所选主题；像素=\(pixel)")
+                }
             }
             // Sample inside the actual photo, not a window coordinate that may
-            // belong to a landscape safe area or to the new external caption.
+            // belong to a landscape safe area. In every configuration the
+            // underlying photograph must remain unchanged across themes.
             var samples: [[UInt8]] = []
             for fraction in [0.2, 0.8] {
                 let photoCrop = try XCTUnwrap(source.cropping(to: CGRect(
@@ -2233,11 +2249,11 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         XCTAssertTrue(state.waitForExistence(timeout: 8), "缺少首页图片显示状态")
         XCTAssertTrue(pageIndicator.waitForExistence(timeout: 8), "缺少首页轮播页码")
 
-        let expectsFullComposition = true
+        let expectsFullComposition = window.frame.width > window.frame.height
         XCTAssertEqual(
             state.label,
             expectsFullComposition ? "完整显示" : "铺满显示",
-            "首页在任何 iPad 窗口方向都应完整显示构图"
+            "首页应恢复竖屏铺满，同时保留横屏完整构图"
         )
         XCTAssertEqual(pageIndicator.value as? String, "第 1 张，共 5 张")
         if expectsFullComposition {
@@ -2315,39 +2331,59 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         attachScreenshot(named: "adaptive-home-accessibility-xxxl", app: app)
     }
 
-    func testWeeklyGalleryHandlesMixedAspectsWithoutMovingTheCaption() throws {
+    func testClassicWeeklyHeroHandlesMixedAspectsWithoutMovingTheOverlay() throws {
         let app = launchApp(arguments: ["-hold-home-remote-images-for-visual-testing",
             "-disable-home-auto-advance-for-visual-testing", "-expose-home-hero-state-for-visual-testing",
             "-home-hero-varied-aspects-for-visual-testing"])
         let title = element("home-hero-title", in: app)
         XCTAssertTrue(title.waitForExistence(timeout: 5))
         let titleFrame = title.frame
+        if app.windows.firstMatch.frame.height > app.windows.firstMatch.frame.width {
+            XCTAssertEqual(titleFrame.minX - app.windows.firstMatch.frame.minX, 22, accuracy: 1,
+                           "经典首页标题必须保留 1.3 左对齐")
+        }
         let weather = element("home-weather", in: app)
         let weatherFrame = weather.frame
         let page = element("home-hero-page-indicator", in: app)
         let ratios = [959.0 / 1440, 1440.0 / 959, 1, 4, 0.5]
         for index in 0..<5 {
-            let photo = element("home-hero-actual-fitted-image-\(index)", in: app)
+            let photo = heroPhoto(index, in: app)
             XCTAssertTrue(photo.waitForExistence(timeout: 5))
             XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
-            XCTAssertEqual(photo.frame.width / photo.frame.height, ratios[index], accuracy: 0.02)
+            if app.windows.firstMatch.frame.width > app.windows.firstMatch.frame.height {
+                XCTAssertEqual(photo.frame.width / photo.frame.height, ratios[index], accuracy: 0.02)
+            } else {
+                XCTAssertGreaterThanOrEqual(photo.frame.width / app.windows.firstMatch.frame.width, 0.98)
+                XCTAssertGreaterThanOrEqual(photo.frame.height / app.windows.firstMatch.frame.height, 0.70)
+                XCTAssertTrue(photo.frame.contains(title.frame), "经典文案应叠在照片左下角")
+            }
             XCTAssertTrue(app.windows.firstMatch.frame.contains(photo.frame))
-            XCTAssertFalse(photo.frame.intersects(title.frame))
-            XCTAssertFalse(photo.frame.intersects(weather.frame))
+            XCTAssertFalse(title.frame.intersects(weather.frame))
             XCTAssertEqual(title.frame.minY, titleFrame.minY, accuracy: 1)
             XCTAssertEqual(title.frame.minX, titleFrame.minX, accuracy: 1)
             XCTAssertEqual(weather.frame, weatherFrame)
             assertHomeHeroIsVisiblyRendered(in: app, page: index + 1)
-            if index < 4 { photo.swipeLeft(velocity: .fast) }
+            if index < 4 { swipeHero(in: app, forward: true) }
         }
         for index in (0...3).reversed() {
-            element("home-hero-actual-fitted-image-\(index + 1)", in: app).swipeRight(velocity: .fast)
-            XCTAssertTrue(element("home-hero-actual-fitted-image-\(index)", in: app).waitForExistence(timeout: 5))
+            swipeHero(in: app, forward: false)
+            XCTAssertTrue(heroPhoto(index, in: app).waitForExistence(timeout: 5))
             XCTAssertEqual(page.value as? String, "第 \(index + 1) 张，共 5 张")
             XCTAssertEqual(title.frame.minY, titleFrame.minY, accuracy: 1)
         }
         // Safe to retain: these are generated color fixtures, not remote photos.
-        attachScreenshot(named: "weekly-gallery-mixed-aspects", app: app)
+        attachScreenshot(named: "classic-weekly-hero-mixed-aspects", app: app)
+    }
+
+    private func heroPhoto(_ index: Int, in app: XCUIApplication) -> XCUIElement {
+        let window = app.windows.firstMatch.frame
+        return element("home-hero-actual-\(window.width > window.height ? "fitted" : "filled")-image-\(index)", in: app)
+    }
+
+    private func swipeHero(in app: XCUIApplication, forward: Bool) {
+        let left = app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.45))
+        let right = app.coordinate(withNormalizedOffset: CGVector(dx: 0.85, dy: 0.45))
+        (forward ? right : left).press(forDuration: 0.05, thenDragTo: forward ? left : right)
     }
 
     private func launchApp(arguments: [String], screenProtectionEnabled: Bool = false) -> XCUIApplication {
@@ -2398,7 +2434,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             XCTFail("无法读取第 \(page) 张首页截图", file: file, line: line)
             return
         }
-        let photo = element("home-hero-actual-fitted-image-\(page - 1)", in: app)
+        let photo = heroPhoto(page - 1, in: app)
         guard photo.waitForExistence(timeout: 5) else {
             XCTFail("缺少第 \(page) 张照片的实际显示范围", file: file, line: line)
             return
