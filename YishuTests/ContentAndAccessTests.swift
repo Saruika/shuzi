@@ -6,6 +6,7 @@ import UIKit
 import UserNotifications
 import WeatherKit
 import CoreLocation
+import Network
 import Observation
 @testable import Yishu
 
@@ -5730,6 +5731,89 @@ private final class SuspendedSignOutTestSender {
 
 @MainActor
 final class FanSignOutLifecycleTests: XCTestCase {
+    func testCleanupTransportTimesOutAgainstLoopbackPeerThatNeverCompletesTLS() async throws {
+        // No external traffic or credentials: accept TCP only on loopback and
+        // deliberately never answer TLS, reproducing a stalled connection.
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+        let listener = try NWListener(using: parameters)
+        let ready = expectation(description: "Loopback listener ready")
+        var connections: [NWConnection] = []
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { ready.fulfill() }
+        }
+        listener.newConnectionHandler = { connection in
+            Task { @MainActor in
+                connections.append(connection)
+                connection.start(queue: .main)
+            }
+        }
+        listener.start(queue: .main)
+        let cleanup = FanSignOutTransportPolicy.makeSession()
+        defer {
+            cleanup.invalidateAndCancel()
+            listener.cancel()
+            connections.forEach { $0.cancel() }
+        }
+        await fulfillment(of: [ready], timeout: 5)
+        let port = try XCTUnwrap(listener.port)
+        let url = try XCTUnwrap(URL(string: "https://127.0.0.1:\(port.rawValue)/cleanup-timeout-fixture"))
+        var request = URLRequest(url: url)
+        request.timeoutInterval = cleanup.configuration.timeoutIntervalForRequest
+        let started = ContinuousClock.now
+        do {
+            _ = try await cleanup.data(for: request)
+            XCTFail("Stalled TLS connection must not succeed")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .timedOut)
+        }
+        XCTAssertLessThan(started.duration(to: .now), .seconds(8),
+                          "Cleanup must not inherit the normal 45-second resource timeout")
+        XCTAssertFalse(connections.isEmpty, "Test must reach the loopback listener")
+    }
+
+    func testCleanupTransportHasShortTotalTimeoutWithoutChangingRegularAccountTransport() {
+        let normal = SecureURLSessionFactory.make(requestTimeout: 30, resourceTimeout: 45)
+        let first = FanSignOutTransportPolicy.makeSession()
+        let second = FanSignOutTransportPolicy.makeSession()
+        defer {
+            normal.invalidateAndCancel()
+            first.invalidateAndCancel()
+            second.invalidateAndCancel()
+        }
+        XCTAssertFalse(first === normal)
+        XCTAssertFalse(first === second)
+        XCTAssertEqual(normal.configuration.timeoutIntervalForRequest, 30)
+        XCTAssertEqual(normal.configuration.timeoutIntervalForResource, 45)
+        XCTAssertTrue(normal.configuration.waitsForConnectivity)
+        for cleanup in [first, second] {
+            XCTAssertEqual(cleanup.configuration.timeoutIntervalForRequest, 3)
+            XCTAssertEqual(cleanup.configuration.timeoutIntervalForResource, 3)
+            XCTAssertFalse(cleanup.configuration.waitsForConnectivity)
+            XCTAssertNil(cleanup.configuration.urlCache)
+            XCTAssertNil(cleanup.configuration.httpCookieStorage)
+            XCTAssertNil(cleanup.configuration.urlCredentialStorage)
+            XCTAssertTrue(cleanup.delegate is RejectingRedirectURLSessionDelegate)
+        }
+    }
+
+    func testUnbindTimeoutStillAttemptsFrozenSessionLogoutAndDoesNotRestoreAccess() async {
+        let frozenToken = UUID().uuidString
+        var locallySignedIn = true
+        let operation = FanSignOutOperation.begin(
+            authorizationToken: frozenToken, unbindingBody: Data("{}".utf8)
+        ) { locallySignedIn = false }
+        var sent: [FanSignOutOperation.Request] = []
+        await operation.complete { request in
+            XCTAssertFalse(locallySignedIn)
+            sent.append(request)
+            throw URLError(.timedOut)
+        }
+        XCTAssertFalse(locallySignedIn)
+        XCTAssertEqual(sent.map(\.method), ["DELETE", "POST"])
+        XCTAssertTrue(sent.allSatisfy { $0.authorizationToken == frozenToken })
+    }
+
     func testSignOutClearsMessagesBeforeNetworkAndLateFailureCannotClearNewAccount() async throws {
         let account = SignOutNotificationTestAccount()
         await account.inbox.refresh(using: account)

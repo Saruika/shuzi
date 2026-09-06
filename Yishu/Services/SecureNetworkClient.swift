@@ -109,7 +109,8 @@ final class RejectingRedirectURLSessionDelegate: NSObject, URLSessionTaskDelegat
 enum SecureURLSessionFactory {
     static func make(
         requestTimeout: TimeInterval,
-        resourceTimeout: TimeInterval
+        resourceTimeout: TimeInterval,
+        waitsForConnectivity: Bool = true
     ) -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
@@ -119,7 +120,7 @@ enum SecureURLSessionFactory {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.timeoutIntervalForRequest = requestTimeout
         configuration.timeoutIntervalForResource = resourceTimeout
-        configuration.waitsForConnectivity = true
+        configuration.waitsForConnectivity = waitsForConnectivity
         configuration.httpMaximumConnectionsPerHost = 4
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
         return URLSession(

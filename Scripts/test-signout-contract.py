@@ -13,6 +13,9 @@ signout = section(source, "    func signOut() async {", "    func deleteAccount(
 assert "let authorizationToken = token" in signout
 assert "FanSignOutOperation.begin(" in signout
 assert "authorizationToken: request.authorizationToken" in signout
+assert "let cleanupSession = FanSignOutTransportPolicy.makeSession()" in signout
+assert "defer { cleanupSession.invalidateAndCancel() }" in signout
+assert "transport: cleanupSession" in signout
 assert signout.index("clearLocalSession()") < signout.index("await ")
 assert "FanAccountOperationGuard" not in signout
 assert "clearLocalSession" not in signout.split("await operation.complete", 1)[1]
@@ -22,6 +25,8 @@ assert "noticeMessage =" not in signout.split("await operation.complete", 1)[1]
 perform = section(source, "    private func perform<T: Decodable>(", "    private func decodeError(")
 assert "clearLocalSession(" not in perform
 assert "authorizationToken ?? token" in perform
+assert "request.timeoutInterval = transport.configuration.timeoutIntervalForRequest" in perform
+assert "try await transport.data(for: request)" in perform
 
 clear = section(source, "    private func clearLocalSession() {", "    private func scheduleAppleCredentialRetry()")
 assert "refreshGeneration &+= 1" in clear

@@ -571,6 +571,19 @@ enum FanAccountOperationGuard {
     }
 }
 
+enum FanSignOutTransportPolicy {
+    /// Cleanup is best effort after local access has already been removed.
+    /// An independent short-lived transport cannot cancel a newer login, and
+    /// cannot hold environment switching behind normal 30/45-second requests.
+    static func makeSession() -> URLSession {
+        SecureURLSessionFactory.make(
+            requestTimeout: 3,
+            resourceTimeout: 3,
+            waitsForConnectivity: false
+        )
+    }
+}
+
 @MainActor
 struct FanSignOutOperation {
     struct Request {
@@ -1825,13 +1838,16 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
             errorMessage = nil
             noticeMessage = nil
         }
+        let cleanupSession = FanSignOutTransportPolicy.makeSession()
+        defer { cleanupSession.invalidateAndCancel() }
         await operation.complete { request in
             let _: FanLogoutResponse = try await perform(
                 path: request.path,
                 method: request.method,
                 body: request.body,
                 authorized: true,
-                authorizationToken: request.authorizationToken
+                authorizationToken: request.authorizationToken,
+                transport: cleanupSession
             )
         }
     }
@@ -2182,6 +2198,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         body: Data? = nil,
         authorized: Bool,
         authorizationToken: String? = nil,
+        transport: URLSession? = nil,
         queryItems: [URLQueryItem] = []
     ) async throws -> T {
         guard !isRetired || (authorizationToken != nil && (
@@ -2208,9 +2225,10 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         guard serviceEnvironment.allowsAPIURL(endpoint) else {
             throw FanAccountError.invalidResponse
         }
+        let transport = transport ?? session
         var request = URLRequest(url: endpoint)
         request.httpMethod = method
-        request.timeoutInterval = 30
+        request.timeoutInterval = transport.configuration.timeoutIntervalForRequest
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
@@ -2234,7 +2252,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await transport.data(for: request)
         } catch {
             throw FanAccountError.unavailable
         }
