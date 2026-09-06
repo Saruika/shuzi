@@ -15,7 +15,7 @@ spec.loader.exec_module(bootstrap)
 
 class ReviewBootstrapTests(unittest.TestCase):
     def test_release_manifest_matches_repository_release(self):
-        release = (SERVER / 'releases/v1.4.0-build4-review-env-preview9.md').read_text()
+        release = (SERVER / 'releases/v1.4.0-build4-review-env-preview17.md').read_text()
         self.assertIn(bootstrap.manifest(SERVER), release)
 
     def test_source_symlink_rejected(self):

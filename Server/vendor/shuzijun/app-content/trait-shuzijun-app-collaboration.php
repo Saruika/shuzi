@@ -577,9 +577,41 @@ trait Shuzijun_App_Collaboration {
         global $wpdb;
         $tables = self::collaboration_tables();
         if (!$tables || !isset($wpdb) || !method_exists($wpdb, 'query')
-            || !method_exists($wpdb, 'get_row') || !method_exists($wpdb, 'prepare')) {
+            || !method_exists($wpdb, 'get_row') || !method_exists($wpdb, 'get_var')
+            || !method_exists($wpdb, 'prepare')) {
             return false;
         }
+        // Only discover the opaque owner before taking the same account lock
+        // used by deletion. Never retain/decrypt a payload before that lock:
+        // deletion could otherwise commit while a worker still sends its copy.
+        $owner = $wpdb->get_var($wpdb->prepare(
+            "SELECT r.fan_user_id FROM {$tables['outbox']} o
+             INNER JOIN {$tables['requests']} r ON r.id = o.request_id
+             WHERE o.id = %d LIMIT 1",
+            $job_id
+        ));
+        if (!empty($wpdb->last_error)
+            || (!is_int($owner) && !is_string($owner))
+            || preg_match('/^[1-9][0-9]*$/D', (string) $owner) !== 1
+            || (string) (int) $owner !== (string) $owner) {
+            return false;
+        }
+        $fan_user_id = (int) $owner;
+        $fan_lock = self::acquire_fan_lock($fan_user_id);
+        if (is_wp_error($fan_lock)) {
+            // Contention is not a failed delivery attempt; the normal sweeper
+            // can reconsider this pending job after the account operation.
+            return false;
+        }
+        try {
+            return self::process_locked_collaboration_outbox($job_id, $fan_user_id, $tables);
+        } finally {
+            self::release_fan_lock($fan_user_id, $fan_lock);
+        }
+    }
+
+    private static function process_locked_collaboration_outbox($job_id, $fan_user_id, $tables) {
+        global $wpdb;
         try {
             $lease_token = bin2hex(random_bytes(16));
         } catch (Throwable $error) {
@@ -610,7 +642,8 @@ trait Shuzijun_App_Collaboration {
             $job_id,
             $lease_token
         ), ARRAY_A);
-        if (!is_array($job)) {
+        if (!is_array($job) || !empty($wpdb->last_error)
+            || (string) ($job['fan_user_id'] ?? '') !== (string) $fan_user_id) {
             self::fail_collaboration_outbox_job($job_id, $lease_token, 1, 'request_missing');
             return false;
         }
