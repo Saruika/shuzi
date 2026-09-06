@@ -818,6 +818,7 @@ private final class TestPushNotificationSleeper: PushNotificationSleeper {
 
 @MainActor
 private final class TestPushNotificationAccount: PushNotificationAccount {
+    let serviceEnvironment: AppServiceEnvironment
     struct BindingAttempt: Equatable {
         let userID: String?
         let generation: UInt64
@@ -839,7 +840,8 @@ private final class TestPushNotificationAccount: PushNotificationAccount {
     private var unbindContinuation: CheckedContinuation<Void, Never>?
     private var bindingContinuation: CheckedContinuation<Void, Never>?
 
-    init(userID: String? = nil) {
+    init(userID: String? = nil, environment: AppServiceEnvironment = .production) {
+        serviceEnvironment = environment
         pushEligibleUserID = userID
     }
 
@@ -886,6 +888,117 @@ private final class TestPushNotificationAccount: PushNotificationAccount {
 }
 
 final class ContentAndAccessTests: XCTestCase {
+    func testInlineVideoContextRejectsOtherWorkspaceAndTracksReplacedOrRemovedVideo() throws {
+        for environment in AppServiceEnvironment.allCases {
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            let url = try XCTUnwrap(URL(string: "https://\(environment.mediaHost)/video/showreel.m3u8"))
+            let context = InlineVideoPlaybackContext(environment: environment, videoURL: url)
+            XCTAssertEqual(context.playableURL, url)
+            let wrongWorkspace = InlineVideoPlaybackContext(environment: other, videoURL: url)
+            XCTAssertNil(wrongWorkspace.playableURL)
+            XCTAssertNotEqual(context, wrongWorkspace)
+            XCTAssertNotEqual(context, InlineVideoPlaybackContext(environment: environment, videoURL: nil))
+            let next = try XCTUnwrap(URL(string: "https://\(environment.mediaHost)/video/new.m3u8"))
+            XCTAssertNotEqual(context, InlineVideoPlaybackContext(environment: environment, videoURL: next))
+            for invalid in ["http://\(environment.mediaHost)/video.mp4", "https://example.invalid/video.mp4"] {
+                XCTAssertNil(InlineVideoPlaybackContext(
+                    environment: environment, videoURL: try XCTUnwrap(URL(string: invalid))
+                ).playableURL)
+            }
+        }
+    }
+
+    func testPushSynchronizationIdentityIncludesWorkspaceEvenForSameAccountAndGeneration() {
+        let production = PushSynchronizationTaskID(userID: "same-user", fanSessionGeneration: 1,
+            deviceRegistrationGeneration: 1, environment: .production)
+        let review = PushSynchronizationTaskID(userID: "same-user", fanSessionGeneration: 1,
+            deviceRegistrationGeneration: 1, environment: .review)
+        XCTAssertNotEqual(production, review)
+        XCTAssertEqual(Set([production, review]).count, 2)
+    }
+
+    @MainActor
+    func testPushCoordinatorRejectsOtherWorkspaceWithoutChangingActiveBindingOrPreferences() async throws {
+        for environment in AppServiceEnvironment.allCases {
+            let defaults = try makePushStartupDefaults()
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            let client = TestPushAuthorizationClient(status: .authorized)
+            let registration = TestPushDeviceRegistrationClient()
+            let coordinator = PushNotificationCoordinator(authorizationClient: client, defaults: defaults,
+                registrationClient: registration, environment: environment)
+            defer { coordinator.accountContextDidChange(to: nil) }
+            let own = TestPushNotificationAccount(userID: "same-user", environment: environment)
+            let foreign = TestPushNotificationAccount(userID: "same-user", environment: other)
+            await coordinator.setNotificationsEnabled(true, for: own)
+            coordinator.receive(deviceToken: Data([0x12, 0x34]))
+            await coordinator.synchronize(with: own)
+            XCTAssertEqual(own.bindingAttempts.count, 1)
+            XCTAssertTrue(coordinator.deviceRegistrationState == .ready)
+            let registrations = registration.registrationCount
+            let unregistrations = registration.unregistrationCount
+            await coordinator.synchronize(with: foreign)
+            await coordinator.setNotificationsEnabled(false, for: foreign)
+            await coordinator.requestAuthorizationAfterRationale(for: foreign)
+            foreign.pushEligibleUserID = nil
+            await coordinator.synchronize(with: foreign)
+            XCTAssertTrue(foreign.bindingAttempts.isEmpty)
+            XCTAssertEqual(foreign.unbindCount, 0)
+            XCTAssertEqual(registration.registrationCount, registrations)
+            XCTAssertEqual(registration.unregistrationCount, unregistrations)
+            XCTAssertEqual(client.requestCount, 0)
+            XCTAssertTrue(coordinator.notificationsEnabled)
+            XCTAssertTrue(coordinator.deviceRegistrationState == .ready)
+            XCTAssertNil(defaults.object(forKey: other.storageKey("push-notifications-enabled")))
+        }
+    }
+
+    @MainActor
+    func testPushStartupConsentAndOptOutRemainScopedAcrossWorkspaces() async throws {
+        let defaults = try makePushStartupDefaults()
+        let productionRegistration = TestPushDeviceRegistrationClient()
+        let reviewRegistration = TestPushDeviceRegistrationClient()
+        let production = PushNotificationCoordinator(
+            authorizationClient: TestPushAuthorizationClient(status: .authorized), defaults: defaults,
+            registrationClient: productionRegistration)
+        let review = PushNotificationCoordinator(
+            authorizationClient: TestPushAuthorizationClient(status: .authorized), defaults: defaults,
+            registrationClient: reviewRegistration, environment: .review)
+        defer {
+            production.accountContextDidChange(to: nil)
+            review.accountContextDidChange(to: nil)
+        }
+        let own = TestPushNotificationAccount(userID: "same-user")
+        let demo = TestPushNotificationAccount(userID: "same-user", environment: .review)
+        PushStartupConsentPolicy.recordGranted(in: defaults)
+        await review.synchronize(with: demo)
+        XCTAssertFalse(review.notificationsEnabled, "演示账号不能消费正式启动授权")
+        XCTAssertEqual(reviewRegistration.registrationCount, 0)
+        await production.synchronize(with: own)
+        XCTAssertTrue(production.notificationsEnabled)
+        await review.setNotificationsEnabled(true, for: demo)
+        await review.setNotificationsEnabled(false, for: demo)
+        await production.synchronize(with: own)
+        XCTAssertTrue(production.notificationsEnabled, "演示退出选择不能覆盖正式偏好")
+        PushStartupConsentPolicy.recordGranted(in: defaults, environment: .review)
+        PushStartupConsentPolicy.clear(in: defaults)
+        XCTAssertTrue(defaults.bool(forKey: "review.push-notifications-startup-consent-pending"))
+        await review.synchronize(with: demo)
+        XCTAssertFalse(review.notificationsEnabled, "新的启动授权不能撤销既有主动关闭")
+        XCTAssertNil(defaults.object(forKey: "review.push-notifications-startup-consent-pending"))
+    }
+
+    @MainActor
+    func testReviewStartupPermissionWritesOnlyReviewConsent() async throws {
+        let defaults = try makePushStartupDefaults()
+        let coordinator = PushNotificationCoordinator(
+            authorizationClient: TestPushAuthorizationClient(outcomes: [.granted]), defaults: defaults,
+            registrationClient: TestPushDeviceRegistrationClient(), environment: .review)
+        await coordinator.requestStartupAuthorizationIfNeeded()
+        XCTAssertTrue(defaults.bool(forKey: "review.push-notifications-startup-consent-pending"))
+        XCTAssertNil(defaults.object(forKey: "push-notifications-startup-consent-pending"))
+        XCTAssertNil(defaults.object(forKey: "push-notifications-enabled"))
+    }
+
     func testGalleryArtworkIdentityIgnoresTransformsButTracksContentAndViewport() throws {
         let preview = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-preview.webp"))
         let full = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-full.webp"))

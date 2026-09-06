@@ -301,7 +301,8 @@ struct RootView: View {
             fanSessionGeneration: fanAccount.pushSessionGeneration,
             deviceRegistrationGeneration: pushNotifications.registrationGeneration,
             canUnbindPushDevice: fanAccount.hasPushUnbindingSession,
-            appleCredentialAccessState: fanAccount.appleCredentialAccessState
+            appleCredentialAccessState: fanAccount.appleCredentialAccessState,
+            environment: fanAccount.serviceEnvironment
         )
     }
 

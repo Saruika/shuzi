@@ -1,11 +1,25 @@
 import AVFoundation
 import SwiftUI
 
+/// The player belongs to both its content URL and its workspace. A new
+/// manifest must never leave the previous movie playing behind new metadata.
+struct InlineVideoPlaybackContext: Equatable {
+    let environment: AppServiceEnvironment
+    let videoURL: URL?
+
+    var playableURL: URL? {
+        guard let videoURL,
+              ContentSecurityPolicy.isTrustedMediaURL(videoURL, environment: environment) else { return nil }
+        return videoURL
+    }
+}
+
 struct CreditsView: View {
     @EnvironmentObject private var store: PortfolioStore
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var inlinePlayer: AVPlayer?
+    @State private var activePlaybackContext: InlineVideoPlaybackContext?
     @State private var isInlinePlaying = false
     @State private var isInlineMuted = false
     @State private var isInlineBuffering = false
@@ -17,6 +31,9 @@ struct CreditsView: View {
     @State private var showVideoPlaybackError = false
     @State private var playbackMonitorTask: Task<Void, Never>?
     @State private var playbackWaitStartedAt: Date?
+    private var playbackContext: InlineVideoPlaybackContext {
+        InlineVideoPlaybackContext(environment: store.serviceEnvironment, videoURL: store.showreel?.videoURL)
+    }
     private var columns: [GridItem] {
         dynamicTypeSize.isAccessibilitySize
             ? [GridItem(.flexible())]
@@ -73,6 +90,10 @@ struct CreditsView: View {
             pauseInlinePlayback()
         }
         .onDisappear { stopInlinePlayback() }
+        .onChange(of: playbackContext) { _, _ in
+            stopInlinePlayback()
+            showVideoPlaybackError = false
+        }
         .alert("视频暂时无法播放", isPresented: $showVideoPlaybackError) {
             Button("重新播放") { playInline() }
             Button("知道了", role: .cancel) { }
@@ -101,7 +122,7 @@ struct CreditsView: View {
 
     private func showreelSection(_ showreel: ShowreelContent) -> some View {
         Group {
-            if let inlinePlayer {
+            if let inlinePlayer, activePlaybackContext == playbackContext {
                 VStack(spacing: 0) {
                     ZStack {
                         ArtworkVideoSurface(player: inlinePlayer, videoGravity: .resizeAspect)
@@ -155,7 +176,7 @@ struct CreditsView: View {
     private func showreelPoster(_ showreel: ShowreelContent) -> some View {
         if dynamicTypeSize.isAccessibilitySize {
             VStack(alignment: .leading, spacing: 0) {
-                ArtworkImage(url: showreel.posterURL, contentMode: .fit)
+                ArtworkImage(url: showreel.posterURL, contentMode: .fit, showsRetryButton: false)
                     .aspectRatio(1.5, contentMode: .fit)
                     .frame(maxWidth: .infinity)
                     .accessibilityHidden(true)
@@ -175,7 +196,7 @@ struct CreditsView: View {
             }
         } else {
             ZStack(alignment: .bottomLeading) {
-                ArtworkImage(url: showreel.posterURL, contentMode: .fit)
+                ArtworkImage(url: showreel.posterURL, contentMode: .fit, showsRetryButton: false)
                     .aspectRatio(1.5, contentMode: .fit)
                     .frame(maxWidth: .infinity)
                     .accessibilityHidden(true)
@@ -285,7 +306,7 @@ struct CreditsView: View {
                 ForEach(store.dramas) { drama in
                     VStack(alignment: .leading, spacing: 10) {
                         Link(destination: drama.destinationURL) {
-                            ArtworkImage(url: drama.imageURL, contentMode: .fit)
+                            ArtworkImage(url: drama.imageURL, contentMode: .fit, showsRetryButton: false)
                                 .aspectRatio(3 / 4, contentMode: .fit)
                                 .frame(maxWidth: .infinity)
                                 .background(AppTheme.elevatedInk)
@@ -309,13 +330,19 @@ struct CreditsView: View {
     }
 
     private func playInline() {
-        guard let showreel = store.showreel else { return }
+        guard store.showreel != nil else { return }
+        guard let videoURL = playbackContext.playableURL else {
+            stopInlinePlayback()
+            showVideoPlaybackError = true
+            return
+        }
         showVideoPlaybackError = false
         VideoAudioSession.activate()
-        let player = AVPlayer(url: showreel.videoURL)
+        let player = AVPlayer(url: videoURL)
         player.automaticallyWaitsToMinimizeStalling = true
         player.isMuted = false
         player.volume = 1
+        activePlaybackContext = playbackContext
         inlinePlayer = player
         isInlineMuted = false
         isInlinePlaying = true
@@ -471,6 +498,7 @@ struct CreditsView: View {
         inlinePlayer?.pause()
         inlinePlayer?.replaceCurrentItem(with: nil)
         inlinePlayer = nil
+        activePlaybackContext = nil
         isInlinePlaying = false
         isInlineMuted = false
         isInlineBuffering = false

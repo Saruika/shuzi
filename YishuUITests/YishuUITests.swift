@@ -918,6 +918,21 @@ final class YishuUITests: XCTestCase {
         }
     }
 
+    func testFailedShowreelPosterCenterStillStartsInlinePlayback() {
+        let app = launchApp(arguments: [
+            "-open-credits-for-visual-testing",
+            "-fail-artwork-for-visual-testing",
+        ])
+        let play = element("showreel-play", in: app)
+        XCTAssertTrue(play.waitForExistence(timeout: 8))
+        scrollToElement(play, in: app)
+        play.tap()
+        XCTAssertTrue(element("showreel-video-surface", in: app).waitForExistence(timeout: 8),
+                      "海报加载失败时点击中心也应播放，不应被嵌套重试按钮拦截")
+        XCTAssertTrue(element("showreel-playback-control", in: app).exists)
+        XCTAssertTrue(element("showreel-mute-control", in: app).exists)
+    }
+
     func testCustomShowreelControlsRemainUsable() {
         let app = launchApp(arguments: [
             "-open-credits-for-visual-testing",

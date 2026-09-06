@@ -896,7 +896,7 @@ struct AdminView: View {
 
         return VStack(alignment: .leading, spacing: 10) {
             if let url = URL(string: drama.wrappedValue.imageURL),
-               ContentSecurityPolicy.isTrustedMediaURL(url) {
+               ContentSecurityPolicy.isTrustedMediaURL(url, environment: admin.serviceEnvironment) {
                 AdminMediaPreview(url: url)
                     .frame(height: 180)
                     .frame(maxWidth: .infinity)

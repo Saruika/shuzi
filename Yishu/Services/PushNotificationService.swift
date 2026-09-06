@@ -122,12 +122,12 @@ enum PushRecoveryPolicy {
 enum PushStartupConsentPolicy {
     private static let pendingKey = "push-notifications-startup-consent-pending"
 
-    static func recordGranted(in defaults: UserDefaults) {
-        defaults.set(true, forKey: pendingKey)
+    static func recordGranted(in defaults: UserDefaults, environment: AppServiceEnvironment = .production) {
+        defaults.set(true, forKey: environment.storageKey(pendingKey))
     }
 
-    static func clear(in defaults: UserDefaults) {
-        defaults.removeObject(forKey: pendingKey)
+    static func clear(in defaults: UserDefaults, environment: AppServiceEnvironment = .production) {
+        defaults.removeObject(forKey: environment.storageKey(pendingKey))
     }
 
     /// The startup grant can enable exactly one eligible account, never a
@@ -136,10 +136,11 @@ enum PushStartupConsentPolicy {
         for userID: String,
         in defaults: UserDefaults,
         preferenceKey: String,
-        associationKey: String
+        associationKey: String,
+        environment: AppServiceEnvironment = .production
     ) {
-        guard defaults.bool(forKey: pendingKey) else { return }
-        clear(in: defaults)
+        guard defaults.bool(forKey: environment.storageKey(pendingKey)) else { return }
+        clear(in: defaults, environment: environment)
         guard !PushNotificationPreferencePolicy.hasExplicitChoice(
             in: defaults,
             preferenceKey: preferenceKey,
@@ -175,6 +176,7 @@ enum PushSessionEligibility {
 }
 
 struct PushSynchronizationTaskID: Hashable {
+    let serviceEnvironment: AppServiceEnvironment
     let userID: String?
     let fanSessionGeneration: UInt64
     let deviceRegistrationGeneration: UInt64
@@ -186,8 +188,10 @@ struct PushSynchronizationTaskID: Hashable {
         fanSessionGeneration: UInt64,
         deviceRegistrationGeneration: UInt64,
         canUnbindPushDevice: Bool = false,
-        appleCredentialAccessState: FanAppleCredentialAccessState = .notRequired
+        appleCredentialAccessState: FanAppleCredentialAccessState = .notRequired,
+        environment: AppServiceEnvironment = .production
     ) {
+        self.serviceEnvironment = environment
         self.userID = userID
         self.fanSessionGeneration = fanSessionGeneration
         self.deviceRegistrationGeneration = deviceRegistrationGeneration
@@ -227,6 +231,7 @@ enum PushDeviceRegistrationState {
 
 @MainActor
 protocol PushNotificationAccount: AnyObject {
+    var serviceEnvironment: AppServiceEnvironment { get }
     var pushEligibleUserID: String? { get }
     var pushSessionGeneration: UInt64 { get }
     var hasPushEligibleSession: Bool { get }
@@ -240,8 +245,9 @@ extension FanAccountStore: PushNotificationAccount {}
 @MainActor
 final class PushNotificationCoordinator: ObservableObject {
     static let shared = PushNotificationCoordinator()
-    private static let preferenceKey = "push-notifications-enabled"
-    private static let associationKey = "push-notifications-enabled-user"
+    let serviceEnvironment: AppServiceEnvironment
+    private var preferenceKey: String { serviceEnvironment.storageKey("push-notifications-enabled") }
+    private var associationKey: String { serviceEnvironment.storageKey("push-notifications-enabled-user") }
 
     @Published private(set) var registrationGeneration: UInt64 = 0
     @Published private(set) var notificationsEnabled: Bool
@@ -301,8 +307,10 @@ final class PushNotificationCoordinator: ObservableObject {
         defaults: UserDefaults = .standard,
         registrationTimeout: Duration = .seconds(30),
         registrationClient: any PushDeviceRegistrationClient = SystemPushDeviceRegistrationClient(),
-        sleeper: any PushNotificationSleeper = SystemPushNotificationSleeper()
+        sleeper: any PushNotificationSleeper = SystemPushNotificationSleeper(),
+        environment: AppServiceEnvironment = .production
     ) {
+        self.serviceEnvironment = environment
         self.authorizationClient = authorizationClient
         self.registrationClient = registrationClient
         self.sleeper = sleeper
@@ -373,14 +381,14 @@ final class PushNotificationCoordinator: ObservableObject {
         authorizationStatus = await authorizationClient.currentStatus()
         // A stored false is an explicit opt-out, including Build 45's legacy
         // opt-out without an account association. Never undo it on upgrade.
-        let hasOptedOut = defaults.object(forKey: Self.preferenceKey) != nil
-            && !defaults.bool(forKey: Self.preferenceKey)
+        let hasOptedOut = defaults.object(forKey: preferenceKey) != nil
+            && !defaults.bool(forKey: preferenceKey)
         guard authorizationStatus == .notDetermined, !hasOptedOut else { return }
         do {
             let granted = try await authorizationClient.requestAuthorization()
             authorizationStatus = await authorizationClient.currentStatus()
             if granted, generation == preferenceGeneration {
-                PushStartupConsentPolicy.recordGranted(in: defaults)
+                PushStartupConsentPolicy.recordGranted(in: defaults, environment: serviceEnvironment)
             }
         } catch {
             // An interrupted request can be retried on a later foreground;
@@ -399,6 +407,9 @@ final class PushNotificationCoordinator: ObservableObject {
         with account: any PushNotificationAccount,
         resetRecoveryBudget: Bool
     ) async {
+        // Each coordinator owns one immutable workspace. Reject a mismatched
+        // account before changing preferences, registering, binding or unbinding.
+        guard account.serviceEnvironment == serviceEnvironment else { return }
         guard let eligibleUserID = account.pushEligibleUserID else {
             accountContextDidChange(to: nil)
             shouldPresentAuthorizationRationale = false
@@ -435,14 +446,15 @@ final class PushNotificationCoordinator: ObservableObject {
         if status == .authorized || status == .provisional || status == .ephemeral {
             PushStartupConsentPolicy.consume(
                 for: eligibleUserID, in: defaults,
-                preferenceKey: Self.preferenceKey, associationKey: Self.associationKey
+                preferenceKey: preferenceKey, associationKey: associationKey,
+                environment: serviceEnvironment
             )
             notificationsEnabled = PushNotificationPreferencePolicy.isEnabled(
-                in: defaults, preferenceKey: Self.preferenceKey,
-                associationKey: Self.associationKey, userID: eligibleUserID
+                in: defaults, preferenceKey: preferenceKey,
+                associationKey: associationKey, userID: eligibleUserID
             )
         } else if status == .denied {
-            PushStartupConsentPolicy.clear(in: defaults)
+            PushStartupConsentPolicy.clear(in: defaults, environment: serviceEnvironment)
         }
         guard notificationsEnabled else {
             await stopDeliveryLocally(unbindingFrom: account)
@@ -467,6 +479,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     func requestAuthorizationAfterRationale(for account: any PushNotificationAccount) async {
+        guard account.serviceEnvironment == serviceEnvironment else { return }
         shouldPresentAuthorizationRationale = false
         guard !isRequestingAuthorization, notificationsEnabled,
               let userID = account.pushEligibleUserID,
@@ -512,8 +525,8 @@ final class PushNotificationCoordinator: ObservableObject {
         accountUserID = userID
         notificationsEnabled = PushNotificationPreferencePolicy.isEnabled(
             in: defaults,
-            preferenceKey: Self.preferenceKey,
-            associationKey: Self.associationKey,
+            preferenceKey: preferenceKey,
+            associationKey: associationKey,
             userID: userID
         )
         registrationClient.unregister()
@@ -542,14 +555,15 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     func setNotificationsEnabled(_ enabled: Bool, for account: any PushNotificationAccount) async {
+        guard account.serviceEnvironment == serviceEnvironment else { return }
         guard let userID = account.pushEligibleUserID else { return }
         accountContextDidChange(to: userID)
         preferenceGeneration &+= 1
-        PushStartupConsentPolicy.clear(in: defaults)
+        PushStartupConsentPolicy.clear(in: defaults, environment: serviceEnvironment)
         if !enabled { shouldPresentAuthorizationRationale = false }
         PushNotificationPreferencePolicy.setEnabled(
             enabled, for: userID, in: defaults,
-            preferenceKey: Self.preferenceKey, associationKey: Self.associationKey
+            preferenceKey: preferenceKey, associationKey: associationKey
         )
         guard notificationsEnabled != enabled else {
             if enabled { await synchronize(with: account) }
@@ -567,6 +581,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private func bindIfPossible(to account: any PushNotificationAccount) async {
+        guard account.serviceEnvironment == serviceEnvironment else { return }
         guard let userID = account.pushEligibleUserID,
               let deviceToken,
               PushDeviceTokenPolicy.isValid(deviceToken) else { return }
@@ -625,6 +640,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private func stopDeliveryLocally(unbindingFrom account: any PushNotificationAccount) async {
+        guard account.serviceEnvironment == serviceEnvironment else { return }
         // Reject callbacks before the network await so a late APNs registration
         // can never resurrect a denied, revoked, switched or signed-out context.
         isAcceptingDeviceTokens = false
@@ -647,6 +663,7 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private func beginDeviceRegistration(for account: any PushNotificationAccount) {
+        guard account.serviceEnvironment == serviceEnvironment else { return }
         let hasCurrentBinding = boundContext.map {
             $0.userID == account.pushEligibleUserID
                 && $0.fanSessionGeneration == account.pushSessionGeneration
@@ -681,7 +698,8 @@ final class PushNotificationCoordinator: ObservableObject {
     }
 
     private func currentRecoveryContext(for account: any PushNotificationAccount) -> RecoveryContext? {
-        guard let userID = account.pushEligibleUserID else { return nil }
+        guard account.serviceEnvironment == serviceEnvironment,
+              let userID = account.pushEligibleUserID else { return nil }
         return RecoveryContext(
             userID: userID,
             sessionGeneration: account.pushSessionGeneration,
