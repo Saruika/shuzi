@@ -47,6 +47,13 @@ DDL、字段/索引修复、SQL 失败不写 ready、修复后恢复，以及错
 扩展后的真实 WordPress 回归为 64 项，覆盖带/不带状态筛选的列表故障、计数故障、
 异常空计数及恢复。见 [修正记录](releases/v1.4.0-build2-preflight4.md)；尚未部署。
 
+随后在同一隔离 WordPress 环境补齐删号清理回归：129 项累计断言通过。发现并
+修正仅凭表存在就开始事务删除的问题；候选 1.5.13.3 在删除之前核对物理 schema
+与 InnoDB，且不依赖功能开关/ready option。覆盖查询、三张表删除及 COMMIT 的
+合成失败回滚、两用户隔离、重复删除，以及 MyISAM 拒绝后数据不变。
+这不是备份/邮件副本清理或生产删号端到端验收，相关门槛仍未关闭。
+见 [删除事务记录](releases/v1.4.0-build2-preflight5.md)。
+
 ```bash
 php Server/tests/collaboration-schema-regression.php
 # 仅测试环境：Unix socket 认证；自建随机空库并在 finally 精确销毁。

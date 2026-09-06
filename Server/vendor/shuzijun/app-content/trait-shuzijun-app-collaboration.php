@@ -690,6 +690,13 @@ trait Shuzijun_App_Collaboration {
             do_action('yishu_collaboration_security_audit', 'account_deletion_schema_incomplete');
             return false;
         }
+        // A physical table existing is not proof that DELETE can roll back.
+        // Validate without the feature/ready option, which may be absent after
+        // rollback. Never partially erase child rows in nontransactional tables.
+        if (!self::collaboration_schema_matches($tables)) {
+            do_action('yishu_collaboration_security_audit', 'account_deletion_schema_incompatible');
+            return false;
+        }
 
         if ($wpdb->query('START TRANSACTION') === false) { return false; }
         $committed = false;

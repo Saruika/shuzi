@@ -102,6 +102,25 @@ final class Yishu_Test_WPDB {
     public array $executed_queries = array();
     public array $user_display_names = array();
     public array $user_meta_rows = array();
+    public array $collaboration_metadata = array();
+
+    public function get_row($prepared, $output) {
+        $this->last_error = '';
+        if (is_array($prepared) && $prepared['query'] === 'SHOW TABLE STATUS LIKE %s') {
+            $table = $prepared['arguments'][0];
+            return isset($this->collaboration_metadata[$table]) ? array('Name' => $table, 'Engine' => 'InnoDB') : null;
+        }
+        return null;
+    }
+
+    public function get_results($query, $output): array {
+        $this->last_error = '';
+        foreach ($this->collaboration_metadata as $table => $metadata) {
+            if ($query === 'SHOW FULL COLUMNS FROM `' . $table . '`') { return $metadata['columns']; }
+            if ($query === 'SHOW INDEX FROM `' . $table . '`') { return $metadata['indexes']; }
+        }
+        return array();
+    }
 
     public function prepare(string $query, ...$arguments): array {
         return array('query' => $query, 'arguments' => $arguments);
@@ -1856,12 +1875,30 @@ $collaboration_tables = array(
     'wp_yishu_collaboration_audit',
 );
 $purge_db->existing_tables = $collaboration_tables;
+// This lightweight harness focuses on deletion gates, not schema correctness.
+// Independent metadata mutation tests and real WordPress/MySQL tests validate
+// the physical schema and rollback behavior without this synthetic metadata.
+foreach (invoke_plugin_method('collaboration_schema_contract') as $kind => $contract) {
+    $metadata = array('columns' => array(), 'indexes' => array());
+    foreach ($contract['columns'] as $field => [$type, $nullable, $default, $extra]) {
+        $metadata['columns'][] = array('Field' => $field, 'Type' => $type, 'Null' => $nullable,
+            'Default' => $default, 'Extra' => $extra);
+    }
+    foreach ($contract['indexes'] as $name => [$non_unique, $columns]) {
+        foreach ($columns as $offset => $column) {
+            $metadata['indexes'][] = array('Key_name' => $name, 'Non_unique' => $non_unique,
+                'Seq_in_index' => $offset + 1, 'Column_name' => $column, 'Sub_part' => null,
+                'Index_type' => 'BTREE', 'Visible' => 'YES', 'Collation' => 'A');
+        }
+    }
+    $purge_db->collaboration_metadata['wp_yishu_collaboration_' . $kind] = $metadata;
+}
 $purge_db->collaboration_request_ids[77] = array(901, 902);
 unset($GLOBALS['yishu_test_options'][Shuzijun_App_Content_API::COLLABORATION_SCHEMA_OPTION]);
 expect_true(
     Shuzijun_App_Content_API::purge_collaboration_data_for_fan_user(77) === true
         && substr_count(implode("\n", $purge_db->executed_queries), 'DELETE ') === 3,
-    '即使 schema option 缺失，只要物理表存在就必须事务性清除合作数据'
+    '即使 schema option 缺失，只要物理 schema 兼容就必须事务性清除合作数据'
 );
 $purge_db->executed_queries = array();
 $GLOBALS['yishu_test_options'][Shuzijun_App_Content_API::COLLABORATION_SCHEMA_OPTION] = 'corrupt';

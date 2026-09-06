@@ -98,7 +98,8 @@ try {
         use Shuzijun_App_Collaboration;
         public const COLLABORATION_SCHEMA_OPTION = 'fixture_collaboration_schema_version';
         public const COLLABORATION_SCHEMA_VERSION = 1;
-        public static function collaboration_phase1_enabled(): bool { return true; }
+        public static bool $fixture_enabled = true;
+        public static function collaboration_phase1_enabled(): bool { return self::$fixture_enabled; }
         public static function account_authority_enabled(): bool { return true; }
         // Read-only inbox tests use the isolated class, never a production
         // feature constant or an actual mail transport.
@@ -219,6 +220,7 @@ try {
                 'inbox can retry normally after the synthetic failure');
         }
     }
+    require __DIR__ . '/collaboration-wordpress-deletion-regression.php';
     check_wordpress_schema($wpdb->get_var('SELECT DATABASE()') === $database, 'test database remained isolated');
     check_wordpress_schema(!class_exists('Shuzijun_App_Content_API', false), 'production API entry never loaded');
     check_wordpress_schema(!wp_next_scheduled('yishu_sweep_collaboration_outbox')
