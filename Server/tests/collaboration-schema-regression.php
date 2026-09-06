@@ -44,7 +44,7 @@ function dbDelta($sql) {
 final class CollaborationSchemaHarness {
     use Shuzijun_App_Collaboration;
     public const COLLABORATION_SCHEMA_OPTION = 'fixture_schema_version';
-    public const COLLABORATION_SCHEMA_VERSION = 1;
+    public const COLLABORATION_SCHEMA_VERSION = 2;
     public static bool $enabled = true;
     public static bool $authority = true;
     public static bool $lock_available = true;
@@ -288,8 +288,8 @@ try {
     foreach (array(
         array('ALTER TABLE fixture_yishu_collaboration_requests DROP INDEX fan_submission',
             'ALTER TABLE fixture_yishu_collaboration_requests ADD UNIQUE KEY fan_submission (fan_user_id, submission_id)'),
-        array('ALTER TABLE fixture_yishu_collaboration_requests MODIFY contact_name varchar(119) NOT NULL',
-            'ALTER TABLE fixture_yishu_collaboration_requests MODIFY contact_name varchar(120) NOT NULL'),
+        array('ALTER TABLE fixture_yishu_collaboration_requests MODIFY private_payload tinytext NOT NULL',
+            'ALTER TABLE fixture_yishu_collaboration_requests MODIFY private_payload text NOT NULL'),
         array('ALTER TABLE fixture_yishu_collaboration_requests ALTER COLUMN status SET DEFAULT \'reviewing\'',
             'ALTER TABLE fixture_yishu_collaboration_requests ALTER COLUMN status SET DEFAULT \'received\''),
         array('ALTER TABLE fixture_yishu_collaboration_outbox DROP INDEX due_jobs',

@@ -93,11 +93,12 @@ try {
     check_wordpress_schema(is_array($installation) && !empty($installation['user_id']), 'fresh WordPress core tables');
     unset($installation);
     require dirname(__DIR__) . '/vendor/shuzijun/app-content/trait-shuzijun-app-collaboration.php';
+    require dirname(__DIR__) . '/vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php';
 
     final class CollaborationWordPressSchemaHarness {
         use Shuzijun_App_Collaboration;
         public const COLLABORATION_SCHEMA_OPTION = 'fixture_collaboration_schema_version';
-        public const COLLABORATION_SCHEMA_VERSION = 1;
+        public const COLLABORATION_SCHEMA_VERSION = 2;
         public static bool $fixture_enabled = true;
         public static function collaboration_phase1_enabled(): bool { return self::$fixture_enabled; }
         public static function account_authority_enabled(): bool { return true; }
@@ -136,7 +137,7 @@ try {
     check_wordpress_schema(count($ddl) === 0, 'repeat upgrade performs no DDL');
 
     foreach (array(
-        'ALTER TABLE fixture_yishu_collaboration_requests MODIFY contact_name varchar(119) NOT NULL',
+        'ALTER TABLE fixture_yishu_collaboration_requests MODIFY private_payload tinytext NOT NULL',
         'ALTER TABLE fixture_yishu_collaboration_outbox DROP INDEX due_jobs',
         'ALTER TABLE fixture_yishu_collaboration_audit DROP COLUMN metadata_json',
     ) as $mutation) {
@@ -221,6 +222,7 @@ try {
         }
     }
     require __DIR__ . '/collaboration-wordpress-deletion-regression.php';
+    require __DIR__ . '/collaboration-wordpress-payload-integration.php';
     check_wordpress_schema($wpdb->get_var('SELECT DATABASE()') === $database, 'test database remained isolated');
     check_wordpress_schema(!class_exists('Shuzijun_App_Content_API', false), 'production API entry never loaded');
     check_wordpress_schema(!wp_next_scheduled('yishu_sweep_collaboration_outbox')

@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Authenticated envelope for future collaboration storage. Not a mail transport
+ * Authenticated envelope for collaboration storage. Not a mail transport
  * and not a feature switch. The caller must authorize before decrypting and
  * must supply a dedicated collaboration key, never an Apple signing/data key.
  */
@@ -33,6 +33,46 @@ final class Shuzijun_Collaboration_Private_Payload {
     public function __serialize(): array { throw new LogicException('collaboration_cipher_not_serializable'); }
     public function __unserialize(array $data): void { throw new LogicException('collaboration_cipher_not_serializable'); }
     private function __clone() {}
+
+    /** Dedicated, deployment-owned key outside the WordPress document root. */
+    public static function from_file($configured_path, $key_id, $document_root) {
+        $key = null;
+        $handle = false;
+        try {
+            if (!is_string($configured_path) || !is_string($document_root)
+                || $configured_path === '' || $configured_path[0] !== '/') { return null; }
+            $root = realpath($document_root);
+            $path = realpath($configured_path);
+            // Canonical spelling rejects symlink components and dot segments.
+            if (!$root || !$path || $path !== $configured_path
+                || $path === $root || str_starts_with($path, rtrim($root, '/') . '/')) { return null; }
+            clearstatcache(true, $path);
+            $before = @lstat($path);
+            if (!is_array($before) || ($before['mode'] & 0170000) !== 0100000
+                || ($before['mode'] & 0077) !== 0 || $before['size'] !== 32) { return null; }
+            $handle = @fopen($path, 'rb');
+            if (!is_resource($handle)) { return null; }
+            $opened = fstat($handle);
+            if (!is_array($opened) || $opened['dev'] !== $before['dev']
+                || $opened['ino'] !== $before['ino'] || $opened['mode'] !== $before['mode']
+                || $opened['size'] !== 32) { return null; }
+            $key = stream_get_contents($handle, 33);
+            return is_string($key) && strlen($key) === 32 ? new self($key, $key_id) : null;
+        } catch (Throwable $error) {
+            return null;
+        } finally {
+            if (is_resource($handle)) { fclose($handle); }
+            if (is_string($key) && function_exists('sodium_memzero')) { sodium_memzero($key); }
+        }
+    }
+
+    /** Never persist an unkeyed fingerprint of guessable personal fields. */
+    public function fingerprint($digest) {
+        if (!is_string($digest) || preg_match('/^[a-f0-9]{64}$/D', $digest) !== 1) {
+            throw new InvalidArgumentException('collaboration_payload_invalid');
+        }
+        return hash_hmac('sha256', 'yishu/collaboration/idempotency/v1|' . $digest, $this->key);
+    }
 
     public function seal(#[\SensitiveParameter] $payload, $fan_user_id, $request_id) {
         $context = $this->context($fan_user_id, $request_id);

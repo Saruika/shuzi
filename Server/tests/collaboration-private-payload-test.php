@@ -1,6 +1,6 @@
 <?php
 
-require dirname(__DIR__) . '/collaboration-private-payload.php';
+require dirname(__DIR__) . '/vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php';
 
 $assertions = 0;
 function check_private_payload($condition, $label) {
@@ -68,4 +68,45 @@ var_dump($cipher);
 $debug = ob_get_clean();
 check_private_payload(strpos($debug, $key) === false && strpos($debug, '[redacted]') !== false, 'ordinary debug rendering redacts key');
 sodium_memzero($key);
+$digest = hash('sha256', 'synthetic idempotency input');
+check_private_payload($cipher->fingerprint($digest) === $cipher->fingerprint($digest), 'stable keyed idempotency');
+check_private_payload($cipher->fingerprint($digest) !== $digest, 'raw hash not persisted');
+check_private_payload($cipher->fingerprint($digest) !== $other_key->fingerprint($digest), 'dedicated key binds fingerprint');
+refuses_private_payload(static fn() => $cipher->fingerprint('invalid'), 'invalid fingerprint input rejected');
+$fixture = sys_get_temp_dir() . '/yishu-cipher-key-' . bin2hex(random_bytes(12));
+mkdir($fixture, 0700);
+mkdir($fixture . '/web', 0700);
+$key_path = $fixture . '/data.key';
+try {
+    file_put_contents($key_path, random_bytes(32));
+    chmod($key_path, 0600);
+    $load = static fn($path = null) => Shuzijun_Collaboration_Private_Payload::from_file(
+        $path ?? $key_path, 'fixture-key', $fixture . '/web'
+    );
+    $loaded = $load();
+    check_private_payload($loaded instanceof Shuzijun_Collaboration_Private_Payload, 'private dedicated key loads');
+    check_private_payload($load()->open($loaded->seal($payload, 101, $id), 101, $id) === $payload,
+        'independent file loads decrypt existing records');
+    chmod($key_path, 0644);
+    check_private_payload($load() === null, 'publicly readable key rejected');
+    chmod($key_path, 0600);
+    symlink($key_path, $fixture . '/alias');
+    check_private_payload($load($fixture . '/alias') === null, 'symlink key rejected');
+    check_private_payload($load($fixture . '/./data.key') === null, 'noncanonical path rejected');
+    check_private_payload($load('relative.key') === null, 'relative path rejected');
+    check_private_payload($load($fixture . '/web') === null, 'directory rejected');
+    rename($key_path, $fixture . '/web/data.key');
+    check_private_payload($load($fixture . '/web/data.key') === null, 'key under web root rejected');
+    rename($fixture . '/web/data.key', $key_path);
+    foreach (array(0, 31, 33, 4096) as $length) {
+        file_put_contents($key_path, $length === 0 ? '' : random_bytes($length));
+        check_private_payload($load() === null, 'incorrect key size rejected');
+    }
+} finally {
+    foreach (array($fixture . '/alias', $key_path, $fixture . '/web/data.key') as $path) {
+        if (is_link($path) || is_file($path)) { unlink($path); }
+    }
+    rmdir($fixture . '/web');
+    rmdir($fixture);
+}
 echo 'collaboration-private-payload: ' . $assertions . " assertions passed; no real contacts or keys used\n";

@@ -326,6 +326,7 @@ $plugin_module_paths = array(
     '/vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php',
+    '/vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php',
 );
 $plugin_module_sources = array_map(
     static fn (string $path) => file_get_contents(dirname(__DIR__) . $path),
@@ -379,7 +380,7 @@ function expect_true(bool $condition, string $message): void {
 expect_true(
     is_string($plugin_entry_source)
         && is_string($plugin_implementation_source)
-        && count(array_filter($plugin_module_sources, 'is_string')) === 6
+        && count(array_filter($plugin_module_sources, 'is_string')) === 7
         && strpos(
             $plugin_entry_source,
             "require_once __DIR__ . '/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php';"

@@ -14,9 +14,10 @@ $seed_deletion = static function (int $fan): void {
     check_wordpress_schema($wpdb->insert('fixture_yishu_collaboration_requests', array(
         'public_id' => wp_generate_uuid4(), 'submission_id' => wp_generate_uuid4(),
         'fan_user_id' => $fan, 'install_hash' => hash('sha256', 'fixture-install-' . $fan),
-        'network_hash' => hash('sha256', 'fixture-network'), 'contact_name' => 'Synthetic Contact',
-        'contact_method' => 'fixture@example.invalid', 'project_type' => 'fixture',
-        'details' => 'Synthetic deletion fixture only', 'payload_hash' => hash('sha256', 'fixture-payload'),
+        'network_hash' => hash('sha256', 'fixture-network'),
+        // Deliberately unreadable payload: deleting personal data must not
+        // require a working decryption key or a well-formed encrypted record.
+        'private_payload' => 'synthetic-unreadable-envelope', 'payload_hash' => hash('sha256', 'fixture-payload'),
         'created_at' => $now, 'updated_at' => $now,
     )) === 1, 'seed synthetic request');
     $request_id = (int) $wpdb->insert_id;

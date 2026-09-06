@@ -12,7 +12,7 @@ trait Shuzijun_App_Collaboration {
             return true;
         }
 
-        $lock = self::acquire_named_fan_lock('collab_schema', 'version-1');
+        $lock = self::acquire_named_fan_lock('collab_schema', 'version-2');
         if (is_wp_error($lock)) {
             do_action('yishu_collaboration_security_audit', 'schema_lock_unavailable');
             return false;
@@ -33,6 +33,23 @@ trait Shuzijun_App_Collaboration {
 
             $tables = self::collaboration_tables();
             if (!$tables) { return false; }
+            // A legacy plaintext schema needs an explicit, reviewed migration.
+            // Never let dbDelta silently leave personal fields beside ciphertext.
+            $existing = $wpdb->get_row($wpdb->prepare(
+                'SHOW TABLE STATUS LIKE %s', $wpdb->esc_like($tables['requests'])
+            ), ARRAY_A);
+            if (!empty($wpdb->last_error)) { return false; }
+            if (is_array($existing)) {
+                $columns = $wpdb->get_results("SHOW FULL COLUMNS FROM `{$tables['requests']}`", ARRAY_A);
+                if (!is_array($columns) || !empty($wpdb->last_error)) { return false; }
+                foreach ($columns as $column) {
+                    if (in_array($column['Field'] ?? '', array('contact_name', 'contact_method',
+                        'organization', 'project_type', 'city', 'preferred_date', 'budget', 'details'), true)) {
+                        do_action('yishu_collaboration_security_audit', 'schema_creation_failed');
+                        return false;
+                    }
+                }
+            }
             $charset = $wpdb->get_charset_collate();
             $requests_sql = "CREATE TABLE {$tables['requests']} (
                 id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
@@ -41,14 +58,7 @@ trait Shuzijun_App_Collaboration {
                 fan_user_id bigint(20) unsigned NOT NULL,
                 install_hash char(64) NOT NULL,
                 network_hash char(64) NOT NULL,
-                contact_name varchar(120) NOT NULL,
-                contact_method varchar(255) NOT NULL,
-                organization varchar(160) NOT NULL DEFAULT '',
-                project_type varchar(40) NOT NULL,
-                city varchar(120) NOT NULL DEFAULT '',
-                preferred_date date NULL,
-                budget varchar(120) NOT NULL DEFAULT '',
-                details text NOT NULL,
+                private_payload text NOT NULL,
                 payload_hash char(64) NOT NULL,
                 status varchar(24) NOT NULL DEFAULT 'received',
                 status_updated_by bigint(20) unsigned NULL,
@@ -144,6 +154,9 @@ trait Shuzijun_App_Collaboration {
         }
         $input = self::sanitize_collaboration_submission($request);
         if (is_wp_error($input)) { return $input; }
+        $cipher = self::collaboration_private_cipher();
+        if (!$cipher) { return self::collaboration_storage_error(); }
+        $input['payloadHash'] = $cipher->fingerprint($input['payloadHash']);
         if (!self::collaboration_storage_ready()) {
             return self::collaboration_storage_error();
         }
@@ -237,20 +250,16 @@ trait Shuzijun_App_Collaboration {
                     throw new RuntimeException('public_id_unavailable');
                 }
                 $now = gmdate('Y-m-d H:i:s');
+                $private_fields = $input;
+                unset($private_fields['submissionID'], $private_fields['payloadHash']);
+                $private_payload = $cipher->seal($private_fields, $fan_user_id, $public_id);
                 $inserted = $wpdb->insert($tables['requests'], array(
                     'public_id' => $public_id,
                     'submission_id' => (string) $input['submissionID'],
                     'fan_user_id' => $fan_user_id,
                     'install_hash' => hash('sha256', strtolower($install_id)),
                     'network_hash' => self::request_network_fingerprint(),
-                    'contact_name' => (string) $input['contactName'],
-                    'contact_method' => (string) $input['contactMethod'],
-                    'organization' => (string) $input['organization'],
-                    'project_type' => (string) $input['projectType'],
-                    'city' => (string) $input['city'],
-                    'preferred_date' => $input['preferredDate'] ?: null,
-                    'budget' => (string) $input['budget'],
-                    'details' => (string) $input['details'],
+                    'private_payload' => $private_payload,
                     'payload_hash' => (string) $input['payloadHash'],
                     'status' => 'received',
                     'status_updated_by' => null,
@@ -258,8 +267,7 @@ trait Shuzijun_App_Collaboration {
                     'created_at' => $now,
                     'updated_at' => $now,
                 ), array(
-                    '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s',
-                    '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%s', '%s',
+                    '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%s', '%d', '%d', '%s', '%s',
                 ));
                 if ($inserted !== 1) { throw new RuntimeException('request_insert_failed'); }
                 $request_id = (int) $wpdb->insert_id;
@@ -379,7 +387,10 @@ trait Shuzijun_App_Collaboration {
         }
         $items = array();
         foreach ($rows as $row) {
-            if (is_array($row)) { $items[] = self::collaboration_admin_record($row); }
+            if (!is_array($row)) { return self::collaboration_storage_error(); }
+            $record = self::collaboration_admin_record($row);
+            if (is_wp_error($record)) { return $record; }
+            $items[] = $record;
         }
         $response = rest_ensure_response(array(
             'requests' => $items,
@@ -442,15 +453,18 @@ trait Shuzijun_App_Collaboration {
                 );
             }
             $previous_status = (string) $row['status'];
+            if (is_wp_error(self::collaboration_admin_record($row))) {
+                throw new RuntimeException('private_payload_unavailable');
+            }
             if ($previous_status === $status) {
                 if ($wpdb->query('COMMIT') === false) {
                     throw new RuntimeException('commit_failed');
                 }
                 $committed = true;
                 $row = self::attach_collaboration_delivery($row);
-                $response = rest_ensure_response(array(
-                    'request' => self::collaboration_admin_record($row),
-                ));
+                $record = self::collaboration_admin_record($row);
+                if (is_wp_error($record)) { return $record; }
+                $response = rest_ensure_response(array('request' => $record));
                 self::set_private_no_store_headers($response);
                 return $response;
             }
@@ -485,9 +499,9 @@ trait Shuzijun_App_Collaboration {
             $row['version'] = $expected_version + 1;
             $row['updated_at'] = $now;
             $row = self::attach_collaboration_delivery($row);
-            $response = rest_ensure_response(array(
-                'request' => self::collaboration_admin_record($row),
-            ));
+            $record = self::collaboration_admin_record($row);
+            if (is_wp_error($record)) { return $record; }
+            $response = rest_ensure_response(array('request' => $record));
             self::set_private_no_store_headers($response);
             return $response;
         } catch (Throwable $error) {
@@ -589,9 +603,7 @@ trait Shuzijun_App_Collaboration {
         ));
         if ($claimed !== 1) { return false; }
         $job = $wpdb->get_row($wpdb->prepare(
-            "SELECT o.*, r.public_id, r.contact_name, r.contact_method,
-                    r.organization, r.project_type, r.city, r.preferred_date,
-                    r.budget, r.details
+            "SELECT o.*, r.public_id, r.fan_user_id, r.private_payload
              FROM {$tables['outbox']} o
              INNER JOIN {$tables['requests']} r ON r.id = o.request_id
              WHERE o.id = %d AND o.lease_token = %s LIMIT 1",
@@ -613,12 +625,17 @@ trait Shuzijun_App_Collaboration {
                 $error_code = 'recipient_unavailable';
             } else {
                 try {
-                    $sent = wp_mail(
-                        $recipient,
-                        '易姝合作邀约 #' . (string) $job['public_id'],
-                        self::collaboration_mail_body($job),
-                        array('Content-Type: text/plain; charset=UTF-8')
-                    ) === true;
+                    $body = self::collaboration_mail_body($job);
+                    if (is_wp_error($body)) {
+                        $error_code = 'private_payload_unavailable';
+                    } else {
+                        $sent = wp_mail(
+                            $recipient,
+                            '易姝合作邀约 #' . (string) $job['public_id'],
+                            $body,
+                            array('Content-Type: text/plain; charset=UTF-8')
+                        ) === true;
+                    }
                 } catch (Throwable $error) {
                     $sent = false;
                     $error_code = 'mail_exception';
@@ -1009,14 +1026,7 @@ trait Shuzijun_App_Collaboration {
                     'fan_user_id' => $reference,
                     'install_hash' => array('char(64)', 'NO', null, ''),
                     'network_hash' => array('char(64)', 'NO', null, ''),
-                    'contact_name' => array('varchar(120)', 'NO', null, ''),
-                    'contact_method' => array('varchar(255)', 'NO', null, ''),
-                    'organization' => array('varchar(160)', 'NO', '', ''),
-                    'project_type' => array('varchar(40)', 'NO', null, ''),
-                    'city' => array('varchar(120)', 'NO', '', ''),
-                    'preferred_date' => array('date', 'YES', null, ''),
-                    'budget' => array('varchar(120)', 'NO', '', ''),
-                    'details' => array('text', 'NO', null, ''),
+                    'private_payload' => array('text', 'NO', null, ''),
                     'payload_hash' => array('char(64)', 'NO', null, ''),
                     'status' => array('varchar(24)', 'NO', 'received', ''),
                     'status_updated_by' => array('bigint unsigned', 'YES', null, ''),
@@ -1283,6 +1293,8 @@ trait Shuzijun_App_Collaboration {
     }
 
     private static function collaboration_admin_record($row) {
+        $private = self::collaboration_open_private_payload($row);
+        if (is_wp_error($private)) { return $private; }
         $fan_user_id = (int) ($row['fan_user_id'] ?? 0);
         $fan_uuid = $fan_user_id > 0
             ? strtolower((string) get_user_meta($fan_user_id, self::FAN_META_UUID, true))
@@ -1290,14 +1302,14 @@ trait Shuzijun_App_Collaboration {
         return array(
             'requestID' => (string) ($row['public_id'] ?? ''),
             'fanUserID' => self::is_uuid_v4($fan_uuid) ? $fan_uuid : '',
-            'contactName' => (string) ($row['contact_name'] ?? ''),
-            'contactMethod' => (string) ($row['contact_method'] ?? ''),
-            'organization' => (string) ($row['organization'] ?? ''),
-            'projectType' => (string) ($row['project_type'] ?? ''),
-            'city' => (string) ($row['city'] ?? ''),
-            'preferredDate' => (string) ($row['preferred_date'] ?? ''),
-            'budget' => (string) ($row['budget'] ?? ''),
-            'details' => (string) ($row['details'] ?? ''),
+            'contactName' => $private['contactName'],
+            'contactMethod' => $private['contactMethod'],
+            'organization' => $private['organization'],
+            'projectType' => $private['projectType'],
+            'city' => $private['city'],
+            'preferredDate' => (string) $private['preferredDate'],
+            'budget' => $private['budget'],
+            'details' => $private['details'],
             'status' => (string) ($row['status'] ?? 'received'),
             'version' => max(1, (int) ($row['version'] ?? 1)),
             'receivedAt' => self::collaboration_iso_time((string) ($row['created_at'] ?? '')),
@@ -1598,10 +1610,31 @@ trait Shuzijun_App_Collaboration {
             && constant('YISHU_COLLABORATION_MAIL_TRANSPORT_READY') === true
             && defined('YISHU_COLLABORATION_EMAIL')
             && function_exists('wp_mail')
+            && self::collaboration_private_cipher() !== null
             && self::collaboration_work_email() !== '';
     }
 
+    private static function collaboration_private_cipher() {
+        if (!defined('YISHU_COLLABORATION_DATA_KEY_PATH') || !defined('YISHU_COLLABORATION_DATA_KEY_ID')) {
+            return null;
+        }
+        return Shuzijun_Collaboration_Private_Payload::from_file(
+            constant('YISHU_COLLABORATION_DATA_KEY_PATH'),
+            constant('YISHU_COLLABORATION_DATA_KEY_ID'), ABSPATH
+        );
+    }
+
+    private static function collaboration_open_private_payload($row) {
+        $cipher = self::collaboration_private_cipher();
+        $payload = $cipher && is_array($row) ? $cipher->open(
+            $row['private_payload'] ?? null, (int) ($row['fan_user_id'] ?? 0), $row['public_id'] ?? null
+        ) : null;
+        return is_array($payload) ? $payload : self::collaboration_storage_error();
+    }
+
     private static function collaboration_mail_body($job) {
+        $private = self::collaboration_open_private_payload($job);
+        if (is_wp_error($private)) { return $private; }
         $labels = array(
             'drama' => '短剧 / 影视出演',
             'commercial' => '商业拍摄',
@@ -1610,20 +1643,20 @@ trait Shuzijun_App_Collaboration {
             'event' => '活动出席',
             'other' => '其他合作',
         );
-        $project_type = (string) ($job['project_type'] ?? 'other');
+        $project_type = $private['projectType'];
         $lines = array(
             '易姝合作邀约',
             '请求编号：' . (string) ($job['public_id'] ?? ''),
-            '联系人：' . (string) ($job['contact_name'] ?? ''),
-            '联系方式：' . (string) ($job['contact_method'] ?? ''),
-            '公司 / 项目：' . (string) ($job['organization'] ?? ''),
+            '联系人：' . $private['contactName'],
+            '联系方式：' . $private['contactMethod'],
+            '公司 / 项目：' . $private['organization'],
             '合作类型：' . (string) ($labels[$project_type] ?? $labels['other']),
-            '拍摄城市：' . (string) ($job['city'] ?? ''),
-            '预计日期：' . (string) ($job['preferred_date'] ?? ''),
-            '预算范围：' . (string) ($job['budget'] ?? ''),
+            '拍摄城市：' . $private['city'],
+            '预计日期：' . (string) $private['preferredDate'],
+            '预算范围：' . $private['budget'],
             '',
             '项目说明：',
-            (string) ($job['details'] ?? ''),
+            $private['details'],
         );
         return implode("\n", $lines);
     }

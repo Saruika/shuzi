@@ -2,6 +2,7 @@
 
 defined('ABSPATH') || exit;
 
+require_once __DIR__ . '/class-shuzijun-collaboration-private-payload.php';
 require_once __DIR__ . '/trait-shuzijun-app-collaboration.php';
 require_once __DIR__ . '/trait-shuzijun-app-fan-endpoints.php';
 require_once __DIR__ . '/trait-shuzijun-app-push-notifications.php';
@@ -82,7 +83,7 @@ final class Shuzijun_App_Content_API {
     const FAN_MAX_INSTALLATIONS = 16;
     const FAN_MAX_SESSIONS = 8;
     const COLLABORATION_SCHEMA_OPTION = 'yishu_collaboration_schema_version';
-    const COLLABORATION_SCHEMA_VERSION = 1;
+    const COLLABORATION_SCHEMA_VERSION = 2;
     const COLLABORATION_EMAIL = '369476120@qq.com';
     const COLLABORATION_OUTBOX_HOOK = 'yishu_process_collaboration_outbox';
     const COLLABORATION_SWEEP_HOOK = 'yishu_sweep_collaboration_outbox';

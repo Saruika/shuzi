@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Shuzijun App Content API
  * Description: Versioned access-controlled content feed and least-privilege mobile publishing API for the Yi Shu app.
- * Version: 1.5.13.3
+ * Version: 1.5.13.4
  * Author: Shuzijun
  */
 

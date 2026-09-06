@@ -41,6 +41,7 @@ readonly -a PLUGIN_MODULE_RELATIVES=(
     vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php
     vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php
     vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php
+    vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php
     vendor/shuzijun/app-content/class-shuzijun-app-content-api.php
 )
 readonly MANIFEST_NAME=release.sha256
@@ -51,17 +52,18 @@ readonly JWT_README=vendor/firebase/php-jwt/README.md
 readonly JWT_README_SHA256=8e2392c48204a21ad0d73068fb273b7ec1f79ccf13eab3fe6f256382f741dc39
 readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134
 readonly PREVIOUS_RELEASE_MANIFEST_SHA256=64e561c0059948d0602f19090f254678654beaddcad9a2e1cb9501d5f064b597
-readonly TARGET_RELEASE_MANIFEST_SHA256=41ab1e6278110eda1912adda1e2ae53c543e1d42322c63f4927f08bb5a74b9ce
+readonly TARGET_RELEASE_MANIFEST_SHA256=5e8c9bf4ff397229c5f910af177e4099e901bda4aa98925c6ed070af54d4b0ed
 readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a
 readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0
-readonly TARGET_RELEASE_PHP_SHA256=f60900d123ca79ac8ce49f2fe32359d79e0da4ff819b0c62b54a5a83abc6f2a0
+readonly TARGET_RELEASE_PHP_SHA256=95573d3c6884c9a80ef4decf76b6a3f21313e576eae04002e1a66009e538dbfb
 readonly -a TARGET_RELEASE_MODULE_SHA256S=(
-    cb5341c99290eb2048ed768531b1733eeab0fdd5f8c5ab2ae80f8ecbcd2675d5
+    8bcf430cc685643f7a555a2eca8334138dc208112372520e93c55c82da4f55d4
     dc3e0af6a7ba309c94e71d65c82f5a928e171b9726f312f5db3fa9eec48ec7b0
     8c4bae3eed0fca9fd8810d04ea29924111b827118aee1f381b39a44f5660e172
     4d70e1cbf14e4de6091bfa5e7b39abc5b009d03f673f8397efa89d645c1e3c33
     06b83b7f583f171135c9a4e5844af907ad5652d1f0da70028d6a82574a58b901
-    c77a7a33376d8475a68090ded9f1d23eba44ee8a19f9cc74633d9a9810202457
+    bdcea372748c79a06284f01570d0863d20316bf3d4d33fe7924c16d100a1b1d7
+    91a4da07763f7a417890b666196545de58e6947dc6f017384674b1e71ecb3767
 )
 readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1
 
@@ -107,7 +109,7 @@ and contain only these release entries plus release.sha256:
   composer.json
   composer.lock
   vendor/
-    shuzijun/app-content/ (six reviewed API modules)
+    shuzijun/app-content/ (seven reviewed API modules)
 EOF
 }
 
@@ -705,7 +707,7 @@ probe_candidate_collaboration_release_fuse() {
         $sourceHashes = explode(",", $argv[4]);
         if (count($sizeValues) !== count($sourceHashes)
             || ($sourceMode === "legacy" && count($sizeValues) !== 1)
-            || ($sourceMode === "modular" && count($sizeValues) !== 7)
+            || ($sourceMode === "modular" && count($sizeValues) !== 8)
             || ($sourceMode !== "legacy" && $sourceMode !== "modular")) {
             exit(26);
         }
@@ -735,9 +737,9 @@ probe_candidate_collaboration_release_fuse() {
             $classSource = "";
             $entrypoint = $sources[0];
         } else {
-            $traitSources = array_slice($sources, 0, 5);
-            $classSource = $sources[5];
-            $entrypoint = $sources[6];
+            $traitSources = array_slice($sources, 0, 6);
+            $classSource = $sources[6];
+            $entrypoint = $sources[7];
             $quote = chr(39);
             $entryLoader = "require_once __DIR__ . " . $quote
                 . "/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php"
@@ -745,6 +747,7 @@ probe_candidate_collaboration_release_fuse() {
             if (substr_count($entrypoint, $entryLoader) !== 1) { exit(27); }
             $entrypoint = str_replace($entryLoader, "", $entrypoint);
             $classLoaders = array(
+                "require_once __DIR__ . " . $quote . "/class-shuzijun-collaboration-private-payload.php" . $quote . ";",
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-collaboration.php" . $quote . ";",
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-fan-endpoints.php" . $quote . ";",
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-push-notifications.php" . $quote . ";",

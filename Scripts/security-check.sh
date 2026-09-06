@@ -73,13 +73,14 @@ fi
 
 if command -v php >/dev/null 2>&1; then
   php -l Server/shuzijun-app-content.php >/dev/null
-  php -l Server/collaboration-private-payload.php >/dev/null
+  php -l Server/vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php >/dev/null
   php Server/tests/collaboration-private-payload-test.php
   while IFS= read -r -d '' plugin_module; do
     php -l "$plugin_module" >/dev/null
   done < <(find Server/vendor/shuzijun/app-content -type f -name '*.php' -print0)
   php Server/tests/plugin-contract-test.php
   php Server/tests/collaboration-schema-regression.php
+  python3 Server/tests/collaboration-release-probe-test.py
 fi
 
 if command -v composer >/dev/null 2>&1; then
