@@ -538,6 +538,9 @@ final class AdminSessionStore: ObservableObject {
             )
             guard attemptGeneration == authenticationGeneration,
                   credential == candidate else { return }
+            guard session.isVerifiedContentManager else {
+                throw AdminAPIError.invalidResponse
+            }
             establishSession(displayName: session.displayName,
                              canManageFanAdministrators: session.canManageFanAdministrators == true)
             errorMessage = nil
@@ -591,8 +594,7 @@ final class AdminSessionStore: ObservableObject {
                 lock()
                 return
             }
-            guard response.authenticated == true, response.role == "yishu_content_manager",
-                  !response.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            guard response.isVerifiedContentManager else {
                 throw AdminAPIError.invalidResponse
             }
             establishSession(displayName: response.displayName,
@@ -1238,6 +1240,11 @@ private struct AdminSessionResponse: Decodable {
     let authenticated: Bool?
     let role: String?
     let canManageFanAdministrators: Bool?
+
+    var isVerifiedContentManager: Bool {
+        authenticated == true && role == "yishu_content_manager"
+            && !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 }
 
 struct AdminFanAdministratorUpdate: Encodable, Equatable {

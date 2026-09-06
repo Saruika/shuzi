@@ -163,6 +163,41 @@ final class BoundAdministratorSessionTests: XCTestCase {
         }
     }
 
+    func testLegacyAdministratorRequiresVerifiedRoleAndCanRetryAfterInvalidReply() async throws {
+        let invalidReplies = [
+            #"{"displayName":"未验证"}"#,
+            #"{"authenticated":false,"role":"yishu_content_manager","displayName":"未验证","canManageFanAdministrators":true}"#,
+            #"{"authenticated":true,"role":"subscriber","displayName":"普通用户"}"#,
+            #"{"authenticated":true,"displayName":"缺少角色"}"#,
+            #"{"authenticated":true,"role":"yishu_content_manager","displayName":"  "}"#,
+        ]
+        for invalidReply in invalidReplies {
+            var requests = 0
+            let admin = AdminSessionStore { request in
+                requests += 1
+                return try self.reply(request, body: requests == 1 ? invalidReply : nil)
+            }
+            let fixture = UUID().uuidString
+            await admin.signIn(username: "isolated-test-admin", applicationPassword: fixture)
+            XCTAssertFalse(admin.isAuthenticated, invalidReply)
+            XCTAssertFalse(admin.isIndependentAdministrator)
+            XCTAssertFalse(admin.canManageFanAdministrators)
+            XCTAssertNotNil(admin.errorMessage)
+            XCTAssertFalse(admin.isWorking)
+            do {
+                _ = try await admin.fetchFeatureCapabilities()
+                XCTFail("Unverified session was allowed to request management data")
+            } catch { XCTAssertEqual(requests, 1) }
+
+            await admin.signIn(username: "isolated-test-admin", applicationPassword: fixture)
+            XCTAssertTrue(admin.isAuthenticated)
+            XCTAssertTrue(admin.isIndependentAdministrator)
+            XCTAssertNil(admin.errorMessage)
+            XCTAssertEqual(requests, 2)
+            admin.signOut()
+        }
+    }
+
     func testLateProbeCannotUnlockAfterLogout() async throws {
         let account = BoundAdministratorTestAccount()
         var admin: AdminSessionStore?
