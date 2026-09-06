@@ -8,15 +8,17 @@ final class FavoritesStore: ObservableObject {
     private static let accountKeyPrefix = "favoritePortfolioImageIDs.v2"
     private let defaults: UserDefaults
     private var activeAccountID: String?
+    let serviceEnvironment: AppServiceEnvironment
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, environment: AppServiceEnvironment = .production) {
         self.defaults = defaults
+        serviceEnvironment = environment
         imageIDs = []
 
         // The old key mixed every signed-in user on a shared device. There is
         // no trustworthy way to assign that data to one server UUID, so fail
         // closed instead of leaking one fan's library to the next account.
-        defaults.removeObject(forKey: Self.legacyDefaultsKey)
+        defaults.removeObject(forKey: environment.storageKey(Self.legacyDefaultsKey))
     }
 
     func activate(accountID: String) {
@@ -70,7 +72,7 @@ final class FavoritesStore: ObservableObject {
     }
 
     private func defaultsKey(for accountID: String) -> String {
-        "\(Self.accountKeyPrefix).\(accountID)"
+        serviceEnvironment.storageKey("\(Self.accountKeyPrefix).\(accountID)")
     }
 
     private static func normalizedAccountID(_ accountID: String) -> String? {

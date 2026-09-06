@@ -1640,6 +1640,220 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(ContentSecurityPolicy.isTrusted(untrusted))
     }
 
+    func testContentManifestsAndMediaResponsesAreEnvironmentScoped() throws {
+        for environment in AppServiceEnvironment.allCases {
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            let manifest = try environmentManifest(environment)
+            XCTAssertTrue(ContentSecurityPolicy.isTrusted(manifest, environment: environment))
+            XCTAssertFalse(ContentSecurityPolicy.isTrusted(manifest, environment: other))
+            let url = try XCTUnwrap(manifest.heroImages.first)
+            XCTAssertTrue(ContentSecurityPolicy.matchesRequestedMediaURL(url, requestedURL: url, environment: environment))
+            XCTAssertFalse(ContentSecurityPolicy.matchesRequestedMediaURL(url, requestedURL: url, environment: other))
+            XCTAssertFalse(ContentSecurityPolicy.matchesRequestedMediaURL(
+                other.mediaUploadRoot.appending(path: "image.jpg"), requestedURL: url, environment: environment))
+        }
+        let review = try environmentManifest(.review)
+        XCTAssertFalse(ContentSecurityPolicy.isTrusted(review), "Default policy must remain production-only")
+        // Change each media URL independently, including nested cover/full-resolution,
+        // video and poster fields. A single cross-environment asset must reject the whole graph.
+        let data = try JSONEncoder().encode(review)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        func variants(_ value: Any) -> [Any] {
+            if let string = value as? String, string.hasPrefix("https://review.shuzijun.com.cn/") {
+                return [string.replacingOccurrences(of: "review.shuzijun.com.cn", with: "www.shuzijun.com.cn")]
+            }
+            if let array = value as? [Any] {
+                return array.indices.flatMap { index in variants(array[index]).map { replacement in
+                    var changed = array; changed[index] = replacement; return changed as Any
+                } }
+            }
+            if let object = value as? [String: Any] {
+                return object.keys.flatMap { key in variants(object[key] as Any).map { replacement in
+                    var changed = object; changed[key] = replacement; return changed as Any
+                } }
+            }
+            return []
+        }
+        let mixedVariants = variants(json)
+        XCTAssertGreaterThan(mixedVariants.count, 10)
+        for variant in mixedVariants {
+            let mixed = try JSONDecoder().decode(AppContentManifest.self, from: JSONSerialization.data(withJSONObject: variant))
+            XCTAssertFalse(ContentSecurityPolicy.isTrusted(mixed, environment: .review))
+        }
+    }
+
+    @MainActor
+    func testReviewCatalogNeverFallsBackToProductionAndRejectsForeignRefresh() throws {
+        let store = PortfolioStore(environment: .review)
+        defer { store.discardProtectedContent() }
+        XCTAssertTrue(store.portfolios.isEmpty)
+        XCTAssertTrue(store.heroImages.isEmpty)
+        XCTAssertNil(store.aboutPortraitURL)
+        XCTAssertNil(store.showreel)
+        XCTAssertTrue(store.dramas.isEmpty)
+        XCTAssertTrue(store.launchPosters.isEmpty)
+        let refresh = store.beginContentRefresh()
+        XCTAssertFalse(store.completeContentRefresh(refresh, with: try environmentManifest(.production)))
+        XCTAssertTrue(store.heroImages.isEmpty)
+        let valid = store.beginContentRefresh()
+        XCTAssertTrue(store.completeContentRefresh(valid, with: try environmentManifest(.review)))
+        XCTAssertEqual(store.heroImages.first?.host, "review.shuzijun.com.cn")
+        store.discardProtectedContent()
+        XCTAssertTrue(store.heroImages.isEmpty)
+        XCTAssertTrue(store.portfolios.isEmpty)
+        XCTAssertNil(store.aboutPortraitURL)
+        XCTAssertNil(store.showreel)
+    }
+
+    @MainActor
+    func testCatalogCacheAndCleanupNeverCrossEnvironments() async throws {
+        let production = PortfolioStore()
+        let review = PortfolioStore(environment: .review)
+        defer { production.discardProtectedContent(); review.discardProtectedContent() }
+        production.discardProtectedContent()
+        review.discardProtectedContent()
+        production.applyPublishedManifest(try environmentManifest(.production))
+        review.applyPublishedManifest(try environmentManifest(.review))
+        for environment in AppServiceEnvironment.allCases {
+            let reader = PortfolioStore(environment: environment)
+            await reader.restoreCachedContent(allowVideo: false)
+            XCTAssertEqual(reader.contentOrigin, .cached)
+            XCTAssertTrue(reader.heroImages.allSatisfy { ContentSecurityPolicy.isTrustedMediaURL($0, environment: environment) })
+            XCTAssertEqual(reader.portfolios.first?.images.count, 3)
+            XCTAssertNil(reader.showreel)
+        }
+        review.discardProtectedContent()
+        let productionReader = PortfolioStore()
+        await productionReader.restoreCachedContent(allowVideo: true)
+        XCTAssertEqual(productionReader.contentOrigin, .cached)
+        let emptyReview = PortfolioStore(environment: .review)
+        await emptyReview.restoreCachedContent(allowVideo: true)
+        XCTAssertTrue(emptyReview.portfolios.isEmpty)
+        review.applyPublishedManifest(try environmentManifest(.review))
+        production.discardProtectedContent()
+        let reviewReader = PortfolioStore(environment: .review)
+        await reviewReader.restoreCachedContent(allowVideo: true)
+        XCTAssertEqual(reviewReader.contentOrigin, .cached)
+        XCTAssertEqual(reviewReader.heroImages.first?.host, "review.shuzijun.com.cn")
+    }
+
+    @MainActor
+    func testFavoritesAndRecentsAreIsolatedEvenForIdenticalAccountIDs() throws {
+        let defaults = try makePushStartupDefaults()
+        let userID = UUID().uuidString
+        let image = try XCTUnwrap(makePortfolio(imageCount: 3).images.first)
+        let portfolio = makePortfolio(imageCount: 3)
+        defaults.set([42], forKey: "favoritePortfolioImageIDs")
+        defaults.set([42], forKey: "recentlyViewedPortfolioIDs")
+        let reviewFavorites = FavoritesStore(defaults: defaults, environment: .review)
+        let reviewRecents = RecentlyViewedStore(defaults: defaults, environment: .review)
+        XCTAssertEqual(defaults.array(forKey: "favoritePortfolioImageIDs") as? [Int], [42])
+        XCTAssertEqual(defaults.array(forKey: "recentlyViewedPortfolioIDs") as? [Int], [42])
+        let productionFavorites = FavoritesStore(defaults: defaults)
+        let productionRecents = RecentlyViewedStore(defaults: defaults)
+        productionFavorites.activate(accountID: userID)
+        productionRecents.activate(accountID: userID)
+        productionFavorites.toggle(image)
+        productionRecents.record(portfolio)
+        reviewFavorites.activate(accountID: userID)
+        reviewRecents.activate(accountID: userID)
+        XCTAssertTrue(reviewFavorites.imageIDs.isEmpty)
+        XCTAssertTrue(reviewRecents.portfolioIDs.isEmpty)
+        reviewFavorites.toggle(image)
+        reviewRecents.record(portfolio)
+        reviewFavorites.removeData(for: userID)
+        reviewRecents.removeData(for: userID)
+        productionFavorites.deactivate(); productionFavorites.activate(accountID: userID)
+        productionRecents.deactivate(); productionRecents.activate(accountID: userID)
+        XCTAssertTrue(productionFavorites.contains(image))
+        XCTAssertEqual(productionRecents.portfolioIDs, [portfolio.id])
+        reviewFavorites.toggle(image)
+        reviewRecents.record(portfolio)
+        productionFavorites.removeData(for: userID)
+        productionRecents.removeData(for: userID)
+        reviewFavorites.deactivate(); reviewFavorites.activate(accountID: userID)
+        reviewRecents.deactivate(); reviewRecents.activate(accountID: userID)
+        XCTAssertTrue(reviewFavorites.contains(image))
+        XCTAssertEqual(reviewRecents.portfolioIDs, [portfolio.id])
+    }
+
+    @MainActor
+    func testLaunchPosterRotationDoesNotReadOrWriteOtherEnvironmentHistory() throws {
+        let defaults = try makePushStartupDefaults()
+        let production = PortfolioStore()
+        let review = PortfolioStore(environment: .review)
+        defer { production.discardProtectedContent(); review.discardProtectedContent() }
+        production.applyPublishedManifest(try environmentManifest(.production))
+        review.applyPublishedManifest(try environmentManifest(.review))
+        let date = Date(timeIntervalSince1970: 2_000_000_000)
+        XCTAssertEqual(production.selectLaunchPosterForColdLaunch(at: date, defaults: defaults)?.id, "first")
+        XCTAssertEqual(review.selectLaunchPosterForColdLaunch(at: date, defaults: defaults)?.id, "first")
+        XCTAssertEqual(review.selectLaunchPosterForColdLaunch(at: date, defaults: defaults)?.id, "second")
+        XCTAssertEqual(production.selectLaunchPosterForColdLaunch(at: date, defaults: defaults)?.id, "second")
+    }
+
+    @MainActor
+    func testAdministratorContentCannotPublishOrAcceptOtherEnvironmentMedia() async throws {
+        for environment in AppServiceEnvironment.allCases {
+            let other: AppServiceEnvironment = environment == .production ? .review : .production
+            let account = BoundAdministratorTestAccount()
+            account.administratorContext = .init(userID: "test-user", sessionGeneration: 1, environment: environment)
+            let manifest = try environmentManifest(environment)
+            let foreign = try environmentManifest(other)
+            var sendsForeignContent = false
+            var requests = [URLRequest]()
+            let admin = AdminSessionStore(environment: environment) { request in
+                requests.append(request)
+                let url = try XCTUnwrap(request.url)
+                let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200,
+                    httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
+                if url.path.hasSuffix("/session") {
+                    return (Data(#"{"authenticated":true,"role":"yishu_content_manager","displayName":"测试管理员"}"#.utf8), response)
+                }
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                return (try encoder.encode(sendsForeignContent ? foreign : manifest), response)
+            }
+            defer { admin.lock() }
+            await admin.signIn(using: account)
+            XCTAssertTrue(admin.isAuthenticated)
+            let content = try await admin.fetchContent()
+            XCTAssertEqual(content.heroImages, manifest.heroImages)
+            let before = requests.count
+            do {
+                _ = try await admin.publishAboutPortrait(try XCTUnwrap(foreign.aboutPortraitURL))
+                XCTFail("Foreign portrait was published")
+            } catch { XCTAssertEqual(requests.count, before) }
+            do {
+                _ = try await admin.publish(heroImages: foreign.heroImages, aboutPortraitURL: nil,
+                    launchPosters: manifest.launchPosters ?? [], showreel: try XCTUnwrap(manifest.showreel), dramas: manifest.dramas)
+                XCTFail("Foreign hero was published")
+            } catch { XCTAssertEqual(requests.count, before) }
+            let published = try await admin.publishAboutPortrait(try XCTUnwrap(manifest.aboutPortraitURL))
+            XCTAssertEqual(published.aboutPortraitURL, manifest.aboutPortraitURL)
+            XCTAssertEqual(requests.last?.httpMethod, "POST")
+            XCTAssertTrue(requests.allSatisfy { $0.url?.host == environment.apiHost })
+            sendsForeignContent = true
+            do { _ = try await admin.fetchContent(); XCTFail("Foreign manifest was accepted") }
+            catch { XCTAssertTrue(admin.isAuthenticated) }
+        }
+    }
+
+    private func environmentManifest(_ environment: AppServiceEnvironment) throws -> AppContentManifest {
+        let base = makeManifest(
+            aboutPortraitURL: AppURL.make("https://www.shuzijun.com.cn/test/about.jpg"), imageCount: 6,
+            launchPosters: [makeLaunchPoster(id: "first", startsAt: .distantPast),
+                            makeLaunchPoster(id: "second", startsAt: .distantPast)])
+        guard environment == .review else { return base }
+        let data = try JSONEncoder().encode(base)
+        var text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        for host in ["www.shuzijun.com.cn", "img.shuzijun.com.cn", "shuzijun.com.cn"] {
+            // Match the serialized HTTPS prefix, not suffixes inside another host.
+            text = text.replacingOccurrences(of: "https:\\/\\/\(host)\\/", with: "https:\\/\\/review.shuzijun.com.cn\\/")
+        }
+        return try JSONDecoder().decode(AppContentManifest.self, from: Data(text.utf8))
+    }
+
     func testAboutPortraitSelectionUsesConfiguredURLBeforeEveryFallback() {
         let configured = URL(
             string: "https://www.shuzijun.com.cn/wp-content/uploads/about-configured.jpg"

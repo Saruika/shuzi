@@ -104,6 +104,27 @@ final class PortfolioStore: ObservableObject {
     @Published private(set) var contentOrigin: ContentOrigin = .bundled
     private var contentRefreshID: UUID?
     private var cacheRestoreGeneration = UUID()
+    let serviceEnvironment: AppServiceEnvironment
+
+    init(environment: AppServiceEnvironment = .production) {
+        serviceEnvironment = environment
+        resetToInitialContent()
+    }
+
+    private func resetToInitialContent() {
+        let usesProductionCatalog = serviceEnvironment == .production
+        portfolios = usesProductionCatalog ? Portfolio.fallback : []
+        heroImages = usesProductionCatalog ? ContentCatalog.heroImages : []
+        configuredAboutPortraitURL = usesProductionCatalog ? ContentCatalog.aboutPortraitURL : nil
+        aboutPortraitURL = AboutPortraitSelectionPolicy.select(
+            configuredURL: configuredAboutPortraitURL,
+            heroImages: heroImages,
+            portfolios: portfolios
+        )
+        launchPosters = usesProductionCatalog ? ContentCatalog.launchPosters : []
+        showreel = usesProductionCatalog ? ContentCatalog.showreel : nil
+        dramas = usesProductionCatalog ? ContentCatalog.dramas : []
+    }
 
     @discardableResult
     func beginContentRefresh() -> UUID {
@@ -117,7 +138,7 @@ final class PortfolioStore: ObservableObject {
     @discardableResult
     func completeContentRefresh(_ refreshID: UUID, with manifest: AppContentManifest) -> Bool {
         guard contentRefreshID == refreshID else { return false }
-        guard ContentSecurityPolicy.isTrusted(manifest) else {
+        guard ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else {
             failContentRefresh(refreshID)
             return false
         }
@@ -153,16 +174,17 @@ final class PortfolioStore: ObservableObject {
     func restoreCachedContent(allowVideo: Bool) async {
         guard contentOrigin == .bundled else { return }
         let generation = cacheRestoreGeneration
+        let environment = serviceEnvironment
         let cache = await withCheckedContinuation { continuation in
-            Self.cacheQueue.async { continuation.resume(returning: Self.loadCache()) }
+            Self.cacheQueue.async { continuation.resume(returning: Self.loadCache(environment: environment)) }
         }
         guard !Task.isCancelled, generation == cacheRestoreGeneration,
               contentOrigin == .bundled,
               let cache,
               !cache.portfolios.isEmpty else { return }
         portfolios = cache.portfolios
-        heroImages = cache.heroImages ?? ContentCatalog.heroImages
-        configuredAboutPortraitURL = cache.aboutPortraitURL ?? ContentCatalog.aboutPortraitURL
+        heroImages = cache.heroImages ?? (serviceEnvironment == .production ? ContentCatalog.heroImages : [])
+        configuredAboutPortraitURL = cache.aboutPortraitURL ?? (serviceEnvironment == .production ? ContentCatalog.aboutPortraitURL : nil)
         aboutPortraitURL = AboutPortraitSelectionPolicy.select(
             configuredURL: configuredAboutPortraitURL,
             heroImages: heroImages,
@@ -196,10 +218,10 @@ final class PortfolioStore: ObservableObject {
         let selected = LaunchPosterSelectionPolicy.select(
             from: launchPosters,
             at: date,
-            previousID: defaults.string(forKey: Self.lastLaunchPosterIDKey)
+            previousID: defaults.string(forKey: serviceEnvironment.storageKey(Self.lastLaunchPosterIDKey))
         )
         if let selected {
-            defaults.set(selected.id, forKey: Self.lastLaunchPosterIDKey)
+            defaults.set(selected.id, forKey: serviceEnvironment.storageKey(Self.lastLaunchPosterIDKey))
         }
         return selected
     }
@@ -207,7 +229,7 @@ final class PortfolioStore: ObservableObject {
     func applyPublishedManifest(_ manifest: AppContentManifest) {
         guard manifest.schemaVersion == 1,
               !manifest.portfolios.isEmpty,
-              ContentSecurityPolicy.isTrusted(manifest) else { return }
+              ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else { return }
         cacheRestoreGeneration = UUID()
         portfolios = manifest.portfolios
         heroImages = manifest.heroImages
@@ -225,6 +247,7 @@ final class PortfolioStore: ObservableObject {
         contentOrigin = .network
         statusMessage = nil
         Self.persistCacheInBackground(
+            environment: serviceEnvironment,
             portfolios: manifest.portfolios,
             heroImages: manifest.heroImages,
             aboutPortraitURL: configuredAboutPortraitURL,
@@ -252,6 +275,7 @@ final class PortfolioStore: ObservableObject {
 
         guard didReduceScope, let lastUpdated else { return }
         Self.persistCacheInBackground(
+            environment: serviceEnvironment,
             portfolios: portfolios,
             heroImages: heroImages,
             aboutPortraitURL: configuredAboutPortraitURL,
@@ -266,21 +290,11 @@ final class PortfolioStore: ObservableObject {
         cacheRestoreGeneration = UUID()
         contentRefreshID = nil
         isRefreshing = false
-        portfolios = Portfolio.fallback
-        heroImages = ContentCatalog.heroImages
-        configuredAboutPortraitURL = ContentCatalog.aboutPortraitURL
-        aboutPortraitURL = AboutPortraitSelectionPolicy.select(
-            configuredURL: configuredAboutPortraitURL,
-            heroImages: ContentCatalog.heroImages,
-            portfolios: Portfolio.fallback
-        )
-        launchPosters = ContentCatalog.launchPosters
-        showreel = ContentCatalog.showreel
-        dramas = ContentCatalog.dramas
+        resetToInitialContent()
         lastUpdated = nil
         statusMessage = nil
         contentOrigin = .bundled
-        Self.removeCacheInBackground()
+        Self.removeCacheInBackground(environment: serviceEnvironment)
     }
 
 #if DEBUG
@@ -308,24 +322,25 @@ final class PortfolioStore: ObservableObject {
     }
 #endif
 
-    private static func removeCacheInBackground() {
+    private static func removeCacheInBackground(environment: AppServiceEnvironment) {
         Self.cacheQueue.async {
-            guard let url = Self.cacheFileURL(createDirectory: false) else { return }
+            guard let url = Self.cacheFileURL(createDirectory: false, environment: environment) else { return }
             try? FileManager.default.removeItem(at: url)
         }
     }
 
-    nonisolated private static func loadCache() -> PortfolioCacheEnvelope? {
-        guard let url = cacheFileURL(createDirectory: false),
+    nonisolated private static func loadCache(environment: AppServiceEnvironment) -> PortfolioCacheEnvelope? {
+        guard let url = cacheFileURL(createDirectory: false, environment: environment),
               let data = try? Data(contentsOf: url),
               data.count <= 5 * 1024 * 1024,
               let cache = try? JSONDecoder().decode(PortfolioCacheEnvelope.self, from: data),
               cache.isAuthorizedPreview,
-              ContentSecurityPolicy.isTrusted(cache) else { return nil }
+              ContentSecurityPolicy.isTrusted(cache, environment: environment) else { return nil }
         return cache
     }
 
     private static func persistCacheInBackground(
+        environment: AppServiceEnvironment,
         portfolios: [Portfolio],
         heroImages: [URL],
         aboutPortraitURL: URL?,
@@ -336,6 +351,7 @@ final class PortfolioStore: ObservableObject {
     ) {
         Self.cacheQueue.async {
             Self.persistCache(
+                environment: environment,
                 portfolios: portfolios,
                 heroImages: heroImages,
                 aboutPortraitURL: aboutPortraitURL,
@@ -348,6 +364,7 @@ final class PortfolioStore: ObservableObject {
     }
 
     nonisolated private static func persistCache(
+        environment: AppServiceEnvironment,
         portfolios: [Portfolio],
         heroImages: [URL],
         aboutPortraitURL: URL?,
@@ -360,7 +377,7 @@ final class PortfolioStore: ObservableObject {
         // URLs). No image bytes are encoded or written to disk; the complete
         // live gallery remains an in-memory response.
         let cachedPortfolios = permissionScopedPreviewPortfolios(from: portfolios)
-        guard let url = cacheFileURL(createDirectory: true),
+        guard let url = cacheFileURL(createDirectory: true, environment: environment),
               let data = try? JSONEncoder().encode(
                 PortfolioCacheEnvelope(
                     cacheSchemaVersion: ContentManifestPolicy.currentCacheSchemaVersion,
@@ -408,7 +425,7 @@ final class PortfolioStore: ObservableObject {
         }
     }
 
-    nonisolated private static func cacheFileURL(createDirectory: Bool) -> URL? {
+    nonisolated private static func cacheFileURL(createDirectory: Bool, environment: AppServiceEnvironment) -> URL? {
         guard let applicationSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -422,7 +439,7 @@ final class PortfolioStore: ObservableObject {
                 attributes: [.protectionKey: FileProtectionType.complete]
             )
         }
-        return directory.appending(path: "portfolio-cache.json")
+        return directory.appending(path: environment.storageKey("portfolio-cache.json"))
     }
 
 }
@@ -445,7 +462,12 @@ enum ContentSecurityPolicy {
     ]
 
     static func isTrusted(_ manifest: AppContentManifest) -> Bool {
-        ContentManifestPolicy.isValid(manifest)
+        isTrusted(manifest, environment: .production)
+    }
+
+    static func isTrusted(_ manifest: AppContentManifest, environment: AppServiceEnvironment) -> Bool {
+        let isTrustedMediaURL: (URL) -> Bool = { Self.isTrustedMediaURL($0, environment: environment) }
+        return ContentManifestPolicy.isValid(manifest)
             && manifest.heroImages.allSatisfy(isTrustedMediaURL)
             && (manifest.aboutPortraitURL.map(isTrustedMediaURL) ?? true)
             && (manifest.launchPosters ?? []).allSatisfy { isTrustedMediaURL($0.imageURL) }
@@ -455,11 +477,12 @@ enum ContentSecurityPolicy {
             && manifest.dramas.allSatisfy {
                 isTrustedMediaURL($0.imageURL) && isTrustedDestinationURL($0.destinationURL)
             }
-            && manifest.portfolios.allSatisfy(isTrusted)
+            && manifest.portfolios.allSatisfy { isTrusted($0, environment: environment) }
     }
 
-    fileprivate static func isTrusted(_ cache: PortfolioCacheEnvelope) -> Bool {
-        ContentManifestPolicy.isValidCache(
+    fileprivate static func isTrusted(_ cache: PortfolioCacheEnvelope, environment: AppServiceEnvironment) -> Bool {
+        let isTrustedMediaURL: (URL) -> Bool = { Self.isTrustedMediaURL($0, environment: environment) }
+        return ContentManifestPolicy.isValidCache(
             schemaVersion: cache.cacheSchemaVersion,
             portfolios: cache.portfolios,
             heroImages: cache.heroImages,
@@ -477,19 +500,28 @@ enum ContentSecurityPolicy {
             && (cache.dramas ?? []).allSatisfy {
                 isTrustedMediaURL($0.imageURL) && isTrustedDestinationURL($0.destinationURL)
             }
-            && cache.portfolios.allSatisfy(isTrusted)
+            && cache.portfolios.allSatisfy { isTrusted($0, environment: environment) }
     }
 
     static func isTrustedMediaURL(_ url: URL) -> Bool {
-        isSecure(url)
+        isTrustedMediaURL(url, environment: .production)
+    }
+
+    static func isTrustedMediaURL(_ url: URL, environment: AppServiceEnvironment) -> Bool {
+        let hosts = environment == .production ? trustedMediaHosts : [environment.mediaHost]
+        return isSecure(url)
             && url.absoluteString.utf8.count <= 2_048
-            && trustedMediaHosts.contains(url.host?.lowercased() ?? "")
+            && hosts.contains(url.host?.lowercased() ?? "")
     }
 
     static func matchesRequestedMediaURL(_ responseURL: URL?, requestedURL: URL) -> Bool {
+        matchesRequestedMediaURL(responseURL, requestedURL: requestedURL, environment: .production)
+    }
+
+    static func matchesRequestedMediaURL(_ responseURL: URL?, requestedURL: URL, environment: AppServiceEnvironment) -> Bool {
         guard let responseURL,
-              isTrustedMediaURL(requestedURL),
-              isTrustedMediaURL(responseURL) else { return false }
+              isTrustedMediaURL(requestedURL, environment: environment),
+              isTrustedMediaURL(responseURL, environment: environment) else { return false }
         return responseURL.scheme?.lowercased() == requestedURL.scheme?.lowercased()
             && responseURL.host?.lowercased() == requestedURL.host?.lowercased()
             && (responseURL.port ?? 443) == (requestedURL.port ?? 443)
@@ -507,8 +539,9 @@ enum ContentSecurityPolicy {
             && trustedDestinationHosts.contains(url.host?.lowercased() ?? "")
     }
 
-    private static func isTrusted(_ portfolio: Portfolio) -> Bool {
-        isTrustedWebsiteURL(portfolio.websiteURL)
+    private static func isTrusted(_ portfolio: Portfolio, environment: AppServiceEnvironment) -> Bool {
+        let isTrustedMediaURL: (URL) -> Bool = { Self.isTrustedMediaURL($0, environment: environment) }
+        return isTrustedMediaURL(portfolio.websiteURL)
             && portfolio.websiteURL.path.hasPrefix("/portfolio/")
             && (portfolio.totalImageCount.map { $0 >= portfolio.images.count && $0 <= 300 } ?? true)
             && (portfolio.coverURL.map(isTrustedMediaURL) ?? true)

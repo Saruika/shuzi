@@ -9,11 +9,13 @@ final class RecentlyViewedStore: ObservableObject {
     private let defaults: UserDefaults
     private var activeAccountID: String?
     private let maximumCount = 6
+    let serviceEnvironment: AppServiceEnvironment
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, environment: AppServiceEnvironment = .production) {
         self.defaults = defaults
+        serviceEnvironment = environment
         portfolioIDs = []
-        defaults.removeObject(forKey: Self.legacyDefaultsKey)
+        defaults.removeObject(forKey: environment.storageKey(Self.legacyDefaultsKey))
     }
 
     func activate(accountID: String) {
@@ -67,7 +69,7 @@ final class RecentlyViewedStore: ObservableObject {
     }
 
     private func defaultsKey(for accountID: String) -> String {
-        "\(Self.accountKeyPrefix).\(accountID)"
+        serviceEnvironment.storageKey("\(Self.accountKeyPrefix).\(accountID)")
     }
 
     private static func normalizedAccountID(_ accountID: String) -> String? {

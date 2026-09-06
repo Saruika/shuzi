@@ -658,7 +658,7 @@ final class AdminSessionStore: ObservableObject {
         }
         try validateActiveRequest(generation: requestGeneration)
         let media = try decodeResponse(UploadedMedia.self, data: responseData, response: response)
-        guard ContentSecurityPolicy.isTrustedMediaURL(media.sourceURL) else {
+        guard ContentSecurityPolicy.isTrustedMediaURL(media.sourceURL, environment: serviceEnvironment) else {
             throw AdminAPIError.invalidResponse
         }
         return media
@@ -696,7 +696,7 @@ final class AdminSessionStore: ObservableObject {
         }
         try validateActiveRequest(generation: requestGeneration)
         let media = try decodeResponse(UploadedMedia.self, data: responseData, response: response)
-        guard ContentSecurityPolicy.isTrustedMediaURL(media.sourceURL) else {
+        guard ContentSecurityPolicy.isTrustedMediaURL(media.sourceURL, environment: serviceEnvironment) else {
             throw AdminAPIError.invalidResponse
         }
         return media
@@ -709,6 +709,13 @@ final class AdminSessionStore: ObservableObject {
         showreel: ShowreelContent,
         dramas: [DramaWork]
     ) async throws -> AppContentManifest {
+        // Reject stale drafts from another workspace before any publishing request.
+        let trustedMedia: (URL) -> Bool = { ContentSecurityPolicy.isTrustedMediaURL($0, environment: self.serviceEnvironment) }
+        guard heroImages.allSatisfy(trustedMedia),
+              (aboutPortraitURL.map(trustedMedia) ?? true),
+              launchPosters.allSatisfy({ trustedMedia($0.imageURL) }),
+              trustedMedia(showreel.videoURL), trustedMedia(showreel.posterURL),
+              dramas.allSatisfy({ trustedMedia($0.imageURL) }) else { throw AdminAPIError.invalidResponse }
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         let body = try encoder.encode(
@@ -725,7 +732,7 @@ final class AdminSessionStore: ObservableObject {
             method: "POST",
             body: body
         )
-        guard ContentSecurityPolicy.isTrusted(manifest) else { throw AdminAPIError.invalidResponse }
+        guard ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else { throw AdminAPIError.invalidResponse }
         return manifest
     }
 
@@ -733,7 +740,7 @@ final class AdminSessionStore: ObservableObject {
     /// administrator drafts. The server's existing content endpoint accepts a
     /// partial body and returns the complete authoritative manifest.
     func publishAboutPortrait(_ aboutPortraitURL: URL) async throws -> AppContentManifest {
-        guard ContentSecurityPolicy.isTrustedMediaURL(aboutPortraitURL) else {
+        guard ContentSecurityPolicy.isTrustedMediaURL(aboutPortraitURL, environment: serviceEnvironment) else {
             throw AdminAPIError.invalidResponse
         }
         let body = try JSONEncoder().encode(
@@ -744,7 +751,7 @@ final class AdminSessionStore: ObservableObject {
             method: "POST",
             body: body
         )
-        guard ContentSecurityPolicy.isTrusted(manifest),
+        guard ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment),
               manifest.aboutPortraitURL == aboutPortraitURL else {
             throw AdminAPIError.invalidResponse
         }
@@ -756,7 +763,7 @@ final class AdminSessionStore: ObservableObject {
             path: "shuzijun/v1/app-content",
             method: "GET"
         )
-        guard ContentSecurityPolicy.isTrusted(manifest) else { throw AdminAPIError.invalidResponse }
+        guard ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else { throw AdminAPIError.invalidResponse }
         return manifest
     }
 
@@ -767,7 +774,7 @@ final class AdminSessionStore: ObservableObject {
             method: "POST",
             body: body
         )
-        guard ContentSecurityPolicy.isTrusted(response.content) else { throw AdminAPIError.invalidResponse }
+        guard ContentSecurityPolicy.isTrusted(response.content, environment: serviceEnvironment) else { throw AdminAPIError.invalidResponse }
         return response.content
     }
 
@@ -784,7 +791,7 @@ final class AdminSessionStore: ObservableObject {
             method: "POST",
             body: body
         )
-        guard ContentSecurityPolicy.isTrusted(result.content) else { throw AdminAPIError.invalidResponse }
+        guard ContentSecurityPolicy.isTrusted(result.content, environment: serviceEnvironment) else { throw AdminAPIError.invalidResponse }
         return result
     }
 

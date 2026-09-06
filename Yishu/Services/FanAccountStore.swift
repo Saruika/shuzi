@@ -1997,7 +1997,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
             method: "GET",
             authorized: true
         )
-        guard ContentSecurityPolicy.isTrusted(manifest) else {
+        guard ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else {
             throw FanAccountError.invalidResponse
         }
         return manifest
