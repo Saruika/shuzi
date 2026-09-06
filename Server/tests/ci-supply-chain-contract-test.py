@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,7 @@ SCRIPT = ROOT / "Scripts/ci-supply-chain.py"
 WORKFLOW = ROOT / ".github/workflows/ios-quality.yml"
 # Current reviewed materials get a new record; immutable historical releases
 # must not be rewritten to pretend they contained today's workflow/scripts.
-RELEASE_RECORD = ROOT / "Server/releases/v1.4.0-build2-preflight13.md"
+RELEASE_RECORD = ROOT / "Server/releases/v1.4.0-build4-review-env-preview19.md"
 SPDX_SCHEMA_URL = (
     "https://raw.githubusercontent.com/spdx/spdx-spec/"
     "aadf3b0b8dbbabdb4d880b0fc714255fea436ff7/schemas/spdx-schema.json"
@@ -317,6 +318,33 @@ def test_workflow_text() -> None:
     assert "id-token: write" not in text
 
 
+def verify_record_digest(text: str, name: str, digest: str) -> None:
+    # Require exactly one complete assignment, not a substring in prose or a
+    # second conflicting fingerprint. Name the stale material in CI output.
+    values = re.findall(rf"^{re.escape(name)}=(.*)$", text, flags=re.MULTILINE)
+    assert values == [digest], f"release record mismatch: {name} ({RELEASE_RECORD.name})"
+
+
+def test_record_digest_rejects_stale_or_ambiguous_materials() -> None:
+    name = "WORKFLOW_SHA256"
+    digest = "a" * 64
+    verify_record_digest(f"{name}={digest}\n", name, digest)
+    for text in (
+        "",
+        f"{name}={'b' * 64}\n",
+        f"{name}={digest}\n{name}={digest}\n",
+        f"{name}={digest}\n{name}={'b' * 64}\n",
+        f"prose {name}={digest}\n",
+        f"{name}={digest}extra\n",
+    ):
+        try:
+            verify_record_digest(text, name, digest)
+        except AssertionError as error:
+            assert name in str(error)
+        else:
+            raise AssertionError("stale or ambiguous release fingerprint was accepted")
+
+
 def test_release_record() -> None:
     text = RELEASE_RECORD.read_text(encoding="utf-8")
     trust_materials = {
@@ -330,12 +358,14 @@ def test_release_record() -> None:
         "RUFF_POLICY_SHA256": ROOT / "Server/ruff.toml",
         "SUPPLY_CHAIN_SCRIPT_SHA256": SCRIPT,
         "RELEASE_ANALYZE_SHA256": ROOT / "Scripts/ci-release-analyze.sh",
+        "TEST_SUMMARY_SHA256": ROOT / "Scripts/ci-test-summary.py",
+        "DISTRIBUTION_CHECK_SHA256": ROOT / "Scripts/check-distribution-package.py",
     }
     for name, path in trust_materials.items():
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        assert text.count(f"{name}={digest}") == 1
-    assert text.count(f"SPDX_2_3_SCHEMA_SHA256={SPDX_SCHEMA_SHA256}") == 1
-    assert text.count("`v1.4.0-build2-preflight13`") == 1
+        verify_record_digest(text, name, digest)
+    verify_record_digest(text, "SPDX_2_3_SCHEMA_SHA256", SPDX_SCHEMA_SHA256)
+    assert text.count("`v1.4.0-build4-review-env-preview19`") == 1
 
 
 def main() -> None:
@@ -350,6 +380,7 @@ def main() -> None:
         test_sboms(temporary)
         test_local_provenance(temporary)
     test_workflow_text()
+    test_record_digest_rejects_stale_or_ambiguous_materials()
     test_release_record()
     print("ci-supply-chain-contract-test: passed")
 

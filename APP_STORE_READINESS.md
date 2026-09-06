@@ -4,6 +4,13 @@
 
 本段优先于下方历史快照，正式上架目标仍未完成，未上传新的 TestFlight 包。
 
+- **最新云端 #133 已终态失败**：2026-09-07 06:51 使用 a6d9a0d / preview18 启动，
+  工具链安装及来源采集成功，依赖策略验证成功，但当前工作流的指纹仍由契约引用
+  Build 2 preflight13 旧记录，导致后续静态分析、iPhone/iPad/Release 全部跳过。
+  这不是 GitHub 无法启动，也不是 App 页面测试已通过。候选
+  [preview19](Server/releases/v1.4.0-build4-review-env-preview19.md) 保留旧记录，更新当前材料
+  引用并添加明确的文件指纹错误信息；本地实际 Python 3.13.15 的完整供应链契约和 Ruff 已通过。
+  06:50 账单核对为已用 USD 9.70 / USD 20、Stop usage Yes；该值是 #133 前快照。
 - **审核资料**：隐私网址已写入 ASC 并回读。用户确认的审核联系人与普通审核账号登录凭据
   已写入审核专用字段并回读；不在 Git 中记录密码、身份码、私人联系方式或会话信息。
   普通审核账号经公开 HTTPS 注册、审批后登录确认有效，当前免费内容接口返回 10 组相册，
@@ -47,11 +54,15 @@
   Release analyze/build 与发行包检查通过；没有照片原图、私钥文件或所检查的 DEBUG 测试标记。
   变更记录见 [preview16](Server/releases/v1.4.0-build4-review-env-preview16.md)。
   专项结果不能替代最终全量矩阵，未上传 TestFlight。
-- **最终 iPad 矩阵正在运行**：`24905f2` / preview16 已在新建 iPad Pro 13-inch 模拟器通过首次
-  系统通知授权，随后在同一设备执行完整矩阵，247 单元已通过，界面测试仍未终态。
+- **最新 iPad 全量矩阵已终态失败**：`24905f2` / preview16 在新建 iPad Pro 13-inch 模拟器通过首次
+  系统通知授权，随后在同一设备执行完整矩阵。247 单元通过；最终 312 个唯一用例中
+  309 通过、2 失败、1 跳过；参数化执行为 363 通过、3 失败、1 跳过，退出 65。
   06:29–06:30 期间设备变为 shutdown，runner 被 signal term 结束，Xcode 自动恢复后有两次
-  主题配置在 setup 获取活跃应用时出现 AX -25218。原因尚待核验；不能记为完整通过或归因布局。
-  本轮 preview17 只改服务端及测试/文档，不修改这轮正在验证的 Swift 产物。
+  主题配置在 setup 获取活跃应用时出现 AX -25218。最终失败用例为完整 iPad 首页构图
+  `testHomeHeroKeepsTheFullIPadCompositionAndNeverTurnsBlank` 和
+  `testHomeIndigoAndIvoryMatchThePage`。关闭原因仍未证实，不归因布局或直接当作可忽略。
+  已保存原始失败结果，并启动同代码、同硬件/系统的新建模拟器专项复验，尚未获得专项终态。
+  preview17–19 不改变该轮 Swift 产物；专项复验不能将这轮完整失败改记为通过。
 - **发行签名已单独核对**：历史实际导出包 `1.4.0 (3)` 的生产 APNs、Apple 登录、WeatherKit 与签名
   检查通过，不代表 Build 4 已导出。新增 [preview18](Server/releases/v1.4.0-build4-review-env-preview18.md)
   校验命令并用预期 Build 4 拒绝同一旧包；未接管上传工具，不把包校验成功当作上架就绪。

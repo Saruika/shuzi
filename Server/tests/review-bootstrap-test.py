@@ -82,6 +82,31 @@ class ReviewBootstrapTests(unittest.TestCase):
         self.assertEqual(env['WP_CLI_CONFIG_PATH'], '/dev/null')
         self.assertFalse(any(key.startswith('YISHU_') for key in env))
 
+    def test_command_configuration_home_is_private_unique_and_always_cleaned(self):
+        directories = []
+        for outcome in ('success', 'failure', 'timeout'):
+            with self.subTest(outcome=outcome):
+                def invoke(args, **kwargs):
+                    directory = Path(kwargs['env']['HOME'])
+                    directories.append(directory)
+                    self.assertTrue(directory.is_dir())
+                    self.assertFalse(directory.is_symlink())
+                    self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                    (directory / 'fixture-config').write_text('isolated')
+                    if outcome == 'timeout':
+                        raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+                    return subprocess.CompletedProcess(args, int(outcome == 'failure'), '', '')
+
+                with patch.object(bootstrap.subprocess, 'run', side_effect=invoke):
+                    if outcome == 'success':
+                        bootstrap.command(['/usr/bin/true'])
+                    else:
+                        error = subprocess.TimeoutExpired if outcome == 'timeout' else RuntimeError
+                        with self.assertRaises(error):
+                            bootstrap.command(['/usr/bin/true'])
+                self.assertFalse(directories[-1].exists())
+        self.assertEqual(len(set(directories)), 3)
+
     def test_private_listener_and_source_denial(self):
         config = (SERVER / 'operations/review/nginx.conf').read_text()
         self.assertIn('listen 127.0.0.1:18089 default_server;', config)

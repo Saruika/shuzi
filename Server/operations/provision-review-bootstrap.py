@@ -19,6 +19,7 @@ import shutil
 import socket
 import stat
 import subprocess
+import tempfile
 import time
 
 ROOT = Path('/srv/shuzijun-review')
@@ -32,11 +33,15 @@ ASSETS = ('php-fpm.conf', 'nginx.conf', '000-review-bootstrap.php', *UNITS)
 
 
 def command(args, *, data=None, timeout=90):
-    result = subprocess.run(args, input=data, text=True, capture_output=True,
-                            timeout=timeout, check=False,
-                            env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
-                                 'HOME': '/tmp', 'LANG': 'C.UTF-8',
-                                 'WP_CLI_CONFIG_PATH': '/dev/null'})
+    # Give CLI tools an isolated configuration home, not the shared temporary
+    # directory. Each invocation gets a new owner-only directory, also cleaned
+    # after command failure or timeout; the caller's environment is unchanged.
+    with tempfile.TemporaryDirectory(prefix='shuzijun-review-command-') as command_home:
+        result = subprocess.run(args, input=data, text=True, capture_output=True,
+                                timeout=timeout, check=False,
+                                env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin',
+                                     'HOME': command_home, 'LANG': 'C.UTF-8',
+                                     'WP_CLI_CONFIG_PATH': '/dev/null'})
     if result.returncode:
         # SQL / install commands may contain secrets on stdin. Never relay
         # their stdout/stderr or arguments into an operator / CI transcript.
