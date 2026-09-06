@@ -229,6 +229,7 @@ try {
     // After the isolated collaboration harness checks, load only the class
     // definitions to exercise real account/session policy without init().
     require __DIR__ . '/fan-bound-administrator-wordpress-integration.php';
+    require __DIR__ . '/fan-administrator-binding-wordpress-integration.php';
     check_wordpress_schema(!wp_next_scheduled('yishu_sweep_collaboration_outbox')
         && !wp_next_scheduled('yishu_process_collaboration_outbox'), 'no collaboration worker scheduled');
     fwrite(STDOUT, 'collaboration-wordpress-schema: ' . $checks . ' assertions passed; WordPress 7.1; MySQL '

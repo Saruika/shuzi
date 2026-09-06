@@ -31,6 +31,7 @@ function current_user_can(string $capability): bool {
 }
 function wp_set_current_user(int $id): void { $GLOBALS['current_user_id'] = $id; }
 function wp_get_current_user() { return get_userdata($GLOBALS['current_user_id']); }
+function get_current_user_id(): int { return $GLOBALS['current_user_id']; }
 function add_filter(...$arguments): void {}
 function remove_filter(...$arguments): void {}
 function wp_authenticate_application_password($input, string $username, string $password) {
@@ -56,6 +57,11 @@ final class BoundAdministratorHarness {
         return self::authenticate_manager_for_capability($request, $capability);
     }
     public static function context() { return self::$fan_session_context; }
+    public static function can_manage_fans(WP_REST_Request $request): bool {
+        return self::manages($request, self::FAN_CAPABILITY);
+    }
+    public static function account_authority_enabled(): bool { return $GLOBALS['authority']; }
+    public static function collaboration_phase1_enabled(): bool { return $GLOBALS['collaboration']; }
     private static function authenticate_fan_session(WP_REST_Request $request) {
         ++$GLOBALS['auth_calls'];
         $context = $GLOBALS['authenticated_context'];
@@ -75,6 +81,8 @@ function expect_bound_admin(bool $condition, string $label): void {
 }
 function reset_bound_admin_fixture(): void {
     $GLOBALS['current_user_id'] = 0;
+    $GLOBALS['authority'] = true;
+    $GLOBALS['collaboration'] = false;
     $GLOBALS['auth_calls'] = 0;
     $GLOBALS['authenticated_context'] = array('userID' => 17, 'scope' => 'normal');
     $GLOBALS['users'] = array(17 => new WP_User(17, array('subscriber', BoundAdministratorHarness::ROLE), array(
@@ -157,4 +165,24 @@ expect_bound_admin(BoundAdministratorHarness::manages(new WP_REST_Request(''), B
 foreach (array('Basic invalid', 'BearerX invalid', 'Digest invalid') as $header) {
     expect_bound_admin(!BoundAdministratorHarness::manages(new WP_REST_Request($header), BoundAdministratorHarness::CAPABILITY), 'explicit malformed credentials cannot borrow a populated WP administrator');
 }
+reset_bound_admin_fixture();
+expect_bound_admin(BoundAdministratorHarness::can_manage_fan_administrators($request) === true, 'full bound App manager can allocate App administration');
+foreach (array(BoundAdministratorHarness::CAPABILITY, BoundAdministratorHarness::FAN_CAPABILITY,
+    BoundAdministratorHarness::PUSH_CAPABILITY) as $capability) {
+    reset_bound_admin_fixture();
+    $GLOBALS['users'][17]->caps[$capability] = false;
+    expect_bound_admin(BoundAdministratorHarness::can_manage_fan_administrators($request) !== true, 'partial App capabilities cannot be amplified by delegation');
+}
+reset_bound_admin_fixture();
+$GLOBALS['users'][17]->caps[BoundAdministratorHarness::COLLABORATION_CAPABILITY] = false;
+expect_bound_admin(BoundAdministratorHarness::can_manage_fan_administrators($request) === true, 'dormant collaboration capability does not block ordinary App administration');
+$GLOBALS['collaboration'] = true;
+expect_bound_admin(BoundAdministratorHarness::can_manage_fan_administrators($request) !== true, 'enabled collaboration must be part of full administrator authority');
+reset_bound_admin_fixture();
+$GLOBALS['authority'] = false;
+expect_bound_admin(BoundAdministratorHarness::can_manage_fan_administrators($request) !== true, 'standby cannot allocate administrator identities');
+reset_bound_admin_fixture();
+$GLOBALS['users'][17]->roles = array('subscriber');
+expect_bound_admin(BoundAdministratorHarness::can_manage_fan_administrators($request) !== true, 'fan capability data alone cannot replace actual role binding');
+expect_bound_admin(is_wp_error(BoundAdministratorHarness::update_fan_administrator($request)), 'mutation callback itself rejects an ordinary caller before storage access');
 echo 'fan-bound-administrator-auth-test: passed assertions=' . $checks . PHP_EOL;

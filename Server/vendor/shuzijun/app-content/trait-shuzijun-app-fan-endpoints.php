@@ -2641,6 +2641,163 @@ trait Shuzijun_App_Fan_Endpoints {
         }
     }
 
+    private static function administrator_actor_has_full_app_capabilities($user) {
+        if (!$user instanceof WP_User) { return false; }
+        $required = array(self::CAPABILITY, self::FAN_CAPABILITY, self::PUSH_CAPABILITY);
+        if (self::collaboration_phase1_enabled()) { $required[] = self::COLLABORATION_CAPABILITY; }
+        foreach ($required as $capability) {
+            if (!user_can($user, $capability)) { return false; }
+        }
+        return true;
+    }
+
+    public static function can_manage_fan_administrators(WP_REST_Request $request) {
+        $access = self::can_manage_fans($request);
+        if ($access !== true) { return $access; }
+        return self::account_authority_enabled()
+            && self::administrator_actor_has_full_app_capabilities(wp_get_current_user());
+    }
+
+    // This changes only the App role, never arbitrary WordPress roles/caps.
+    // The shared actor/target locks also serialize against account suspension,
+    // deletion and password recovery. A stale UI must reload before overwriting.
+    public static function update_fan_administrator(WP_REST_Request $request) {
+        global $wpdb;
+        if (!self::account_authority_enabled()
+            || !self::authenticate_manager_for_capability($request, self::FAN_CAPABILITY)
+            || !self::administrator_actor_has_full_app_capabilities(wp_get_current_user())) {
+            return new WP_Error('fan_admin_forbidden', '只有完整的 App 管理员可以分配管理员身份。', array('status' => 403));
+        }
+        $actor_id = get_current_user_id();
+        $desired = $request->get_param('administrator');
+        $expected = $request->get_param('expectedAdministrator');
+        $expected_revision = $request->get_param('expectedRevision');
+        if (!is_bool($desired) || !is_bool($expected) || !is_int($expected_revision) || $expected_revision < 0) {
+            return new WP_Error('fan_admin_input_invalid', '请明确选择管理员身份并刷新当前状态。', array('status' => 400));
+        }
+        $uuid = $request->get_url_params()['uuid'] ?? null;
+        if (!is_string($uuid) || !preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/D', $uuid)) {
+            return new WP_Error('fan_not_found', '用户不存在。', array('status' => 404));
+        }
+        $users = get_users(array('number' => 2, 'fields' => 'all',
+            'meta_key' => self::FAN_META_UUID, 'meta_value' => $uuid));
+        if (count($users) !== 1 || !$users[0] instanceof WP_User) {
+            return new WP_Error('fan_not_found', '用户不存在。', array('status' => 404));
+        }
+        $target_id = (int) $users[0]->ID;
+        if ($target_id === $actor_id) {
+            return new WP_Error('fan_admin_self_change', '请由另一位管理员修改你的管理员身份。', array('status' => 409));
+        }
+        $locks = array();
+        $transaction = false;
+        $committed = false;
+        $failure = new WP_Error('fan_admin_update_failed', '管理员身份暂时无法更新，请刷新后重试。', array('status' => 503));
+        try {
+            $lock_ids = array(0, $actor_id, $target_id);
+            sort($lock_ids, SORT_NUMERIC);
+            foreach ($lock_ids as $lock_id) {
+                $owner = self::acquire_fan_lock($lock_id);
+                if (is_wp_error($owner)) { return $owner; }
+                $locks[$lock_id] = $owner;
+            }
+            // Discard request-local and persistent WP caches after acquiring
+            // the locks; a revoked actor must not reuse its earlier WP_User.
+            clean_user_cache($actor_id);
+            clean_user_cache($target_id);
+            wp_set_current_user(0);
+            // A legacy cookie was already authenticated by WordPress before
+            // entry. Preserve that identity, but reload its current caps.
+            if (trim((string) $request->get_header('authorization')) === '') {
+                wp_set_current_user($actor_id);
+            }
+            if (!self::account_authority_enabled()
+                || !self::authenticate_manager_for_capability($request, self::FAN_CAPABILITY)
+                || get_current_user_id() !== $actor_id
+                || !self::administrator_actor_has_full_app_capabilities(wp_get_current_user())) {
+                return new WP_Error('fan_admin_forbidden', '管理员身份已变更，请重新登录。', array('status' => 403));
+            }
+            $target = get_userdata($target_id);
+            if (!$target instanceof WP_User
+                || get_user_meta($target_id, self::FAN_META_UUID, true) !== $uuid) { return $failure; }
+            if ($desired && ((string) get_user_meta($target_id, self::FAN_META_STATUS, true) !== 'active'
+                || !self::fan_has_required_douyin_id($target_id)
+                || !empty(get_user_meta($target_id, self::FAN_META_INVITATION, true))
+                || !empty(get_user_meta($target_id, self::FAN_META_PASSWORD_RECOVERY, true))
+                || !empty(get_user_meta($target_id, self::FAN_META_APPLE_SETUP, true))
+                || (self::fan_account_source($target_id) === 'apple'
+                    && !self::fan_stored_consent_is_accepted(get_user_meta($target_id, self::FAN_META_CONSENT, true))))) {
+                return new WP_Error('fan_admin_setup_required', '只能为已完成资料并审批通过的用户授予管理员身份。', array('status' => 409));
+            }
+            // Never silently grant site-wide powers if another plugin changed
+            // the shared App role. Revocation remains possible in that case.
+            if ($desired) {
+                $role = get_role(self::ROLE);
+                $allowed = array('read', 'upload_files', self::CAPABILITY, self::FAN_CAPABILITY,
+                    self::PUSH_CAPABILITY, self::COLLABORATION_CAPABILITY);
+                if (!$role || array_diff(array_keys($role->capabilities), $allowed)) { return $failure; }
+                foreach (array('read', 'upload_files', self::CAPABILITY, self::FAN_CAPABILITY, self::PUSH_CAPABILITY) as $cap) {
+                    if (!$role->has_cap($cap)) { return $failure; }
+                }
+                if (self::collaboration_phase1_enabled() && !$role->has_cap(self::COLLABORATION_CAPABILITY)) { return $failure; }
+            }
+            $engines = $wpdb->get_col($wpdb->prepare(
+                'SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (%s, %s)',
+                $wpdb->users, $wpdb->usermeta
+            ));
+            if (!is_array($engines) || count($engines) !== 2 || array_filter($engines, function ($engine) { return strtoupper((string) $engine) !== 'INNODB'; })
+                || $wpdb->query('START TRANSACTION') === false) { return $failure; }
+            $transaction = true;
+            $cap_key = $wpdb->get_blog_prefix() . 'capabilities';
+            foreach (array($cap_key, self::FAN_META_ADMIN_BINDING_AUDIT, self::FAN_META_ADMIN_BINDING_REVISION) as $meta_key) {
+                $rows = $wpdb->get_results($wpdb->prepare(
+                    "SELECT umeta_id FROM {$wpdb->usermeta} WHERE user_id = %d AND meta_key = %s FOR UPDATE",
+                    $target_id, $meta_key
+                ));
+                if (!is_array($rows) || count($rows) > 1 || !empty($wpdb->last_error)) { return $failure; }
+            }
+            $caps = self::fan_meta_from_database($target_id, $cap_key, array(), true);
+            if (!is_array($caps) || !empty($wpdb->last_error)) { return $failure; }
+            $previous = array_key_exists(self::ROLE, $caps);
+            $stored_revision = self::fan_meta_from_database($target_id, self::FAN_META_ADMIN_BINDING_REVISION, 0, true);
+            $revision = filter_var($stored_revision, FILTER_VALIDATE_INT, array('options' => array('min_range' => 0)));
+            if ((!is_int($stored_revision) && !is_string($stored_revision)) || $revision === false || !empty($wpdb->last_error)) { return $failure; }
+            if ($previous !== $expected || $revision !== $expected_revision) {
+                return new WP_Error('fan_admin_conflict', '管理员身份已被其他操作修改，请刷新后重试。', array('status' => 409));
+            }
+            if ($desired && array_diff(array_keys($caps), array('subscriber', self::ROLE))) {
+                return new WP_Error('fan_admin_role_conflict', '该用户存在独立的网站权限，请先核对账号。', array('status' => 409));
+            }
+            if ($previous !== $desired) {
+                if ($revision >= PHP_INT_MAX) { return $failure; }
+                ++$revision;
+                if ($desired) { $caps[self::ROLE] = true; } else { unset($caps[self::ROLE]); }
+                $audit = self::fan_meta_from_database($target_id, self::FAN_META_ADMIN_BINDING_AUDIT, array(), true);
+                if (!is_array($audit) || !empty($wpdb->last_error)) { return $failure; }
+                $audit[] = array('administrator' => $desired, 'previousAdministrator' => $previous,
+                    'actorID' => $actor_id, 'revision' => $revision, 'at' => gmdate('c'));
+                // Update the role and its bounded audit atomically, without
+                // exposing an uncommitted role via WordPress object caching.
+                if (!self::set_fan_meta_in_transaction($target_id, $cap_key, $caps)
+                    || !self::set_fan_meta_in_transaction($target_id, self::FAN_META_ADMIN_BINDING_AUDIT, array_slice($audit, -50))
+                    || !self::set_fan_meta_in_transaction($target_id, self::FAN_META_ADMIN_BINDING_REVISION, $revision)) { return $failure; }
+            }
+            if ($wpdb->query('COMMIT') === false) { return $failure; }
+            $committed = true;
+            clean_user_cache($target_id);
+            $fresh = get_userdata($target_id);
+            if (!$fresh instanceof WP_User || in_array(self::ROLE, (array) $fresh->roles, true) !== $desired) { return $failure; }
+            $response = rest_ensure_response(array('user' => self::fan_admin_profile($fresh)));
+            $response->header('Cache-Control', 'private, no-store');
+            return $response;
+        } finally {
+            if ($transaction && !$committed) { $wpdb->query('ROLLBACK'); }
+            clean_user_cache($target_id);
+            foreach (array_reverse($locks, true) as $lock_id => $owner) {
+                self::release_fan_lock($lock_id, $owner);
+            }
+        }
+    }
+
     private static function authenticate_content_manager($request) {
         return self::authenticate_manager_for_capability($request, self::CAPABILITY);
     }

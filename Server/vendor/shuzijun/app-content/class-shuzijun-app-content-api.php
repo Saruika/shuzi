@@ -37,6 +37,8 @@ final class Shuzijun_App_Content_API {
     const FAN_META_APPLE_REFRESH_TOKEN = '_yishu_fan_apple_refresh_token';
     const FAN_META_APPLE_AUTH_IAT = '_yishu_fan_apple_auth_iat';
     const FAN_META_AUTH_AUDIT = '_yishu_fan_auth_audit';
+    const FAN_META_ADMIN_BINDING_AUDIT = '_yishu_fan_admin_binding_audit';
+    const FAN_META_ADMIN_BINDING_REVISION = '_yishu_fan_admin_binding_revision';
     const FAN_CONSENT_VERSION = '2026-09-04-approval-v4';
     // Server 1.5.12.1 is the fixed, reviewed consent-protocol bridge between
     // Build 42 (v3) and Build 45 (v4). Remove v3 from new submissions in
@@ -543,6 +545,12 @@ final class Shuzijun_App_Content_API {
             'methods' => WP_REST_Server::EDITABLE,
             'callback' => array(__CLASS__, 'update_fan_access'),
             'permission_callback' => array(__CLASS__, 'can_manage_fans'),
+        ));
+
+        register_rest_route('shuzijun/v1', '/app-admin/fans/(?P<uuid>[a-f0-9-]{36})/administrator', array(
+            'methods' => WP_REST_Server::EDITABLE,
+            'callback' => array(__CLASS__, 'update_fan_administrator'),
+            'permission_callback' => array(__CLASS__, 'can_manage_fan_administrators'),
         ));
 
         register_rest_route('shuzijun/v1', '/app-content/premium', array(
