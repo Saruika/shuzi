@@ -58,6 +58,16 @@ private actor ImagePipelineTestLoader {
 
 @MainActor
 final class ArtworkEnvironmentPipelineTests: XCTestCase {
+    func testGestureRasterFixtureUsesTheRealDecoderWithoutRemotePhotographs() async throws {
+        let url = AppURL.make("https://www.shuzijun.com.cn/wp-content/uploads/gesture-fixture.png")
+        let pipeline = ArtworkImagePipeline { try await ArtworkImageUITestFixture.response(for: $0) }
+        let image = try await pipeline.image(for: url, maxPixelSize: 640)
+        let raster = try XCTUnwrap(image.cgImage)
+        XCTAssertEqual(raster.width, 400)
+        XCTAssertEqual(raster.height, 600)
+        await pipeline.purgeMemory()
+    }
+
     private func fixture() throws -> Data {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
             UIColor.blue.setFill()
@@ -1255,7 +1265,7 @@ final class ContentAndAccessTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 430, height: 760)
         controller.viewDidLayoutSubviews()
         let photo = try XCTUnwrap(
-            controller.scrollView.accessibilityElements?.first as? UIAccessibilityElement
+            controller.scrollView.accessibilityElements?.first(where: { $0 is UIAccessibilityElement }) as? UIAccessibilityElement
         )
         let initialUpdates = controller.contentUpdateCount
         for scale in [CGFloat(1.25), 2, 4, 1, 3, 1] {
@@ -1266,6 +1276,19 @@ final class ContentAndAccessTests: XCTestCase {
         }
         XCTAssertEqual(controller.contentUpdateCount, initialUpdates,
                        "更新辅助功能缩放值不能重建图片加载子树")
+    }
+
+    func testGalleryHostedRetryControlsPrecedeVirtualPhotoInAccessibilityHitTesting() throws {
+        let url = AppURL.make("https://www.shuzijun.com.cn/wp-content/uploads/control-fixture.png")
+        let image = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "测试图片")
+        let controller = GalleryZoomViewController(image: image)
+        controller.loadViewIfNeeded()
+        let elements = try XCTUnwrap(controller.scrollView.accessibilityElements)
+        XCTAssertEqual(elements.count, 2)
+        XCTAssertTrue(elements[0] is UIView, "实际重试按钮的宿主必须先参与命中测试")
+        let photo = try XCTUnwrap(elements[1] as? UIAccessibilityElement)
+        XCTAssertEqual(photo.accessibilityIdentifier, "gallery-image-1")
+        XCTAssertTrue(photo.accessibilityTraits.contains(.adjustable))
     }
 
     func testNativeGalleryPanDoesNotUpdateHostedArtworkAndRotationResetsZoom() throws {

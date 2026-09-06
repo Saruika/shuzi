@@ -2254,9 +2254,19 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
     }
 
     func testGalleryRepeatedPinchPreservesPagingAndClose() {
+        verifyGalleryRepeatedPinch(imageFailure: false)
+    }
+
+    func testGalleryFailureKeepsRetryAndZoomResetAndCloseUsable() {
+        verifyGalleryRepeatedPinch(imageFailure: true)
+    }
+
+    private func verifyGalleryRepeatedPinch(imageFailure: Bool) {
         let app = launchApp(arguments: [
             "-open-portfolio-for-visual-testing",
             "-use-multi-image-gallery-for-visual-testing",
+            "-trace-gallery-gestures-for-testing",
+            imageFailure ? "-fail-artwork-for-visual-testing" : "-use-deterministic-gallery-images-for-testing",
         ], screenProtectionEnabled: true)
         let card = app.buttons.matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")
@@ -2276,6 +2286,23 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         let counter = element("gallery-counter", in: app)
         XCTAssertTrue(photo.waitForExistence(timeout: 8))
         XCTAssertTrue(close.waitForExistence(timeout: 5))
+        recordPresentationGeometry(imageFailure ? "gallery-failure-gestures" : "gallery-loaded-gestures",
+                                   frame: app.windows.firstMatch.frame)
+        let retries = app.buttons.matching(identifier: "artwork-image-retry")
+        if imageFailure {
+            XCTAssertTrue(retries.firstMatch.waitForExistence(timeout: 5))
+            guard let retry = retries.allElementsBoundByIndex.first(where: {
+                $0.isHittable && photo.frame.intersects($0.frame)
+            }) else {
+                XCTFail("当前照片缺少可点击的重试按钮：\(app.debugDescription)")
+                return
+            }
+            retry.tap()
+            XCTAssertTrue(retry.waitForExistence(timeout: 5), "持续加载失败仍必须允许再次重试")
+        } else {
+            XCTAssertTrue(retries.allElementsBoundByIndex.allSatisfy { !$0.isHittable || !photo.frame.intersects($0.frame) },
+                          "正常图片手势用例不能在网络失败占位图上假装验收成功")
+        }
 
         for _ in 0..<3 {
             photo.pinch(withScale: 1.8, velocity: 0.9)
@@ -2288,11 +2315,24 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             dragStart.press(forDuration: 0.05, thenDragTo: dragEnd)
             dragEnd.press(forDuration: 0.05, thenDragTo: dragStart)
             XCTAssertEqual(counter.label, "第 1 张，共 3 张", "缩放不应意外翻页")
-            photo.doubleTap()
+            if imageFailure {
+                // Retry is an intentional interactive button in the centre,
+                // not the photograph. Exercise zoom on unobstructed canvas.
+                photo.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.15)).doubleTap()
+            } else {
+                photo.doubleTap()
+            }
             let reset = XCTNSPredicateExpectation(
                 predicate: NSPredicate(format: "value == %@", "缩放 100%"), object: photo
             )
-            XCTAssertEqual(XCTWaiter.wait(for: [reset], timeout: 3), .completed)
+            let resetResult = XCTWaiter.wait(for: [reset], timeout: 3)
+            if resetResult != .completed {
+                let details = XCTAttachment(string: "photo=\(photo.debugDescription)\napp=\(app.debugDescription)")
+                details.name = "gallery-double-tap-failure-state"
+                details.lifetime = .keepAlways
+                add(details)
+            }
+            XCTAssertEqual(resetResult, .completed, "native zoom=\(String(describing: photo.value)); \(photo.debugDescription)")
             XCTAssertTrue(close.isHittable, "缩放后关闭按钮不可操作")
         }
         photo.swipeLeft()

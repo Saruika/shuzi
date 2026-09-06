@@ -797,6 +797,7 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
 
 #if DEBUG
     private(set) var contentUpdateCount = 0
+    private var doubleTapCount = 0
 #endif
 
     init(image: PortfolioImage, environment: AppServiceEnvironment = .production) {
@@ -861,7 +862,9 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
         // Preserve access to the hosted retry button, rather than collapsing
         // the entire scroll view into a single accessibility element.
         scrollView.isAccessibilityElement = false
-        scrollView.accessibilityElements = [accessiblePhoto, host.view as Any]
+        // Hosted controls must win accessibility hit-testing over the virtual
+        // full-viewport photo. Otherwise Retry exists but cannot be activated.
+        scrollView.accessibilityElements = [host.view as Any, accessiblePhoto]
         zoomAccessibility = accessiblePhoto
         updateAccessibility()
     }
@@ -971,6 +974,12 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
     private func updateAccessibility() {
         zoomAccessibility?.accessibilityIdentifier = "gallery-image-\(image.id)"
         zoomAccessibility?.accessibilityLabel = image.altText
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-trace-gallery-gestures-for-testing") {
+            zoomAccessibility?.accessibilityLabel = "\(image.altText); doubleTaps=\(doubleTapCount)"
+            zoomAccessibility?.accessibilityHint = "doubleTaps=\(doubleTapCount); viewport=\(viewportSize); offset=\(scrollView.contentOffset)"
+        }
+#endif
     }
 
     private func setZoom(_ scale: CGFloat) {
@@ -982,6 +991,9 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
     }
 
     @objc private func toggleZoom() {
+#if DEBUG
+        doubleTapCount += 1
+#endif
         setZoom(scrollView.zoomScale > 1.01 ? 1 : 2)
     }
 

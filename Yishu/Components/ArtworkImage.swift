@@ -73,6 +73,35 @@ enum ArtworkImageLifecyclePolicy {
     }
 }
 
+#if DEBUG
+/// Deterministic in-memory raster for gesture tests, not artist content and
+/// never bundled into Release. Still passes the real image decoder and cache.
+enum ArtworkImageUITestFixture {
+    static func response(for request: URLRequest) async throws -> (Data, URLResponse) {
+        guard let url = request.url else { throw ArtworkImageLoadError.invalidResponse }
+        let data = await MainActor.run {
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            format.opaque = true
+            return UIGraphicsImageRenderer(size: CGSize(width: 400, height: 600), format: format)
+                .pngData { context in
+                    UIColor.systemTeal.setFill()
+                    context.fill(CGRect(x: 0, y: 0, width: 400, height: 600))
+                    UIColor.white.setFill()
+                    for row in stride(from: 20, through: 560, by: 80) {
+                        context.fill(CGRect(x: 20, y: row, width: 360, height: 20))
+                    }
+                }
+        }
+        guard let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+            headerFields: ["Content-Type": "image/png", "Content-Length": String(data.count)]) else {
+            throw ArtworkImageLoadError.invalidResponse
+        }
+        return (data, response)
+    }
+}
+#endif
+
 /// A small, size-aware image pipeline. `AsyncImage` decodes the original file
 /// before SwiftUI scales it, which is expensive for the 2560 px portfolio
 /// artwork. This pipeline creates a thumbnail close to the actual view size and
@@ -115,7 +144,15 @@ actor ArtworkImagePipeline {
     init(environment: AppServiceEnvironment = .production,
          dataLoader: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil) {
         self.environment = environment
+#if DEBUG
+        if dataLoader == nil && ProcessInfo.processInfo.arguments.contains("-use-deterministic-gallery-images-for-testing") {
+            self.dataLoader = { try await ArtworkImageUITestFixture.response(for: $0) }
+        } else {
+            self.dataLoader = dataLoader
+        }
+#else
         self.dataLoader = dataLoader
+#endif
     }
 
     func image(for url: URL, maxPixelSize: Int) async throws -> UIImage {
