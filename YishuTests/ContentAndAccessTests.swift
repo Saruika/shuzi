@@ -193,6 +193,94 @@ final class AppServiceEnvironmentTests: XCTestCase {
 }
 
 @MainActor
+final class LiveReviewAdministratorTests: XCTestCase {
+    private enum CheckFailure: Error {
+        case owner, registration, pendingAccess, approval, binding, nativeSession
+        case revocation, deletion, deletedLogin
+    }
+
+    /// Opt-in integration of the shipping stores, not a response stub or a UI
+    /// access-gate bypass. Run only on a newly owned disposable simulator.
+    func testNativeAccountApprovalBindingRevocationAndDeletion() async throws {
+        let values = ProcessInfo.processInfo.environment
+        guard values["YISHU_LIVE_REVIEW_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Requires explicit isolated review acceptance setup")
+        }
+        guard let ownerPassword = values["YISHU_REVIEW_OWNER_ACCESS"], !ownerPassword.isEmpty,
+              let password = values["YISHU_REVIEW_DISPOSABLE_PASSWORD"],
+              FanAccountValidation.isValidPassword(password),
+              let marker = values["YISHU_REVIEW_DISPOSABLE_MARKER"],
+              marker.range(of: #"^native_[a-f0-9]{24}$"#, options: .regularExpression) != nil else {
+            throw CheckFailure.owner
+        }
+        let owner = AdminSessionStore(environment: .review)
+        let account = FanAccountStore(environment: .review)
+        let bound = AdminSessionStore(environment: .review)
+        defer { owner.signOut(); bound.signOut() }
+        await owner.signIn(username: "review_bootstrap", applicationPassword: ownerPassword)
+        guard owner.canManageFanAdministrators else { throw CheckFailure.owner }
+        var failure: Error?
+        var identityCode: String?
+        var userID: String?
+        do {
+            await account.register(displayName: "临时原生验收", douyinID: "",
+                                   password: password, passwordConfirmation: password,
+                                   acceptedDataUse: true)
+            guard account.profile == nil,
+                  account.errorMessage == FanAccountError.invalidDouyinID.errorDescription else {
+                throw CheckFailure.registration
+            }
+            await account.register(displayName: "临时原生验收", douyinID: marker,
+                                   password: password, passwordConfirmation: password,
+                                   acceptedDataUse: true)
+            guard let profile = account.profile else { throw CheckFailure.registration }
+            identityCode = profile.identityCode
+            userID = profile.userID
+            guard account.isAuthenticated, !account.isApproved,
+                  account.administratorContext == nil else { throw CheckFailure.pendingAccess }
+            _ = try await owner.updateFanAccess(userID: profile.userID, status: "active")
+            await account.refreshSession()
+            guard account.isApproved, account.administratorContext == nil else { throw CheckFailure.approval }
+            let before = try await owner.fetchFanUser(userID: profile.userID)
+            _ = try await owner.updateFanAdministrator(AdminFanAdministratorUpdate(user: before, administrator: true))
+            await account.refreshSession()
+            guard account.administratorContext != nil else { throw CheckFailure.binding }
+            await bound.signIn(using: account)
+            guard bound.isAuthenticated, !bound.isIndependentAdministrator,
+                  bound.canManageFanAdministrators else { throw CheckFailure.nativeSession }
+            let active = try await owner.fetchFanUser(userID: profile.userID)
+            _ = try await owner.updateFanAdministrator(AdminFanAdministratorUpdate(user: active, administrator: false))
+            // Do not refresh the fan hint first: an existing native admin
+            // session must be denied by the real backend immediately.
+            do {
+                _ = try await bound.fetchFanUser(userID: profile.userID)
+                throw CheckFailure.revocation
+            } catch AdminAPIError.insufficientPermission {
+                guard !bound.isAuthenticated else { throw CheckFailure.revocation }
+            } catch AdminAPIError.invalidCredentials {
+                guard !bound.isAuthenticated else { throw CheckFailure.revocation }
+            }
+            await account.refreshSession()
+            guard account.isApproved, account.administratorContext == nil else { throw CheckFailure.revocation }
+        } catch { failure = error }
+        // Always attempt the normal user-facing delete API, including after a
+        // failed intermediate assertion. The runner has a separate recovery path.
+        if account.profile != nil {
+            await account.deleteAccount(currentPassword: password)
+            guard let userID, account.removedAccountUserID == userID,
+                  !account.isAuthenticated else { throw CheckFailure.deletion }
+        }
+        if let failure { throw failure }
+        guard let identityCode else { throw CheckFailure.registration }
+        await account.signIn(identityCode: identityCode, password: password)
+        guard !account.isAuthenticated,
+              account.errorMessage == FanAccountError.invalidCredentials.errorDescription else {
+            throw CheckFailure.deletedLogin
+        }
+    }
+}
+
+@MainActor
 private final class BoundAdministratorTestAccount: FanAdministratorAccount {
     var administratorContext: FanAdministratorContext? = .init(userID: "test-user", sessionGeneration: 1)
     let changes = PassthroughSubject<Void, Never>()
