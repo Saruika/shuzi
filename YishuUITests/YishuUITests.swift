@@ -1467,7 +1467,17 @@ private extension XCTestCase {
         XCTAssertTrue(back.isHittable)
         XCTAssertTrue(measuredFrame.contains(back.frame), "消息返回入口超出当前窗口")
         back.tap()
-        XCTAssertTrue(presentationElement("fan-message-11111111-2222-4333-8444-555555555555", in: app).waitForExistence(timeout: 5))
+        let message = presentationElement("fan-message-11111111-2222-4333-8444-555555555555", in: app)
+        XCTAssertTrue(message.waitForExistence(timeout: 5), "返回消息箱后列表必须可见，不能重复自动打开通知")
+        let reopened = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == 1"), object: detail)
+        reopened.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [reopened], timeout: 3), .completed,
+                       "返回后同一条推送不得再次抢占导航")
+        // A consumed automatic deep link must not disable an intentional tap.
+        message.tap()
+        XCTAssertTrue(detail.waitForExistence(timeout: 5), "用户仍可主动重开消息")
+        app.navigationBars.buttons["消息箱"].tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 5), "再次返回消息箱仍须成功")
         let close = presentationElement("fan-notification-presentation-close", in: app)
         XCTAssertTrue(close.waitForExistence(timeout: 5))
         XCTAssertTrue(measuredFrame.contains(close.frame), "消息箱关闭入口超出当前窗口")

@@ -40,6 +40,7 @@ struct FanNotificationInboxView: View {
     @ObservedObject var inbox: FanNotificationStore
     var initialNotificationID: String?
     @State private var selectedID: String?
+    @State private var openedInitialNotificationID: String?
 
     var body: some View {
         ScrollView {
@@ -116,20 +117,27 @@ struct FanNotificationInboxView: View {
             inbox.purgeExpiredMessages()
         }
         .task(id: account.notificationContext) {
+            let expectedContext = account.notificationContext
             await inbox.refresh(using: account)
-            if account.notificationContext != nil, let initialNotificationID {
+            // Navigation can restart this task when returning from detail.
+            // Consume a push deep link once, never immediately push it again
+            // after the user deliberately returns to the message list.
+            if !Task.isCancelled, expectedContext != nil,
+               account.notificationContext == expectedContext,
+               let initialNotificationID, openedInitialNotificationID != initialNotificationID {
+                openedInitialNotificationID = initialNotificationID
                 selectedID = initialNotificationID
             }
         }
-        .onChange(of: account.notificationContext) { _, _ in selectedID = nil }
+        .onChange(of: account.notificationContext) { _, _ in
+            selectedID = nil
+            openedInitialNotificationID = nil
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await inbox.refresh(using: account) } }
         }
-        .navigationDestination(isPresented: Binding(
-            get: { selectedID != nil && account.notificationContext != nil },
-            set: { if !$0 { selectedID = nil; inbox.closeDetail() } }
-        )) {
-            if let selectedID { FanNotificationDetailView(inbox: inbox, notificationID: selectedID) }
+        .navigationDestination(item: $selectedID) { notificationID in
+            FanNotificationDetailView(inbox: inbox, notificationID: notificationID)
         }
     }
 }
