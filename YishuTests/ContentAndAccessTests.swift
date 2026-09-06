@@ -803,6 +803,30 @@ final class ContentAndAccessTests: XCTestCase {
                           "即使拖动取消、停在原图，自动翻页也必须重新计时")
     }
 
+    @MainActor
+    func testHomeContactInvalidatesAutoAdvanceBeforeAnotherViewUpdate() {
+        let state = HomeHeroPlaybackState(selection: 0)
+        let armed = HomeHeroAdvanceRequest(enabled: true, selection: state.selection,
+                                           interactionGeneration: state.interactionGeneration)
+        state.isTouching = true
+        XCTAssertNotEqual(state.interactionGeneration, armed.interactionGeneration,
+                          "按下时立即使旧计时失效，不能等待下一次界面更新")
+        let pressedGeneration = state.interactionGeneration
+        state.isTouching = true
+        XCTAssertEqual(state.interactionGeneration, pressedGeneration,
+                       "重复按下通知不能不断重置计时")
+        state.isTouching = false
+        XCTAssertNotEqual(state.interactionGeneration, pressedGeneration,
+                          "松手或取消滑动后开始新的完整等待周期")
+        let released = HomeHeroAdvanceRequest(enabled: true, selection: state.selection,
+                                              interactionGeneration: state.interactionGeneration)
+        XCTAssertNotEqual(armed, released,
+                          "即使按下和松手发生在同一轮更新中、图片没变，旧计时也必须失效")
+        state.isTouching = false
+        XCTAssertEqual(state.interactionGeneration, released.interactionGeneration,
+                       "重复取消或松手通知不会推迟新的计时")
+    }
+
     func testHeroPreheatIdentityDoesNotDependOnSwipeDirection() {
         for selection in 0..<5 {
             for presentation in [HomeHeroPresentation.fill, .fit] {

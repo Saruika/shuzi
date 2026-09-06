@@ -160,7 +160,14 @@ final class HomeHeroPlaybackState {
     var landscapeContinuityImage: UIImage?
     var activeURLs: Set<URL> = []
     var selectedURL: URL?
-    var isTouching = false
+    var isTouching = false {
+        didSet {
+            // Invalidate synchronously with UIKit contact events. SwiftUI may
+            // coalesce a begin/end pair before onChange sees either edge;
+            // the old sleeping task must still fail its generation check.
+            if oldValue != isTouching { interactionGeneration &+= 1 }
+        }
+    }
     var interactionGeneration: UInt = 0
     var preparedImages: [URL: UIImage] = [:]
     var automaticAdvanceCount = 0
@@ -305,7 +312,6 @@ private struct HeroPager: View {
             playback.activeURLs = []
             playback.selectedURL = nil
         }
-        .onChange(of: playback.isTouching) { _, _ in playback.interactionGeneration &+= 1 }
         .onChange(of: scenePhase) { _, phase in
             playback.isActive = phase == .active
             if phase != .active {
