@@ -490,24 +490,25 @@ private struct HeroPager: View {
             Spacer(minLength: 0)
             weatherButton
         }
-        .foregroundStyle(AppTheme.warmWhite)
+        .foregroundStyle(.white)
     }
 
     private var weatherButton: some View {
         Button { openWeatherOrSettings() } label: {
             weatherSummary
-                .font(.caption.weight(.semibold))
+                .font(.footnote.weight(.semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 11)
                 .padding(.vertical, 7)
                 // This small control sits over changing, sometimes very bright
                 // photographs. Keep its caption legible independently of the
                 // photo, without darkening the full-screen artwork itself.
-                .background(.black.opacity(0.80), in: Capsule())
+                .background(Color(white: 0.08), in: Capsule())
                 .overlay {
                     Capsule()
                         .stroke(.white.opacity(0.30), lineWidth: 0.5)
                 }
+                .compositingGroup()
                 .shadow(color: AppTheme.surfaceShadow, radius: 6, y: 2)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
@@ -526,6 +527,7 @@ private struct HeroPager: View {
         // Keep this photographic overlay compact; VoiceOver still receives
         // the complete weather summary at all text sizes.
         .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .foregroundStyle(.white)
         .accessibilityIdentifier("home-weather")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(localWeather.accessibilitySummary)

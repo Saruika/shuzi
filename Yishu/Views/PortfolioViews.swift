@@ -283,7 +283,7 @@ private struct PortfolioGridCard: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            ArtworkImage(url: portfolio.coverURL)
+            ArtworkImage(url: portfolio.coverURL, showsRetryButton: false)
                 .aspectRatio(3 / 4, contentMode: .fit)
                 .frame(maxWidth: .infinity)
             VStack(alignment: .leading, spacing: 5) {
@@ -535,7 +535,9 @@ private struct EditorialArtworkImage: View {
         ZStack {
             placeholder
             Color.black.opacity(0.12)
-            ArtworkImage(url: url, contentMode: .fit)
+            // This artwork is the label of an outer open-photo button.
+            // An embedded retry button would steal center taps after a load failure.
+            ArtworkImage(url: url, contentMode: .fit, showsRetryButton: false)
         }
         .background(AppTheme.elevatedInk)
         .clipped()

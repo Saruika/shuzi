@@ -317,6 +317,14 @@ struct DownsampledAsyncImage<Content: View>: View {
             }
             error = nil
             guard let url, maxPixelSize > 0 else { return }
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-fail-artwork-for-visual-testing") {
+                image = nil
+                loadedURL = nil
+                error = ArtworkImageLoadError.httpStatus(503)
+                return
+            }
+#endif
             if let cachedPreview = await ArtworkImagePipeline.shared.cachedPreview(for: url) {
                 guard !Task.isCancelled else { return }
                 publish(cachedPreview, for: url)
@@ -371,12 +379,14 @@ struct DownsampledAsyncImage<Content: View>: View {
 struct ArtworkImage: View {
     let url: URL?
     var contentMode: ContentMode = .fill
+    var showsRetryButton = true
 
     var body: some View {
         GeometryReader { proxy in
             DownsampledAsyncImage(
                 url: url,
-                targetSize: proxy.size
+                targetSize: proxy.size,
+                showsRetryButton: showsRetryButton
             ) { phase in
                 switch phase {
                 case .empty:

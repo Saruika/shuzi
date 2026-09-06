@@ -4,7 +4,9 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-**最新可读性候选：[v1.4.0-build4-preview3](Server/releases/v1.4.0-build4-preview3.md)。** 完整 iPhone 回归发现天气文字对比度失败，已修正胶囊局部底色；新增五种换图背景检查，修正纯白背景下角色说明的局部对比度，不扩大照片渐变或改动布局。专项、Release 分析和历史失败均留证，完整最终矩阵仍待结束，尚未上传新包。
+**最新交互候选：[v1.4.0-build4-preview4](Server/releases/v1.4.0-build4-preview4.md)。** 修复封面失败后嵌套重试按钮抢占相册点击，强化天气局部可读性，并纠正关于页把重试按钮当作整张照片的测量错误。iPad 原 8 个失败用例及新增故障测试共 12 次配置执行通过；iPhone 210 单元 + 4 UI 通过，Release 分析通过。保留原矩阵失败及所有诊断证据，不等于最终全量/真机验收，未上传新包。隐私网址、审核联系人及普通账号已交付 ASC；独立管理员演示仍待完成，见 [上架就绪记录](APP_STORE_READINESS.md)。
+
+**历史可读性候选：[v1.4.0-build4-preview3](Server/releases/v1.4.0-build4-preview3.md)。** 新增五种換图背景检查，修正纯白背景下角色说明的局部对比度。其后完整矩阵已结束：iPhone 通过，iPad 失败项的诊断与修复见最新交互候选；不再处于等待终态的状态。
 
 **管理员登录候选补丁：[v1.4.0-build4-preview2](Server/releases/v1.4.0-build4-preview2.md)。** 独立管理员和绑定用户现在共用严格的服务器身份响应校验；HTTP 200 或显示姓名本身不能解锁管理界面。当前账号进入管理、授予和撤销的步骤见 [管理员绑定使用说明](ADMIN_USER_GUIDE.md)。尚未上传 TestFlight。此后已按用户明确指定，为一个已审批账号绑定 App 管理员并回读审计；未授予网站超级管理员，仍需真实 App 端到端验收。
 

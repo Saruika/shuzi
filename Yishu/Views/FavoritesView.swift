@@ -184,7 +184,7 @@ struct FavoritesView: View {
                 ForEach(entries) { entry in
                     Button { selectedEntry = entry } label: {
                         ZStack(alignment: .bottomLeading) {
-                            ArtworkImage(url: entry.image.url)
+                            ArtworkImage(url: entry.image.url, showsRetryButton: false)
                                 .aspectRatio(3 / 4, contentMode: .fit)
                                 .frame(maxWidth: .infinity)
                             LinearGradient(
@@ -224,7 +224,7 @@ struct FavoritesView: View {
                 ForEach(recentPortfolios) { portfolio in
                     NavigationLink(value: portfolio) {
                         ZStack(alignment: .bottomLeading) {
-                            ArtworkImage(url: portfolio.coverURL)
+                            ArtworkImage(url: portfolio.coverURL, showsRetryButton: false)
                                 .aspectRatio(3 / 4, contentMode: .fit)
                                 .frame(maxWidth: .infinity)
                             LinearGradient(

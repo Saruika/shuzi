@@ -771,14 +771,19 @@ final class YishuUITests: XCTestCase {
 
         let app = launchApp(arguments: [
             "-open-about-for-visual-testing",
+            "-expose-about-portrait-canvas-for-testing",
             "-UIPreferredContentSizeCategoryName",
             "UICTContentSizeCategoryXXXL",
         ])
-        let portrait = element("about-portrait", in: app)
+        let portrait = element("about-portrait-canvas", in: app)
         let roleSummary = element("about-role-summary", in: app)
         XCTAssertTrue(portrait.waitForExistence(timeout: 8), "横屏关于页人物图没有出现")
         XCTAssertTrue(roleSummary.waitForExistence(timeout: 8), "横屏关于页职业说明没有出现")
         XCTAssertEqual(roleSummary.label, "短剧演员 / 模特 / 视频创作者")
+        print("ABOUT_LANDSCAPE portrait=\(portrait.frame) role=\(roleSummary.frame); portraitElement=\(portrait.debugDescription)")
+        XCTAssertEqual(portrait.frame.width, min(app.windows.firstMatch.frame.width, 720), accuracy: 1)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(roleSummary.frame), "职业说明必须完整显示在当前窗口")
+        attachScreenshot(named: "about-landscape-before-boundary-assertion", app: app)
         XCTAssertTrue(
             portrait.frame.insetBy(dx: -1, dy: -1).contains(roleSummary.frame),
             "横屏关于页职业说明超出人物图"
@@ -790,17 +795,22 @@ final class YishuUITests: XCTestCase {
     func testAboutRoleSummaryIsCompleteAtAccessibilityXXXL() throws {
         let app = launchApp(arguments: [
             "-open-about-for-visual-testing",
+            "-expose-about-portrait-canvas-for-testing",
             "-expose-about-visible-bottom-for-visual-testing",
             "-UIPreferredContentSizeCategoryName",
             "UICTContentSizeCategoryAccessibilityXXXL",
         ])
-        let portrait = element("about-portrait", in: app)
+        let portrait = element("about-portrait-canvas", in: app)
         let roleSummary = element("about-role-summary", in: app)
         let visibleBottom = element("about-visible-bottom", in: app)
         XCTAssertTrue(portrait.waitForExistence(timeout: 8), "辅助功能字号下关于页人物图没有出现")
         XCTAssertTrue(roleSummary.waitForExistence(timeout: 8), "辅助功能字号下职业说明没有出现")
         XCTAssertTrue(visibleBottom.waitForExistence(timeout: 8), "缺少关于页可见区域边界")
         XCTAssertEqual(roleSummary.label, "短剧演员 / 模特 / 视频创作者")
+        print("ABOUT_AXXXL portrait=\(portrait.frame) role=\(roleSummary.frame); portraitElement=\(portrait.debugDescription)")
+        XCTAssertEqual(portrait.frame.width, min(app.windows.firstMatch.frame.width, 720), accuracy: 1)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(roleSummary.frame), "职业说明必须完整显示在当前窗口")
+        attachScreenshot(named: "about-axxxl-before-boundary-assertion", app: app)
         XCTAssertTrue(
             portrait.frame.insetBy(dx: -1, dy: -1).contains(roleSummary.frame),
             "辅助功能字号下职业说明超出人物图"
@@ -881,6 +891,31 @@ final class YishuUITests: XCTestCase {
             "点击关闭后图片查看器仍停留在屏幕上"
         )
         XCTAssertTrue(detail.exists, "关闭图片后没有返回当前相册")
+    }
+
+    func testFailedThumbnailCenterStillOpensAlbumAndPhoto() {
+        for protectionEnabled in [false, true] {
+            let app = launchApp(arguments: [
+                "-open-portfolio-for-visual-testing",
+                "-use-multi-image-gallery-for-visual-testing",
+                "-fail-artwork-for-visual-testing",
+            ], screenProtectionEnabled: protectionEnabled)
+            let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
+            XCTAssertTrue(card.waitForExistence(timeout: 8))
+            XCTAssertTrue(card.images["photo"].firstMatch.waitForExistence(timeout: 5), "测试必须在封面失败状态下操作")
+            XCTAssertFalse(card.buttons["artwork-image-retry"].exists, "卡片不能嵌套另一个抢占点击的重试按钮")
+            card.tap()
+            let firstImage = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-")).firstMatch
+            XCTAssertTrue(firstImage.waitForExistence(timeout: 8), "封面加载失败不能阻止进入相册")
+            XCTAssertFalse(firstImage.buttons["artwork-image-retry"].exists)
+            firstImage.tap()
+            let close = element("gallery-close", in: app)
+            XCTAssertTrue(close.waitForExistence(timeout: 8), "照片加载失败不能阻止打开查看器")
+            XCTAssertTrue(element("artwork-image-retry", in: app).waitForExistence(timeout: 5), "独立查看器仍应提供重试")
+            close.tap()
+            XCTAssertTrue(firstImage.waitForExistence(timeout: 8), "照片失败时仍需可以关闭查看器")
+            app.terminate()
+        }
     }
 
     func testCustomShowreelControlsRemainUsable() {
