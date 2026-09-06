@@ -217,6 +217,19 @@ struct AboutView: View {
             .background { EditorialCaptionBackdrop().padding(.top, -24) }
         }
         .aspectRatio(portraitAspectRatio, contentMode: .fit)
+        .background {
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-expose-about-portrait-canvas-for-testing") {
+                // Measure the actual canvas, not the retry button to which
+                // SwiftUI can forward an image's accessibility identifier.
+                Color.clear
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("人物图片画布")
+                    .accessibilityIdentifier("about-portrait-canvas")
+                    .allowsHitTesting(false)
+            }
+#endif
+        }
     }
 
     private var biography: some View {
