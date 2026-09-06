@@ -255,6 +255,27 @@ final class ContentAndAccessTests: XCTestCase {
         ))
     }
 
+    func testGalleryAccessibilityReadsTheCurrentNativeZoomScale() throws {
+        let url = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-photo.webp"))
+        let image = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "照片")
+        let controller = GalleryZoomViewController(image: image)
+        controller.loadViewIfNeeded()
+        controller.view.frame = CGRect(x: 0, y: 0, width: 430, height: 760)
+        controller.viewDidLayoutSubviews()
+        let photo = try XCTUnwrap(
+            controller.scrollView.accessibilityElements?.first as? UIAccessibilityElement
+        )
+        let initialUpdates = controller.contentUpdateCount
+        for scale in [CGFloat(1.25), 2, 4, 1, 3, 1] {
+            controller.scrollView.setZoomScale(scale, animated: false)
+            XCTAssertEqual(controller.scrollView.zoomScale, scale, accuracy: 0.001)
+            XCTAssertEqual(photo.accessibilityValue, "缩放 \(Int((scale * 100).rounded()))%",
+                           "辅助功能必须读取当前原生缩放值，不能依赖滞后的手势结束回调")
+        }
+        XCTAssertEqual(controller.contentUpdateCount, initialUpdates,
+                       "更新辅助功能缩放值不能重建图片加载子树")
+    }
+
     func testNativeGalleryPanDoesNotUpdateHostedArtworkAndRotationResetsZoom() throws {
         let url = try XCTUnwrap(URL(string: "https://img.shuzijun.com.cn/images/test-photo.webp"))
         let image = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "照片")

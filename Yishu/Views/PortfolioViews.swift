@@ -935,7 +935,6 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
     private func updateAccessibility() {
         zoomAccessibility?.accessibilityIdentifier = "gallery-image-\(image.id)"
         zoomAccessibility?.accessibilityLabel = image.altText
-        zoomAccessibility?.accessibilityValue = "缩放 \(Int((scrollView.zoomScale * 100).rounded()))%"
     }
 
     private func setZoom(_ scale: CGFloat) {
@@ -980,6 +979,17 @@ final class GalleryZoomScrollView: UIScrollView {
 private final class GalleryZoomAccessibilityElement: UIAccessibilityElement {
     weak var scrollView: UIScrollView?
     weak var controller: GalleryZoomViewController?
+
+    // UIKit owns the zoom transform. Read its current value instead of a
+    // snapshot captured before an animation or gesture-end callback completes.
+    // This does not invalidate SwiftUI or reload artwork during a pinch.
+    override var accessibilityValue: String? {
+        get {
+            guard let scrollView else { return nil }
+            return "缩放 \(Int((scrollView.zoomScale * 100).rounded()))%"
+        }
+        set { }
+    }
 
     override var accessibilityFrame: CGRect {
         get {
