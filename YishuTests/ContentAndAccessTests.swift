@@ -196,7 +196,7 @@ final class AppServiceEnvironmentTests: XCTestCase {
 final class LiveReviewAdministratorTests: XCTestCase {
     private enum CheckFailure: Error {
         case owner, registration, pendingAccess, approval, binding, nativeSession
-        case revocation, deletion, deletedLogin
+        case revocation, deletion, deletedLogin, publishedMediaRetention
     }
 
     /// Opt-in integration of the shipping stores, not a response stub or a UI
@@ -222,6 +222,7 @@ final class LiveReviewAdministratorTests: XCTestCase {
         var failure: Error?
         var identityCode: String?
         var userID: String?
+        var temporaryPortfolioID: Int?
         // Fixed phase labels only: never put credentials, identity codes or
         // server response bodies into test diagnostics.
         var phase = "mandatory-douyin"
@@ -273,6 +274,23 @@ final class LiveReviewAdministratorTests: XCTestCase {
             if values["YISHU_REVIEW_EXPECT_PHOTO_ONLY"] == "1" {
                 guard editable.showreel == nil else { throw CheckFailure.nativeSession }
             }
+            if values["YISHU_REVIEW_MEDIA_ACCEPTANCE"] == "1" {
+                phase = "bound-media-upload-and-gallery"
+                let data = UIGraphicsImageRenderer(size: CGSize(width: 320, height: 480)).pngData { context in
+                    UIColor.darkGray.setFill()
+                    context.fill(CGRect(x: 0, y: 0, width: 320, height: 480))
+                    UIColor.white.setFill()
+                    context.fill(CGRect(x: 80, y: 120, width: 160, height: 240))
+                }
+                let first = try await bound.upload(data: data, filename: marker + "-one.png", mimeType: "image/png")
+                let second = try await bound.upload(data: data, filename: marker + "-two.png", mimeType: "image/png")
+                let created = try await bound.createPortfolio(title: marker,
+                    subtitle: "临时合成验收素材，结束后清理", eyebrow: "TEST FIXTURE")
+                temporaryPortfolioID = created.portfolioID
+                let changed = try await bound.updateGallery(portfolioID: created.portfolioID, mediaIDs: [second.id, first.id])
+                guard changed.portfolios.first(where: { $0.id == created.portfolioID })?.images.map(\.id) == [second.id, first.id]
+                else { throw CheckFailure.nativeSession }
+            }
             phase = "revocation"
             let active = try await owner.fetchFanUser(userID: profile.userID)
             _ = try await owner.updateFanAdministrator(AdminFanAdministratorUpdate(user: active, administrator: false))
@@ -300,6 +318,17 @@ final class LiveReviewAdministratorTests: XCTestCase {
                   !account.isAuthenticated else { throw CheckFailure.deletion }
         }
         if let failure { throw failure }
+        if let temporaryPortfolioID {
+            // Removing a staff account must not silently remove artist-owned
+            // published gallery media. The runner separately cleans fixtures.
+            let afterDeletion = try await owner.fetchContent()
+            let remaining = afterDeletion.portfolios.first(where: { $0.id == temporaryPortfolioID })
+            print("native-review-media-retention: album-present=\(remaining != nil); image-count=\(remaining?.images.count ?? 0)")
+            guard remaining?.images.count == 2 else {
+                print("native-review-failed-phase: published-media-after-account-deletion")
+                throw CheckFailure.publishedMediaRetention
+            }
+        }
         guard let identityCode else { throw CheckFailure.registration }
         await account.signIn(identityCode: identityCode, password: password)
         guard !account.isAuthenticated,
