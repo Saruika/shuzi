@@ -111,6 +111,7 @@ python3 Server/tests/review-bootstrap-test.py
 python3 Server/tests/review-catalog-test.py
 python3 Server/tests/review-accounts-test.py
 python3 Server/tests/review-upgrade-test.py
+python3 Server/tests/review-permalinks-test.py
 python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py
 python3 Server/tests/bootstrap-legacy-app-content-release-contract-test.py

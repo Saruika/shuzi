@@ -68,12 +68,22 @@ class ReviewCatalogTests(unittest.TestCase):
         self.assertEqual(catalog.a.catalog_snapshot(empty), empty)
         url = 'https://review.shuzijun.com.cn/wp-content/uploads/example.jpg'
         full = dict(heroImages=[url], launchPosters=[dict(imageURL=url, subtitle='审核演示')],
-                    aboutPortraitURL=url, portfolios=[dict(coverURL=url, images=[dict(url=url, fullSizeURL=url)])])
+                    aboutPortraitURL=url, portfolios=[dict(websiteURL='https://review.shuzijun.com.cn/portfolio/example/',
+                        coverURL=url, images=[dict(url=url, fullSizeURL=url)])])
         self.assertEqual(catalog.a.catalog_snapshot(full), full)
         self.assertEqual(full['launchPosters'][0]['subtitle'], '审核演示')
         full['portfolios'][0]['images'][0]['fullSizeURL'] = url.replace('review.', 'www.')
         with self.assertRaises(RuntimeError):
             catalog.a.catalog_snapshot(full)
+
+    def test_plain_root_and_cross_environment_permalink_are_rejected(self):
+        for website in ('https://review.shuzijun.com.cn/?portfolio=example',
+                        'https://www.shuzijun.com.cn/portfolio/example/',
+                        'http://review.shuzijun.com.cn/portfolio/example/'):
+            value = dict(heroImages=[], launchPosters=[], aboutPortraitURL=None,
+                         portfolios=[dict(websiteURL=website, coverURL=None, images=[])])
+            with self.subTest(website=website), self.assertRaises(RuntimeError):
+                catalog.a.catalog_snapshot(value)
 
 
 if __name__ == '__main__':

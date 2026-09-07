@@ -155,3 +155,15 @@ preview25 的 1.5.13.10 精确清单，只替换 3 个已核对插件文件。�
 不得把第一次尝试记为成功或自动回滚完整成功。详细备份位置和证据见 preview26 发布记录。
 隔离配置、内容、最终 Test1/Test2 身份码/密码均未改动；邮件/Apple/APNs 仍阻断，
 `publicReady` 仍为 false。当前 TestFlight 不因此自动获得新客户端协议。
+
+## 相册固定链接（preview27）
+
+真实原生联调发现默认空 `permalink_structure` 返回根路径查询链接，不符合 App 已有
+`/portfolio/` 清单规则。已用 `repair-review-permalinks.py --apply` 仅修正独立站该选项为
+`/%postname%/`，新请求按 WordPress 自身规则生成链接；不修改 CPT 的非公开状态或 nginx。
+私有 prepared/completed 元数据记录保留，既有作品去掉 websiteURL 后的完整摘要相同。
+修复工具默认只读，不覆盖其他非空结构；失败只恢复已知状态，遇到外部修改停下报告。
+新建站点的 bootstrap 同步设置该选项，HTTPS 账号验收增加 websiteURL 来源与路径检查。
+
+原生集成最终 1 通过/0 失败/0 跳过，临时用户与访问码清理确认；仍不是完整 UI 上架验收。
+不要为生成漂亮链接开放网页相册，也不要放宽 Swift 的清单来源校验。

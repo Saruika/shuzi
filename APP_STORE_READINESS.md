@@ -4,6 +4,12 @@
 
 本段优先于下方历史快照，正式上架目标仍未完成，未上传新的 TestFlight 包。
 
+- **独立后台相册固定链接已修正，原生全流程复验通过**：审核站默认空 permalink 设置
+  返回根路径链接，被 App 既有 `/portfolio/` 来源规则拒绝。仅修正独立站的该选项，
+  不放宽 App 校验、不开放网页相册。真实目录内容摘要保持一致；注册/审批/HS 密码重新登录/绑定管理员/
+  照片-only 完整清单/撤销/主动删号在 iPhone 17 Pro Max 原生服务集成复验 1 通过、0 失败、0 跳过。
+  临时账号、维护访问码、自有模拟器已清理。见 [preview27](Server/releases/v1.4.0-build4-review-env-preview27.md)。
+  此结果不替代最终 Test1/Test2 完整 UI 或 Apple/APNs/SMTP 验收。
 - **照片-only 管理协议已部署到独立审核实例**：真实审核配置为 2 本完整相册（5/3 张）、
   无视频。App 不再对明确 administrator 范围要求视频存在；明确 viewer 不可编辑，仍检查会话与相册完整性。
   Swift 单元 249 通过/1 跳过，独立 WordPress/MySQL 395 项断言通过，包含同 token 撤销后的范围降级。

@@ -14,6 +14,22 @@ spec.loader.exec_module(bootstrap)
 
 
 class ReviewBootstrapTests(unittest.TestCase):
+    def test_permalink_setup_is_guarded_and_does_not_open_public_pages(self):
+        with patch.object(bootstrap, 'command', return_value='review-permalinks-configured\n') as run:
+            bootstrap.configure_permalink_structure()
+        arguments = run.call_args.args[0]
+        code = arguments[arguments.index('eval') + 1]
+        for check in ("ABSPATH !== '/srv/shuzijun-review/site/'", "DB_NAME !== 'shuzijun_review'",
+                      "YISHU_APP_SERVICE_ENVIRONMENT !== 'review'", "$old !== '' && $old !== '/%postname%/'"):
+            self.assertIn(check, code)
+        self.assertNotIn('flush_rewrite_rules', code)
+        self.assertNotIn('publicly_queryable', code)
+        self.assertIn('configure_permalink_structure()', (SERVER / 'operations/provision-review-bootstrap.py').read_text())
+
+    def test_permalink_setup_requires_positive_confirmation(self):
+        with patch.object(bootstrap, 'command', return_value=''), self.assertRaises(RuntimeError):
+            bootstrap.configure_permalink_structure()
+
     def test_release_manifest_matches_repository_release(self):
         release = (SERVER / 'releases/v1.4.0-build4-review-env-preview25.md').read_text()
         values = [line for line in release.splitlines() if line.startswith('RELEASE_MANIFEST_SHA256=')]

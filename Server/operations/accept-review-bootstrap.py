@@ -78,6 +78,10 @@ def catalog_snapshot(data):
         urls.append(snapshot['aboutPortraitURL'])
     urls.extend(poster['imageURL'] for poster in snapshot['launchPosters'])
     for album in snapshot['portfolios']:
+        website = urlsplit(album['websiteURL'])
+        check(website.scheme == 'https' and website.netloc == 'review.shuzijun.com.cn'
+              and website.path.startswith('/portfolio/') and not website.query and not website.fragment,
+              'catalog permalink satisfies native review manifest policy')
         if album['coverURL']:
             urls.append(album['coverURL'])
         for photo in album['images']:

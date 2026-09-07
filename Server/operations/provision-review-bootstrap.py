@@ -128,6 +128,24 @@ def wait_for_php():
     raise RuntimeError('Private PHP API did not become ready; no acceptance claimed')
 
 
+def configure_permalink_structure():
+    # The native manifest contract expects /portfolio/... links, even though
+    # this API-only instance must still refuse public website album browsing.
+    # Do not flush hard rewrite rules or change post-type visibility/nginx.
+    guard = ("if (ABSPATH !== '/srv/shuzijun-review/site/' || DB_NAME !== 'shuzijun_review' "
+             "|| YISHU_APP_SERVICE_ENVIRONMENT !== 'review' "
+             "|| home_url() !== 'https://review.shuzijun.com.cn') { exit(79); } ")
+    code = guard + ("$old = get_option('permalink_structure'); "
+                    "if ($old !== '' && $old !== '/%postname%/') { exit(80); } "
+                    "if ($old === '') { update_option('permalink_structure', '/%postname%/'); } "
+                    "if (get_option('permalink_structure') !== '/%postname%/') { exit(81); } "
+                    "echo 'review-permalinks-configured';")
+    result = command(['/usr/sbin/runuser', '-u', USER, '--', '/usr/bin/wp', 'eval', code,
+                      f'--path={SITE}', '--skip-packages', '--quiet'])
+    if result.strip() != 'review-permalinks-configured':
+        raise RuntimeError('Review permalink configuration was not confirmed')
+
+
 def preflight(source, core, expected):
     if os.geteuid() != 0:
         raise ValueError('Run on the authorized primary host as root')
@@ -215,6 +233,7 @@ def install(source, core, expected):
              '--title=Hi Shuzi — isolated review', '--admin_user=review_bootstrap',
              '--admin_email=review-bootstrap@example.invalid', '--skip-email',
              '--prompt=admin_password', '--quiet'], data=private['bootstrapPassword'] + '\n')
+    configure_permalink_structure()
     for name in ('php-fpm.conf', 'nginx.conf'):
         write_new(CONFIG / name, (source / 'operations/review' / name).read_text(), gid=identity.pw_gid)
     for name in UNITS:

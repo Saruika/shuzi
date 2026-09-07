@@ -246,6 +246,14 @@ final class LiveReviewAdministratorTests: XCTestCase {
             _ = try await owner.updateFanAccess(userID: profile.userID, status: "active")
             await account.refreshSession()
             guard account.isApproved, account.administratorContext == nil else { throw CheckFailure.approval }
+            phase = "hs-password-login"
+            await account.signOut()
+            guard !account.isAuthenticated else { throw CheckFailure.nativeSession }
+            await account.signIn(identityCode: profile.identityCode, password: password)
+            guard account.isAuthenticated, account.isApproved,
+                  account.profile?.userID == profile.userID,
+                  account.profile?.identityCode == profile.identityCode,
+                  account.administratorContext == nil else { throw CheckFailure.nativeSession }
             phase = "binding"
             let before = try await owner.fetchFanUser(userID: profile.userID)
             _ = try await owner.updateFanAdministrator(AdminFanAdministratorUpdate(user: before, administrator: true))
