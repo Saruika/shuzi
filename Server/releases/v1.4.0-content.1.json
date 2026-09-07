@@ -1,0 +1,260 @@
+{
+  "content_version": "v1.4.0-content.1",
+  "batch_id": "albums-20260908-guofeng-02",
+  "published_at": "2026-09-07T23:29:58+00:00",
+  "app_binary": "1.4.0 (5), unchanged",
+  "albums": [
+    {
+      "id": 147,
+      "title": "青衣夜语",
+      "media_ids": [
+        140,
+        141
+      ],
+      "added_media_ids": [
+        140,
+        141
+      ],
+      "cover_media_id": 140,
+      "operation": "create",
+      "before_media_ids": [],
+      "effective_cover_media_id": 140
+    },
+    {
+      "id": 58,
+      "title": "唐风",
+      "media_ids": [
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        142,
+        143,
+        144
+      ],
+      "added_media_ids": [
+        142,
+        143,
+        144
+      ],
+      "cover_media_id": 0,
+      "operation": "append",
+      "before_media_ids": [
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66
+      ],
+      "effective_cover_media_id": 59
+    },
+    {
+      "id": 7,
+      "title": "新中式",
+      "media_ids": [
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        133,
+        134,
+        135,
+        136,
+        137,
+        145,
+        146
+      ],
+      "added_media_ids": [
+        145,
+        146
+      ],
+      "cover_media_id": 0,
+      "operation": "append",
+      "before_media_ids": [
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        133,
+        134,
+        135,
+        136,
+        137
+      ],
+      "effective_cover_media_id": 33
+    }
+  ],
+  "total_albums": 11,
+  "total_photos": 77,
+  "network_bytes_total": 3916394,
+  "source_bytes_total": 79885013,
+  "asset_policy": {
+    "local_photo_files_written": false,
+    "originals_modified": false,
+    "ai_generation_or_restoration": false,
+    "upscaling": false,
+    "crop": false,
+    "max_long_edge": 2400,
+    "metadata_stripped": true,
+    "source_authenticity_note": "Visual review and available camera/export metadata are supporting evidence, not proof of no historical AI use."
+  },
+  "items": [
+    {
+      "source_sha256": "df54ea5559931840ef5675861bcec837120312fec1d39d85f95cf25555d6f3ad",
+      "source_bytes": 10469661,
+      "source_width": 2730,
+      "source_height": 4096,
+      "camera": "",
+      "software": "",
+      "sha256": "70d8d3e6d434064025163e6fae91b9b66e32ccf0b5ddce7c2f07bc70279f8856",
+      "bytes": 475591,
+      "width": 1600,
+      "height": 2400,
+      "media_id": 140,
+      "album": "青衣夜语",
+      "position_added": 1,
+      "source_name": "2023-12-07-211817.jpg"
+    },
+    {
+      "source_sha256": "d355a32f66fc576dc55625888e27241c8f16cdce20efd3ae9fe4de07f70993a9",
+      "source_bytes": 10239516,
+      "source_width": 2730,
+      "source_height": 4096,
+      "camera": "",
+      "software": "",
+      "sha256": "2849b9bcbfad9ec3c8afa0d530c0661e7e397402062de5b9c67c78c1b3f2d20c",
+      "bytes": 477559,
+      "width": 1600,
+      "height": 2400,
+      "media_id": 141,
+      "album": "青衣夜语",
+      "position_added": 2,
+      "source_name": "2023-12-07-211837.jpg"
+    },
+    {
+      "source_sha256": "4462219af33000d1116cb662e6c30ca50e8e43de57587b6468a19d12d1e27f4d",
+      "source_bytes": 4001402,
+      "source_width": 1820,
+      "source_height": 2730,
+      "camera": "",
+      "software": "",
+      "sha256": "ff94e0e268e351bcdda4f564d294995bfe2f63e0ba6a28cede39e1e45555c935",
+      "bytes": 508940,
+      "width": 1600,
+      "height": 2400,
+      "media_id": 142,
+      "album": "唐风",
+      "position_added": 1,
+      "source_name": "2023-12-21-194723.jpg"
+    },
+    {
+      "source_sha256": "2ba75a5125079aa5b4b321122fd86d821f70f5fbffb7ec3ed286dbb24449629c",
+      "source_bytes": 8460728,
+      "source_width": 2730,
+      "source_height": 4096,
+      "camera": "",
+      "software": "",
+      "sha256": "6bd08521643a4a94624a2c01f91895542e87b42756a2fb9d35b8e0e6411928fb",
+      "bytes": 529999,
+      "width": 1600,
+      "height": 2400,
+      "media_id": 143,
+      "album": "唐风",
+      "position_added": 2,
+      "source_name": "2023-12-21-194727.jpg"
+    },
+    {
+      "source_sha256": "5bd3931aea7a95bdd40d44783fcc10bfd143ab72163cb0aef863ad16f527c45f",
+      "source_bytes": 8822657,
+      "source_width": 2730,
+      "source_height": 4096,
+      "camera": "",
+      "software": "",
+      "sha256": "0d459b3aaec9ad453d98ea1b8ca233666ad1cea50e853ec4e76f4e26e4d57ebd",
+      "bytes": 535948,
+      "width": 1600,
+      "height": 2400,
+      "media_id": 144,
+      "album": "唐风",
+      "position_added": 3,
+      "source_name": "2023-12-21-194739.jpg"
+    },
+    {
+      "source_sha256": "ebea1b300eb80fcd136683692337af43c07ae202829bff786c1f43a172be3049",
+      "source_bytes": 22069652,
+      "source_width": 6720,
+      "source_height": 4480,
+      "camera": "Canon EOS 5D Mark IV",
+      "software": "Adobe Photoshop CC 2019 (Windows)",
+      "sha256": "2259067d26fbbd06a1304fc82c00e61e633406ccba01cff6c17742ceda345e6d",
+      "bytes": 643898,
+      "width": 2400,
+      "height": 1600,
+      "media_id": 145,
+      "album": "新中式",
+      "position_added": 1,
+      "source_name": "2021-12-19 144432.jpg"
+    },
+    {
+      "source_sha256": "4596a0e81ab4260701c751a10955519203e26bf2b3c1fb44604b452af0e30012",
+      "source_bytes": 15821397,
+      "source_width": 4480,
+      "source_height": 6720,
+      "camera": "Canon EOS 5D Mark IV",
+      "software": "Adobe Photoshop CC 2019 (Windows)",
+      "sha256": "b81b237818f1b0d1b50cf35731741a0c496601abfec51114d2d12676bb4edd12",
+      "bytes": 744459,
+      "width": 1600,
+      "height": 2400,
+      "media_id": 146,
+      "album": "新中式",
+      "position_added": 2,
+      "source_name": "2021-12-19 154234.jpg"
+    }
+  ],
+  "rejected_candidates": [
+    {
+      "name": "2023-12-07-211912.jpg",
+      "reason": "两张拼接排版，不作为单张原片混入相册"
+    },
+    {
+      "name": "2023-12-21-194731.jpg",
+      "reason": "与现有唐风照片重复"
+    },
+    {
+      "name": "2023-12-21-194735.jpg",
+      "reason": "与现有唐风照片重复"
+    },
+    {
+      "name": "2021-12-19 141223.jpg",
+      "reason": "原尺寸面部高光和边缘处理偏重，未选用"
+    },
+    {
+      "name": "2021-12-19 145619.jpg",
+      "reason": "主体偏小且局部边缘偏硬，未选用"
+    }
+  ],
+  "verification": {
+    "both_node_catalogs_equal": true,
+    "both_node_hashes_and_variants_verified": 7,
+    "real_app_session_direct_200_imageio_verified": 7,
+    "backup_direct_https_verified": 7,
+    "anonymous_content_status": 401,
+    "public_new_album_status": 404,
+    "unrelated_visual_config_unchanged": true,
+    "temporary_publishing_credential_revoked": true,
+    "sync_exit_status": 0
+  },
+  "publication_tool_sha256": "34e78eaa658c53b4626e7ddd34caf25aa5da41cebb61a58e34d67eab1574cd84"
+}
