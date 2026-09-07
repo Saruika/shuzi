@@ -4,6 +4,8 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
+**最新布局验收：[preview34](Server/releases/v1.4.0-build4-review-env-preview34.md)。** 主流 iPhone/iPad 的选定布局与相册操作回归通过，新增月白主题七个页面状态的上下边缘像素检查，两端横竖屏/系统明暗共八次配置执行全部通过；保留照片延伸到系统栏下方的效果，不改播放器。正式主节点候选 dry-run 通过，尚未部署。浅色相册文字对比度、完整功能矩阵及发布服务验收仍需继续，未上传 TestFlight。
+
 **审核环境部署验收：[preview33](Server/releases/v1.4.0-build4-review-env-preview33.md)。** 独立审核站已升级至 PHP 1.5.13.12，包含注销保留已发布作品和并发写入保护；精确清单、服务健康、匿名管理拒绝及隔离策略已复核。iPhone/iPad 真实原生注册、审批、绑定管理员、上传发布、撤权、注销及作品保留均通过，临时资源已清理。正式节点尚未部署本修复，TestFlight 暂不上传；完整页面 UI 和 Apple/推送/邮件验收仍需继续。
 
 **相册视觉候选：[preview30](Server/releases/v1.4.0-build4-review-env-preview30.md)。** 相册卡片、详情文字层改为透明，移除序号的黑色胶囊；仅通过字形小阴影辅助阅读，保留原内容和布局。尚未上传 TestFlight。

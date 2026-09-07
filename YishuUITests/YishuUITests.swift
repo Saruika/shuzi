@@ -701,6 +701,7 @@ final class YishuUITests: XCTestCase {
     func testIPadPortraitPortfolioDoesNotReflowWhenOpeningOrReturning() throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("iPad 竖屏导航回归") }
         let app = launchApp(arguments: ["-trace-portfolio-layout-for-testing",
+            "-use-deterministic-gallery-images-for-testing",
             "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"])
         tabButton("作品", in: app).tap()
         let search = element("portfolio-search-control", in: app)
@@ -938,6 +939,7 @@ final class YishuUITests: XCTestCase {
         let app = launchApp(arguments: [
             "-open-about-for-visual-testing",
             "-expose-about-visible-bottom-for-visual-testing",
+            "-use-deterministic-gallery-images-for-testing",
         ])
         let window = app.windows.firstMatch
         let roleSummary = element("about-role-summary", in: app)
@@ -1763,6 +1765,7 @@ private extension XCTestCase {
             "-bypass-access-gate-for-visual-testing",
             "-open-portfolio-for-visual-testing",
             "-use-multi-image-gallery-for-visual-testing",
+            "-use-deterministic-gallery-images-for-testing",
         ]
         app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
@@ -1964,6 +1967,126 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
 
     func testLaunchPosterCoversEveryActualWindowConfiguration() {
         recordPresentationGeometry("launch-poster", frame: verifyLaunchPosterCurrentWindow())
+    }
+
+    func testIvoryPrimaryAndPushedPagesPaintBothScreenEdges() throws {
+        let app = launchApp(arguments: [
+            "-cn.com.shuzijun.yishu.appearance.v1", "ivory",
+            "-use-deterministic-gallery-images-for-testing",
+            "-expose-about-portrait-canvas-for-testing",
+            "-hold-home-remote-images-for-visual-testing",
+            "-disable-home-auto-advance-for-visual-testing"
+        ])
+        let window = app.windows.firstMatch
+        recordPresentationGeometry("ivory-page-edges", frame: window.frame)
+        for (tab, heading) in [("作品", "portfolio-heading"), ("影视", "credits-heading"),
+                               ("收藏", "favorites-heading"), ("关于", "about-heading")] {
+            tabButton(tab, in: app).tap()
+            XCTAssertTrue(element(heading, in: app).waitForExistence(timeout: 8))
+            if tab == "影视" {
+                try assertIvoryScreenEdges(app, page: tab, edges: [.top])
+                // In landscape the existing showreel poster legitimately
+                // extends underneath the bottom safe area. Check the page
+                // background after reaching the footer, not its dark image
+                // caption; do not remove or restyle the player's backdrop.
+                let footer = app.staticTexts["角色与品牌合作"]
+                for _ in 0..<12 where !footer.isHittable {
+                    app.scrollViews.firstMatch.swipeUp()
+                }
+                XCTAssertTrue(footer.isHittable, "影视页必须能滚动至合作区域")
+                app.scrollViews.firstMatch.swipeUp()
+                // Scrolling intentionally moves photos under translucent top
+                // chrome. Its source is no longer the plain page background.
+                try assertIvoryScreenEdges(app, page: tab, edges: [.bottom])
+            } else {
+                try assertIvoryScreenEdges(app, page: tab)
+            }
+        }
+
+        tabButton("作品", in: app).tap()
+        let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 8))
+        let albumID = card.identifier.replacingOccurrences(of: "portfolio-card-", with: "")
+        card.tap()
+        XCTAssertTrue(element("portfolio-detail-\(albumID)", in: app).waitForExistence(timeout: 8))
+        try assertIvoryScreenEdges(app, page: "相册详情")
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(element("portfolio-heading", in: app).waitForExistence(timeout: 8))
+        try assertIvoryScreenEdges(app, page: "相册返回")
+
+        tabButton("关于", in: app).tap()
+        let invitation = element("about-collaboration", in: app)
+        // A full-speed swipe across the central gap of the landscape layout
+        // can miss the text column or overshoot the button. Use small drags
+        // inside the details column, steering back if the target passed above.
+        for _ in 0..<16 where !invitation.isHittable {
+            let scene = window.frame
+            let details = element("about-details-scroll", in: app)
+            let visible = details.exists ? details.frame.intersection(scene) : scene
+            let x = details.exists ? visible.midX : scene.width * (scene.width > scene.height ? 0.75 : 0.5)
+            let towardBottom = !invitation.exists || invitation.frame.midY >= visible.midY
+            let start = window.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: x, dy: visible.minY + visible.height * (towardBottom ? 0.65 : 0.35)))
+            let end = window.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: x, dy: visible.minY + visible.height * (towardBottom ? 0.35 : 0.65)))
+            start.press(forDuration: 0.1, thenDragTo: end)
+        }
+        XCTAssertTrue(invitation.isHittable,
+                      "合作入口必须可触达：button=\(invitation.frame), window=\(window.frame)")
+        invitation.tap()
+        XCTAssertTrue(element("collaboration-heading", in: app).waitForExistence(timeout: 8))
+        try assertIvoryScreenEdges(app, page: "合作邀约")
+    }
+
+    private enum CheckedScreenEdge: Hashable { case top, bottom }
+
+    private func assertIvoryScreenEdges(
+        _ app: XCUIApplication, page: String, edges: Set<CheckedScreenEdge> = [.top, .bottom]
+    ) throws {
+        let size = app.windows.firstMatch.frame.size
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            XCUIScreen.main.screenshot().image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        // app.screenshot() can crop a landscape iPad using portrait storage
+        // coordinates. Keep the normalized full-screen evidence used below,
+        // including when the first edge assertion fails.
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "ivory-edges-\(page)-\(Int(size.width))x\(Int(size.height))"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        let source = try XCTUnwrap(image.cgImage)
+        // Avoid rounded corners, the island, status glyphs and home indicator.
+        // These tiny patches are outside content: a dark photo elsewhere must
+        // not be mistaken for a global black safe-area strip.
+        for x in [0.25, 0.75] {
+            for (position, edge, y) in [(CheckedScreenEdge.top, "顶部", 2.0), (CheckedScreenEdge.bottom, "底部", size.height - 6)]
+                where edges.contains(position) {
+                let patch = try XCTUnwrap(source.cropping(to: CGRect(x: size.width * x, y: y, width: 4, height: 4)))
+                var rgba = [UInt8](repeating: 0, count: 4)
+                let context = try XCTUnwrap(CGContext(data: &rgba, width: 1, height: 1,
+                    bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.draw(patch, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+                let point = CGPoint(x: size.width * x + 2, y: y + 2)
+                let portrait = element("about-portrait-canvas", in: app)
+                if page == "关于", edge == "顶部", portrait.exists,
+                   portrait.frame.contains(point) {
+                    // Landscape iPhone has no top status bar. Its fitted
+                    // portrait correctly reaches y=0; require the known cyan
+                    // fixture (or a white stripe), not an ivory replacement.
+                    let cyan = rgba[0] < 15 && (185...210).contains(Int(rgba[1]))
+                        && (198...224).contains(Int(rgba[2]))
+                    let white = rgba[0] > 230 && rgba[1] > 230 && rgba[2] > 230
+                    XCTAssertTrue(cyan || white, "关于顶部照片被黑边遮住或未正常显示：\(rgba)")
+                    continue
+                }
+                XCTAssertGreaterThan(rgba[0], 190, "\(page)\(edge)没有延续浅色背景：\(rgba)")
+                XCTAssertGreaterThan(rgba[1], 185, "\(page)\(edge)出现黑边或深色遮挡：\(rgba)")
+                XCTAssertGreaterThan(rgba[2], 175, "\(page)\(edge)没有延续浅色背景：\(rgba)")
+            }
+        }
     }
 
     func testThemesFromAboutKeepNavigationAndFitActualWindow() throws {
@@ -2205,6 +2328,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         }
 
         XCTAssertLessThanOrEqual(heading.frame.maxX, scene.maxX + 1, "关于页标题超出窗口")
+        XCTAssertGreaterThanOrEqual(portrait.frame.minY, scene.minY - 1, "关于页人物图顶部超出窗口")
         XCTAssertGreaterThanOrEqual(portrait.frame.minX, scene.minX - 1, "关于页人物图超出窗口")
         XCTAssertLessThanOrEqual(portrait.frame.maxX, scene.maxX + 1, "关于页人物图超出窗口")
         XCTAssertTrue(
@@ -2240,7 +2364,8 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         guard UIDevice.current.userInterfaceIdiom == .pad else {
             throw XCTSkip("固定双栏滚动是 iPad 专属行为")
         }
-        let app = launchApp(arguments: ["-open-about-for-visual-testing"])
+        let app = launchApp(arguments: ["-open-about-for-visual-testing",
+            "-use-deterministic-gallery-images-for-testing"])
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 8))
         guard window.frame.width >= 700 else {
@@ -2317,6 +2442,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         let app = launchApp(arguments: [
             "-open-portfolio-for-visual-testing",
             "-use-multi-image-gallery-for-visual-testing",
+            "-use-deterministic-gallery-images-for-testing",
         ])
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的应用窗口")
