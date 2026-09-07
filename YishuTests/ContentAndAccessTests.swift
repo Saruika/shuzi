@@ -13,6 +13,16 @@ import Security
 
 @MainActor
 final class PortfolioCaptionRenderingTests: XCTestCase {
+    func testCaptionOutlineUsesTheOppositeLuminanceWithoutPaintingABackground() {
+        for theme in AppColorTheme.allCases {
+            let outline = UIColor(PortfolioCaptionPalette(theme: theme).outline)
+            var white: CGFloat = 0, alpha: CGFloat = 0
+            XCTAssertTrue(outline.getWhite(&white, alpha: &alpha))
+            XCTAssertEqual(alpha, 1, accuracy: 0.001)
+            XCTAssertEqual(white, theme.colorScheme == .light ? 1 : 0, accuracy: 0.001)
+        }
+    }
+
     func testLightCaptionRolesContrastWithTheirUnpaintedThemeBackground() throws {
         for theme in AppColorTheme.allCases where theme.colorScheme == .light {
             let palette = PortfolioCaptionPalette(theme: theme)

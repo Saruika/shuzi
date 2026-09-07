@@ -14,6 +14,7 @@ struct PortfolioCaptionPalette {
     var accent: Color { usesDarkGlyphs ? theme.palette.accent.color : MediaTheme.gold }
     var ordinal: Color { usesDarkGlyphs ? theme.palette.text.color : .white.opacity(0.84) }
     var shadow: Color { usesDarkGlyphs ? .white.opacity(0.85) : .black.opacity(0.72) }
+    var outline: Color { usesDarkGlyphs ? .white : .black }
 }
 
 /// Keep the photograph visible right up to the glyphs. This modifier must not
@@ -22,7 +23,15 @@ struct PortfolioCaptionLegibility: ViewModifier {
     var palette: PortfolioCaptionPalette? = nil
 
     func body(content: Content) -> some View {
-        content.shadow(color: (palette ?? .current).shadow, radius: 2, x: 0, y: 1)
+        let colors = palette ?? .current
+        // A blurred drop shadow disappears against pale or detailed photos.
+        // Trace only the glyphs; leave the photograph and caption frame clear.
+        content
+            .shadow(color: colors.outline, radius: 0, x: 0.75, y: 0)
+            .shadow(color: colors.outline, radius: 0, x: -0.75, y: 0)
+            .shadow(color: colors.outline, radius: 0, x: 0, y: 0.75)
+            .shadow(color: colors.outline, radius: 0, x: 0, y: -0.75)
+            .shadow(color: colors.shadow, radius: 2, x: 0, y: 1)
     }
 }
 
