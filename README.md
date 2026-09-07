@@ -2,9 +2,9 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 最新 TestFlight 上传版本：`1.4.0 (5)`，Apple 处理通过、内部测试可用；外部审核待提交（Build 4 仍在审） · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 最新 TestFlight 上传版本：`1.4.0 (5)`，Apple 处理通过、内部测试可用；外部测试已提交，等待 Apple 审核 · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-**Build 5 交付结果：[发行记录](Server/releases/v1.4.0-build5.md)。** 去掉相册名称阴影的安装包已上传并通过 Apple 处理，内外测试组均已关联，测试说明已保存。提交外部审核时 Apple 返回 ANOTHER_BUILD_IN_REVIEW；没有撤回 Build 4，也没有过期旧包。以下 preview39 的“未上传”指该修改当时的阶段状态，现已包含在 Build 5。
+**Build 5 交付结果：[发行记录](Server/releases/v1.4.0-build5.md)。** 去掉相册名称阴影的安装包已上传并通过 Apple 处理，内外测试组均已关联，测试说明已保存。用户手动撤回 Build 4 的审核后，Build 5 已于 2026-09-08 07:00（UTC+8）成功提交外部测试审核，回读状态为 WAITING_FOR_REVIEW；未过期或删除旧包，未提交正式 App Store 上架。以下 preview39 的“未上传”指该修改当时的阶段状态，现已包含在 Build 5。
 
 **相册名称纯文字候选：[preview39](Server/releases/v1.4.0-build4-review-env-preview39.md)。** 按用户要求，移除相册列表与详情标题区域的描边和阴影，保留字体、字色、位置与透明背景，照片序号和其他页面不变。iPhone/iPad 黑金与月白的相册进入、看图关闭/返回检查通过；未重新上传 TestFlight。取消字形保护后，白字在浅色照片上仍有已知对比度风险，不能把交互检查当成对比度审计通过。
 
