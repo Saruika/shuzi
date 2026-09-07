@@ -8,6 +8,7 @@ import WeatherKit
 import CoreLocation
 import Network
 import Observation
+import Security
 @testable import Yishu
 
 @MainActor
@@ -253,6 +254,22 @@ final class LiveReviewAdministratorTests: XCTestCase {
               marker.range(of: #"^native_[a-f0-9]{24}$"#, options: .regularExpression) != nil else {
             throw CheckFailure.owner
         }
+        // The shipping account store requires a working device-only Keychain.
+        // An unsigned simulator build is not a valid live-auth acceptance host.
+        let keychainProbe: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "cn.com.shuzijun.yishu.native-acceptance",
+            kSecAttrAccount as String: marker,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecValueData as String: Data(marker.utf8)
+        ]
+        let keychainStatus = SecItemAdd(keychainProbe as CFDictionary, nil)
+        if keychainStatus == errSecSuccess {
+            let query = keychainProbe.filter { $0.key != (kSecValueData as String) }
+            XCTAssertEqual(SecItemDelete(query as CFDictionary), errSecSuccess)
+        }
+        print("native-review-keychain-status: \(keychainStatus)")
+        guard keychainStatus == errSecSuccess else { throw CheckFailure.nativeSession }
         let owner = AdminSessionStore(environment: .review)
         let account = FanAccountStore(environment: .review)
         let bound = AdminSessionStore(environment: .review)
@@ -278,7 +295,18 @@ final class LiveReviewAdministratorTests: XCTestCase {
             await account.register(displayName: "临时原生验收", douyinID: marker,
                                    password: password, passwordConfirmation: password,
                                    acceptedDataUse: true)
-            guard let profile = account.profile else { throw CheckFailure.registration }
+            guard let profile = account.profile else {
+                // Only allowlisted client error categories enter diagnostics.
+                // Server messages, identity codes and credentials stay private.
+                let known: [(String, FanAccountError)] = [
+                    ("rate-limited", .rateLimited), ("unavailable", .unavailable),
+                    ("invalid-response", .invalidResponse), ("consent", .consentRequired),
+                    ("douyin", .invalidDouyinID), ("password", .weakPassword)
+                ]
+                let category = known.first { $0.1.errorDescription == account.errorMessage }?.0 ?? "other"
+                print("native-review-registration-category: \(category)")
+                throw CheckFailure.registration
+            }
             identityCode = profile.identityCode
             userID = profile.userID
             guard account.isAuthenticated, !account.isApproved,

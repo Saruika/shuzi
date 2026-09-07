@@ -4,15 +4,15 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-**发布阻塞及候选修复：[preview31](Server/releases/v1.4.0-build4-review-env-preview31.md)。** 已实现注销前保留已发布作品并解除上传者关联、删除个人资料和未使用素材，真实 WordPress/MySQL 回归 434 项通过。尚未部署；并发发布/删号与审核站原生全流程仍待验收，暂不上传 TestFlight。此前打包通过不覆盖这个新场景。
+**审核环境部署验收：[preview33](Server/releases/v1.4.0-build4-review-env-preview33.md)。** 独立审核站已升级至 PHP 1.5.13.12，包含注销保留已发布作品和并发写入保护；精确清单、服务健康、匿名管理拒绝及隔离策略已复核。iPhone/iPad 真实原生注册、审批、绑定管理员、上传发布、撤权、注销及作品保留均通过，临时资源已清理。正式节点尚未部署本修复，TestFlight 暂不上传；完整页面 UI 和 Apple/推送/邮件验收仍需继续。
 
 **相册视觉候选：[preview30](Server/releases/v1.4.0-build4-review-env-preview30.md)。** 相册卡片、详情文字层改为透明，移除序号的黑色胶囊；仅通过字形小阴影辅助阅读，保留原内容和布局。尚未上传 TestFlight。
 
-**最新并发保护：[preview32](Server/releases/v1.4.0-build4-review-env-preview32.md)。** 已补原生/WordPress REST 媒体写入与注销互斥、锁后重新鉴权及数据库会话核验，真实双 MySQL 连接回归在旧代码失败、新候选通过，完整集成 460 项断言通过。仍待审核站原生生命周期和部署验收，不宣称线上已修复。
+**并发保护实现：[preview32](Server/releases/v1.4.0-build4-review-env-preview32.md)。** 已补原生/WordPress REST 媒体写入与注销互斥、锁后重新鉴权及数据库会话核验，真实双 MySQL 连接回归在旧代码失败、新候选通过，完整集成 460 项断言通过。后续独立审核站部署见 preview33，不代表正式环境已修复。
 
 **云端测试已通过：[iOS Quality Gate #135](QA_CI_135.md)。** 运行于 `3808d11`：iPhone、iPad、首次通知授权、SAST/SCA、SBOM 及 Release 检查成功。该提交早于当前候选，不覆盖上述删号问题。重启后已从 Git 恢复独立工作目录，并核对 NAS 安装包完整；未上传新包。
 
-**最新候选：[preview27](Server/releases/v1.4.0-build4-review-env-preview27.md)。** 独立 HTTPS 后台、授权演示素材及 Test1/Test2 展示名称账号已准备，实际使用 HS 身份码和密码登录。审核插件 1.5.13.10 与相册固定链接修复已部署，真实原生注册/审批/HS 重新登录/管理员绑定/完整相册/撤权/删号验证通过。Release 已加入显式环境入口和演示标识；最终账号完整 UI、Apple 登录/推送/邮件仍未验收，不代表可提交审核。
+**历史入口候选：[preview27](Server/releases/v1.4.0-build4-review-env-preview27.md)。** 独立 HTTPS 后台、授权演示素材及 Test1/Test2 展示名称账号已准备，实际使用 HS 身份码和密码登录。当时审核插件 1.5.13.10 与相册固定链接修复已部署，窄范围原生注册/审批/HS 重新登录/管理员绑定/完整相册/撤权/删号验证通过，不含发布后的媒体保留。Release 已加入显式环境入口和演示标识；最终账号完整 UI、Apple 登录/推送/邮件仍未验收，不代表可提交审核。
 
 **最新实际安装包：[Build 4 包预检 2](Server/releases/v1.4.0-build4-package-preflight2.md)。** 使用干净 `4ad7d09` 源码重新归档并导出，实际发行签名、权限与 Apple 上传前校验通过；安装包和归档已核对保存到 NAS。**尚未上传 TestFlight，当前可下载版本仍为 1.4.0 (3)。** 上架剩余事项见 [就绪清单](APP_STORE_READINESS.md)。
 
