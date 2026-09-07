@@ -222,6 +222,9 @@ final class LiveReviewAdministratorTests: XCTestCase {
         var failure: Error?
         var identityCode: String?
         var userID: String?
+        // Fixed phase labels only: never put credentials, identity codes or
+        // server response bodies into test diagnostics.
+        var phase = "mandatory-douyin"
         do {
             await account.register(displayName: "临时原生验收", douyinID: "",
                                    password: password, passwordConfirmation: password,
@@ -230,6 +233,7 @@ final class LiveReviewAdministratorTests: XCTestCase {
                   account.errorMessage == FanAccountError.invalidDouyinID.errorDescription else {
                 throw CheckFailure.registration
             }
+            phase = "registration"
             await account.register(displayName: "临时原生验收", douyinID: marker,
                                    password: password, passwordConfirmation: password,
                                    acceptedDataUse: true)
@@ -238,16 +242,30 @@ final class LiveReviewAdministratorTests: XCTestCase {
             userID = profile.userID
             guard account.isAuthenticated, !account.isApproved,
                   account.administratorContext == nil else { throw CheckFailure.pendingAccess }
+            phase = "approval"
             _ = try await owner.updateFanAccess(userID: profile.userID, status: "active")
             await account.refreshSession()
             guard account.isApproved, account.administratorContext == nil else { throw CheckFailure.approval }
+            phase = "binding"
             let before = try await owner.fetchFanUser(userID: profile.userID)
             _ = try await owner.updateFanAdministrator(AdminFanAdministratorUpdate(user: before, administrator: true))
             await account.refreshSession()
             guard account.administratorContext != nil else { throw CheckFailure.binding }
+            phase = "bound-session"
             await bound.signIn(using: account)
             guard bound.isAuthenticated, !bound.isIndependentAdministrator,
                   bound.canManageFanAdministrators else { throw CheckFailure.nativeSession }
+            // Fetch through the shipping client and actual HS-bound session.
+            // A real photo-only review catalog must be editable without fake video.
+            phase = "photo-only-content"
+            let editable = try await bound.fetchContent()
+            guard editable.contentAudience == .administrator,
+                  AdminContentEditingPolicy.isFullAdministratorManifest(editable),
+                  editable.portfolios.count >= 2 else { throw CheckFailure.nativeSession }
+            if values["YISHU_REVIEW_EXPECT_PHOTO_ONLY"] == "1" {
+                guard editable.showreel == nil else { throw CheckFailure.nativeSession }
+            }
+            phase = "revocation"
             let active = try await owner.fetchFanUser(userID: profile.userID)
             _ = try await owner.updateFanAdministrator(AdminFanAdministratorUpdate(user: active, administrator: false))
             // Do not refresh the fan hint first: an existing native admin
@@ -262,7 +280,10 @@ final class LiveReviewAdministratorTests: XCTestCase {
             }
             await account.refreshSession()
             guard account.isApproved, account.administratorContext == nil else { throw CheckFailure.revocation }
-        } catch { failure = error }
+        } catch {
+            print("native-review-failed-phase: \(phase); error-type: \(type(of: error))")
+            failure = error
+        }
         // Always attempt the normal user-facing delete API, including after a
         // failed intermediate assertion. The runner has a separate recovery path.
         if account.profile != nil {
