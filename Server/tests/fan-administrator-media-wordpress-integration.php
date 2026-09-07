@@ -46,6 +46,10 @@ $attachment_count = static fn(): int => (int) $wpdb->get_var(
 add_filter('upload_dir', $upload_location);
 add_filter('wp_image_editors', $force_gd);
 add_filter('rest_pre_dispatch', $media_gate, 10, 3);
+// The outer fixture intentionally omits init() to avoid unrelated schedulers.
+// Register the same deletion hook as production while testing core lifecycle.
+$delete_hook = array(Shuzijun_App_Content_API::class, 'prepare_fan_user_deletion');
+add_action('delete_user', $delete_hook, 10, 1);
 try {
     // The theme normally registers this post type; the isolated fixture loads
     // no theme. Keep the native attachment controller and every API callback.
@@ -153,6 +157,66 @@ try {
         && $forged_scope->get_data()['contentAudience'] === 'viewer',
         'client-supplied audience cannot override actual server-side role checks');
 
+    // Build additional ownership/reference cases directly inside this private
+    // fixture after revocation (not through an unauthorized upload endpoint).
+    $retention_fixtures = array();
+    foreach (array('unused', 'about', 'hero', 'poster', 'shared', 'fallback', 'cover', 'other_owner') as $kind) {
+        $file = $upload_root . '/retention-' . $kind . '.png';
+        file_put_contents($file, $png_bytes);
+        $id = wp_insert_attachment(array('post_title' => 'Synthetic retention ' . $kind,
+            'post_mime_type' => 'image/png', 'post_status' => 'inherit',
+            'post_author' => $kind === 'other_owner' ? $granting_manager['id'] : $publisher['id']), $file);
+        check_wordpress_schema(is_int($id) && $id > 0, 'retention fixture attachment created');
+        $fixture_media_ids[] = $id;
+        wp_update_attachment_metadata($id, wp_generate_attachment_metadata($id, $file));
+        $retention_fixtures[$kind] = array('id' => $id, 'file' => $file,
+            'url' => wp_get_attachment_url($id), 'metadata' => wp_get_attachment_metadata($id));
+    }
+    $draft_id = wp_insert_post(array('post_type' => 'portfolio', 'post_status' => 'draft',
+        'post_title' => 'Unused private draft', 'post_author' => $publisher['id']));
+    $fallback_id = wp_insert_post(array('post_type' => 'portfolio', 'post_status' => 'publish',
+        'post_title' => 'Published fallback', 'post_author' => $granting_manager['id']));
+    wp_update_post(array('ID' => $retention_fixtures['fallback']['id'], 'post_parent' => $fallback_id));
+    // Shared gallery reference is authoritative even when parent is a draft.
+    wp_update_post(array('ID' => $retention_fixtures['shared']['id'], 'post_parent' => $draft_id));
+    update_post_meta($fallback_id, '_thumbnail_id', $retention_fixtures['cover']['id']);
+    update_post_meta($fixture_portfolio_id, '_portfolio_gallery', wp_json_encode(array(
+        $media_id, $retention_fixtures['shared']['id'])));
+    update_post_meta($fixture_portfolio_id, '_edit_last', (string) $publisher['id']);
+    $retention_config = get_option(Shuzijun_App_Content_API::OPTION_CONFIG, array());
+    $retention_config['aboutPortraitURL'] = wp_get_attachment_image_url($retention_fixtures['about']['id'], 'large');
+    $retention_config['heroImages'] = array($retention_fixtures['hero']['url']);
+    $retention_config['launchPosters'] = array(array('imageURL' => $retention_fixtures['poster']['url']));
+    update_option(Shuzijun_App_Content_API::OPTION_CONFIG, $retention_config);
+
+    foreach (array('publication_read', 'ownership_write') as $failure_kind) {
+        $injected = 0;
+        $reject_retention_query = static function ($sql) use ($failure_kind, &$injected, $wpdb) {
+            $matches = $failure_kind === 'publication_read'
+                ? str_contains($sql, 'SELECT p.ID, p.post_type, m.meta_key')
+                : (str_starts_with($sql, "UPDATE `{$wpdb->posts}` SET `post_author` = 0"));
+            if ($matches) {
+                $injected++;
+                return "SELECT yishu_deliberately_absent_fixture_column FROM {$wpdb->posts}";
+            }
+            return $sql;
+        };
+        $old_suppression = $wpdb->suppress_errors(true);
+        add_filter('query', $reject_retention_query);
+        try {
+            $failed_delete = $dispatch_media_fixture($publisher, 'POST', '/shuzijun/v1/fan/delete', array(
+                'installID' => $publisher['install'], 'currentPassword' => $publisher['password'],
+                'confirmation' => 'DELETE_ACCOUNT'));
+        } finally {
+            remove_filter('query', $reject_retention_query);
+            $wpdb->suppress_errors($old_suppression);
+        }
+        check_wordpress_schema($injected > 0 && $failed_delete->get_status() === 503,
+            'real REST deletion fails closed on retention database failure: ' . $failure_kind);
+        check_wordpress_schema(get_userdata($publisher['id']) instanceof WP_User && is_file($uploaded_file)
+            && get_post($media_id) instanceof WP_Post, 'failed retention leaves account and published original intact');
+    }
+
     $deletion = $dispatch_media_fixture($publisher, 'POST', '/shuzijun/v1/fan/delete', array(
         'installID' => $publisher['install'], 'currentPassword' => $publisher['password'],
         'confirmation' => 'DELETE_ACCOUNT'));
@@ -169,9 +233,51 @@ try {
     $retained = $dispatch_media_fixture($granting_manager, 'GET', '/shuzijun/v1/app-content');
     $retained_albums = array_values(array_filter($retained->get_data()['portfolios'],
         static fn($album) => $album['id'] === $fixture_portfolio_id));
-    check_wordpress_schema(count($retained_albums) === 1 && count($retained_albums[0]['images']) === 1,
+    check_wordpress_schema(count($retained_albums) === 1 && count($retained_albums[0]['images']) === 2,
         'administrator still receives published gallery after uploader deletion');
+    foreach ($retention_fixtures as $kind => $fixture) {
+        if ($kind === 'unused') {
+            check_wordpress_schema(!get_post($fixture['id']) && !is_file($fixture['file']),
+                'unused private original is deleted, not indiscriminately retained');
+            foreach ($fixture['metadata']['sizes'] as $size) {
+                check_wordpress_schema(!is_file($upload_root . '/' . $size['file']), 'unused generated size is deleted');
+            }
+        } else {
+            $expected_author = $kind === 'other_owner' ? $granting_manager['id'] : 0;
+            check_wordpress_schema(get_post($fixture['id']) instanceof WP_Post
+                && (int) get_post($fixture['id'])->post_author === $expected_author
+                && is_file($fixture['file']) && hash_file('sha256', $fixture['file']) === hash('sha256', $png_bytes),
+                'retained editorial reference/other owner: ' . $kind);
+        }
+    }
+    check_wordpress_schema(!get_post($draft_id), 'unused unpublished album is removed despite theme lacking author support');
+    check_wordpress_schema(get_post($fallback_id) instanceof WP_Post
+        && (int) get_post($fallback_id)->post_author === $granting_manager['id'], 'other owner album is unchanged');
+    check_wordpress_schema(get_post_meta($fixture_portfolio_id, '_edit_last', true) === '', 'editor account metadata detached');
+    check_wordpress_schema(get_user_meta($publisher['id']) === array(), 'all publisher user metadata removed');
+    check_wordpress_schema(get_option(Shuzijun_App_Content_API::OPTION_CONFIG) === $retention_config,
+        'deletion never changes artwork configuration');
+    wp_delete_post($fallback_id, true);
+
+    // The WordPress administration path must honor the same retention policy,
+    // even when no fan UUID exists and no App remove_fan_user() wrapper runs.
+    $core_subject = $make_fan();
+    delete_user_meta($core_subject['id'], Shuzijun_App_Content_API::FAN_META_UUID);
+    $core_album_id = wp_insert_post(array('post_type' => 'portfolio', 'post_status' => 'publish',
+        'post_title' => 'Core deletion retained album', 'post_author' => $core_subject['id']));
+    $core_file = $upload_root . '/core-delete-retained.png';
+    file_put_contents($core_file, $png_bytes);
+    $core_media_id = wp_insert_attachment(array('post_title' => 'Core deletion retained image',
+        'post_mime_type' => 'image/png', 'post_author' => $core_subject['id']), $core_file, $core_album_id);
+    $fixture_media_ids[] = $core_media_id;
+    update_post_meta($core_album_id, '_portfolio_gallery', wp_json_encode(array($core_media_id)));
+    check_wordpress_schema(wp_delete_user($core_subject['id']), 'core/admin can delete account without fan UUID');
+    check_wordpress_schema(!get_userdata($core_subject['id']) && is_file($core_file)
+        && (int) get_post($core_album_id)->post_author === 0
+        && (int) get_post($core_media_id)->post_author === 0, 'core hook preserves and detaches published work too');
+    wp_delete_post($core_album_id, true);
 } finally {
+    remove_action('delete_user', $delete_hook, 10);
     remove_filter('rest_pre_dispatch', $media_gate, 10);
     remove_filter('wp_image_editors', $force_gd);
     // Keep upload mapping installed while WordPress removes original/subsizes.

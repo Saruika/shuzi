@@ -2532,11 +2532,158 @@ trait Shuzijun_App_Fan_Identity {
         return is_wp_error($permissions) ? array() : $permissions;
     }
 
+    /**
+     * Detach published editorial work before core selects this author's posts
+     * for deletion. Never reassign the entire account: unused private uploads
+     * must still be removed by WordPress, including their generated sizes.
+     */
+    private static function retain_published_work_for_deleting_user($user_id) {
+        global $wpdb;
+        $owned = $wpdb->get_results($wpdb->prepare(
+            "SELECT ID, post_type, post_status, post_parent FROM {$wpdb->posts}
+             WHERE post_author = %d AND post_type IN ('portfolio', 'attachment')",
+            $user_id
+        ));
+        if ($wpdb->last_error !== '' || !is_array($owned)) { return false; }
+        if (!$owned) { return self::detach_deleted_editor_metadata($user_id); }
+
+        // Read the complete publication set, not the paginated App feed. A
+        // shared photo can belong to a different album than its post_parent.
+        $published = $wpdb->get_results(
+            "SELECT p.ID, p.post_type, m.meta_key, m.meta_value FROM {$wpdb->posts} p
+             LEFT JOIN {$wpdb->postmeta} m ON m.post_id = p.ID
+             AND m.meta_key IN ('_portfolio_gallery', '_thumbnail_id')
+             WHERE p.post_status = 'publish' AND p.post_type <> 'attachment'"
+        );
+        if ($wpdb->last_error !== '' || !is_array($published)) { return false; }
+        $referenced = array();
+        $fallback_albums = array();
+        foreach ($published as $row) {
+            if ($row->post_type === 'portfolio' && !isset($fallback_albums[(int) $row->ID])) {
+                $fallback_albums[(int) $row->ID] = true;
+            }
+            if ($row->meta_key === '_thumbnail_id') {
+                $referenced[(int) $row->meta_value] = true;
+            } elseif ($row->post_type === 'portfolio' && $row->meta_key === '_portfolio_gallery') {
+                $gallery = json_decode((string) $row->meta_value, true);
+                if (is_array($gallery) && $gallery) {
+                    $fallback_albums[(int) $row->ID] = false;
+                    foreach ($gallery as $id) { $referenced[absint($id)] = true; }
+                }
+            }
+        }
+
+        // An SQL failure must not look like an empty configuration and allow
+        // deletion. Include stored/scheduled as well as fallback media; do not
+        // accidentally revive a previously removed photo during this cleanup.
+        $raw_config = $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s", self::OPTION_CONFIG
+        ));
+        if ($wpdb->last_error !== '') { return false; }
+        $stored = $raw_config === null ? array() : maybe_unserialize($raw_config);
+        if (!is_array($stored)) { return false; }
+        $paths = array();
+        foreach (array($stored, self::config()) as $config) {
+            $urls = (array) ($config['heroImages'] ?? array());
+            $urls[] = $config['aboutPortraitURL'] ?? null;
+            foreach ((array) ($config['launchPosters'] ?? array()) as $poster) {
+                if (is_array($poster)) { $urls[] = $poster['imageURL'] ?? null; }
+            }
+            foreach (array('videoURL', 'posterURL') as $key) { $urls[] = $config['showreel'][$key] ?? null; }
+            foreach ((array) ($config['dramas'] ?? array()) as $drama) {
+                if (is_array($drama)) { $urls[] = $drama['imageURL'] ?? null; }
+            }
+            foreach ($urls as $url) {
+                $path = self::editorial_media_retention_path($url);
+                if ($path !== '') { $paths[$path] = true; }
+            }
+        }
+
+        // Decide every retained ID before changing ownership. Derivatives use
+        // the same upload directory as their original; compare whole paths,
+        // never basenames or substring matches across unrelated uploads.
+        $retain = array();
+        foreach ($owned as $post) {
+            $id = (int) $post->ID;
+            if ($post->post_type === 'portfolio') {
+                if ($post->post_status === 'publish') { $retain[] = $id; }
+                continue;
+            }
+            $used = isset($referenced[$id]) || !empty($fallback_albums[(int) $post->post_parent]);
+            if (!$used && $paths) {
+                $metadata_rows = $wpdb->get_results($wpdb->prepare(
+                    "SELECT meta_key, meta_value FROM {$wpdb->postmeta} WHERE post_id = %d
+                     AND meta_key IN ('_wp_attachment_metadata', '_wp_attached_file')", $id
+                ));
+                if ($wpdb->last_error !== '' || !is_array($metadata_rows)) { return false; }
+                // Warm no caches from a potentially failed metadata query.
+                $original_path = self::editorial_media_retention_path(wp_get_attachment_url($id));
+                if ($wpdb->last_error !== '') { return false; }
+                if ($original_path !== '') {
+                    $used = isset($paths[$original_path]);
+                    $directory = dirname($original_path);
+                    foreach ($metadata_rows as $row) {
+                        if ($row->meta_key !== '_wp_attachment_metadata') { continue; }
+                        $metadata = maybe_unserialize($row->meta_value);
+                        if (!is_array($metadata)) { continue; }
+                        $files = array($metadata['original_image'] ?? '');
+                        foreach ((array) ($metadata['sizes'] ?? array()) as $size) {
+                            if (is_array($size)) { $files[] = $size['file'] ?? ''; }
+                        }
+                        foreach ($files as $file) {
+                            if (is_string($file) && $file !== '' && basename($file) === $file
+                                && isset($paths[$directory . '/' . $file])) { $used = true; }
+                        }
+                    }
+                }
+            }
+            if ($used) { $retain[] = $id; }
+        }
+        foreach ($retain as $id) {
+            // Compare author as well as ID: never take ownership from another
+            // editor if a concurrent operation already changed this record.
+            $changed = $wpdb->update($wpdb->posts, array('post_author' => 0),
+                array('ID' => $id, 'post_author' => $user_id), array('%d'), array('%d', '%d'));
+            if ($changed === false) { return false; }
+            clean_post_cache($id);
+        }
+        // Theme portfolios do not advertise author support. Explicitly include
+        // them in core cleanup so unpublished drafts do not retain personal
+        // author links. Published records now have author 0 and are not selected.
+        add_filter('post_types_to_delete_with_user', array(__CLASS__, 'include_editorial_drafts_in_user_deletion'), 10, 2);
+        return self::detach_deleted_editor_metadata($user_id);
+    }
+
+    private static function detach_deleted_editor_metadata($user_id) {
+        global $wpdb;
+        $edited_ids = $wpdb->get_col($wpdb->prepare(
+            "SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_edit_last' AND meta_value = %s",
+            (string) $user_id
+        ));
+        if ($wpdb->last_error !== '' || !is_array($edited_ids)) { return false; }
+        if ($wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->postmeta} WHERE meta_key = '_edit_last' AND meta_value = %s", (string) $user_id
+        )) === false) { return false; }
+        foreach ($edited_ids as $id) { clean_post_cache((int) $id); }
+        return true;
+    }
+
+    private static function editorial_media_retention_path($url) {
+        if (!is_string($url) || !self::trusted_media_url($url)) { return ''; }
+        $path = wp_parse_url($url, PHP_URL_PATH);
+        return is_string($path) ? rawurldecode($path) : '';
+    }
+
+    public static function include_editorial_drafts_in_user_deletion($types, $user_id) {
+        return array_values(array_unique(array_merge((array) $types, array('portfolio'))));
+    }
+
     private static function remove_fan_user($user_id, $douyin_reservation = '') {
         $user_id = (int) $user_id;
         if ($user_id <= 0
             || !self::purge_collaboration_data_for_fan_user($user_id)
-            || !self::purge_push_data_for_fan_user($user_id)) {
+            || !self::purge_push_data_for_fan_user($user_id)
+            || !self::retain_published_work_for_deleting_user($user_id)) {
             return false;
         }
         // The App deletion paths already hold the per-user lock. Mark the
@@ -3390,6 +3537,13 @@ trait Shuzijun_App_Fan_Identity {
         }
 
         // A damaged/missing fan UUID must not bypass collaboration cleanup.
+        if (empty(self::$fan_user_deletion_prepared[$user_id])
+            && !self::retain_published_work_for_deleting_user($user_id)) {
+            self::release_fan_user_deletion_lock($user_id);
+            self::abort_fan_user_deletion('account_deletion_editorial_retention_failed');
+        }
+
+        // A damaged/missing fan UUID must not bypass editorial retention either.
         // Once physical-table cleanup is proven, non-fan users need no further
         // plugin-specific metadata work.
         if (!get_user_meta($user_id, self::FAN_META_UUID, true)) { return; }

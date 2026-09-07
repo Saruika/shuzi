@@ -4,7 +4,7 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-**发布阻塞：[preview28](Server/releases/v1.4.0-build4-review-env-preview28.md)。** 新增真实上传→发布→撤权→注销验收，复现管理员注销后相册仍在但其上传图片被删除。已确认保留已发布作品并解除上传者关联、删除个人资料和未使用的未发布素材；实现与验收尚未完成，暂不上传。此前的打包及账号流程通过不覆盖这个新场景。
+**发布阻塞及候选修复：[preview31](Server/releases/v1.4.0-build4-review-env-preview31.md)。** 已实现注销前保留已发布作品并解除上传者关联、删除个人资料和未使用素材，真实 WordPress/MySQL 回归 434 项通过。尚未部署；并发发布/删号与审核站原生全流程仍待验收，暂不上传 TestFlight。此前打包通过不覆盖这个新场景。
 
 **相册视觉候选：[preview30](Server/releases/v1.4.0-build4-review-env-preview30.md)。** 相册卡片、详情文字层改为透明，移除序号的黑色胶囊；仅通过字形小阴影辅助阅读，保留原内容和布局。尚未上传 TestFlight。
 
