@@ -4,7 +4,11 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-**最新审核后台进度：[v1.4.0-build4-review-env-preview11](Server/releases/v1.4.0-build4-review-env-preview11.md)。** 独立子域名与专用 HTTPS 已通，HTTP 只跳转 HTTPS；带部署 hook 的证书续期演练通过。真实 HTTPS 入口的 23 项账号流程通过，并验证独立访客限流与代理身份覆盖。现仍为配置中，授权媒体、最终审核账号、Apple/发信/推送和 App Release 入口待完成；不是整套审核环境验收完成，未上传 TestFlight。
+**最新候选：[preview27](Server/releases/v1.4.0-build4-review-env-preview27.md)。** 独立 HTTPS 后台、授权演示素材及 Test1/Test2 展示名称账号已准备，实际使用 HS 身份码和密码登录。审核插件 1.5.13.10 与相册固定链接修复已部署，真实原生注册/审批/HS 重新登录/管理员绑定/完整相册/撤权/删号验证通过。Release 已加入显式环境入口和演示标识；最终账号完整 UI、Apple 登录/推送/邮件仍未验收，不代表可提交审核。
+
+**最新实际安装包：[Build 4 包预检 2](Server/releases/v1.4.0-build4-package-preflight2.md)。** 使用干净 `4ad7d09` 源码重新归档并导出，实际发行签名、权限与 Apple 上传前校验通过；安装包和归档已核对保存到 NAS。**尚未上传 TestFlight，当前可下载版本仍为 1.4.0 (3)。** 上架剩余事项见 [就绪清单](APP_STORE_READINESS.md)。
+
+以下为历史阶段记录；其中“未部署”“待创建”等描述对应各阶段当时的状态，当前状态以上述链接为准。
 
 **私有后台引导记录：[v1.4.0-build4-review-env-preview10](Server/releases/v1.4.0-build4-review-env-preview10.md)。** 主节点已建立独立数据库、运行身份、WordPress 和 PHP/nginx 服务。23 项真实注册/审批/管理员绑定与撤销/删号检查通过，临时合成账号和凭据已清除；未复制正式用户或修改正式业务模块。14 项本地部署边界检查通过。该阶段仅本机访问，后续公开 HTTPS 进度见 preview11。
 
