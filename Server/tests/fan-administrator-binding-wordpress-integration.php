@@ -22,8 +22,9 @@ try {
     check_wordpress_schema(Shuzijun_App_Content_API::account_authority_enabled(), 'only temporary authority marker is used');
 
     $make_fan = static function (bool $administrator = false): array {
+        $fan_password = bin2hex(random_bytes(24));
         $fan_id = wp_insert_user(array('user_login' => 'binding_' . bin2hex(random_bytes(8)),
-            'user_pass' => bin2hex(random_bytes(24)), 'role' => 'subscriber'));
+            'user_pass' => $fan_password, 'role' => 'subscriber'));
         check_wordpress_schema(is_int($fan_id) && $fan_id > 0, 'create isolated binding fixture user');
         $fan_uuid = wp_generate_uuid4();
         update_user_meta($fan_id, Shuzijun_App_Content_API::FAN_META_UUID, $fan_uuid);
@@ -37,7 +38,8 @@ try {
         add_option($fan_option, array('userID' => $fan_id, 'expires' => time() + 600,
             'installHash' => hash('sha256', $fan_install), 'scope' => 'normal',
             'credentialEpoch' => 1, 'authMethod' => 'password', 'recentAuthUntil' => 0), '', false);
-        return array('id' => $fan_id, 'uuid' => $fan_uuid, 'token' => $fan_token, 'install' => $fan_install);
+        return array('id' => $fan_id, 'uuid' => $fan_uuid, 'token' => $fan_token,
+            'install' => $fan_install, 'password' => $fan_password);
     };
     $binding_request = static function (array $actor, array $target, $desired, $expected): WP_REST_Request {
         $binding_request = new WP_REST_Request('PATCH', '/shuzijun/v1/app-admin/fans/' . $target['uuid'] . '/administrator');

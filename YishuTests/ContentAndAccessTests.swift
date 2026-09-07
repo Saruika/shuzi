@@ -10,6 +10,46 @@ import Network
 import Observation
 @testable import Yishu
 
+@MainActor
+final class PortfolioCaptionRenderingTests: XCTestCase {
+    func testCaptionKeepsEmptyPhotoAreaFullyTransparentInBothAppearances() throws {
+        for appearance in [ColorScheme.light, .dark] {
+            for textSize in [DynamicTypeSize.large, .accessibility3] {
+                let caption = Text("相册 · 东方美学")
+                    .font(.title3)
+                    .foregroundStyle(.white)
+                    .modifier(PortfolioCaptionLegibility())
+                    .padding(24)
+                    .frame(width: 640, height: 160)
+                    .environment(\.colorScheme, appearance)
+                    .environment(\.dynamicTypeSize, textSize)
+                let renderer = ImageRenderer(content: caption)
+                renderer.scale = 1
+                renderer.isOpaque = false
+                let image = try XCTUnwrap(renderer.cgImage)
+                var rgba = [UInt8](repeating: 0, count: 640 * 160 * 4)
+                try rgba.withUnsafeMutableBytes { buffer in
+                    let context = try XCTUnwrap(CGContext(data: buffer.baseAddress,
+                        width: 640, height: 160, bitsPerComponent: 8, bytesPerRow: 640 * 4,
+                        space: CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                    context.draw(image, in: CGRect(x: 0, y: 0, width: 640, height: 160))
+                }
+                // A caption-sized black gradient or capsule would paint these
+                // pixels even though no text is present at the photo boundary.
+                for x in stride(from: 0, to: 640, by: 8) {
+                    for y in [0, 8, 151, 159] {
+                        XCTAssertEqual(rgba[(y * 640 + x) * 4 + 3], 0,
+                            "相册文字外侧不应绘制黑色蒙版")
+                    }
+                }
+                XCTAssertTrue(stride(from: 3, to: rgba.count, by: 4).contains { rgba[$0] > 0 },
+                    "必须实际渲染文字，不能用空视图通过透明度测试")
+            }
+        }
+    }
+}
+
 private actor ImagePipelineTestLoader {
     let data: Data
     let responseURL: URL?

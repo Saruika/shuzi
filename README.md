@@ -4,7 +4,9 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-**发布阻塞：[preview28](Server/releases/v1.4.0-build4-review-env-preview28.md)。** 新增真实上传→发布→撤权→注销验收，复现管理员注销后相册仍在但其上传图片被删除。回归目前失败；暂不上传候选包，先确认业务作品保留规则并修复。此前的打包及账号流程通过不覆盖这个新场景。
+**发布阻塞：[preview28](Server/releases/v1.4.0-build4-review-env-preview28.md)。** 新增真实上传→发布→撤权→注销验收，复现管理员注销后相册仍在但其上传图片被删除。已确认保留已发布作品并解除上传者关联、删除个人资料和未使用的未发布素材；实现与验收尚未完成，暂不上传。此前的打包及账号流程通过不覆盖这个新场景。
+
+**相册视觉候选：[preview30](Server/releases/v1.4.0-build4-review-env-preview30.md)。** 相册卡片、详情文字层改为透明，移除序号的黑色胶囊；仅通过字形小阴影辅助阅读，保留原内容和布局。尚未上传 TestFlight。
 
 **云端测试已通过：[iOS Quality Gate #135](QA_CI_135.md)。** 运行于 `3808d11`：iPhone、iPad、首次通知授权、SAST/SCA、SBOM 及 Release 检查成功。该提交早于当前候选，不覆盖上述删号问题。重启后已从 Git 恢复独立工作目录，并核对 NAS 安装包完整；未上传新包。
 

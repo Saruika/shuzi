@@ -961,6 +961,34 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "05-about-visible-bottom", app: app)
     }
 
+    func testTransparentAlbumCaptionsKeepNavigationWorkingInLightAndDarkThemes() {
+        for theme in ["blackGold", "ivory"] {
+            let app = launchApp(arguments: ["-open-portfolio-for-visual-testing",
+                "-use-deterministic-gallery-images-for-testing",
+                "-cn.com.shuzijun.yishu.appearance.v1", theme])
+            let card = app.buttons.matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
+            XCTAssertTrue(card.waitForExistence(timeout: 12))
+            XCTAssertTrue(card.isHittable)
+            attachScreenshot(named: "transparent-album-grid-\(theme)", app: app)
+            card.tap()
+            let firstImage = app.buttons.matching(
+                NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-")).firstMatch
+            XCTAssertTrue(firstImage.waitForExistence(timeout: 8))
+            XCTAssertTrue(firstImage.isHittable)
+            attachScreenshot(named: "transparent-album-detail-\(theme)", app: app)
+            firstImage.tap()
+            let close = element("gallery-close", in: app)
+            XCTAssertTrue(close.waitForExistence(timeout: 8))
+            assertMinimumTapTarget(close, named: "图片查看器关闭")
+            close.tap()
+            let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: close)
+            XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
+            XCTAssertTrue(firstImage.exists)
+            app.terminate()
+        }
+    }
+
     func testPortfolioCanOpenAnAlbumAndFullScreenViewer() {
         let app = launchApp(arguments: ["-open-portfolio-for-visual-testing"])
         assertExists("portfolio-heading", in: app)

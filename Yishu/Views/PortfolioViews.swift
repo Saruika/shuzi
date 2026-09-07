@@ -1,6 +1,14 @@
 import SwiftUI
 import UIKit
 
+/// Keep the photograph visible right up to the glyphs. This modifier must not
+/// paint a rectangle, material or gradient behind an album caption.
+struct PortfolioCaptionLegibility: ViewModifier {
+    func body(content: Content) -> some View {
+        content.shadow(color: .black.opacity(0.72), radius: 2, x: 0, y: 1)
+    }
+}
+
 struct PortfolioGridView: View {
     @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var admin: AdminSessionStore
@@ -302,20 +310,9 @@ private struct PortfolioGridCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .foregroundStyle(.white)
             }
+            .modifier(PortfolioCaptionLegibility())
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-                // Size the scrim to the caption, not a percentage of the
-                // photograph. Pale clothing/railings must not wash out the
-                // title or its gold eyebrow, including larger text sizes.
-                LinearGradient(stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .black.opacity(0.82), location: 0.18),
-                    .init(color: .black.opacity(0.82), location: 1),
-                ], startPoint: .top, endPoint: .bottom)
-                .padding(.top, -20)
-                .allowsHitTesting(false)
-            }
 
         }
         .frame(maxWidth: .infinity)
@@ -475,12 +472,6 @@ private struct PortfolioHeroArtwork: View {
         ZStack(alignment: .bottomLeading) {
             EditorialArtworkImage(url: image.url)
 
-            LinearGradient(
-                colors: [.clear, MediaTheme.ink.opacity(0.18), MediaTheme.ink.opacity(0.96)],
-                startPoint: .center,
-                endPoint: .bottom
-            )
-
             VStack(alignment: .leading, spacing: 10) {
                 Text(portfolio.eyebrow)
                     .font(.caption2.weight(.semibold))
@@ -490,10 +481,11 @@ private struct PortfolioHeroArtwork: View {
                     .font(.system(.largeTitle, design: .serif))
                 Text(portfolio.subtitle)
                     .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(.white.opacity(0.92))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .foregroundStyle(.white)
+            .modifier(PortfolioCaptionLegibility())
             .multilineTextAlignment(.leading)
             .padding(.horizontal, 22)
             .padding(.bottom, 24)
@@ -514,9 +506,9 @@ private struct PortfolioGalleryTile: View {
                 .font(.system(.caption2, design: .monospaced).weight(.semibold))
                 .tracking(0.8)
                 .foregroundStyle(.white.opacity(0.84))
+                .modifier(PortfolioCaptionLegibility())
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
-                .background(.black.opacity(0.52), in: Capsule())
                 .padding(8)
         }
         .aspectRatio(2 / 3, contentMode: .fit)
@@ -532,26 +524,12 @@ private struct EditorialArtworkImage: View {
     let url: URL
 
     var body: some View {
-        ZStack {
-            placeholder
-            Color.black.opacity(0.12)
-            // This artwork is the label of an outer open-photo button.
-            // An embedded retry button would steal center taps after a load failure.
-            ArtworkImage(url: url, contentMode: .fit, showsRetryButton: false)
-        }
-        .background(AppTheme.elevatedInk)
-        .clipped()
-    }
-
-    private var placeholder: some View {
-        ZStack {
-            AppTheme.elevatedInk
-            LinearGradient(
-                colors: [.white.opacity(0.035), .clear, AppTheme.gold.opacity(0.045)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        }
+        // ArtworkImage owns its loading/error placeholder. Do not leave an
+        // opaque placeholder or black tint behind an already loaded portrait:
+        // aspect-fit margins must reveal the page, not form another dark panel.
+        // The outer open-photo button still owns taps after a loading failure.
+        ArtworkImage(url: url, contentMode: .fit, showsRetryButton: false)
+            .clipped()
     }
 }
 

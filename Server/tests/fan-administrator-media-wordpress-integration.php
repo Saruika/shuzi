@@ -152,6 +152,25 @@ try {
     check_wordpress_schema($forged_scope->get_status() === 200
         && $forged_scope->get_data()['contentAudience'] === 'viewer',
         'client-supplied audience cannot override actual server-side role checks');
+
+    $deletion = $dispatch_media_fixture($publisher, 'POST', '/shuzijun/v1/fan/delete', array(
+        'installID' => $publisher['install'], 'currentPassword' => $publisher['password'],
+        'confirmation' => 'DELETE_ACCOUNT'));
+    check_wordpress_schema($deletion->get_status() === 200, 'revoked publisher can delete own account normally');
+    check_wordpress_schema(!get_userdata($publisher['id']), 'publisher personal account is actually deleted');
+    check_wordpress_schema(get_post($media_id) instanceof WP_Post && is_file($uploaded_file),
+        'published original survives publisher account deletion');
+    check_wordpress_schema((int) get_post($media_id)->post_author === 0
+        && (int) get_post($fixture_portfolio_id)->post_author === 0,
+        'published image and album no longer reference deleted uploader');
+    check_wordpress_schema(hash_file('sha256', $uploaded_file) === hash('sha256', $png_bytes)
+        && is_file($upload_root . '/' . $metadata['sizes']['large']['file']),
+        'retained original and display derivative remain unchanged');
+    $retained = $dispatch_media_fixture($granting_manager, 'GET', '/shuzijun/v1/app-content');
+    $retained_albums = array_values(array_filter($retained->get_data()['portfolios'],
+        static fn($album) => $album['id'] === $fixture_portfolio_id));
+    check_wordpress_schema(count($retained_albums) === 1 && count($retained_albums[0]['images']) === 1,
+        'administrator still receives published gallery after uploader deletion');
 } finally {
     remove_filter('rest_pre_dispatch', $media_gate, 10);
     remove_filter('wp_image_editors', $force_gd);
