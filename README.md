@@ -2,7 +2,9 @@
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 最新 TestFlight 上传版本：`1.4.0 (4)`，Apple 处理通过，外部测试等待审核 · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+
+**上传与外部审核记录：[preview38](Server/releases/v1.4.0-build4-review-env-preview38.md)。** 修复后的 `47e072c` 安装包已上传，Apple 返回 VALID，外部测试审核状态为 WAITING_FOR_REVIEW。中英文测试重点、审核资料及独立普通/管理员账号均已配置，现有外部测试组已关联。公开链接未开启、未邀请测试员、未过期旧包，也未提交正式 App Store 上架。以下 preview 是历史阶段记录，状态以本条为准。
 
 **外部测试准备与字形修复：[preview37](Server/releases/v1.4.0-build4-review-env-preview37.md)。** 中英文测试资料、审核联系人与经过登录/权限验证的两套审核账号已保存到 Apple。完整矩阵发现 iPhone 旗袍标题对比度问题；仅加字形细描边、不恢复黑色蒙版，修复后 7 项定向测试和首次通知授权通过。正在准备包含本修复的新 Build 4，尚未上传或提交外部审核。下面各 preview 为历史阶段记录，不代表当前仍在运行或尚未部署。
 
