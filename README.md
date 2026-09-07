@@ -4,6 +4,8 @@
 
 > 最新 TestFlight 上传版本：`1.4.0 (4)`，Apple 处理通过，外部测试等待审核 · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
+**相册名称纯文字候选：[preview39](Server/releases/v1.4.0-build4-review-env-preview39.md)。** 按用户要求，移除相册列表与详情标题区域的描边和阴影，保留字体、字色、位置与透明背景，照片序号和其他页面不变。iPhone/iPad 黑金与月白的相册进入、看图关闭/返回检查通过；未重新上传 TestFlight。取消字形保护后，白字在浅色照片上仍有已知对比度风险，不能把交互检查当成对比度审计通过。
+
 **上传与外部审核记录：[preview38](Server/releases/v1.4.0-build4-review-env-preview38.md)。** 修复后的 `47e072c` 安装包已上传，Apple 返回 VALID，外部测试审核状态为 WAITING_FOR_REVIEW。中英文测试重点、审核资料及独立普通/管理员账号均已配置，现有外部测试组已关联。公开链接未开启、未邀请测试员、未过期旧包，也未提交正式 App Store 上架。以下 preview 是历史阶段记录，状态以本条为准。
 
 **外部测试准备与字形修复：[preview37](Server/releases/v1.4.0-build4-review-env-preview37.md)。** 中英文测试资料、审核联系人与经过登录/权限验证的两套审核账号已保存到 Apple。完整矩阵发现 iPhone 旗袍标题对比度问题；仅加字形细描边、不恢复黑色蒙版，修复后 7 项定向测试和首次通知授权通过。正在准备包含本修复的新 Build 4，尚未上传或提交外部审核。下面各 preview 为历史阶段记录，不代表当前仍在运行或尚未部署。

@@ -336,7 +336,6 @@ private struct PortfolioGridCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .foregroundStyle(PortfolioCaptionPalette.current.title)
             }
-            .modifier(PortfolioCaptionLegibility())
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -511,7 +510,6 @@ private struct PortfolioHeroArtwork: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .foregroundStyle(PortfolioCaptionPalette.current.title)
-            .modifier(PortfolioCaptionLegibility())
             .multilineTextAlignment(.leading)
             .padding(.horizontal, 22)
             .padding(.bottom, 24)
