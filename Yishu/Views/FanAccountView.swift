@@ -25,6 +25,17 @@ struct AppAccessGateView: View {
                 externalAdminAccessPresented: presentsAdminAccess
             )
                 .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        NavigationLink {
+                            AppWorkspaceSelectionView()
+                        } label: {
+                            Label("环境", systemImage: "server.rack")
+                                .font(.caption.weight(.semibold))
+                                .frame(minWidth: 44, minHeight: 44)
+                        }
+                        .accessibilityLabel("服务环境")
+                        .accessibilityIdentifier("access-gate-workspace-entry")
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             presentsAdminAccess = true

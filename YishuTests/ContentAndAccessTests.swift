@@ -1056,6 +1056,21 @@ private final class TestAppWorkspace: AppWorkspaceLifecycle {
 }
 
 final class ContentAndAccessTests: XCTestCase {
+    func testWorkspaceSelectionPersistsOnlyKnownExplicitLocalValues() throws {
+        let suite = "workspace-selection-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(AppWorkspaceSelection.restore(from: defaults), .production)
+        for invalid in ["https://example.invalid", "REVIEW", "", "reviewer"] {
+            defaults.set(invalid, forKey: AppWorkspaceSelection.key)
+            XCTAssertEqual(AppWorkspaceSelection.restore(from: defaults), .production)
+        }
+        AppWorkspaceSelection.save(.review, to: defaults)
+        XCTAssertEqual(AppWorkspaceSelection.restore(from: defaults), .review)
+        AppWorkspaceSelection.save(.production, to: defaults)
+        XCTAssertEqual(AppWorkspaceSelection.restore(from: defaults), .production)
+    }
+
     @MainActor
     func testRetiredContentStoreCannotApplyLateManifestOrRestoreItsCache() async throws {
         let store = PortfolioStore(environment: .review)
@@ -1081,7 +1096,8 @@ final class ContentAndAccessTests: XCTestCase {
     @MainActor
     func testWorkspaceSwitchSerializesCleanupAndRecreatesServicesEvenAfterCallerCancellation() async {
         var events: [String] = []
-        let coordinator = AppWorkspaceCoordinator { environment in
+        var persisted: [AppServiceEnvironment] = []
+        let coordinator = AppWorkspaceCoordinator(didSelect: { persisted.append($0) }) { environment in
             events.append("create-\(environment.rawValue)")
             return TestAppWorkspace(environment: environment) { events.append($0) }
         }
@@ -1089,6 +1105,7 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(events, ["create-production", "activate-production"])
         let unchanged = await coordinator.switchEnvironment(to: .production)
         XCTAssertFalse(unchanged)
+        XCTAssertTrue(persisted.isEmpty)
         original.waitForRetirement = true
         let started = expectation(description: "Old workspace teardown suspended")
         original.retirementStarted = { started.fulfill() }
@@ -1096,6 +1113,7 @@ final class ContentAndAccessTests: XCTestCase {
         await fulfillment(of: [started], timeout: 2)
         XCTAssertTrue(coordinator.isSwitching)
         XCTAssertTrue(coordinator.current === original)
+        XCTAssertTrue(persisted.isEmpty, "Do not persist a workspace before teardown completes")
         XCTAssertEqual(events.last, "retire-start-production")
         let concurrent = await coordinator.switchEnvironment(to: .production)
         XCTAssertFalse(concurrent)
@@ -1105,10 +1123,12 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertTrue(changed)
         XCTAssertFalse(coordinator.isSwitching)
         XCTAssertEqual(coordinator.current.serviceEnvironment, .review)
+        XCTAssertEqual(persisted, [.review])
         XCTAssertEqual(events, ["create-production", "activate-production", "retire-start-production",
             "retire-end-production", "create-review", "activate-review"])
         let returned = await coordinator.switchEnvironment(to: .production)
         XCTAssertTrue(returned)
+        XCTAssertEqual(persisted, [.review, .production])
         XCTAssertFalse(coordinator.current === original, "回到正式环境必须创建新服务，不能复用已退役会话")
     }
 

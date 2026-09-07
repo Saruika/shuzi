@@ -136,3 +136,9 @@ sudo python3 Server/operations/prepare-review-catalog.py --apply
 中断时先按私有恢复记录核查，不能删除记录绕过检查、重设密码或重复注册。
 这两组账号尚未交给 Apple；当前 TestFlight 仍使用生产环境，尚不能直接使用它们登录。
 Release 显式入口、最终 UI 及 Apple/APNs/邮件验证仍未完成，不能标记审核环境全面就绪。
+
+## App 入口候选（preview24）
+
+Release 源码已加入登录页/设置页的显式环境选择、切换确认、本机偏好及持续演示标识。
+当前 TestFlight 及早先导出的 Build 4 包尚不包含这一入口。入口不会自动登录或跳过审批，
+最终账号完整界面、管理员编辑与外部业务仍待验收；不要更改 `publicReady` 或提前交付给 Apple。

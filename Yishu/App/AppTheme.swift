@@ -194,6 +194,7 @@ struct EditorialCaptionBackdrop: View {
 }
 
 private struct AppAppearanceModifier: ViewModifier {
+    @Environment(\.appServiceEnvironment) private var serviceEnvironment
     var isAppRoot = false
     func body(content: Content) -> some View {
         let theme = AppearanceStore.shared.theme
@@ -205,6 +206,18 @@ private struct AppAppearanceModifier: ViewModifier {
             .foregroundStyle(theme.palette.text.color)
             .tint(theme.palette.accent.color)
             .themeNavigationChrome()
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if serviceEnvironment == .review {
+                    Text("演示环境 · 独立账号与资料")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(theme.palette.text.color)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity)
+                        .background(.regularMaterial)
+                        .accessibilityIdentifier("workspace-review-banner")
+                }
+            }
     }
 }
 

@@ -3,12 +3,57 @@ import XCTest
 import Vision
 
 final class YishuUITests: XCTestCase {
+    func testPublicWorkspaceEntryPreservesLoginGateAndLabelsFullScreenPresentation() {
+        let app = XCUIApplication()
+        // No account/gate bypass and no screenshot-protection bypass. Only
+        // suppress the unrelated permission prompt and start in production.
+        app.launchArguments = ["-app-service-environment", "production",
+            "-skip-startup-notification-authorization-for-testing",
+            "-reset-fan-session-for-visual-testing", "-skip-launch-poster-for-visual-testing"]
+        app.launch()
+        defer { app.terminate() }
+        let entry = element("access-gate-workspace-entry", in: app)
+        XCTAssertTrue(entry.waitForExistence(timeout: 15))
+        XCTAssertFalse(element("workspace-review-banner", in: app).exists)
+        entry.tap()
+        element("workspace-select-review", in: app).tap()
+        XCTAssertTrue(app.buttons["取消"].firstMatch.waitForExistence(timeout: 5))
+        app.buttons["取消"].firstMatch.tap()
+        XCTAssertTrue(element("workspace-selection", in: app).exists)
+        XCTAssertFalse(element("workspace-review-banner", in: app).exists)
+        element("workspace-select-review", in: app).tap()
+        app.buttons["切换至审核演示环境"].firstMatch.tap()
+        XCTAssertTrue(entry.waitForExistence(timeout: 15), "Switch must return to the real login gate")
+        XCTAssertTrue(element("workspace-review-banner", in: app).waitForExistence(timeout: 5))
+        XCTAssertFalse(tabButton("首页", in: app).exists, "Selecting review must not approve or log in a user")
+        element("access-gate-admin-entry", in: app).tap()
+        XCTAssertTrue(element("admin-login-heading", in: app).waitForExistence(timeout: 8))
+        XCTAssertTrue(element("workspace-review-banner", in: app).waitForExistence(timeout: 5),
+                      "A separate administrator presentation must retain the environment label")
+        // Relaunch without an argument override: the explicit local choice survives.
+        app.terminate()
+        app.launchArguments.removeFirst(2)
+        app.launch()
+        XCTAssertTrue(entry.waitForExistence(timeout: 15))
+        XCTAssertTrue(element("workspace-review-banner", in: app).waitForExistence(timeout: 5))
+        entry.tap()
+        element("workspace-select-production", in: app).tap()
+        app.buttons["切换至正式环境"].firstMatch.tap()
+        XCTAssertTrue(entry.waitForExistence(timeout: 15))
+        XCTAssertFalse(element("workspace-review-banner", in: app).exists)
+        XCTAssertFalse(tabButton("首页", in: app).exists)
+    }
+
     func testWorkspaceSwitchRecreatesRootAndClosesPreviousDetails() {
         let app = launchApp(arguments: ["-workspace-switch-for-testing", "-open-about-for-visual-testing"])
         let settings = element("about-settings", in: app)
         scrollToElement(settings, in: app)
         settings.tap()
         XCTAssertTrue(element("user-settings", in: app).waitForExistence(timeout: 8))
+        let selector = element("settings-workspace", in: app)
+        scrollToElement(selector, in: app)
+        selector.tap()
+        XCTAssertTrue(element("workspace-selection", in: app).waitForExistence(timeout: 5))
         let environment = element("workspace-test-environment", in: app)
         XCTAssertEqual(environment.label, "production")
         element("workspace-test-review", in: app).tap()
@@ -79,6 +124,7 @@ final class YishuUITests: XCTestCase {
     func testStartupAsksSystemNotificationPermissionBeforeLogin() {
         let app = XCUIApplication()
         app.launchArguments = [
+            "-app-service-environment", "production",
             "-skip-launch-poster-for-visual-testing",
             "-disable-screen-protection-for-visual-testing",
             "-reset-fan-session-for-visual-testing",
@@ -1340,6 +1386,7 @@ final class YishuUITests: XCTestCase {
     ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
+            "-app-service-environment", "production",
             "-skip-launch-poster-for-visual-testing",
             "-reset-fan-session-for-visual-testing",
             "-bypass-access-gate-for-visual-testing",
@@ -2742,6 +2789,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
     private func launchApp(arguments: [String], screenProtectionEnabled: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = [
+            "-app-service-environment", "production",
             "-skip-launch-poster-for-visual-testing",
             "-disable-screen-protection-for-visual-testing",
             "-reset-fan-session-for-visual-testing",

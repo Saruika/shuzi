@@ -3,7 +3,10 @@ import SwiftUI
 @main
 struct YishuApp: App {
     @UIApplicationDelegateAdaptor(YishuApplicationDelegate.self) private var applicationDelegate
-    @StateObject private var workspaces = AppWorkspaceCoordinator {
+    @StateObject private var workspaces = AppWorkspaceCoordinator(
+        environment: AppWorkspaceSelection.restore(),
+        didSelect: { AppWorkspaceSelection.save($0) }
+    ) {
         AppServiceWorkspace(environment: $0)
     }
     @State private var localWeather = LocalWeatherStore()
@@ -33,6 +36,7 @@ struct YishuApp: App {
                     }
 #endif
             }
+            .environment(\.appServiceEnvironment, workspaces.current.serviceEnvironment)
             .preferredColorScheme(AppearanceStore.shared.systemColorScheme)
         }
     }

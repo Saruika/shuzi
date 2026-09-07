@@ -141,7 +141,7 @@ struct HomeView: View {
                             Color.clear.frame(width: 1, height: 1)
                                 .accessibilityElement(children: .ignore)
                                 .accessibilityIdentifier("home-canvas-geometry")
-                                .accessibilityValue("safe=\(safeProxy.frame(in: .global)); insets=\(safeProxy.safeAreaInsets); full=\(proxy.frame(in: .global))")
+                                .accessibilityValue(Text(verbatim: "safe=\(safeProxy.frame(in: .global)); insets=\(safeProxy.safeAreaInsets); full=\(proxy.frame(in: .global))"))
                                 .allowsHitTesting(false)
                         }
                     }

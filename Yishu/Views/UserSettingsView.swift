@@ -29,6 +29,12 @@ struct UserSettingsView: View {
             }
             .listRowBackground(AppTheme.elevatedInk)
             Section("版本") {
+                NavigationLink {
+                    AppWorkspaceSelectionView()
+                } label: {
+                    Label("服务环境", systemImage: "server.rack")
+                }
+                .accessibilityIdentifier("settings-workspace")
                 LabeledContent("Hi，梳子", value: versionLabel)
                 Text("主题偏好只保存在这台设备，不上传、不用于追踪，也不改变账号权限。")
                     .font(.footnote)
