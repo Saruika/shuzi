@@ -333,6 +333,9 @@ trait Shuzijun_App_Content_Delivery {
         $portfolio_audience = $can_view_full_gallery ? $audience : 'public';
         return array(
             'schemaVersion' => 1,
+            // Only server-side authenticated management paths pass 'admin'.
+            // Gallery/video entitlements do not confer editorial authority.
+            'contentAudience' => $audience === 'admin' ? 'administrator' : 'viewer',
             'updatedAt' => gmdate('c', $updated),
             'heroImages' => $config['heroImages'],
             'aboutPortraitURL' => $config['aboutPortraitURL'],

@@ -48,10 +48,14 @@ enum AdminContentEditingPolicy {
     }
 
     static func isFullAdministratorManifest(_ manifest: AppContentManifest) -> Bool {
-        manifest.showreel != nil
-            && manifest.portfolios.allSatisfy {
-                $0.images.count == $0.displayImageCount
-            }
+        guard manifest.portfolios.allSatisfy({ $0.images.count == $0.displayImageCount }) else { return false }
+        // An authenticated administrator may legitimately have no configured
+        // video. New servers attest the response audience, not editorial content.
+        // This remains a completeness check, never a substitute for session/role checks.
+        if let audience = manifest.contentAudience { return audience == .administrator }
+        // Preserve the old stricter behavior until both production nodes are
+        // upgraded. An explicit viewer response must never use this fallback.
+        return manifest.showreel != nil
     }
 }
 

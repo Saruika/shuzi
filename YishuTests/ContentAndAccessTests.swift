@@ -2943,6 +2943,44 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
+    func testExplicitAdministratorAudienceAllowsPhotoOnlyContentButNeverViewerOrPartialAlbums() throws {
+        let full = makeManifest(aboutPortraitURL: nil, imageCount: 6)
+        func manifest(_ audience: AppContentAudience?, video: ShowreelContent? = nil,
+                      portfolios: [Portfolio]? = nil) -> AppContentManifest {
+            AppContentManifest(schemaVersion: full.schemaVersion, updatedAt: full.updatedAt,
+                heroImages: full.heroImages, aboutPortraitURL: full.aboutPortraitURL,
+                launchPosters: full.launchPosters, showreel: video, dramas: [],
+                portfolios: portfolios ?? full.portfolios, contentAudience: audience)
+        }
+        let photoOnly = manifest(.administrator)
+        XCTAssertTrue(ContentManifestPolicy.isValid(photoOnly))
+        XCTAssertTrue(AdminContentEditingPolicy.isFullAdministratorManifest(photoOnly))
+        XCTAssertFalse(AdminContentEditingPolicy.canEdit(isAuthenticated: false, hasLoadedFullManifest: true))
+        for video in [nil, full.showreel] {
+            XCTAssertFalse(AdminContentEditingPolicy.isFullAdministratorManifest(manifest(.viewer, video: video)),
+                "An explicit viewer response cannot fall back to legacy video-based acceptance")
+        }
+        XCTAssertFalse(AdminContentEditingPolicy.isFullAdministratorManifest(manifest(nil)))
+        XCTAssertTrue(AdminContentEditingPolicy.isFullAdministratorManifest(manifest(nil, video: full.showreel)),
+            "Legacy production servers keep their previous contract until deployment")
+        let p = full.portfolios[0]
+        let partial = Portfolio(id: p.id, title: p.title, subtitle: p.subtitle, eyebrow: p.eyebrow,
+            slug: p.slug, websiteURL: p.websiteURL, coverURL: p.coverURL,
+            images: Array(p.images.prefix(3)), totalImageCount: p.images.count)
+        XCTAssertFalse(AdminContentEditingPolicy.isFullAdministratorManifest(manifest(.administrator, portfolios: [partial])))
+        let data = try JSONEncoder().encode(photoOnly)
+        let decoded = try JSONDecoder().decode(AppContentManifest.self, from: data)
+        XCTAssertEqual(decoded.contentAudience, .administrator)
+        XCTAssertNil(decoded.showreel)
+        XCTAssertTrue(AdminContentEditingPolicy.isFullAdministratorManifest(decoded))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        for invalid: Any in ["admin", "unknown", "", true, 1, ["administrator"]] {
+            object["contentAudience"] = invalid
+            XCTAssertThrowsError(try JSONDecoder().decode(AppContentManifest.self,
+                from: JSONSerialization.data(withJSONObject: object)))
+        }
+    }
+
     func testAdministratorMediaPreviewsAlwaysPreserveTheCompleteAsset() {
         switch AdminMediaPreviewPolicy.contentMode {
         case .fit:

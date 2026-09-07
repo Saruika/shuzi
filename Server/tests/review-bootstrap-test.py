@@ -15,8 +15,9 @@ spec.loader.exec_module(bootstrap)
 
 class ReviewBootstrapTests(unittest.TestCase):
     def test_release_manifest_matches_repository_release(self):
-        release = (SERVER / 'releases/v1.4.0-build4-review-env-preview17.md').read_text()
-        self.assertIn(bootstrap.manifest(SERVER), release)
+        release = (SERVER / 'releases/v1.4.0-build4-review-env-preview25.md').read_text()
+        values = [line for line in release.splitlines() if line.startswith('RELEASE_MANIFEST_SHA256=')]
+        self.assertEqual(values, ['RELEASE_MANIFEST_SHA256=' + bootstrap.manifest(SERVER)])
 
     def test_source_symlink_rejected(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -99,6 +99,8 @@ try {
     check_wordpress_schema((int) wp_get_post_parent_id($media_id) === $fixture_portfolio_id,
         'gallery assignment updates actual attachment parent');
     $read = $dispatch_media_fixture($publisher, 'GET', '/shuzijun/v1/app-content');
+    check_wordpress_schema($read->get_data()['contentAudience'] === 'administrator',
+        'actual bound administrator receives explicit editorial audience');
     $albums = array_values(array_filter($read->get_data()['portfolios'],
         static fn($album) => $album['id'] === $fixture_portfolio_id));
     check_wordpress_schema($read->get_status() === 200 && count($albums) === 1
@@ -140,8 +142,16 @@ try {
     check_wordpress_schema(get_option(Shuzijun_App_Content_API::OPTION_CONFIG) === $saved_configuration
         && get_post_meta($fixture_portfolio_id, '_portfolio_gallery', true) === $saved_gallery,
         'rejected writes leave configuration and album unchanged');
-    check_wordpress_schema($dispatch_media_fixture($publisher, 'GET', '/shuzijun/v1/app-content')->get_status() === 200,
+    $revoked_read = $dispatch_media_fixture($publisher, 'GET', '/shuzijun/v1/app-content');
+    check_wordpress_schema($revoked_read->get_status() === 200,
         'revoked administrator remains an approved ordinary fan');
+    check_wordpress_schema($revoked_read->get_data()['contentAudience'] === 'viewer',
+        'the same bearer after revocation cannot receive an editorial content marker');
+    $forged_scope = $dispatch_media_fixture($publisher, 'GET', '/shuzijun/v1/app-content',
+        array('audience' => 'admin', 'contentAudience' => 'administrator'));
+    check_wordpress_schema($forged_scope->get_status() === 200
+        && $forged_scope->get_data()['contentAudience'] === 'viewer',
+        'client-supplied audience cannot override actual server-side role checks');
 } finally {
     remove_filter('rest_pre_dispatch', $media_gate, 10);
     remove_filter('wp_image_editors', $force_gd);

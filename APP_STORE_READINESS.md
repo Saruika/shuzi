@@ -4,6 +4,11 @@
 
 本段优先于下方历史快照，正式上架目标仍未完成，未上传新的 TestFlight 包。
 
+- **照片-only 管理编辑误判已有候选修复，尚未部署**：真实审核配置为 2 本完整相册（5/3 张）、
+  无视频。App 不再对明确 administrator 范围要求视频存在；明确 viewer 不可编辑，仍检查会话与相册完整性。
+  Swift 单元 249 通过/1 跳过，独立 WordPress/MySQL 395 项断言通过，包含同 token 撤销后的范围降级。
+  详见 [preview25](Server/releases/v1.4.0-build4-review-env-preview25.md)。演示实例仍是 1.5.13.8，
+  生产仍是 1.5.13.7；候选 1.5.13.10 尚未替换运行代码，因此未宣称线上编辑阻塞已解决。
 - **Release 候选已加入显式环境入口，但还不能交付审核**：登录页、设置页可手动选择独立环境，
   确认后退出旧会话，演示根界面及全屏页面显示持续标识。iPhone 门禁/取消/切换/重启/标识回归通过。
   详见 [preview24](Server/releases/v1.4.0-build4-review-env-preview24.md)。Apple/APNs/邮件与最终

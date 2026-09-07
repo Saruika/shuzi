@@ -22,7 +22,11 @@ class WP_Error { public function __construct(...$arguments) {} }
 function is_wp_error($value) { return $value instanceof WP_Error; }
 function wp_parse_url($url, $component = -1) { return parse_url($url, $component); }
 function home_url($path = '/') { global $home; return $home . $path; }
-function get_option($key, $default = false) { global $stored; return $stored; }
+function get_option($key, $default = false) {
+    global $stored;
+    return $key === 'fixture-updated' ? 1700000000 : $stored;
+}
+function get_posts($arguments) { return array(); }
 function esc_url_raw($value, $protocols = null) { return trim((string) $value); }
 function sanitize_text_field($value) { return trim(strip_tags((string) $value)); }
 function sanitize_key($value) { return preg_replace('/[^a-z0-9_-]/', '', strtolower((string) $value)); }
@@ -38,6 +42,7 @@ require_once dirname(__DIR__) . '/vendor/shuzijun/app-content/trait-shuzijun-app
 class DeliveryEnvironmentFixture {
     use Shuzijun_App_Content_Delivery;
     const OPTION_CONFIG = 'fixture-only';
+    const OPTION_UPDATED = 'fixture-updated';
     private static function text_length($value) { return mb_strlen((string) $value); }
     private static function is_uuid_v4($value) {
         return is_string($value) && preg_match('/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/D', $value) === 1;
@@ -55,6 +60,13 @@ $config = DeliveryEnvironmentFixture::invoke('config');
 check(count($config['heroImages']) === ($production ? 3 : 0), 'Default heroes stay in their environment');
 check(count($config['launchPosters']) === ($production ? 3 : 0), 'No production poster fallback in review');
 check(is_array($config['showreel']) === $production, 'Review has no unconfigured showreel');
+foreach (array('admin', 'app', 'public', 'premium', 'administrator') as $audience) {
+    $manifest = DeliveryEnvironmentFixture::invoke('manifest', $audience, array('gallery_full', 'video_view'));
+    check($manifest['contentAudience'] === ($audience === 'admin' ? 'administrator' : 'viewer'),
+        'Only the internal admin audience is editorial; free full access does not grant editing');
+    check(is_array($manifest['showreel']) === ($production && in_array($audience, array('admin', 'premium', 'app'), true)),
+        'Audience metadata does not create videos or bypass existing content permissions');
+}
 foreach (array('www.shuzijun.com.cn', 'shuzijun.com.cn', 'img.shuzijun.com.cn', 'other.example.invalid') as $host) {
     $url = 'https://' . $host . '/image.webp';
     check((DeliveryEnvironmentFixture::invoke('trusted_media_url', $url) === $url) === $production,

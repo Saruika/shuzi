@@ -83,6 +83,11 @@ struct LaunchPosterContent: Identifiable, Hashable, Codable {
     }
 }
 
+enum AppContentAudience: String, Codable {
+    case administrator
+    case viewer
+}
+
 struct AppContentManifest: Codable {
     let schemaVersion: Int
     let updatedAt: Date
@@ -92,6 +97,21 @@ struct AppContentManifest: Codable {
     let showreel: ShowreelContent?
     let dramas: [DramaWork]
     let portfolios: [Portfolio]
+    let contentAudience: AppContentAudience?
+
+    init(schemaVersion: Int, updatedAt: Date, heroImages: [URL], aboutPortraitURL: URL?,
+         launchPosters: [LaunchPosterContent]?, showreel: ShowreelContent?,
+         dramas: [DramaWork], portfolios: [Portfolio], contentAudience: AppContentAudience? = nil) {
+        self.schemaVersion = schemaVersion
+        self.updatedAt = updatedAt
+        self.heroImages = heroImages
+        self.aboutPortraitURL = aboutPortraitURL
+        self.launchPosters = launchPosters
+        self.showreel = showreel
+        self.dramas = dramas
+        self.portfolios = portfolios
+        self.contentAudience = contentAudience
+    }
 }
 
 /// Treats the CMS response as untrusted input even after TLS and host checks.
