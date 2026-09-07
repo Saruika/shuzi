@@ -4,6 +4,12 @@
 
 本段优先于下方历史快照，正式上架目标仍未完成，未上传新的 TestFlight 包。
 
+- **最终展示名称已确认，独立审核账号已准备**：用户确认 Test1/Test2 只是展示名称，实际用 HS 登录。
+  已通过正常注册、审批与绑定流程建立两组演示账号；Test1 普通、Test2 App 管理员，
+  实际 HS/密码登录、相册读取及管理权限边界均通过。临时会话/维护访问码已清理，
+  最终凭据只留服务器 root:root 0600 私有记录。详见
+  [preview23](Server/releases/v1.4.0-build4-review-env-preview23.md)。尚未交给 Apple，
+  当前 TestFlight 没有演示入口，不能直接使用这两组独立账号；原生产普通审核账号未改动。
 - **Build 4 实际发行包已准备并通过 Apple 上传前校验**：以干净 `32d7a9f` 归档并导出
   `1.4.0 (4)`，实际签名/profile、生产 APNs、Apple 登录、WeatherKit、包内照片/密钥/测试内容
   检查通过，`altool --validate-app` 退出 0。IPA 及归档已复制到用户 NAS 并核对一致。
@@ -50,7 +56,7 @@
 - **管理员审核账号**：用户已明确批准独立演示后台与显式环境入口。实现位于独立的
   `codex/review-environment` 分支。独立后台现已部署，`review.shuzijun.com.cn` 的 HTTPS、
   证书续期演练、8 张演示照片/2 组相册和正常注册/审批/管理员绑定/撤销/删号接口已验证。
-  Release App 的环境入口仍未启用；Test1/Test2 最终演示账号尚未交付，不向审核账号授予生产数据管理权。
+  Release App 的环境入口仍未启用；Test1/Test2 已准备但尚未交付，不向审核账号授予生产数据管理权。
   后台外部邮件、Apple 和 APNs 仍主动阻断，不能将媒体/API 验收等同于完整审核环境已就绪。
   具体结果见 [审核实例记录](Server/operations/review/README.md)。
 - **preview14 专项已完成，完整矩阵未完成**：`6d03fb4` 的 iPad 245 单元 + 8 次相册 UI 配置执行、

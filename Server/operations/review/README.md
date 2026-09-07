@@ -124,3 +124,15 @@ sudo python3 Server/operations/prepare-review-catalog.py --apply
 这只是媒体与账号接口验收。Test1/Test2 最终资料、App 显式入口和演示标识、Apple 登录/撤销、
 独立推送与发信，以及完整 iPhone/iPad UI 验收仍未完成；健康状态继续标记配置中。
 没有上传新的 TestFlight，也没有提交 App Store 审核。
+
+## 账号阶段（preview23，当前状态）
+
+用户确认 Test1 / Test2 作为展示名称，继续使用 HS 身份码登录。现已按正常注册、审批与
+管理员绑定流程准备 `Test1（审核测试）`、`Test2（审核测试）`，分别为普通和 App 管理员。
+实际新会话的 HS/密码登录、媒体域名隔离及管理权限区分通过；引导会话和临时维护访问码已清理。
+最终凭据仅保存在 root:root 0600 的 `review-accounts-private.json`，不能输出或上传 GitHub。
+
+`prepare-review-accounts.py` 默认只读；`--apply` 只允许首次创建，已有记录或同名账号拒绝重跑。
+中断时先按私有恢复记录核查，不能删除记录绕过检查、重设密码或重复注册。
+这两组账号尚未交给 Apple；当前 TestFlight 仍使用生产环境，尚不能直接使用它们登录。
+Release 显式入口、最终 UI 及 Apple/APNs/邮件验证仍未完成，不能标记审核环境全面就绪。
