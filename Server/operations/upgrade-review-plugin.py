@@ -21,9 +21,11 @@ b = a.bootstrap
 a.HTTPS_EDGE = True
 LIVE = b.SITE / 'wp-content/mu-plugins'
 BASELINE = '1644a7c2abc922627adecee38b2a5622a39438a0960bbf31febd334229f96e4d'
-TARGET = '1a3fb2d2830b9bbb8127ef9113bd95b42dc9f66fb12d34a3f86d10977fc1935a'
+TARGET = '5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe'
 CHANGED = (
     'vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php',
+    'vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php',
+    'vendor/shuzijun/app-content/class-shuzijun-app-content-api.php',
     'shuzijun-app-content.php',  # Commit entry/version last while PHP is stopped.
 )
 PHP_UNIT = 'shuzijun-review-php.service'

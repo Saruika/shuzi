@@ -5,6 +5,7 @@ defined('ABSPATH') || exit;
 trait Shuzijun_App_Fan_Identity {
     private static $fan_user_deletion_prepared = array();
     private static $fan_user_deletion_locks = array();
+    private static $editorial_deletion_locks = array();
     private static $fan_user_deletion_release_hooks_registered = false;
 
     public static function normalize_identity_code($value) {
@@ -2680,29 +2681,33 @@ trait Shuzijun_App_Fan_Identity {
 
     private static function remove_fan_user($user_id, $douyin_reservation = '') {
         $user_id = (int) $user_id;
-        if ($user_id <= 0
-            || !self::purge_collaboration_data_for_fan_user($user_id)
-            || !self::purge_push_data_for_fan_user($user_id)
-            || !self::retain_published_work_for_deleting_user($user_id)) {
-            return false;
-        }
-        // The App deletion paths already hold the per-user lock. Mark the
-        // successful purge so WordPress's delete_user hook does not acquire the
-        // same named lock recursively; the outer caller keeps it until this
-        // function returns.
-        self::$fan_user_deletion_prepared[$user_id] = true;
+        if ($user_id <= 0) { return false; }
+        $publication_lock = self::acquire_editorial_publication_lock();
+        if (is_wp_error($publication_lock)) { return false; }
         try {
-            self::revoke_all_fan_sessions($user_id);
-            if (!function_exists('wp_delete_user')) {
-                require_once ABSPATH . 'wp-admin/includes/user.php';
-            }
-            if (!function_exists('wp_delete_user') || !wp_delete_user($user_id)) {
+            if (!self::purge_collaboration_data_for_fan_user($user_id)
+                || !self::purge_push_data_for_fan_user($user_id)
+                || !self::retain_published_work_for_deleting_user($user_id)) {
                 return false;
             }
-            if ($douyin_reservation) { delete_option((string) $douyin_reservation); }
-            return true;
+            // App deletion already holds the user lock. Keep publication and
+            // actor exclusion until core finishes deleting files and metadata.
+            self::$fan_user_deletion_prepared[$user_id] = true;
+            try {
+                self::revoke_all_fan_sessions($user_id);
+                if (!function_exists('wp_delete_user')) {
+                    require_once ABSPATH . 'wp-admin/includes/user.php';
+                }
+                if (!function_exists('wp_delete_user') || !wp_delete_user($user_id)) {
+                    return false;
+                }
+                if ($douyin_reservation) { delete_option((string) $douyin_reservation); }
+                return true;
+            } finally {
+                unset(self::$fan_user_deletion_prepared[$user_id]);
+            }
         } finally {
-            unset(self::$fan_user_deletion_prepared[$user_id]);
+            self::release_named_fan_lock($publication_lock);
         }
     }
 
@@ -3529,6 +3534,12 @@ trait Shuzijun_App_Fan_Identity {
             }
             self::$fan_user_deletion_locks[$user_id] = $lock_owner;
             self::register_fan_user_deletion_release_hooks();
+            $publication_lock = self::acquire_editorial_publication_lock();
+            if (is_wp_error($publication_lock)) {
+                self::release_fan_user_deletion_lock($user_id);
+                self::abort_fan_user_deletion('account_deletion_editorial_busy');
+            }
+            self::$editorial_deletion_locks[$user_id] = $publication_lock;
             if (!self::purge_collaboration_data_for_fan_user($user_id)
                 || !self::purge_push_data_for_fan_user($user_id)) {
                 self::release_fan_user_deletion_lock($user_id);
@@ -3603,6 +3614,11 @@ trait Shuzijun_App_Fan_Identity {
 
     private static function release_fan_user_deletion_lock($user_id) {
         $user_id = (int) $user_id;
+        if (isset(self::$editorial_deletion_locks[$user_id])) {
+            $publication_lock = self::$editorial_deletion_locks[$user_id];
+            unset(self::$editorial_deletion_locks[$user_id]);
+            self::release_named_fan_lock($publication_lock);
+        }
         if (!isset(self::$fan_user_deletion_locks[$user_id])) { return; }
         $lock_owner = self::$fan_user_deletion_locks[$user_id];
         unset(self::$fan_user_deletion_locks[$user_id]);

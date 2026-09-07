@@ -190,6 +190,10 @@ final class Shuzijun_App_Content_API {
         add_filter('rest_post_dispatch', array(__CLASS__, 'secure_rest_response'), 10, 3);
         add_filter('rest_pre_dispatch', array(__CLASS__, 'enforce_account_authority'), 0, 3);
         add_filter('rest_pre_dispatch', array(__CLASS__, 'block_public_catalog_routes'), 10, 3);
+        add_filter('rest_request_before_callbacks', array(__CLASS__, 'guard_editorial_rest_write'), 10, 3);
+        add_filter('rest_request_after_callbacks', array(__CLASS__, 'release_editorial_rest_write'), PHP_INT_MAX, 3);
+        add_filter('rest_post_dispatch', array(__CLASS__, 'release_editorial_rest_write'), PHP_INT_MAX, 3);
+        add_action('shutdown', array(__CLASS__, 'release_pending_editorial_rest_writes'), PHP_INT_MAX, 0);
         add_filter('wp_sitemaps_post_types', array(__CLASS__, 'remove_portfolios_from_sitemaps'));
         add_filter('theme_mod_hero_cta', array(__CLASS__, 'public_hero_cta'));
         add_filter('theme_mod_hero_cta_link', array(__CLASS__, 'public_hero_cta_link'));

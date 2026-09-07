@@ -50,6 +50,15 @@ add_filter('rest_pre_dispatch', $media_gate, 10, 3);
 // Register the same deletion hook as production while testing core lifecycle.
 $delete_hook = array(Shuzijun_App_Content_API::class, 'prepare_fan_user_deletion');
 add_action('delete_user', $delete_hook, 10, 1);
+$write_guard = array(Shuzijun_App_Content_API::class, 'guard_editorial_rest_write');
+$write_release = array(Shuzijun_App_Content_API::class, 'release_editorial_rest_write');
+// Also permits running this fixture against the previous release: if its guard
+// is absent, the actual contending-upload assertion must fail, not be skipped.
+if (method_exists(Shuzijun_App_Content_API::class, 'guard_editorial_rest_write')) {
+    add_filter('rest_request_before_callbacks', $write_guard, 10, 3);
+    add_filter('rest_request_after_callbacks', $write_release, PHP_INT_MAX, 3);
+    add_filter('rest_post_dispatch', $write_release, PHP_INT_MAX, 3);
+}
 try {
     // The theme normally registers this post type; the isolated fixture loads
     // no theme. Keep the native attachment controller and every API callback.
@@ -66,8 +75,13 @@ try {
     try { imagepng($image); $png_bytes = (string) ob_get_contents(); }
     finally { ob_end_clean(); imagedestroy($image); }
     check_wordpress_schema(strlen($png_bytes) > 100, 'synthetic portrait bytes were generated, not downloaded');
+    require __DIR__ . '/editorial-concurrency-wordpress-integration.php';
     $before_upload = $attachment_count();
     $upload = $dispatch_media_fixture($publisher, 'POST', '/wp/v2/media', array(), $png_bytes);
+    remove_action('add_attachment', $observe_actual_upload);
+    check_wordpress_schema($observed_upload_lock === 1, 'real upload holds publication and actor locks until attachment insert');
+    check_wordpress_schema((int) $concurrent_connection->query("SELECT IS_FREE_LOCK(" . $concurrent_connection->quote($publication_lock_name) . ")")->fetchColumn() === 1,
+        'successful upload releases publication lock before next request');
     check_wordpress_schema($upload->get_status() === 201, 'actual core raw-body upload returns created');
     $uploaded = $upload->get_data();
     $media_id = (int) ($uploaded['id'] ?? 0);
@@ -215,11 +229,24 @@ try {
             'real REST deletion fails closed on retention database failure: ' . $failure_kind);
         check_wordpress_schema(get_userdata($publisher['id']) instanceof WP_User && is_file($uploaded_file)
             && get_post($media_id) instanceof WP_Post, 'failed retention leaves account and published original intact');
+        check_wordpress_schema($external_lock($publication_lock_name, 'IS_FREE_LOCK') === 1
+            && $external_lock($publisher_lock_name, 'IS_FREE_LOCK') === 1,
+            'failed deletion releases publication and actor locks across connections');
     }
 
+    $observed_deletion_lock = 0;
+    $observe_actual_deletion = static function ($id) use (&$observed_deletion_lock, $external_lock, $publication_lock_name) {
+        check_wordpress_schema($external_lock($publication_lock_name, 'GET_LOCK') === 0,
+            'publication lock stays held while core deletes an unused attachment');
+        $observed_deletion_lock++;
+    };
+    add_action('delete_attachment', $observe_actual_deletion);
     $deletion = $dispatch_media_fixture($publisher, 'POST', '/shuzijun/v1/fan/delete', array(
         'installID' => $publisher['install'], 'currentPassword' => $publisher['password'],
         'confirmation' => 'DELETE_ACCOUNT'));
+    remove_action('delete_attachment', $observe_actual_deletion);
+    check_wordpress_schema($observed_deletion_lock > 0
+        && $external_lock($publication_lock_name, 'IS_FREE_LOCK') === 1, 'completed deletion releases publication lock after file cleanup');
     check_wordpress_schema($deletion->get_status() === 200, 'revoked publisher can delete own account normally');
     check_wordpress_schema(!get_userdata($publisher['id']), 'publisher personal account is actually deleted');
     check_wordpress_schema(get_post($media_id) instanceof WP_Post && is_file($uploaded_file),
@@ -277,6 +304,14 @@ try {
         && (int) get_post($core_media_id)->post_author === 0, 'core hook preserves and detaches published work too');
     wp_delete_post($core_album_id, true);
 } finally {
+    if (isset($observe_actual_upload)) { remove_action('add_attachment', $observe_actual_upload); }
+    if (isset($observe_actual_deletion)) { remove_action('delete_attachment', $observe_actual_deletion); }
+    remove_filter('rest_request_before_callbacks', $write_guard, 10);
+    remove_filter('rest_request_after_callbacks', $write_release, PHP_INT_MAX);
+    remove_filter('rest_post_dispatch', $write_release, PHP_INT_MAX);
+    if (method_exists(Shuzijun_App_Content_API::class, 'release_pending_editorial_rest_writes')) {
+        Shuzijun_App_Content_API::release_pending_editorial_rest_writes();
+    }
     remove_action('delete_user', $delete_hook, 10);
     remove_filter('rest_pre_dispatch', $media_gate, 10);
     remove_filter('wp_image_editors', $force_gd);

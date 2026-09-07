@@ -3,6 +3,70 @@
 defined('ABSPATH') || exit;
 
 trait Shuzijun_App_Content_Delivery {
+    private static $editorial_request_locks = array();
+
+    private static function acquire_editorial_publication_lock() {
+        return self::acquire_named_fan_lock('editorial', 'publication-and-account-deletion-v1');
+    }
+
+    /** Serialize native/WordPress REST media writes with account removal. */
+    public static function guard_editorial_rest_write($response, $handler, $request) {
+        if ($response !== null || !$request instanceof WP_REST_Request
+            || in_array($request->get_method(), array('GET', 'HEAD', 'OPTIONS'), true)
+            || !preg_match('#^(?:/shuzijun/v1/app-content(?:/|$)|/wp/v2/(?:media|portfolio)(?:/|$))#', $request->get_route())) {
+            return $response;
+        }
+        $key = spl_object_id($request);
+        if (isset(self::$editorial_request_locks[$key])) { return $response; }
+        if (!self::account_authority_enabled() || !self::authenticate_content_manager($request)) {
+            return new WP_Error('editorial_session_invalid', '管理登录状态已变更，请重新登录。', array('status' => 403));
+        }
+        $actor_id = get_current_user_id();
+        $publication_lock = self::acquire_editorial_publication_lock();
+        if (is_wp_error($publication_lock)) { return $publication_lock; }
+        $actor_lock = self::acquire_fan_lock($actor_id);
+        if (is_wp_error($actor_lock)) {
+            self::release_named_fan_lock($publication_lock);
+            return $actor_lock;
+        }
+        self::$editorial_request_locks[$key] = array($actor_id, $actor_lock, $publication_lock);
+        // An earlier permission check may have raced with revoke/delete. Never
+        // reuse its WP_User or bearer context after entering the write lock.
+        clean_user_cache($actor_id);
+        self::$fan_session_context = null;
+        wp_set_current_user(0);
+        if (trim((string) $request->get_header('authorization')) === '') { wp_set_current_user($actor_id); }
+        $fan_bearer = preg_match('/^Bearer(?:\s|$)/i', trim((string) $request->get_header('authorization'))) === 1;
+        if (!self::authenticate_content_manager($request) || get_current_user_id() !== $actor_id
+            || ($fan_bearer && !self::fan_session_context_is_current_from_database(self::$fan_session_context, 'normal'))) {
+            self::release_editorial_rest_write($response, $handler, $request);
+            self::$fan_session_context = null;
+            wp_set_current_user(0);
+            return new WP_Error('editorial_session_invalid', '管理登录状态已变更，请重新登录。', array('status' => 403));
+        }
+        return $response;
+    }
+
+    public static function release_editorial_rest_write($response, $handler, $request) {
+        if (!$request instanceof WP_REST_Request) { return $response; }
+        $key = spl_object_id($request);
+        if (isset(self::$editorial_request_locks[$key])) {
+            list($actor_id, $actor_lock, $publication_lock) = self::$editorial_request_locks[$key];
+            unset(self::$editorial_request_locks[$key]);
+            self::release_fan_lock($actor_id, $actor_lock);
+            self::release_named_fan_lock($publication_lock);
+        }
+        return $response;
+    }
+
+    public static function release_pending_editorial_rest_writes() {
+        foreach (self::$editorial_request_locks as $key => $locks) {
+            unset(self::$editorial_request_locks[$key]);
+            self::release_fan_lock($locks[0], $locks[1]);
+            self::release_named_fan_lock($locks[2]);
+        }
+    }
+
     public static function secure_rest_response($result, $server, $request) {
         if (!$request instanceof WP_REST_Request || strpos($request->get_route(), '/shuzijun/v1/') !== 0) {
             return $result;

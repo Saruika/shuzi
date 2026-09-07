@@ -145,8 +145,8 @@ Release 源码已加入登录页/设置页的显式环境选择、切换确认�
 
 ## 审核插件升级（preview26）
 
-当前工具的候选锁已更新为 preview31：从已部署 preview25 的 1.5.13.10 升级到 1.5.13.11，
-仅 fan-identity trait 与入口版本两个文件，尚未执行部署。下方为保留的 preview26 历史记录，
+当前工具的候选锁已更新为 preview32：从已部署 preview25 的 1.5.13.10 升级到 1.5.13.12，
+仅 fan-identity/content-delivery traits、核心类与入口版本四个文件，尚未执行部署。下方为保留的 preview26 历史记录，
 不要将旧三文件清单或旧基线用于当前命令。
 
 `upgrade-review-plugin.py` 默认仅做只读预检；`--apply` 限定从预期审核清单升级到

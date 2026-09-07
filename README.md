@@ -8,6 +8,8 @@
 
 **相册视觉候选：[preview30](Server/releases/v1.4.0-build4-review-env-preview30.md)。** 相册卡片、详情文字层改为透明，移除序号的黑色胶囊；仅通过字形小阴影辅助阅读，保留原内容和布局。尚未上传 TestFlight。
 
+**最新并发保护：[preview32](Server/releases/v1.4.0-build4-review-env-preview32.md)。** 已补原生/WordPress REST 媒体写入与注销互斥、锁后重新鉴权及数据库会话核验，真实双 MySQL 连接回归在旧代码失败、新候选通过，完整集成 460 项断言通过。仍待审核站原生生命周期和部署验收，不宣称线上已修复。
+
 **云端测试已通过：[iOS Quality Gate #135](QA_CI_135.md)。** 运行于 `3808d11`：iPhone、iPad、首次通知授权、SAST/SCA、SBOM 及 Release 检查成功。该提交早于当前候选，不覆盖上述删号问题。重启后已从 Git 恢复独立工作目录，并核对 NAS 安装包完整；未上传新包。
 
 **最新候选：[preview27](Server/releases/v1.4.0-build4-review-env-preview27.md)。** 独立 HTTPS 后台、授权演示素材及 Test1/Test2 展示名称账号已准备，实际使用 HS 身份码和密码登录。审核插件 1.5.13.10 与相册固定链接修复已部署，真实原生注册/审批/HS 重新登录/管理员绑定/完整相册/撤权/删号验证通过。Release 已加入显式环境入口和演示标识；最终账号完整 UI、Apple 登录/推送/邮件仍未验收，不代表可提交审核。
