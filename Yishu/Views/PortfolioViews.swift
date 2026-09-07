@@ -1,11 +1,28 @@
 import SwiftUI
 import UIKit
 
+/// Captions can cross a fitted photograph's letterbox area. Match those
+/// unpainted areas to the chosen theme without adding a backdrop to the photo.
+@MainActor
+struct PortfolioCaptionPalette {
+    let theme: AppColorTheme
+    static var current: Self { Self(theme: AppearanceStore.shared.theme) }
+    private var usesDarkGlyphs: Bool { theme.colorScheme == .light }
+
+    var title: Color { usesDarkGlyphs ? theme.palette.text.color : .white }
+    var subtitle: Color { usesDarkGlyphs ? theme.palette.secondary.color : .white.opacity(0.92) }
+    var accent: Color { usesDarkGlyphs ? theme.palette.accent.color : MediaTheme.gold }
+    var ordinal: Color { usesDarkGlyphs ? theme.palette.text.color : .white.opacity(0.84) }
+    var shadow: Color { usesDarkGlyphs ? .white.opacity(0.85) : .black.opacity(0.72) }
+}
+
 /// Keep the photograph visible right up to the glyphs. This modifier must not
 /// paint a rectangle, material or gradient behind an album caption.
 struct PortfolioCaptionLegibility: ViewModifier {
+    var palette: PortfolioCaptionPalette? = nil
+
     func body(content: Content) -> some View {
-        content.shadow(color: .black.opacity(0.72), radius: 2, x: 0, y: 1)
+        content.shadow(color: (palette ?? .current).shadow, radius: 2, x: 0, y: 1)
     }
 }
 
@@ -302,13 +319,13 @@ private struct PortfolioGridCard: View {
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .layoutPriority(1)
-                    .foregroundStyle(MediaTheme.gold)
+                    .foregroundStyle(PortfolioCaptionPalette.current.accent)
                     .accessibilityLabel(portfolio.eyebrow)
                 Text(portfolio.title)
                     .font(.system(.title3, design: .serif))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
-                    .foregroundStyle(.white)
+                    .foregroundStyle(PortfolioCaptionPalette.current.title)
             }
             .modifier(PortfolioCaptionLegibility())
             .padding(14)
@@ -476,15 +493,15 @@ private struct PortfolioHeroArtwork: View {
                 Text(portfolio.eyebrow)
                     .font(.caption2.weight(.semibold))
                     .tracking(2)
-                    .foregroundStyle(MediaTheme.gold)
+                    .foregroundStyle(PortfolioCaptionPalette.current.accent)
                 Text(portfolio.title)
                     .font(.system(.largeTitle, design: .serif))
                 Text(portfolio.subtitle)
                     .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.92))
+                    .foregroundStyle(PortfolioCaptionPalette.current.subtitle)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .foregroundStyle(.white)
+            .foregroundStyle(PortfolioCaptionPalette.current.title)
             .modifier(PortfolioCaptionLegibility())
             .multilineTextAlignment(.leading)
             .padding(.horizontal, 22)
@@ -505,7 +522,7 @@ private struct PortfolioGalleryTile: View {
             Text(String(format: "%02d", number))
                 .font(.system(.caption2, design: .monospaced).weight(.semibold))
                 .tracking(0.8)
-                .foregroundStyle(.white.opacity(0.84))
+                .foregroundStyle(PortfolioCaptionPalette.current.ordinal)
                 .modifier(PortfolioCaptionLegibility())
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)

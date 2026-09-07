@@ -4,7 +4,9 @@
 
 > 当前 TestFlight 内部测试版本：`1.4.0 (3)` · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
-**最新布局验收：[preview34](Server/releases/v1.4.0-build4-review-env-preview34.md)。** 主流 iPhone/iPad 的选定布局与相册操作回归通过，新增月白主题七个页面状态的上下边缘像素检查，两端横竖屏/系统明暗共八次配置执行全部通过；保留照片延伸到系统栏下方的效果，不改播放器。正式主节点候选 dry-run 通过，尚未部署。浅色相册文字对比度、完整功能矩阵及发布服务验收仍需继续，未上传 TestFlight。
+**最新相册修复：[preview35](Server/releases/v1.4.0-build4-review-env-preview35.md)。** 浅色主题的相册标题、说明与序号改用既有主题字色，背景保持透明；深色风格、图片、布局和播放器不变。两端各 252 单元通过，选定 UI 两端各六次执行通过；首轮 iPad 色值表示误判与修正后复验、真实服务 opt-in 跳过均在记录中列明。主、备节点候选 dry-run 均通过，正式插件尚未替换。完整矩阵和发布服务验收仍在推进，未上传 TestFlight。
+
+**上下边缘验收：[preview34](Server/releases/v1.4.0-build4-review-env-preview34.md)。** 月白主题七个页面状态的上下边缘像素检查，两端横竖屏/系统明暗共八次配置执行全部通过；保留照片延伸到系统栏下方的效果，不改播放器。这是选定场景的证据，不代表所有功能或真实网络服务已经完成验收。
 
 **审核环境部署验收：[preview33](Server/releases/v1.4.0-build4-review-env-preview33.md)。** 独立审核站已升级至 PHP 1.5.13.12，包含注销保留已发布作品和并发写入保护；精确清单、服务健康、匿名管理拒绝及隔离策略已复核。iPhone/iPad 真实原生注册、审批、绑定管理员、上传发布、撤权、注销及作品保留均通过，临时资源已清理。正式节点尚未部署本修复，TestFlight 暂不上传；完整页面 UI 和 Apple/推送/邮件验收仍需继续。
 

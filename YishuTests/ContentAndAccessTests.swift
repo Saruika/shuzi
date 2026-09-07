@@ -13,16 +13,56 @@ import Security
 
 @MainActor
 final class PortfolioCaptionRenderingTests: XCTestCase {
+    func testLightCaptionRolesContrastWithTheirUnpaintedThemeBackground() throws {
+        for theme in AppColorTheme.allCases where theme.colorScheme == .light {
+            let palette = PortfolioCaptionPalette(theme: theme)
+            for (role, color) in [("title", palette.title), ("subtitle", palette.subtitle),
+                                  ("accent", palette.accent), ("ordinal", palette.ordinal)] {
+                var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, alpha: CGFloat = 0
+                XCTAssertTrue(UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &alpha))
+                XCTAssertEqual(alpha, 1, accuracy: 0.001, "\(theme) \(role) 必须保持完整字色")
+                let glyph = ThemeRGB(red: Double(r), green: Double(g), blue: Double(b))
+                XCTAssertGreaterThanOrEqual(glyph.contrast(with: theme.palette.background), 4.5,
+                                           "\(theme) \(role) 在等比照片留白上不够清楚")
+            }
+        }
+    }
+
+    func testDarkCaptionPalettePreservesExistingPhotoTypography() {
+        for theme in AppColorTheme.allCases where theme.colorScheme == .dark {
+            let palette = PortfolioCaptionPalette(theme: theme)
+            let roles: [(Color, Color)] = [
+                (palette.title, .white),
+                (palette.subtitle, .white.opacity(0.92)),
+                (palette.ordinal, .white.opacity(0.84)),
+                (palette.accent, MediaTheme.gold),
+                (palette.shadow, .black.opacity(0.72))
+            ]
+            for (actual, expected) in roles {
+                var ar: CGFloat = 0, ag: CGFloat = 0, ab: CGFloat = 0, aa: CGFloat = 0
+                var er: CGFloat = 0, eg: CGFloat = 0, eb: CGFloat = 0, ea: CGFloat = 0
+                // Compare rendered components, not UIColor's gray/RGB storage.
+                XCTAssertTrue(UIColor(actual).getRed(&ar, green: &ag, blue: &ab, alpha: &aa))
+                XCTAssertTrue(UIColor(expected).getRed(&er, green: &eg, blue: &eb, alpha: &ea))
+                XCTAssertEqual(ar, er, accuracy: 0.001)
+                XCTAssertEqual(ag, eg, accuracy: 0.001)
+                XCTAssertEqual(ab, eb, accuracy: 0.001)
+                XCTAssertEqual(aa, ea, accuracy: 0.001)
+            }
+        }
+    }
+
     func testCaptionKeepsEmptyPhotoAreaFullyTransparentInBothAppearances() throws {
-        for appearance in [ColorScheme.light, .dark] {
+        for theme in AppColorTheme.allCases {
+            let palette = PortfolioCaptionPalette(theme: theme)
             for textSize in [DynamicTypeSize.large, .accessibility3] {
                 let caption = Text("相册 · 东方美学")
                     .font(.title3)
-                    .foregroundStyle(.white)
-                    .modifier(PortfolioCaptionLegibility())
+                    .foregroundStyle(palette.title)
+                    .modifier(PortfolioCaptionLegibility(palette: palette))
                     .padding(24)
                     .frame(width: 640, height: 160)
-                    .environment(\.colorScheme, appearance)
+                    .environment(\.colorScheme, theme.colorScheme)
                     .environment(\.dynamicTypeSize, textSize)
                 let renderer = ImageRenderer(content: caption)
                 renderer.scale = 1
@@ -46,6 +86,18 @@ final class PortfolioCaptionRenderingTests: XCTestCase {
                 }
                 XCTAssertTrue(stride(from: 3, to: rgba.count, by: 4).contains { rgba[$0] > 0 },
                     "必须实际渲染文字，不能用空视图通过透明度测试")
+                if theme.colorScheme == .light {
+                    var darkOpaquePixels = 0
+                    for offset in stride(from: 0, to: rgba.count, by: 4) {
+                        let isDark = rgba[offset] < 128
+                            && rgba[offset + 1] < 128
+                            && rgba[offset + 2] < 128
+                        let isOpaque = rgba[offset + 3] > 250
+                        if isDark && isOpaque { darkOpaquePixels += 1 }
+                    }
+                    XCTAssertGreaterThan(darkOpaquePixels, 20,
+                                         "\(theme) 浅色文字不能仍靠白字黑影支撑：\(textSize)")
+                }
             }
         }
     }
