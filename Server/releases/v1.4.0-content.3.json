@@ -1,0 +1,562 @@
+{
+  "content_version": "v1.4.0-content.3",
+  "batch_id": "albums-20260908-guofeng-04",
+  "published_at": "2026-09-08T00:49:44+00:00",
+  "app_binary": "1.4.0 (5), unchanged",
+  "before": {
+    "albums": 15,
+    "photos": 96
+  },
+  "after": {
+    "albums": 19,
+    "photos": 112
+  },
+  "albums": [
+    {
+      "id": 187,
+      "title": "玄羽入画",
+      "new": true,
+      "media_ids": [
+        171,
+        172,
+        173,
+        174
+      ],
+      "added_media_ids": [
+        171,
+        172,
+        173,
+        174
+      ],
+      "cover_media_id": 171,
+      "slug": "xuanyu-ruhua",
+      "subtitle": "玄衣映翠，羽影入画。",
+      "eyebrow": "古风",
+      "operation": "create"
+    },
+    {
+      "id": 188,
+      "title": "碧影听香",
+      "new": true,
+      "media_ids": [
+        175,
+        176,
+        177,
+        178
+      ],
+      "added_media_ids": [
+        175,
+        176,
+        177,
+        178
+      ],
+      "cover_media_id": 175,
+      "slug": "biying-tingxiang",
+      "subtitle": "一袭碧色，窗影含香。",
+      "eyebrow": "旗袍",
+      "operation": "create"
+    },
+    {
+      "id": 189,
+      "title": "石巷清风",
+      "new": true,
+      "media_ids": [
+        179,
+        180,
+        181,
+        182
+      ],
+      "added_media_ids": [
+        179,
+        180,
+        181,
+        182
+      ],
+      "cover_media_id": 179,
+      "slug": "shixiang-qingfeng",
+      "subtitle": "石巷花影，清风徐来。",
+      "eyebrow": "旗袍",
+      "operation": "create"
+    },
+    {
+      "id": 190,
+      "title": "墨锦庭芳",
+      "new": true,
+      "media_ids": [
+        183,
+        184,
+        185,
+        186
+      ],
+      "added_media_ids": [
+        183,
+        184,
+        185,
+        186
+      ],
+      "cover_media_id": 183,
+      "slug": "mojin-tingfang",
+      "subtitle": "墨色织锦，庭前留芳。",
+      "eyebrow": "旗袍",
+      "operation": "create"
+    }
+  ],
+  "photos": [
+    {
+      "name": "2月7日(14).jpg",
+      "source_sha256": "af258c6855c224ab43bda9cee9e80e3fae8e614d19f7ce99d6820ab64860b0a8",
+      "source_bytes": 6848269,
+      "source_width": 2160,
+      "source_height": 3840,
+      "camera": "",
+      "software": "",
+      "sha256": "dd8f2480ec0e88ed815be718ef13a3a17a7134e819dc9a682f5110b726565d84",
+      "bytes": 570734,
+      "width": 1350,
+      "height": 2400,
+      "media_id": 171
+    },
+    {
+      "name": "2月7日(8).jpg",
+      "source_sha256": "1310ae85746a546cfca75d40b7ca776f376f5c51d6aeb9c9e7de3c640c6805e6",
+      "source_bytes": 7280964,
+      "source_width": 2160,
+      "source_height": 3840,
+      "camera": "",
+      "software": "",
+      "sha256": "58b923f335f3bab61b74fe157f67e666f0f45b5cc483376f7a1a6440cc97966e",
+      "bytes": 620088,
+      "width": 1350,
+      "height": 2400,
+      "media_id": 172
+    },
+    {
+      "name": "2月7日(11).jpg",
+      "source_sha256": "5e09af35459a1b8f41844d7ddf482af0d49bfd58cd32b4ad3e5acb2548b842a2",
+      "source_bytes": 6815788,
+      "source_width": 2160,
+      "source_height": 3840,
+      "camera": "",
+      "software": "",
+      "sha256": "9cafedf5e6081d3d027e686976fbbdad9eca7050a55360d502ed95fba8617f93",
+      "bytes": 620338,
+      "width": 1350,
+      "height": 2400,
+      "media_id": 173
+    },
+    {
+      "name": "2月7日(24).jpg",
+      "source_sha256": "62516f00148971fcf5bf7cdb22c7939b2e73dcc9dd82277e1c326cee4d7cf68c",
+      "source_bytes": 6974028,
+      "source_width": 2160,
+      "source_height": 3840,
+      "camera": "",
+      "software": "",
+      "sha256": "dee5f0b4f186acbe9599f280e8e74e0f565763b5b609b4b41999f52a613608ff",
+      "bytes": 537868,
+      "width": 1350,
+      "height": 2400,
+      "media_id": 174
+    },
+    {
+      "name": "20240108133315242.jpg",
+      "source_sha256": "e6b370148bfd4f6bf12c7ab3b1b22923ab6439a5c9b0cfeed21864e46f1b9094",
+      "source_bytes": 1503987,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "12665ec2850bb64b5a35c9071290d7fe2366ef4562ccaa2391057c3f4740dd8f",
+      "bytes": 315844,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 175
+    },
+    {
+      "name": "20240108133315274.jpg",
+      "source_sha256": "a13c356aefcf0cfc385ae000cfa58d5fc6522c9c146da103be883b86ea84ee4c",
+      "source_bytes": 1452161,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "a0cfc5069720823cbcc83ee9a133e4248262e227456db43879ec05f1e7de6c36",
+      "bytes": 308654,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 176
+    },
+    {
+      "name": "20240108133315300.jpg",
+      "source_sha256": "9e9f8ab49b8f22593ee647cd2f53ebc37956459a8aeba93a6bdadd69c57fc69e",
+      "source_bytes": 1518506,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "ad61dd09664c4bb795064b78920c35a9307a14246bc35a0686ab74e18e1073f8",
+      "bytes": 317625,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 177
+    },
+    {
+      "name": "20240108133315313.jpg",
+      "source_sha256": "377467a97414ef1ce4f6e6574fa9d5b3f7cb41886b4fd7f05b9e0b4817a3a40d",
+      "source_bytes": 1835550,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "ccc22936ffcef8412258c1930b87c4b745479b8957452d0bdc20c50753cd63d0",
+      "bytes": 404483,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 178
+    },
+    {
+      "name": "2025-04-20 001001.jpg",
+      "source_sha256": "b8ba815dd854986b6569cf58362fc932957dda11cc0277fd0863b6ecbd550849",
+      "source_bytes": 2269372,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "e467a48bd05e0b654916b010c83ce6dc2a4693c0c2579d97607134f9dbc7755d",
+      "bytes": 476682,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 179
+    },
+    {
+      "name": "2025-04-20 001021.jpg",
+      "source_sha256": "28bcc19151305e423a1a31aeaa526eee4c2d92a08256b0740d58a7175ead10c3",
+      "source_bytes": 2157537,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "0f6d9fa3313dfc6f86113f07c6bfd064b0021fb89c0822472f4bd778b4703391",
+      "bytes": 460357,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 180
+    },
+    {
+      "name": "2025-04-20 001100.jpg",
+      "source_sha256": "4161eac096c2d754cb45109c8f6ca085bf513037e3e26bade06a36965a617243",
+      "source_bytes": 2318163,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "69cf86a18f6a4212895a094ae5d523bffc9b4205495b0f522df3d0ac1ece56d8",
+      "bytes": 496304,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 181
+    },
+    {
+      "name": "2025-04-20 001040.jpg",
+      "source_sha256": "137e64f07afe22cd65281cb6c4b45445245aa47568717f31b4bed5d8b63c664d",
+      "source_bytes": 1989994,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "0be9633f91432a48f6e743ba415fe55c1197c4d0266d454aa33e3120271023d5",
+      "bytes": 404352,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 182
+    },
+    {
+      "name": "2025-04-20 001120.jpg",
+      "source_sha256": "887c184e711b77f65070cff77e9e735478f17f1cd77a8034fca6619e0b55e57e",
+      "source_bytes": 2458637,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "d3eb87aa633d10df332e77c6ccad94ede6b4602bfd79b066ed57feec8397d09c",
+      "bytes": 522397,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 183
+    },
+    {
+      "name": "2025-04-20 001140.jpg",
+      "source_sha256": "2ce3bbe0b9d01b9fbc862a94f869839706035477b42ccff64190ee4a571127ee",
+      "source_bytes": 2755697,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "8942eba9466e80aed92d582b6ce62ba306ae736b3ec78946e9b9052b2e019bc2",
+      "bytes": 599174,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 184
+    },
+    {
+      "name": "2025-04-20 001219.jpg",
+      "source_sha256": "dc001d20fb2e560200b3e8850dda60020f754275e0620a630c4ae888aa7e8fe8",
+      "source_bytes": 2104953,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "f8bb5df4eaa6ba8e7a357676d238e3d45693c8c8431070aa21c63e740b138829",
+      "bytes": 437289,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 185
+    },
+    {
+      "name": "2025-04-20 001200.jpg",
+      "source_sha256": "ff18111bb0309f06e5fd07fd6ebb8c18656fd64df0a346d36add3e1c4933afc2",
+      "source_bytes": 1829258,
+      "source_width": 3412,
+      "source_height": 5120,
+      "camera": "",
+      "software": "",
+      "sha256": "dc9203f77c8bf574c3d3b6ac93351c22754f4cbbac31af439c7f775fa00b0251",
+      "bytes": 363487,
+      "width": 1599,
+      "height": 2400,
+      "media_id": 186
+    }
+  ],
+  "unchanged_existing_albums": [
+    {
+      "id": 6,
+      "title": "婚纱作品",
+      "media_ids": [
+        18,
+        19,
+        20,
+        28,
+        29,
+        30
+      ],
+      "cover_media_id": 0
+    },
+    {
+      "id": 7,
+      "title": "新中式",
+      "media_ids": [
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        133,
+        134,
+        135,
+        136,
+        137,
+        145,
+        146
+      ],
+      "cover_media_id": 0
+    },
+    {
+      "id": 39,
+      "title": "旗袍",
+      "media_ids": [
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82
+      ],
+      "cover_media_id": 40
+    },
+    {
+      "id": 58,
+      "title": "唐风",
+      "media_ids": [
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        142,
+        143,
+        144
+      ],
+      "cover_media_id": 0
+    },
+    {
+      "id": 67,
+      "title": "田野",
+      "media_ids": [
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75
+      ],
+      "cover_media_id": 0
+    },
+    {
+      "id": 83,
+      "title": "荷韵",
+      "media_ids": [
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91
+      ],
+      "cover_media_id": 0
+    },
+    {
+      "id": 92,
+      "title": "校园光影",
+      "media_ids": [
+        93,
+        94,
+        95,
+        96,
+        97,
+        98,
+        99
+      ],
+      "cover_media_id": 0
+    },
+    {
+      "id": 100,
+      "title": "冬日庭院",
+      "media_ids": [
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107,
+        108
+      ],
+      "cover_media_id": 0
+    },
+    {
+      "id": 138,
+      "title": "灯影绮罗",
+      "media_ids": [
+        126,
+        127,
+        128,
+        129
+      ],
+      "cover_media_id": 126
+    },
+    {
+      "id": 139,
+      "title": "花庭清韵",
+      "media_ids": [
+        130,
+        131,
+        132
+      ],
+      "cover_media_id": 130
+    },
+    {
+      "id": 147,
+      "title": "青衣夜语",
+      "media_ids": [
+        140,
+        141
+      ],
+      "cover_media_id": 140
+    },
+    {
+      "id": 167,
+      "title": "青瓷书香",
+      "media_ids": [
+        148,
+        149,
+        150,
+        151,
+        152
+      ],
+      "cover_media_id": 148
+    },
+    {
+      "id": 168,
+      "title": "青花静读",
+      "media_ids": [
+        153,
+        154,
+        155,
+        156,
+        157
+      ],
+      "cover_media_id": 153
+    },
+    {
+      "id": 169,
+      "title": "绛色窗影",
+      "media_ids": [
+        158,
+        159,
+        160,
+        161
+      ],
+      "cover_media_id": 158
+    },
+    {
+      "id": 170,
+      "title": "绒锦良辰",
+      "media_ids": [
+        162,
+        163,
+        164,
+        165,
+        166
+      ],
+      "cover_media_id": 162
+    }
+  ],
+  "source_bytes": 52112864,
+  "network_bytes": 7455676,
+  "local_photo_files_written": false,
+  "visual_review_limitation": "Visual review cannot prove absence of historic AI processing; no AI generation, restoration, sharpening or upscaling was used in this batch.",
+  "verification": {
+    "primary_and_backup_catalog_equal": true,
+    "source_hashes_unique_in_batch_and_prior_content_manifests": true,
+    "media_checks_each_node": 16,
+    "backup_direct_https_head": 16,
+    "actual_app_session_download_decode": 16,
+    "anonymous_app_content_http": 401,
+    "public_new_album_pages_http": 404,
+    "temporary_publishing_credential_revoked": true,
+    "global_display_config_unchanged": true,
+    "existing_15_albums_unchanged": true,
+    "sync": {
+      "started": "2026-09-08T08:49:58+08:00",
+      "finished": "2026-09-08T08:53:10+08:00",
+      "result": "success",
+      "exit_status": 0
+    },
+    "services_each_node": [
+      "nginx active",
+      "php8.3-fpm active",
+      "mysql active"
+    ],
+    "fan_device_end_to_end_tested": false
+  }
+}
+
