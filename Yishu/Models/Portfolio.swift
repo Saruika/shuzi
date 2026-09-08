@@ -350,7 +350,7 @@ enum ContentCatalog {
     static let qqMailWebURL = AppURL.make("https://mail.qq.com/")
     static let xiaohongshuURL = AppURL.make("https://xhslink.com/m/API2hEV4WME")
     static let douyinURL = AppURL.make("https://v.douyin.com/8T9JGm_WtwQ/")
-    static let hongguoURL = AppURL.make("https://novelquickapp.com/s/wHlfrwqog1g/")
+    static let hongguoURL = AppURL.make("https://novelquickapp.com/s/qcN1w-iokyY/")
 
     static let dramas: [DramaWork] = [
         DramaWork(

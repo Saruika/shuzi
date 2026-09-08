@@ -2960,6 +2960,15 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertNil(endpoint.password)
     }
 
+    func testDramaFallbacksUseTheRenewedActorShareLink() {
+        XCTAssertEqual(ContentCatalog.hongguoURL.absoluteString,
+                       "https://novelquickapp.com/s/qcN1w-iokyY/")
+        XCTAssertEqual(ContentCatalog.dramas.count, 5)
+        for drama in ContentCatalog.dramas {
+            XCTAssertEqual(drama.destinationURL, ContentCatalog.hongguoURL)
+        }
+    }
+
     func testPrivacyPolicyUsesTheOfficialHTTPSOrigin() {
         XCTAssertTrue(AppNetworkSecurityPolicy.isTrustedHTTPSOrigin(ContentCatalog.privacyPolicyURL))
         XCTAssertEqual(ContentCatalog.privacyPolicyURL.path, "/app-privacy")
