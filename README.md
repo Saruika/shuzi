@@ -1,12 +1,12 @@
 # Hi，梳子 iOS
 
-**Build 6 发行准备：[滚动区域衔接修复](Server/releases/v1.4.0-build6.md)。** 修复作品搜索栏和底部导航的硬边，保持既有页面风格。正在完成发行检查，尚未上传；不自动撤回 Build 5 的外部审核或过期旧包。
+**Build 6 已交付：[滚动区域衔接修复与回执](Server/releases/v1.4.0-build6.md)。** 修复作品搜索栏和底部导航的硬边，保持既有页面风格；包含红果影视及关于页链接检查。Apple 已处理通过、内部测试可安装，中英文测试说明已保存。未撤回 Build 5 的外部审核，未过期旧包。
 
-**新增开发候选：[相册可见性开关](Server/releases/v1.4.0-build6-preview1.md)。** 管理员在 App「内容管理 → 照片作品」可隐藏或恢复单个相册，照片保留；普通用户清单同步过滤。旧相册默认可见，代码尚未部署或上传 TestFlight，不改变下方已发布内容记录。
+**服务端开发候选：[相册可见性开关](Server/releases/v1.4.0-build6-preview1.md)。** 设计为管理员在 App「内容管理 → 照片作品」隐藏或恢复单个相册，照片保留、普通用户清单同步过滤。客户端代码已包含在 Build 6，但服务端候选尚未部署，旧 API 下开关保持禁用，不宣称该功能已上线。
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
-> 最新 TestFlight 上传版本：`1.4.0 (5)`，Apple 处理通过、内部测试可用；外部测试已提交，等待 Apple 审核 · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
+> 最新 TestFlight 上传版本：`1.4.0 (6)`，Apple 处理通过、内部测试可用；Build 6 外部测试尚未提交，Build 5 仍等待 Apple 外部审核 · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
 **最新相册内容：[v1.4.0-content.3](Server/releases/v1.4.0-content.3.md)**（2026-09-08）：新增“玄羽入画”“碧影听香”“石巷清风”“墨锦庭芳”四套、16 张，现为 **19 册、112 张**。旧相册及其他页面配置不变；主备同步、16 张图片的真实 App 网络会话下载与解码验证通过。App“作品”页下拉刷新即可，无需重装 TestFlight。
 
