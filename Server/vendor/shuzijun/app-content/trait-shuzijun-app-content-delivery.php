@@ -512,7 +512,7 @@ trait Shuzijun_App_Content_Delivery {
             return array('heroImages' => array(), 'aboutPortraitURL' => null,
                 'launchPosters' => array(), 'showreel' => null, 'dramas' => array());
         }
-        $hongguo = 'https://novelquickapp.com/s/wHlfrwqog1g/';
+        $hongguo = 'https://novelquickapp.com/s/qcN1w-iokyY/';
         return array(
             'heroImages' => array(
                 'https://img.shuzijun.com.cn/images/hero-mobile-1.webp',

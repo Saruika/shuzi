@@ -21,7 +21,7 @@ b = a.bootstrap
 a.HTTPS_EDGE = True
 LIVE = b.SITE / 'wp-content/mu-plugins'
 BASELINE = '5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe'
-TARGET = '942a95ee1174707716282998229ada7ea3759328fd3b425a55c8a383e910b4b6'
+TARGET = 'd4a2d15fefcb6c403ee2535010f04065981ca64aaa46c44a4f5e56d69d3ad9a3'
 CHANGED = (
     'vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php',
     'vendor/shuzijun/app-content/class-shuzijun-app-content-api.php',

@@ -31,7 +31,7 @@ class ReviewBootstrapTests(unittest.TestCase):
             bootstrap.configure_permalink_structure()
 
     def test_release_manifest_matches_repository_release(self):
-        release = (SERVER / 'releases/v1.4.0-build6-preview1.md').read_text()
+        release = (SERVER / 'releases/v1.4.0-build6-preview3.md').read_text()
         values = [line for line in release.splitlines() if line.startswith('RELEASE_MANIFEST_SHA256=')]
         self.assertEqual(values, ['RELEASE_MANIFEST_SHA256=' + bootstrap.manifest(SERVER)])
 

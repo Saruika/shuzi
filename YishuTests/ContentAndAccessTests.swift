@@ -11,6 +11,75 @@ import Observation
 import Security
 @testable import Yishu
 
+final class DramaLinkHealthTests: XCTestCase {
+    private func actorPage(name: String = "易姝", status: Int = 0) throws -> Data {
+        let payload: [String: Any] = ["loaderData": ["page": ["pageData": [
+            "BaseResp": ["StatusCode": status], "actor_data": ["actor_name": name,
+                "works": [["series_title": "京春夜"]]]]]]]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        return Data("<script>window._ROUTER_DATA = \(json)</script>".utf8)
+    }
+
+    func testSoft404IsExpiredEvenWithStatus200() {
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: Data(#"{"message":"404 not found"}"#.utf8)), .expired)
+    }
+
+    func testHardExpiryAndTemporaryFailuresAreDifferent() {
+        for status in [404, 410] { XCTAssertEqual(DramaLinkPolicy.evaluate(status: status, body: Data()), .expired) }
+        for status in [302, 403, 429, 500, 503] {
+            XCTAssertEqual(DramaLinkPolicy.evaluate(status: status, body: Data()), .unverified)
+        }
+    }
+
+    func testOnlyValidArtistPagePasses() throws {
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: try actorPage(), requireActor: true), .available)
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: try actorPage(name: "其他演员"), requireActor: true), .unverified)
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: try actorPage(status: 1)), .unverified)
+    }
+
+    func testVerificationPageMalformedAndOversizedDataDoNotPass() {
+        for body in [Data("<html>请验证</html>".utf8), Data("window._ROUTER_DATA = {broken}</script>".utf8), Data(repeating: 32, count: 524_289)] {
+            XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: body), .unverified)
+        }
+    }
+
+    func testSeriesPageCannotBecomeAnActorProfile() {
+        let body = Data(#"<script>window._ROUTER_DATA = {"loaderData":{"page":{"pageData":{"BaseResp":{"StatusCode":0},"series_data":{"title":"京春夜"}}}}}</script>"#.utf8)
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: body), .available)
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: body, requireActor: true), .unverified)
+    }
+
+    func testUnsafeRedirectDestinationsAreRejected() throws {
+        XCTAssertTrue(DramaLinkPolicy.isHongguo(ContentCatalog.hongguoURL))
+        for text in ["https://novelquickapp.com.evil.test/", "https://127.0.0.1/", "https://user@novelquickapp.com/", "https://novelquickapp.com:444/", "file:///tmp/test"] {
+            XCTAssertFalse(DramaLinkPolicy.isHongguo(try XCTUnwrap(URL(string: text))))
+        }
+    }
+
+    func testReplacementPreservesPerSeriesLinksAndAllOtherFields() throws {
+        let replacement = try XCTUnwrap(URL(string: "https://novelquickapp.com/s/new-test/"))
+        let dedicated = try XCTUnwrap(URL(string: "https://novelquickapp.com/s/series-test/"))
+        var original = ContentCatalog.dramas
+        let first = original[0]
+        original[0] = DramaWork(id: first.id, title: first.title, imageURL: first.imageURL, destinationURL: dedicated)
+        let result = DramaLinkPolicy.replacing(original, from: ContentCatalog.hongguoURL, to: replacement)
+        XCTAssertEqual(result.map(\.id), original.map(\.id))
+        XCTAssertEqual(result.map(\.title), original.map(\.title))
+        XCTAssertEqual(result.map(\.imageURL), original.map(\.imageURL))
+        XCTAssertEqual(result[0].destinationURL, dedicated)
+        XCTAssertTrue(result.dropFirst().allSatisfy { $0.destinationURL == replacement })
+        XCTAssertEqual(DramaLinkPolicy.profileCandidate(in: result), replacement)
+    }
+
+    func testAboutDoesNotChooseASingleSeriesAsProfile() throws {
+        let first = ContentCatalog.dramas[0]
+        let series = DramaWork(id: first.id, title: first.title, imageURL: first.imageURL,
+                               destinationURL: try XCTUnwrap(URL(string: "https://novelquickapp.com/s/series-only/")))
+        XCTAssertEqual(DramaLinkPolicy.profileCandidate(in: [series]), ContentCatalog.hongguoURL)
+        XCTAssertEqual(DramaLinkPolicy.profileCandidate(in: []), ContentCatalog.hongguoURL)
+    }
+}
+
 @MainActor
 final class PortfolioCaptionRenderingTests: XCTestCase {
     func testCaptionOutlineUsesTheOppositeLuminanceWithoutPaintingABackground() {

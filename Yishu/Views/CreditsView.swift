@@ -15,6 +15,11 @@ struct InlineVideoPlaybackContext: Equatable {
 }
 
 struct CreditsView: View {
+    @Environment(\.openURL) private var openURL
+    @State private var checkingDramaID: String?
+    @State private var dramaLinkTask: Task<Void, Never>?
+    @State private var dramaLinkMessage = ""
+    @State private var showDramaLinkMessage = false
     @EnvironmentObject private var store: PortfolioStore
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -86,10 +91,18 @@ struct CreditsView: View {
             playbackWaitStartedAt = playbackWaitStartedAt ?? .now
         }
         .onChange(of: scenePhase) { _, phase in
+            if phase != .active { dramaLinkTask?.cancel(); checkingDramaID = nil }
             guard phase != .active, inlinePlayer != nil else { return }
             pauseInlinePlayback()
         }
-        .onDisappear { stopInlinePlayback() }
+        .onDisappear {
+            stopInlinePlayback()
+            dramaLinkTask?.cancel()
+            checkingDramaID = nil
+        }
+        .alert("观看链接提示", isPresented: $showDramaLinkMessage) {
+            Button("知道了", role: .cancel) { }
+        } message: { Text(dramaLinkMessage) }
         .onChange(of: playbackContext) { _, _ in
             stopInlinePlayback()
             showVideoPlaybackError = false
@@ -305,7 +318,7 @@ struct CreditsView: View {
             LazyVGrid(columns: columns, spacing: 18) {
                 ForEach(store.dramas) { drama in
                     VStack(alignment: .leading, spacing: 10) {
-                        Link(destination: drama.destinationURL) {
+                        Button { openDrama(drama) } label: {
                             ArtworkImage(url: drama.imageURL, contentMode: .fit, showsRetryButton: false)
                                 .aspectRatio(3 / 4, contentMode: .fit)
                                 .frame(maxWidth: .infinity)
@@ -313,6 +326,10 @@ struct CreditsView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 3))
                         }
                         .buttonStyle(.plain)
+                        .overlay {
+                            if checkingDramaID == drama.id { ProgressView().padding(12).background(.regularMaterial, in: Circle()) }
+                        }
+                        .disabled(checkingDramaID != nil)
                         .accessibilityIdentifier("drama-link-\(drama.id)")
                         .accessibilityLabel("观看\(drama.title)")
                         .accessibilityHint("打开外部播放页面")
@@ -327,6 +344,30 @@ struct CreditsView: View {
             }
         }
         .padding(.horizontal, 20)
+    }
+
+    private func openDrama(_ drama: DramaWork) {
+        guard checkingDramaID == nil else { return }
+        checkingDramaID = drama.id
+        dramaLinkTask = Task { @MainActor in
+            let health = DramaLinkPolicy.isHongguo(drama.destinationURL)
+                ? await DramaLinkChecker.check(drama.destinationURL) : .available
+            guard !Task.isCancelled else { return }
+            checkingDramaID = nil
+            guard scenePhase == .active,
+                  store.dramas.contains(where: { $0.id == drama.id && $0.destinationURL == drama.destinationURL }) else { return }
+            guard health == .available else {
+                dramaLinkMessage = health.message
+                showDramaLinkMessage = true
+                return
+            }
+            openURL(drama.destinationURL) { accepted in
+                if !accepted {
+                    dramaLinkMessage = "暂时无法打开观看页面，请稍后再试。"
+                    showDramaLinkMessage = true
+                }
+            }
+        }
     }
 
     private func playInline() {

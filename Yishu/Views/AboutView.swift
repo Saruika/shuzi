@@ -6,6 +6,12 @@ private enum AboutContactIcon {
 }
 
 struct AboutView: View {
+    @Environment(\.openURL) private var openExternalURL
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var hongguoTask: Task<Void, Never>?
+    @State private var isCheckingHongguo = false
+    @State private var hongguoMessage = ""
+    @State private var showsHongguoMessage = false
     @EnvironmentObject private var admin: AdminSessionStore
     @Environment(LocalWeatherStore.self) private var localWeather
     @EnvironmentObject private var portfolioStore: PortfolioStore
@@ -35,6 +41,13 @@ struct AboutView: View {
             }
         }
         .toolbar(.hidden, for: .navigationBar)
+        .onDisappear { hongguoTask?.cancel(); isCheckingHongguo = false }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { hongguoTask?.cancel(); isCheckingHongguo = false }
+        }
+        .alert("观看链接提示", isPresented: $showsHongguoMessage) {
+            Button("知道了", role: .cancel) { }
+        } message: { Text(hongguoMessage) }
         .fullScreenCover(isPresented: $presentsAdminAccess) {
             SecureCaptureSurface(
                 owner: .fullScreenPresentation,
@@ -359,8 +372,16 @@ struct AboutView: View {
                 "红果短剧",
                 detail: "易姝",
                 icon: .brandAsset("HongguoBrandIcon"),
-                url: ContentCatalog.hongguoURL
+                url: DramaLinkPolicy.profileCandidate(in: portfolioStore.dramas)
             )
+            .environment(\.openURL, OpenURLAction { url in
+                checkAndOpenHongguo(url)
+                return .handled
+            })
+            .disabled(isCheckingHongguo)
+            .overlay(alignment: .trailing) {
+                if isCheckingHongguo { ProgressView().padding(.trailing, 16) }
+            }
             .accessibilityIdentifier("about-hongguo-link")
         }
         .padding(.horizontal, 16)
@@ -404,6 +425,23 @@ struct AboutView: View {
         .padding(.horizontal, 16)
         .padding(.top, 14)
         .padding(.bottom, 8)
+    }
+
+    private func checkAndOpenHongguo(_ url: URL) {
+        guard !isCheckingHongguo else { return }
+        isCheckingHongguo = true
+        hongguoTask = Task { @MainActor in
+            let health = await DramaLinkChecker.check(url, requireActor: true)
+            guard !Task.isCancelled else { return }
+            isCheckingHongguo = false
+            guard scenePhase == .active, url == DramaLinkPolicy.profileCandidate(in: portfolioStore.dramas) else { return }
+            guard health == .available else {
+                hongguoMessage = health.message; showsHongguoMessage = true; return
+            }
+            openExternalURL(url) { accepted in
+                if !accepted { hongguoMessage = "暂时无法打开红果页面，请稍后再试。"; showsHongguoMessage = true }
+            }
+        }
     }
 
     private var fanAccountAccess: some View {

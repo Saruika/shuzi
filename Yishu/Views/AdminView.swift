@@ -105,6 +105,10 @@ struct AdminView: View {
     @State private var launchPosterDrafts = ContentCatalog.launchPosters
     @State private var showreelDraft = ContentCatalog.showreel
     @State private var dramaDrafts: [DramaDraft] = ContentCatalog.dramas.map(DramaDraft.init)
+    @State private var sharedDramaOldURL = ContentCatalog.hongguoURL.absoluteString
+    @State private var sharedDramaNewURL = ""
+    @State private var isCheckingDramaLink = false
+    @State private var dramaLinkCheckMessage: String?
     @State private var tagsText = ContentCatalog.showreel.tags.joined(separator: "、")
     @State private var selectedPortfolioID: Int?
     @State private var isCreatingPortfolio = false
@@ -904,6 +908,21 @@ struct AdminView: View {
 
     private var dramaEditor: some View {
         AdminSection(title: "影视履历", subtitle: "修改剧名、海报与公开跳转") {
+            DisclosureGroup("统一更换红果入口") {
+                Text("只替换与旧链接完全相同的入口，保留其他作品的专属链接。检查通过后更新草稿，仍需点击“保存并发布全部修改”。")
+                    .font(.caption).foregroundStyle(AppTheme.muted)
+                TextField("需要替换的旧链接", text: $sharedDramaOldURL)
+                    .textInputAutocapitalization(.never).keyboardType(.URL).autocorrectionDisabled()
+                TextField("新的红果分享链接", text: $sharedDramaNewURL)
+                    .textInputAutocapitalization(.never).keyboardType(.URL).autocorrectionDisabled()
+                Button(isCheckingDramaLink ? "正在检查…" : "检查并替换相同链接") {
+                    Task { await replaceSharedDramaLink() }
+                }
+                .disabled(isPublishing || isCheckingDramaLink || !administratorEditorIsReady)
+                if let dramaLinkCheckMessage {
+                    Text(dramaLinkCheckMessage).font(.caption).accessibilityIdentifier("drama-link-check-result")
+                }
+            }
             ForEach(dramaDrafts) { drama in
                 dramaCard(drama)
             }
@@ -917,6 +936,35 @@ struct AdminView: View {
             .disabled(isPublishing || dramaDrafts.count >= 50)
         }
         .textFieldStyle(AdminTextFieldStyle())
+    }
+
+    @MainActor
+    private func replaceSharedDramaLink() async {
+        guard administratorEditorIsReady, !isPublishing, !isCheckingDramaLink else { return }
+        guard let old = URL(string: sharedDramaOldURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let new = URL(string: sharedDramaNewURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              DramaLinkPolicy.isHongguo(old), DramaLinkPolicy.isHongguo(new), old != new else {
+            dramaLinkCheckMessage = "请填写两个不同的红果 HTTPS 链接。"; return
+        }
+        let contentID = administratorContentLoadID
+        let original = dramaDrafts
+        guard let works = try? original.map({ try $0.value() }),
+              works.contains(where: { $0.destinationURL == old }) else {
+            dramaLinkCheckMessage = "没有匹配的入口，或现有短剧资料尚未填写完整。"; return
+        }
+        isCheckingDramaLink = true
+        defer { isCheckingDramaLink = false }
+        let health = await DramaLinkChecker.check(new, requireActor: true)
+        guard !Task.isCancelled, administratorEditorIsReady,
+              administratorContentLoadID == contentID, !isPublishing, dramaDrafts == original,
+              sharedDramaOldURL.trimmingCharacters(in: .whitespacesAndNewlines) == old.absoluteString,
+              sharedDramaNewURL.trimmingCharacters(in: .whitespacesAndNewlines) == new.absoluteString else {
+            dramaLinkCheckMessage = "资料已变化，请重新检查后再替换。"; return
+        }
+        guard health == .available else { dramaLinkCheckMessage = health.message; return }
+        dramaDrafts = DramaLinkPolicy.replacing(works, from: old, to: new).map(DramaDraft.init)
+        sharedDramaOldURL = new.absoluteString
+        dramaLinkCheckMessage = "已更新 \(works.filter { $0.destinationURL == old }.count) 个草稿入口，请保存并发布。"
     }
 
     private func dramaCard(_ snapshot: DramaDraft) -> some View {
@@ -966,7 +1014,7 @@ struct AdminView: View {
                 Label("保存并发布全部修改", systemImage: "icloud.and.arrow.up")
                     .adminPrimaryButton()
             }
-            .disabled(isPublishing || !administratorEditorIsReady)
+            .disabled(isPublishing || isCheckingDramaLink || !administratorEditorIsReady)
 
             Button("放弃未发布的文字修改") { loadDrafts() }
                 .font(.caption)
@@ -1067,6 +1115,12 @@ struct AdminView: View {
             tagsText = showreel.tags.joined(separator: "、")
         }
         dramaDrafts = store.dramas.map(DramaDraft.init)
+        let groups = Dictionary(grouping: store.dramas.filter { DramaLinkPolicy.isHongguo($0.destinationURL) }, by: \.destinationURL)
+        sharedDramaOldURL = groups.sorted {
+            $0.value.count == $1.value.count ? $0.key.absoluteString < $1.key.absoluteString : $0.value.count > $1.value.count
+        }.first?.key.absoluteString ?? ContentCatalog.hongguoURL.absoluteString
+        sharedDramaNewURL = ""
+        dramaLinkCheckMessage = nil
         if selectedPortfolioID.flatMap({ selectedID in
             editablePortfolios.first(where: { $0.id == selectedID })
         }) == nil {
@@ -1786,7 +1840,7 @@ private struct AdminMediaPreview: View {
     }
 }
 
-private struct DramaDraft: Identifiable {
+private struct DramaDraft: Identifiable, Equatable {
     var id: String
     var title: String
     var imageURL: String
