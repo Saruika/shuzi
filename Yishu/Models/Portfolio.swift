@@ -10,6 +10,10 @@ struct Portfolio: Identifiable, Hashable, Codable {
     let coverURL: URL?
     let images: [PortfolioImage]
     var totalImageCount: Int? = nil
+    // Optional for compatibility with previously published manifests/caches.
+    var isVisible: Bool? = nil
+
+    var isVisibleToViewers: Bool { isVisible ?? true }
 
     var displayImageCount: Int {
         max(images.count, totalImageCount ?? images.count)
@@ -214,7 +218,7 @@ enum ContentManifestPolicy {
     }
 
     private static func isValidPortfolios(_ portfolios: [Portfolio]) -> Bool {
-        guard (1...maximumPortfolioCount).contains(portfolios.count),
+        guard portfolios.count <= maximumPortfolioCount,
               hasUniqueElements(portfolios.map(\.id)) else { return false }
 
         var loadedImageCount = 0

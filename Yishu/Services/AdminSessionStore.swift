@@ -802,6 +802,20 @@ final class AdminSessionStore: ObservableObject {
         return response.content
     }
 
+    func updatePortfolioVisibility(_ portfolio: Portfolio, isVisible: Bool) async throws -> AppContentManifest {
+        let body = try JSONEncoder().encode(PortfolioVisibilityUpdate(
+            isVisible: isVisible, expectedIsVisible: portfolio.isVisibleToViewers))
+        let response: PortfolioVisibilityResponse = try await authorizedJSON(
+            path: "shuzijun/v1/app-content/portfolio/\(portfolio.id)/visibility", method: "POST", body: body)
+        guard response.portfolioID == portfolio.id, response.isVisible == isVisible,
+              ContentSecurityPolicy.isTrusted(response.content, environment: serviceEnvironment),
+              AdminContentEditingPolicy.isFullAdministratorManifest(response.content),
+              response.content.portfolios.first(where: { $0.id == portfolio.id })?.isVisible == isVisible else {
+            throw AdminAPIError.invalidResponse
+        }
+        return response.content
+    }
+
     func createPortfolio(
         title: String,
         subtitle: String,
@@ -1335,6 +1349,17 @@ struct AppContentUpdate: Encodable {
 
 struct AboutPortraitUpdate: Encodable {
     let aboutPortraitURL: URL
+}
+
+private struct PortfolioVisibilityUpdate: Encodable {
+    let isVisible: Bool
+    let expectedIsVisible: Bool
+}
+
+private struct PortfolioVisibilityResponse: Decodable {
+    let portfolioID: Int
+    let isVisible: Bool
+    let content: AppContentManifest
 }
 
 private struct GalleryUpdate: Encodable {

@@ -127,7 +127,14 @@ struct PortfolioGridView: View {
                     .padding(.horizontal, 14)
 
                     if filteredPortfolios.isEmpty {
-                        ContentUnavailableView.search(text: searchText)
+                        Group {
+                            if store.portfolios.isEmpty {
+                                ContentUnavailableView("暂无可见相册", systemImage: "photo.on.rectangle",
+                                    description: Text("相册发布后会在这里显示，可下拉刷新。"))
+                            } else {
+                                ContentUnavailableView.search(text: searchText)
+                            }
+                        }
                             .foregroundStyle(AppTheme.warmWhite)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 50)
@@ -347,6 +354,7 @@ private struct PortfolioGridCard: View {
 
 struct PortfolioDetailView: View {
     let portfolio: Portfolio
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var favorites: FavoritesStore
     @EnvironmentObject private var recentlyViewed: RecentlyViewedStore
@@ -373,7 +381,10 @@ struct PortfolioDetailView: View {
     }
 
     private var currentPortfolio: Portfolio {
-        store.portfolios.first { $0.id == portfolio.id } ?? portfolio
+        store.portfolios.first { $0.id == portfolio.id } ?? Portfolio(
+            id: portfolio.id, title: portfolio.title, subtitle: portfolio.subtitle,
+            eyebrow: portfolio.eyebrow, slug: portfolio.slug, websiteURL: portfolio.websiteURL,
+            coverURL: nil, images: [], totalImageCount: 0, isVisible: false)
     }
 
     var body: some View {
@@ -454,6 +465,12 @@ struct PortfolioDetailView: View {
             }
         }
         .accessibilityIdentifier("portfolio-detail-\(currentPortfolio.id)")
+        .onChange(of: store.portfolios.map(\.id)) { _, ids in
+            if !ids.contains(portfolio.id) {
+                selectedImage = nil
+                dismiss()
+            }
+        }
         .navigationTitle(currentPortfolio.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
@@ -604,7 +621,7 @@ struct GalleryViewer: View {
     }
 
     private var accessibleImages: [PortfolioImage] {
-        store.portfolios.first(where: { $0.id == portfolio.id })?.images ?? portfolio.images
+        store.portfolios.first(where: { $0.id == portfolio.id })?.images ?? []
     }
 
     var body: some View {
@@ -654,6 +671,7 @@ struct GalleryViewer: View {
         .statusBarHidden()
         .environment(\.colorScheme, .dark)
         .onChange(of: accessibleImages.map(\.id)) { _, imageIDs in
+            if imageIDs.isEmpty { onClose(); return }
             if !imageIDs.contains(selection), let firstID = imageIDs.first {
                 selection = firstID
             }

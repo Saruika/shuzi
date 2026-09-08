@@ -762,6 +762,67 @@ final class BoundAdministratorSessionTests: XCTestCase {
         XCTAssertFalse(store.isWorking)
     }
 
+    func testVisibilityMutationChecksRequestAndMatchingAdministratorResponse() async throws {
+        let account = BoundAdministratorTestAccount()
+        var album = Portfolio(id: 91, title: "测试相册", subtitle: "", eyebrow: "", slug: "visibility-test",
+            websiteURL: try XCTUnwrap(URL(string: "https://www.shuzijun.com.cn/portfolio/visibility-test/")),
+            coverURL: nil, images: [])
+        album.isVisible = true
+        var saved = album
+        saved.isVisible = false
+        let content = AppContentManifest(schemaVersion: 1, updatedAt: .now,
+            heroImages: [try XCTUnwrap(URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/visibility-test.jpg"))],
+            aboutPortraitURL: nil, launchPosters: [], showreel: nil,
+            dramas: [], portfolios: [saved], contentAudience: .administrator)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let contentObject = try JSONSerialization.jsonObject(with: encoder.encode(content))
+        var returnedID = album.id
+        var writes = 0
+        let admin = AdminSessionStore { request in
+            if request.url?.path.hasSuffix("/session") == true { return try self.reply(request) }
+            writes += 1
+            XCTAssertTrue(try XCTUnwrap(request.url).path.hasSuffix("/portfolio/\(album.id)/visibility"))
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer synthetic-session")
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Bool])
+            XCTAssertEqual(object, ["isVisible": false, "expectedIsVisible": true])
+            let response = try JSONSerialization.data(withJSONObject: [
+                "portfolioID": returnedID, "isVisible": false, "content": contentObject])
+            return try self.reply(request, body: String(decoding: response, as: UTF8.self))
+        }
+        await admin.signIn(using: account)
+        let accepted = try await admin.updatePortfolioVisibility(album, isVisible: false)
+        XCTAssertEqual(accepted.portfolios.first?.isVisible, false)
+        returnedID += 1
+        do {
+            _ = try await admin.updatePortfolioVisibility(album, isVisible: false)
+            XCTFail("A response for another album was accepted")
+        } catch { XCTAssertEqual(writes, 2, "Mismatched writes must never retry automatically") }
+        admin.lock()
+    }
+
+    func testVisibilityConflictDoesNotRetryOrSignOutAdministrator() async throws {
+        let account = BoundAdministratorTestAccount()
+        let album = Portfolio(id: 91, title: "测试相册", subtitle: "", eyebrow: "", slug: "visibility-test",
+            websiteURL: try XCTUnwrap(URL(string: "https://www.shuzijun.com.cn/portfolio/visibility-test/")),
+            coverURL: nil, images: [])
+        var writes = 0
+        let admin = AdminSessionStore { request in
+            if request.url?.path.hasSuffix("/session") == true { return try self.reply(request) }
+            writes += 1
+            return try self.reply(request, status: 409,
+                body: #"{"code":"portfolio_visibility_conflict","message":"请刷新后重试","data":{"status":409}}"#)
+        }
+        await admin.signIn(using: account)
+        do {
+            _ = try await admin.updatePortfolioVisibility(album, isVisible: false)
+            XCTFail("Conflict was reported as a successful save")
+        } catch { XCTAssertEqual(writes, 1) }
+        XCTAssertTrue(admin.isAuthenticated)
+        admin.lock()
+    }
+
     func testAccountPublisherLocksVisibleManagementState() async throws {
         let account = BoundAdministratorTestAccount()
         let admin = AdminSessionStore { request in try self.reply(request) }
@@ -6050,6 +6111,65 @@ final class ContentAndAccessTests: XCTestCase {
             endsAt: endsAt ?? Date(timeIntervalSince1970: 4_102_444_800),
             displaySeconds: 2.5
         )
+    }
+
+    func testPortfolioVisibilityDecodesLegacyAndHiddenAlbums() throws {
+        var album = makePortfolio(imageCount: 3)
+        let oldData = try JSONEncoder().encode(album)
+        XCTAssertTrue(try JSONDecoder().decode(Portfolio.self, from: oldData).isVisibleToViewers)
+        album.isVisible = false
+        XCTAssertFalse(try JSONDecoder().decode(Portfolio.self,
+            from: JSONEncoder().encode(album)).isVisibleToViewers)
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: oldData) as? [String: Any])
+        object["isVisible"] = "false"
+        XCTAssertThrowsError(try JSONDecoder().decode(Portfolio.self,
+            from: JSONSerialization.data(withJSONObject: object)))
+    }
+
+    @MainActor
+    func testHiddenAlbumsStayEditableButOutOfViewerCollections() throws {
+        let base = makeManifest(aboutPortraitURL: nil)
+        var album = base.portfolios[0]
+        album.isVisible = false
+        func manifest(_ audience: AppContentAudience) -> AppContentManifest {
+            AppContentManifest(schemaVersion: 1, updatedAt: .now, heroImages: base.heroImages,
+                aboutPortraitURL: nil, launchPosters: [], showreel: nil, dramas: [],
+                portfolios: [album], contentAudience: audience)
+        }
+        let store = PortfolioStore()
+        store.applyPublishedManifest(manifest(.administrator))
+        XCTAssertTrue(store.portfolios.isEmpty)
+        XCTAssertEqual(store.managedPortfolios.map(\.id), [album.id])
+        XCTAssertFalse(try XCTUnwrap(store.managedPortfolios.first).isVisibleToViewers)
+        XCTAssertTrue(AdminContentEditingPolicy.isFullAdministratorManifest(manifest(.administrator)))
+        store.enforcePermissionScope(canViewFullGallery: false, canViewVideo: false)
+        XCTAssertTrue(store.portfolios.isEmpty)
+        album.isVisible = true
+        store.applyPublishedManifest(manifest(.administrator))
+        XCTAssertEqual(store.portfolios.first?.images, album.images)
+        store.applyPublishedManifest(manifest(.viewer))
+        XCTAssertTrue(store.managedPortfolios.isEmpty)
+        store.discardProtectedContent()
+    }
+
+    @MainActor
+    func testEmptyAlbumManifestClearsOldContentAndRejectsLateRefresh() {
+        let base = makeManifest(aboutPortraitURL: nil)
+        let empty = AppContentManifest(schemaVersion: 1, updatedAt: .now,
+            heroImages: base.heroImages, aboutPortraitURL: nil, launchPosters: [],
+            showreel: nil, dramas: [], portfolios: [], contentAudience: .viewer)
+        XCTAssertTrue(ContentManifestPolicy.isValid(empty))
+        XCTAssertTrue(ContentSecurityPolicy.isTrusted(empty))
+        let store = PortfolioStore()
+        store.applyPublishedManifest(base)
+        let oldID = store.beginContentRefresh()
+        let newID = store.beginContentRefresh()
+        XCTAssertTrue(store.completeContentRefresh(newID, with: empty))
+        XCTAssertTrue(store.portfolios.isEmpty)
+        XCTAssertEqual(store.contentOrigin, .network)
+        XCTAssertFalse(store.completeContentRefresh(oldID, with: base))
+        XCTAssertTrue(store.portfolios.isEmpty)
+        store.discardProtectedContent()
     }
 
     private func makeManifest(

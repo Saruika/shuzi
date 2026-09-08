@@ -327,6 +327,46 @@ trait Shuzijun_App_Content_Delivery {
         return $response;
     }
 
+    // An absent flag preserves every existing album. Only an explicit hide
+    // affects delivery; publishing/editing its photos never resets this flag.
+    private static function portfolio_is_visible($id) {
+        return (string) get_post_meta($id, '_app_is_hidden', true) !== '1';
+    }
+
+    public static function update_portfolio_visibility(WP_REST_Request $request) {
+        if (!current_user_can(self::CAPABILITY) || !self::account_authority_enabled()) {
+            return new WP_Error('portfolio_visibility_forbidden', '需要内容管理权限。', array('status' => 403));
+        }
+        // Use the route ID, never a body/query parameter that could override it.
+        $route = $request->get_url_params();
+        $id = absint($route['id'] ?? 0);
+        $post = get_post($id);
+        if (!$post instanceof WP_Post || $post->post_type !== 'portfolio' || $post->post_status !== 'publish') {
+            return new WP_Error('portfolio_not_found', '作品集不存在。', array('status' => 404));
+        }
+        $body = $request->get_json_params();
+        if (!is_array($body) || !isset($body['isVisible'], $body['expectedIsVisible'])
+            || !is_bool($body['isVisible']) || !is_bool($body['expectedIsVisible'])) {
+            return new WP_Error('invalid_visibility', '可见状态必须为布尔值。', array('status' => 400));
+        }
+        // The existing editorial REST lock serializes read/check/write and
+        // revalidates the actor after role revocation/account deletion races.
+        clean_post_cache($id);
+        if (self::portfolio_is_visible($id) !== $body['expectedIsVisible']) {
+            return new WP_Error('portfolio_visibility_conflict', '相册状态已变更，请刷新后重试。', array('status' => 409));
+        }
+        update_post_meta($id, '_app_is_hidden', $body['isVisible'] ? '0' : '1');
+        clean_post_cache($id);
+        if (self::portfolio_is_visible($id) !== $body['isVisible']) {
+            return new WP_Error('portfolio_visibility_failed', '保存失败，请稍后重试。', array('status' => 500));
+        }
+        self::mark_updated();
+        $response = rest_ensure_response(array('portfolioID' => $id, 'isVisible' => $body['isVisible'],
+            'content' => self::manifest('admin')));
+        $response->header('Cache-Control', 'private, no-store');
+        return $response;
+    }
+
     public static function create_portfolio(WP_REST_Request $request) {
         $title = sanitize_text_field((string) $request->get_param('title'));
         $subtitle = sanitize_text_field((string) $request->get_param('subtitle'));
@@ -554,6 +594,10 @@ trait Shuzijun_App_Content_Delivery {
         ));
         $result = array();
         foreach ($posts as $post) {
+            $is_visible = self::portfolio_is_visible($post->ID);
+            // Filter before building image URLs for every non-editor audience,
+            // including full-gallery and legacy premium sessions.
+            if (!$is_visible && $audience !== 'admin') { continue; }
             $gallery = json_decode((string) get_post_meta($post->ID, '_portfolio_gallery', true), true);
             if (!is_array($gallery) || !$gallery) {
                 $gallery = get_children(array(
@@ -641,6 +685,7 @@ trait Shuzijun_App_Content_Delivery {
                 'websiteURL' => get_permalink($post),
                 'coverURL' => $images ? $images[0]['url'] : null,
                 'totalImageCount' => $total_image_count,
+                'isVisible' => $is_visible,
                 'images' => $images,
             );
         }

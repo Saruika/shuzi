@@ -134,6 +134,7 @@ try {
     $saved_gallery = get_post_meta($fixture_portfolio_id, '_portfolio_gallery', true);
     $saved_files = scandir($upload_root);
     $count_before_denials = $attachment_count();
+    require __DIR__ . '/portfolio-visibility-wordpress-integration.php';
     // Installation mismatch intentionally revokes that token. Use a different
     // account so it cannot make the subsequent role-revocation test pass merely
     // because the publisher's session was already invalidated.

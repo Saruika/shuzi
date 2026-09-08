@@ -194,6 +194,11 @@ symlink。候选 `nginx -t`、reload、service active 或任何后置条件失�
 
 ## App Content API 独立发布器
 
+当前代码候选为 **1.5.13.13 相册可见性**，精确清单、发布器摘要与验证边界见
+[build6-preview1](../releases/v1.4.0-build6-preview1.md)。当前代码只接受已审核
+1.5.13.12 清单作为普通升级前置状态；审核站升级工具同样逐文件匹配该版本。
+尚未执行部署。下方旧版本路径与摘要仅为历史操作说明，不得直接复制用于新候选。
+
 `deploy-app-content-release` 只发布 App Content API 的固定代码单元：
 
 - `shuzijun-app-content.php`

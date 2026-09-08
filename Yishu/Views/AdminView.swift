@@ -415,8 +415,8 @@ struct AdminView: View {
     private var portfolioEditor: some View {
         AdminSection(title: "照片作品", subtitle: "新建相册、上传照片与调整内容") {
             Picker("当前相册", selection: selectedPortfolioBinding) {
-                ForEach(store.portfolios) { portfolio in
-                    Text(portfolio.title).tag(Optional(portfolio.id))
+                ForEach(editablePortfolios) { portfolio in
+                    Text(portfolio.title + (portfolio.isVisibleToViewers ? "" : "（已隐藏）")).tag(Optional(portfolio.id))
                 }
             }
             .pickerStyle(.menu)
@@ -474,6 +474,30 @@ struct AdminView: View {
             .disabled(isPublishing || selectedPortfolio == nil)
 
             if let portfolio = selectedPortfolio {
+                Toggle(isOn: Binding(
+                    get: { portfolio.isVisibleToViewers },
+                    set: { visible in Task { await updateVisibility(portfolio, isVisible: visible) } }
+                )) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("相册是否可见")
+                        Text(portfolio.isVisibleToViewers
+                            ? "用户可在作品页查看；关闭后隐藏，照片不会删除。"
+                            : "已对用户隐藏；管理员仍可编辑，开启后恢复显示。")
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .tint(AppTheme.gold)
+                .disabled(isPublishing || !administratorEditorIsReady || portfolio.isVisible == nil)
+                .accessibilityIdentifier("admin-portfolio-visibility")
+
+                if portfolio.isVisible == nil {
+                    Text("后台更新后可设置相册可见性，现有相册编辑不受影响。")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.muted)
+                }
+
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 148), spacing: 8)], spacing: 8) {
                     ForEach(Array(portfolio.images.enumerated()), id: \.element.id) { index, image in
                         ZStack {
@@ -952,16 +976,20 @@ struct AdminView: View {
         }
     }
 
+    private var editablePortfolios: [Portfolio] {
+        store.managedPortfolios.isEmpty ? store.portfolios : store.managedPortfolios
+    }
+
     private var selectedPortfolioBinding: Binding<Int?> {
         Binding(
-            get: { selectedPortfolioID ?? store.portfolios.first?.id },
+            get: { selectedPortfolioID ?? editablePortfolios.first?.id },
             set: { selectedPortfolioID = $0 }
         )
     }
 
     private var selectedPortfolio: Portfolio? {
-        let id = selectedPortfolioID ?? store.portfolios.first?.id
-        return store.portfolios.first { $0.id == id }
+        let id = selectedPortfolioID ?? editablePortfolios.first?.id
+        return editablePortfolios.first { $0.id == id }
     }
 
     private func loadAdministratorContent() async {
@@ -1040,9 +1068,9 @@ struct AdminView: View {
         }
         dramaDrafts = store.dramas.map(DramaDraft.init)
         if selectedPortfolioID.flatMap({ selectedID in
-            store.portfolios.first(where: { $0.id == selectedID })
+            editablePortfolios.first(where: { $0.id == selectedID })
         }) == nil {
-            selectedPortfolioID = store.portfolios.first?.id
+            selectedPortfolioID = editablePortfolios.first?.id
         }
     }
 
@@ -1068,6 +1096,15 @@ struct AdminView: View {
             try applyAdministratorManifest(manifest, contentLoadID: contentLoadID)
         }
         selectedPhotos = []
+    }
+
+    private func updateVisibility(_ portfolio: Portfolio, isVisible: Bool) async {
+        guard !isPublishing, isVisible != portfolio.isVisibleToViewers else { return }
+        await performOperation(success: isVisible ? "相册已恢复显示" : "相册已隐藏，照片仍保留") { contentLoadID in
+            let manifest = try await admin.updatePortfolioVisibility(portfolio, isVisible: isVisible)
+            try ensureAdministratorOperationIsCurrent(contentLoadID)
+            store.applyPublishedManifest(manifest)
+        }
     }
 
     private func createPortfolio() async {

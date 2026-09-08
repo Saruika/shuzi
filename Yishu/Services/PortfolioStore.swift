@@ -85,6 +85,9 @@ final class PortfolioStore: ObservableObject {
     nonisolated private static let cachedManifestPreviewImageCount = 3
     nonisolated private static let lastLaunchPosterIDKey = "cn.com.shuzijun.yishu.last-launch-poster-id"
     @Published private(set) var portfolios: [Portfolio] = Portfolio.fallback
+    /// Only the authenticated content editor consumes this collection. Hidden
+    /// albums must never enter browse, search, favourites or the disk snapshot.
+    @Published private(set) var managedPortfolios: [Portfolio] = []
     @Published private(set) var heroImages: [URL] = ContentCatalog.heroImages
     /// The value explicitly published by an administrator. Keep it separate
     /// from the effective display fallback so editing an unrelated field never
@@ -113,6 +116,7 @@ final class PortfolioStore: ObservableObject {
     }
 
     private func resetToInitialContent() {
+        managedPortfolios = []
         let usesProductionCatalog = serviceEnvironment == .production
         portfolios = usesProductionCatalog ? Portfolio.fallback : []
         heroImages = usesProductionCatalog ? ContentCatalog.heroImages : []
@@ -182,9 +186,8 @@ final class PortfolioStore: ObservableObject {
         }
         guard !isRetired, !Task.isCancelled, generation == cacheRestoreGeneration,
               contentOrigin == .bundled,
-              let cache,
-              !cache.portfolios.isEmpty else { return }
-        portfolios = cache.portfolios
+              let cache else { return }
+        portfolios = cache.portfolios.filter(\.isVisibleToViewers)
         heroImages = cache.heroImages ?? (serviceEnvironment == .production ? ContentCatalog.heroImages : [])
         configuredAboutPortraitURL = cache.aboutPortraitURL ?? (serviceEnvironment == .production ? ContentCatalog.aboutPortraitURL : nil)
         aboutPortraitURL = AboutPortraitSelectionPolicy.select(
@@ -230,16 +233,16 @@ final class PortfolioStore: ObservableObject {
 
     func applyPublishedManifest(_ manifest: AppContentManifest) {
         guard !isRetired, manifest.schemaVersion == 1,
-              !manifest.portfolios.isEmpty,
               ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else { return }
         cacheRestoreGeneration = UUID()
-        portfolios = manifest.portfolios
+        managedPortfolios = manifest.contentAudience == .administrator ? manifest.portfolios : []
+        portfolios = manifest.portfolios.filter(\.isVisibleToViewers)
         heroImages = manifest.heroImages
         configuredAboutPortraitURL = manifest.aboutPortraitURL
         aboutPortraitURL = AboutPortraitSelectionPolicy.select(
             configuredURL: configuredAboutPortraitURL,
             heroImages: manifest.heroImages,
-            portfolios: manifest.portfolios
+            portfolios: portfolios
         )
         // Missing/empty managed posters must never revive bundled or retired copy.
         launchPosters = manifest.launchPosters ?? []
@@ -250,7 +253,7 @@ final class PortfolioStore: ObservableObject {
         statusMessage = nil
         Self.persistCacheInBackground(
             environment: serviceEnvironment,
-            portfolios: manifest.portfolios,
+            portfolios: portfolios,
             heroImages: manifest.heroImages,
             aboutPortraitURL: configuredAboutPortraitURL,
             launchPosters: launchPosters,
@@ -418,7 +421,7 @@ final class PortfolioStore: ObservableObject {
     nonisolated private static func permissionScopedPreviewPortfolios(
         from portfolios: [Portfolio]
     ) -> [Portfolio] {
-        portfolios.map { portfolio in
+        portfolios.filter(\.isVisibleToViewers).map { portfolio in
             let preview = Array(portfolio.images.prefix(cachedManifestPreviewImageCount))
             return Portfolio(
                 id: portfolio.id,
@@ -429,7 +432,8 @@ final class PortfolioStore: ObservableObject {
                 websiteURL: portfolio.websiteURL,
                 coverURL: preview.first?.url ?? portfolio.coverURL,
                 images: preview,
-                totalImageCount: portfolio.displayImageCount
+                totalImageCount: portfolio.displayImageCount,
+                isVisible: portfolio.isVisible
             )
         }
     }

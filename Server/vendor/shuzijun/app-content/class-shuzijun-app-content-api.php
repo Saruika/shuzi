@@ -579,6 +579,13 @@ final class Shuzijun_App_Content_API {
             ),
         ));
 
+        register_rest_route('shuzijun/v1', '/app-content/portfolio/(?P<id>\d+)/visibility', array(
+            'methods' => WP_REST_Server::EDITABLE,
+            'callback' => array(__CLASS__, 'update_portfolio_visibility'),
+            'permission_callback' => array(__CLASS__, 'can_manage'),
+            'args' => array('id' => array('required' => true, 'sanitize_callback' => 'absint')),
+        ));
+
         register_rest_route('shuzijun/v1', '/app-content/portfolio', array(
             'methods' => WP_REST_Server::CREATABLE,
             'callback' => array(__CLASS__, 'create_portfolio'),

@@ -20,10 +20,9 @@ spec.loader.exec_module(a)
 b = a.bootstrap
 a.HTTPS_EDGE = True
 LIVE = b.SITE / 'wp-content/mu-plugins'
-BASELINE = '1644a7c2abc922627adecee38b2a5622a39438a0960bbf31febd334229f96e4d'
-TARGET = '5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe'
+BASELINE = '5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe'
+TARGET = '942a95ee1174707716282998229ada7ea3759328fd3b425a55c8a383e910b4b6'
 CHANGED = (
-    'vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php',
     'vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php',
     'vendor/shuzijun/app-content/class-shuzijun-app-content-api.php',
     'shuzijun-app-content.php',  # Commit entry/version last while PHP is stopped.
