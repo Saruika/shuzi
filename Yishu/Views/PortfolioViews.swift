@@ -151,6 +151,9 @@ struct PortfolioGridView: View {
                 .padding(.bottom, 36)
             }
             .floatingTabBarScrollClearance()
+            // Keep the pinned search inset's geometry stable during push/pop,
+            // but let moving artwork remain visible behind its material.
+            .scrollClipDisabled()
             .refreshable { await refreshContent() }
         }
         .navigationBarTitleDisplayMode(.inline)
@@ -162,7 +165,7 @@ struct PortfolioGridView: View {
                 .padding(.horizontal, 20)
                 .padding(.top, horizontalSizeClass == .regular ? -1 : 0)
                 .padding(.bottom, 10)
-                .background(AppTheme.ink)
+                .background(.ultraThinMaterial)
                 .background {
 #if DEBUG
                     if ProcessInfo.processInfo.arguments.contains("-trace-portfolio-layout-for-testing") {

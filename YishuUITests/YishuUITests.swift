@@ -3,6 +3,60 @@ import XCTest
 import Vision
 
 final class YishuUITests: XCTestCase {
+    func testScrollChromeContinuityInLightAndDarkThemes() {
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+        func capture(_ name: String, app: XCUIApplication) {
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        for theme in ["ivory", "blackGold"] {
+            let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", theme,
+                "-use-deterministic-gallery-images-for-testing",
+                "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"])
+            for orientation in [UIDeviceOrientation.portrait, .landscapeRight] {
+                XCUIDevice.shared.orientation = orientation
+                let window = app.windows.firstMatch
+                let rotated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    let frame = window.frame
+                    return orientation.isLandscape ? frame.width > frame.height : frame.height > frame.width
+                }, object: window)
+                XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 8), .completed,
+                               "滚动检查必须取得实际横竖屏窗口，不能只依赖配置名称")
+                print("PRESENTATION_GEOMETRY scroll-chrome-\(theme): window=\(window.frame)")
+                for tab in ["作品", "影视"] {
+                    tabButton(tab, in: app).tap()
+                    let heading = element(tab == "作品" ? "portfolio-heading" : "credits-heading", in: app)
+                    XCTAssertTrue(heading.waitForExistence(timeout: 8))
+                    let scroll = app.scrollViews.firstMatch
+                    XCTAssertTrue(scroll.exists)
+                    let viewport = scroll.frame
+                    let search = element("portfolio-search-control", in: app)
+                    let searchFrame = search.exists ? search.frame : .zero
+                    capture("chrome-\(theme)-\(tab)-initial", app: app)
+                    scroll.swipeUp()
+                    scroll.swipeUp()
+                    XCTAssertEqual(scroll.frame.minY, viewport.minY, accuracy: 1)
+                    XCTAssertEqual(scroll.frame.height, viewport.height, accuracy: 1)
+                    if tab == "作品" {
+                        XCTAssertTrue(element("portfolio-search-field", in: app).isHittable)
+                        XCTAssertEqual(search.frame.minY, searchFrame.minY, accuracy: 1)
+                        XCTAssertEqual(search.frame.height, searchFrame.height, accuracy: 1)
+                    }
+                    XCTAssertTrue(tabButton("关于", in: app).isHittable)
+                    capture("chrome-\(theme)-\(tab)-scrolled", app: app)
+                    let navigationFrame = tabButton("关于", in: app).frame
+                    let geometry = XCTAttachment(string: "window=\(app.windows.firstMatch.frame); scroll=\(scroll.frame); navigationButton=\(navigationFrame); search=\(searchFrame)")
+                    geometry.name = "chrome-geometry-\(theme)-\(tab)"
+                    geometry.lifetime = .keepAlways
+                    add(geometry)
+                }
+            }
+            app.terminate()
+        }
+    }
+
     func testPublicWorkspaceEntryPreservesLoginGateAndLabelsFullScreenPresentation() {
         let app = XCUIApplication()
         // No account/gate bypass and no screenshot-protection bypass. Only
@@ -1940,6 +1994,7 @@ private extension XCTestCase {
 /// to validate iPadOS 26 windows, whose geometry can be independent from the
 /// device's physical orientation.
 final class YishuAdaptiveLayoutUITests: XCTestCase {
+
     override class var runsForEachTargetApplicationUIConfiguration: Bool { true }
     // ci-ios-tests.sh deliberately disables parallel testing: the process-local
     // evidence must cover all UI configurations before this class tears down.

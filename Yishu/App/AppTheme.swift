@@ -285,7 +285,10 @@ private struct FloatingTabBarScrollClearance: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *), UIDevice.current.userInterfaceIdiom == .phone {
-            content.padding(.bottom, 24)
+            // Reserve room for the final row without shortening the scroll
+            // viewport. Outer padding leaves a hard seam above the glass tabs.
+            content.contentMargins(.bottom, 24, for: .scrollContent)
+                .scrollEdgeEffectStyle(.soft, for: .bottom)
         } else {
             content.contentMargins(.bottom, height, for: .scrollContent)
         }

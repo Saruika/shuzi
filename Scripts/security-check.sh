@@ -105,6 +105,7 @@ python3 Scripts/test-launch-poster-contract.py
 python3 Scripts/test-weather-privacy-contract.py
 python3 Server/tests/drama-link-monitor-test.py
 python3 Scripts/test-album-title-style-contract.py
+python3 Scripts/test-scroll-chrome-contract.py
 python3 Scripts/test-ci-permission-isolation.py
 python3 Scripts/test-ci-test-summary.py
 python3 Scripts/test-distribution-package.py

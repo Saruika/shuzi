@@ -1,5 +1,7 @@
 # Hi，梳子 iOS
 
+**Build 6 发行准备：[滚动区域衔接修复](Server/releases/v1.4.0-build6.md)。** 修复作品搜索栏和底部导航的硬边，保持既有页面风格。正在完成发行检查，尚未上传；不自动撤回 Build 5 的外部审核或过期旧包。
+
 **新增开发候选：[相册可见性开关](Server/releases/v1.4.0-build6-preview1.md)。** 管理员在 App「内容管理 → 照片作品」可隐藏或恢复单个相册，照片保留；普通用户清单同步过滤。旧相册默认可见，代码尚未部署或上传 TestFlight，不改变下方已发布内容记录。
 
 “Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
