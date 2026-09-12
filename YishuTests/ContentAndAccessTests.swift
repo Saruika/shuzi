@@ -2190,6 +2190,10 @@ final class ContentAndAccessTests: XCTestCase {
         }
 
         let expectedLinkedFunctionalTypes = [
+            "NSPrivacyCollectedDataTypeEmailAddress",
+            "NSPrivacyCollectedDataTypePhoneNumber",
+            "NSPrivacyCollectedDataTypeOtherUserContactInfo",
+            "NSPrivacyCollectedDataTypeOtherUserContent",
             "NSPrivacyCollectedDataTypePhotosorVideos",
             "NSPrivacyCollectedDataTypeOtherDiagnosticData",
             "NSPrivacyCollectedDataTypeOtherDataTypes",
