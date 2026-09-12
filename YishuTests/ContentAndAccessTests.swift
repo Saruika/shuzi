@@ -186,18 +186,25 @@ private actor ImagePipelineTestLoader {
     let data: Data
     let responseURL: URL?
     let delayed: Bool
+    let initialFailures: [URLError.Code]
     let onRequest: @Sendable (Int) -> Void
     private(set) var requests: [URLRequest] = []
     private var pending: [Int: CheckedContinuation<(Data, URLResponse), Error>] = [:]
 
     init(data: Data, responseURL: URL? = nil, delayed: Bool = false,
+         initialFailures: [URLError.Code] = [],
          onRequest: @escaping @Sendable (Int) -> Void = { _ in }) {
         self.data = data; self.responseURL = responseURL; self.delayed = delayed; self.onRequest = onRequest
+        self.initialFailures = initialFailures
     }
 
     func load(_ request: URLRequest) async throws -> (Data, URLResponse) {
         let index = requests.count
         requests.append(request)
+        if initialFailures.indices.contains(index) {
+            onRequest(index)
+            throw URLError(initialFailures[index])
+        }
         if !delayed { onRequest(index); return try reply(to: request) }
         // Intentionally ignore cancellation to model a reply already delivered
         // by the network while a workspace/memory purge is taking place.
@@ -230,6 +237,42 @@ private actor ImagePipelineTestLoader {
 
 @MainActor
 final class ArtworkEnvironmentPipelineTests: XCTestCase {
+    func testTransientDisconnectRecoversInsideBoundedImageRetryAndCachesDecodedImage() async throws {
+        let loader = ImagePipelineTestLoader(data: try fixture(),
+            initialFailures: [.networkConnectionLost, .notConnectedToInternet])
+        let pipeline = ArtworkImagePipeline { try await loader.load($0) }
+        let url = AppURL.make("https://www.shuzijun.com.cn/test/reconnect.png")
+        let image = try await pipeline.image(for: url, maxPixelSize: 320)
+        XCTAssertNotNil(image.cgImage)
+        let cached = try await pipeline.image(for: url, maxPixelSize: 320)
+        XCTAssertTrue(image === cached)
+        let requests = await loader.requests
+        XCTAssertEqual(requests.count, 3, "恢复后应命中内存缓存，不再发请求")
+        await pipeline.purgeMemory()
+    }
+
+    func testExhaustedOfflineImageFlightDoesNotPoisonExplicitRetryAfterReconnect() async throws {
+        let loader = ImagePipelineTestLoader(data: try fixture(),
+            initialFailures: Array(repeating: .notConnectedToInternet, count: 3))
+        let pipeline = ArtworkImagePipeline { try await loader.load($0) }
+        let url = AppURL.make("https://www.shuzijun.com.cn/test/reconnect.png")
+        do {
+            _ = try await pipeline.image(for: url, maxPixelSize: 320)
+            XCTFail("持续离线不应被伪装成加载成功")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .notConnectedToInternet)
+        }
+        let failedRequests = await loader.requests
+        XCTAssertEqual(failedRequests.count, 3, "离线重试必须有上限")
+        let failedPreview = await pipeline.cachedPreview(for: url)
+        XCTAssertNil(failedPreview)
+        let recovered = try await pipeline.image(for: url, maxPixelSize: 320)
+        XCTAssertNotNil(recovered.cgImage)
+        let recoveredRequests = await loader.requests
+        XCTAssertEqual(recoveredRequests.count, 4, "重连后必须创建新请求而不是复用失败任务")
+        await pipeline.purgeMemory()
+    }
+
     func testGestureRasterFixtureUsesTheRealDecoderWithoutRemotePhotographs() async throws {
         let url = AppURL.make("https://www.shuzijun.com.cn/wp-content/uploads/gesture-fixture.png")
         let pipeline = ArtworkImagePipeline { try await ArtworkImageUITestFixture.response(for: $0) }
