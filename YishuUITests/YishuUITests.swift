@@ -3,6 +3,98 @@ import XCTest
 import Vision
 
 final class YishuUITests: XCTestCase {
+    func testReviewBannerLeavesNavigationControlsUncovered() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-app-service-environment", "review",
+            "-skip-startup-notification-authorization-for-testing",
+            "-reset-fan-session-for-visual-testing", "-skip-launch-poster-for-visual-testing"]
+        app.launch()
+        defer { app.terminate() }
+
+        let banner = element("workspace-review-banner", in: app)
+        let workspaceEntry = element("access-gate-workspace-entry", in: app)
+        let adminEntry = element("access-gate-admin-entry", in: app)
+        XCTAssertTrue(workspaceEntry.waitForExistence(timeout: 15))
+        XCTAssertTrue(banner.waitForExistence(timeout: 5))
+        XCTAssertTrue(adminEntry.exists)
+        for control in [workspaceEntry, adminEntry] {
+            XCTAssertGreaterThan(control.frame.height, 0)
+            XCTAssertLessThanOrEqual(banner.frame.maxY, control.frame.minY + 1,
+                "演示提示不能覆盖登录页导航按钮：banner=\(banner.frame), control=\(control.frame)")
+            XCTAssertTrue(control.isHittable)
+        }
+        workspaceEntry.tap()
+        let selection = element("workspace-selection", in: app)
+        XCTAssertTrue(selection.waitForExistence(timeout: 5))
+        let navigation = app.navigationBars.firstMatch
+        XCTAssertTrue(navigation.exists)
+        XCTAssertLessThanOrEqual(banner.frame.maxY, navigation.frame.minY + 1,
+            "二级页面导航必须位于演示提示下方：banner=\(banner.frame), navigation=\(navigation.frame)")
+    }
+
+    func testReviewBannerKeepsTabsSearchAndGalleryCloseVisible() {
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+        let orientations: [UIDeviceOrientation] = UIDevice.current.userInterfaceIdiom == .pad
+            ? [.portrait, .landscapeRight] : [.portrait]
+        for theme in ["blackGold", "ivory"] {
+            for orientation in orientations {
+                let app = XCUIApplication()
+                // Deterministic account/image fixtures only; retain the real
+                // secure rendering surface and every environment indicator.
+                app.launchArguments = ["-app-service-environment", "review",
+                    "-cn.com.shuzijun.yishu.appearance.v1", theme,
+                    "-skip-startup-notification-authorization-for-testing",
+                    "-skip-launch-poster-for-visual-testing", "-reset-fan-session-for-visual-testing",
+                    "-bypass-access-gate-for-visual-testing", "-use-deterministic-gallery-images-for-testing",
+                    "-use-multi-image-gallery-for-visual-testing", "-use-review-layout-fixtures-for-testing",
+                    "-hold-home-remote-images-for-visual-testing"]
+                app.launch()
+                XCUIDevice.shared.orientation = orientation
+                let window = app.windows.firstMatch
+                let rotated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                    orientation.isLandscape ? window.frame.width > window.frame.height
+                        : window.frame.height > window.frame.width
+                }, object: window)
+                XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 8), .completed)
+                let works = tabButton("作品", in: app)
+                XCTAssertTrue(works.waitForExistence(timeout: 12))
+                works.tap()
+                let banner = element("workspace-review-banner", in: app)
+                let search = element("portfolio-search-control", in: app)
+                XCTAssertTrue(search.waitForExistence(timeout: 8))
+                XCTAssertTrue(banner.exists)
+                for control in [works, search] {
+                    XCTAssertLessThanOrEqual(banner.frame.maxY, control.frame.minY + 1,
+                        "演示提示遮挡 Tab/搜索：\(theme), \(window.frame), banner=\(banner.frame), control=\(control.frame)")
+                    XCTAssertTrue(control.isHittable)
+                }
+                let card = app.buttons.matching(
+                    NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
+                XCTAssertTrue(card.waitForExistence(timeout: 8))
+                card.tap()
+                let navigation = app.navigationBars.firstMatch
+                XCTAssertTrue(navigation.waitForExistence(timeout: 5))
+                XCTAssertLessThanOrEqual(banner.frame.maxY, navigation.frame.minY + 1)
+                let photo = app.buttons.matching(
+                    NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-")).firstMatch
+                XCTAssertTrue(photo.waitForExistence(timeout: 8))
+                scrollToElement(photo, in: app)
+                photo.tap()
+                let close = element("gallery-close", in: app)
+                XCTAssertTrue(close.waitForExistence(timeout: 8))
+                XCTAssertTrue(banner.exists, "全屏图片仍须标明演示环境")
+                XCTAssertLessThanOrEqual(banner.frame.maxY, close.frame.minY + 1)
+                XCTAssertTrue(close.isHittable)
+                close.tap()
+                let dismissed = XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "exists == false"), object: close)
+                XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
+                XCTAssertTrue(photo.exists)
+                app.terminate()
+            }
+        }
+    }
+
     func testScrollChromeContinuityInLightAndDarkThemes() {
         addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
         func capture(_ name: String, app: XCUIApplication) {

@@ -61,13 +61,17 @@ if find "$app_path" -type f \
 fi
 
 secret_pattern='AKID[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16}|-----BEGIN ([A-Z0-9 ]+)?PRIVATE KEY-----|Secret(Key|Id)[[:space:]]*[:=]'
-if strings "$executable" | grep -Eiq "$secret_pattern"; then
+# Consume the full strings stream: grep -q may terminate it early, producing
+# SIGPIPE under pipefail and incorrectly making a detected match look false.
+if strings "$executable" | grep -Ei "$secret_pattern" >/dev/null; then
   printf 'release-bundle-audit: sensitive string found\n' >&2
   exit 1
 fi
 
-if strings "$executable" | grep -Fq -- '-preview-admin-launch-poster-for-testing'; then
-  printf 'release-bundle-audit: administrator preview fixture found\n' >&2
+if strings "$executable" | grep -F \
+  -e '-preview-admin-launch-poster-for-testing' \
+  -e '-use-review-layout-fixtures-for-testing' >/dev/null; then
+  printf 'release-bundle-audit: debug presentation fixture found\n' >&2
   exit 1
 fi
 

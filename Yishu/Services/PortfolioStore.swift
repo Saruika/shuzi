@@ -313,9 +313,27 @@ final class PortfolioStore: ObservableObject {
     /// Gives layout tests a deterministic multi-page album without changing
     /// release content or reaching the live publishing service.
     func configureMultiImageGalleryForVisualTestingIfNeeded() {
-        guard ProcessInfo.processInfo.arguments.contains(
-            "-use-multi-image-gallery-for-visual-testing"
-        ), let firstPortfolio = portfolios.first else { return }
+        let arguments = ProcessInfo.processInfo.arguments
+        guard arguments.contains("-use-multi-image-gallery-for-visual-testing") else { return }
+        if serviceEnvironment == .review {
+            // Review must never borrow the production catalog, even in a UI
+            // fixture. The synthetic image loader keeps these URLs offline.
+            guard portfolios.isEmpty,
+                  arguments.contains("-use-review-layout-fixtures-for-testing"),
+                  arguments.contains("-use-deterministic-gallery-images-for-testing"),
+                  arguments.contains("-bypass-access-gate-for-visual-testing") else { return }
+            let images = (1...3).map { index in
+                let url = AppURL.make("https://review.shuzijun.com.cn/wp-content/uploads/layout-fixture-\(index).jpg")
+                return PortfolioImage(id: index, url: url, fullSizeURL: url,
+                    altText: "布局测试色块 \(index)")
+            }
+            portfolios = [Portfolio(id: -1, title: "演示布局测试", subtitle: "仅本地合成图片",
+                eyebrow: "布局测试", slug: "layout-fixture",
+                websiteURL: AppURL.make("https://review.shuzijun.com.cn/portfolio/layout-fixture/"),
+                coverURL: images.first?.url, images: images, totalImageCount: images.count)]
+            return
+        }
+        guard let firstPortfolio = portfolios.first else { return }
 
         let visualTestImages = Portfolio.fallback.compactMap(\.images.first)
         guard visualTestImages.count >= 3 else { return }

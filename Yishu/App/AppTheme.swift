@@ -198,16 +198,13 @@ private struct AppAppearanceModifier: ViewModifier {
     var isAppRoot = false
     func body(content: Content) -> some View {
         let theme = AppearanceStore.shared.theme
-        content
-            .background { AppTheme.ink.ignoresSafeArea(.container) }
-            .scrollContentBackground(.hidden)
-            .environment(\.colorScheme, theme.colorScheme)
-            .preferredColorScheme(isAppRoot ? AppearanceStore.shared.systemColorScheme : theme.colorScheme)
-            .foregroundStyle(theme.palette.text.color)
-            .tint(theme.palette.accent.color)
-            .themeNavigationChrome()
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if serviceEnvironment == .review {
+        Group {
+            if serviceEnvironment == .review {
+                // A safeAreaInset outside the protected hosting hierarchy can
+                // leave native navigation/search bars using the window's old
+                // top inset. Reserve a real row so those controls cannot sit
+                // underneath the environment notice. Production is unchanged.
+                VStack(spacing: 0) {
                     Text("演示环境 · 独立账号与资料")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(theme.palette.text.color)
@@ -216,8 +213,19 @@ private struct AppAppearanceModifier: ViewModifier {
                         .frame(maxWidth: .infinity)
                         .background(.regularMaterial)
                         .accessibilityIdentifier("workspace-review-banner")
+                    content.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+            } else {
+                content
             }
+        }
+            .background { AppTheme.ink.ignoresSafeArea(.container) }
+            .scrollContentBackground(.hidden)
+            .environment(\.colorScheme, theme.colorScheme)
+            .preferredColorScheme(isAppRoot ? AppearanceStore.shared.systemColorScheme : theme.colorScheme)
+            .foregroundStyle(theme.palette.text.color)
+            .tint(theme.palette.accent.color)
+            .themeNavigationChrome()
     }
 }
 
