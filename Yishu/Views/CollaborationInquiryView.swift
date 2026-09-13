@@ -87,10 +87,11 @@ struct CollaborationInquiryView: View {
             Alert(title: Text(item.title), message: Text(item.message), dismissButton: .default(Text("知道了")))
         }
         .alert("未找到可用的邮件应用", isPresented: $showMailFallback) {
+            Button("复制邀约内容") { copyInquiry() }
             Button("打开 QQ 邮箱网页版") { openURL(ContentCatalog.qqMailWebURL) }
             Button("取消", role: .cancel) { }
         } message: {
-            Text("邀约内容已经复制，可在任意邮件或聊天应用中粘贴发送。")
+            Text("邀约尚未发送，也未自动复制。你可以选择复制，再粘贴到邮件中发送。")
         }
         .task { await refreshSubmissionCapability() }
     }
@@ -264,7 +265,7 @@ struct CollaborationInquiryView: View {
             }
 
             Button {
-                UIPasteboard.general.string = inquiryText
+                copyInquiry()
                 notice = .inquiryCopied(serverSubmissionEnabled: serverSubmissionEnabled)
             } label: {
                 Text("复制邀约内容")
@@ -361,6 +362,10 @@ struct CollaborationInquiryView: View {
         serverSubmissionEnabled = capabilities.collaborationSubmissionEnabled
     }
 
+    private func copyInquiry() {
+        UIPasteboard.general.string = inquiryText
+    }
+
     private func sendEmail() {
         var components = URLComponents()
         components.scheme = "mailto"
@@ -373,13 +378,11 @@ struct CollaborationInquiryView: View {
             URLQueryItem(name: "body", value: inquiryText),
         ]
         guard let url = components.url else {
-            UIPasteboard.general.string = inquiryText
             showMailFallback = true
             return
         }
         openURL(url) { accepted in
             guard !accepted else { return }
-            UIPasteboard.general.string = inquiryText
             showMailFallback = true
         }
     }

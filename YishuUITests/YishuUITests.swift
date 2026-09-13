@@ -1358,6 +1358,43 @@ final class YishuUITests: XCTestCase {
                       "清除后只能为空或系统提供的占位提示")
     }
 
+    func testUnavailableMailOffersCopyWithoutClaimingItAlreadyCopied() {
+        let app = launchApp(arguments: ["-open-about-for-visual-testing",
+            "-hold-home-remote-images-for-visual-testing"], screenProtectionEnabled: true)
+        defer { app.terminate() }
+        let collaboration = element("about-collaboration", in: app)
+        scrollToElement(collaboration, in: app)
+        collaboration.tap()
+        let name = app.textFields["联系人 / 称呼"].firstMatch
+        let contact = app.textFields["手机 / 微信 / 邮箱"].firstMatch
+        XCTAssertTrue(name.waitForExistence(timeout: 8))
+        name.tap()
+        name.typeText("QA mail fallback")
+        // Bring the next field above the on-screen keyboard before typing.
+        app.scrollViews.firstMatch.swipeUp()
+        scrollToElement(contact, in: app)
+        contact.tap()
+        contact.typeText("qa@example.invalid")
+        let email = element("collaboration-email", in: app)
+        scrollToElement(email, in: app)
+        XCTAssertTrue(email.isHittable)
+        email.tap()
+
+        // The simulator has no configured mail handler; no mail is sent.
+        let fallback = app.alerts["未找到可用的邮件应用"]
+        guard fallback.waitForExistence(timeout: 8) else {
+            XCTFail("必须实际复现邮件应用不可用的分支，不能跳过")
+            return
+        }
+        XCTAssertTrue(fallback.staticTexts[
+            "邀约尚未发送，也未自动复制。你可以选择复制，再粘贴到邮件中发送。"].exists)
+        XCTAssertTrue(fallback.buttons["复制邀约内容"].exists)
+        fallback.buttons["取消"].tap()
+        XCTAssertTrue(element("collaboration-heading", in: app).exists)
+        XCTAssertEqual(name.value as? String, "QA mail fallback")
+        XCTAssertEqual(contact.value as? String, "qa@example.invalid")
+    }
+
     func testCollaborationAndAdministratorRoutesRemainReachable() {
         let app = launchApp(arguments: ["-open-about-for-visual-testing"])
         assertExists("about-heading", in: app)
