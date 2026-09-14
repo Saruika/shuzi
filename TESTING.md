@@ -1,5 +1,12 @@
 # Hi，梳子测试与质量门禁
 
+## 当前隐私邮箱回归（2026-09-14）
+
+- 隐私与个人信息请求使用 `support@shuzijun.com.cn`；合作邀约继续使用 `369476120@qq.com`。下方 Build 44 的旧地址仅为历史验收记录。
+- 执行 `python3 Scripts/test-privacy-alignment.py`，核对 App 常量、显示文字、邮件链接与官网政策正文一致，并保持合作邮箱独立。
+- iOS 用例 `ContentAndAccessTests.testBusinessAndPrivacyMailboxesAreExplicitlySeparated` 核对实际生成的邮件 URL；PHP 插件合同同步核对官网文字及链接。
+- 仅调整联系地址，不修改数据收集声明、同意版本、业务流程或页面设计。源码验证不代表官网部署、当前安装包或 Apple 审核资料已更新。
+
 ## 本地验证
 
 执行以下命令即可复现 GitHub 的主要检查：

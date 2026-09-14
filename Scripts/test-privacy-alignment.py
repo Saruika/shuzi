@@ -34,6 +34,30 @@ class PrivacyAlignmentTests(unittest.TestCase):
                 with self.subTest(path=path, phrase=phrase):
                     self.assertIn(phrase, source)
 
+    def test_privacy_mailbox_and_link_match_in_app_and_website(self):
+        catalog = (ROOT / 'Yishu/Models/Portfolio.swift').read_text()
+        app_policy = (ROOT / 'Yishu/Views/PrivacyPolicyView.swift').read_text()
+        web_policy = (ROOT / 'Server/app-privacy-policy.html').read_text()
+        address = 'support@shuzijun.com.cn'
+        self.assertIn(f'static let privacyContactEmailAddress = "{address}"', catalog)
+        self.assertIn(
+            r'static let privacyEmailURL = AppURL.make("mailto:\(privacyContactEmailAddress)")',
+            catalog,
+        )
+        self.assertIn(r'\(ContentCatalog.privacyContactEmailAddress)', app_policy)
+        self.assertIn('Link(destination: ContentCatalog.privacyEmailURL)', app_policy)
+        self.assertIn(f'<a href="mailto:{address}">{address}</a>', web_policy)
+        for source in (catalog, app_policy, web_policy):
+            self.assertNotIn('sariki@me.com', source.lower())
+
+    def test_collaboration_keeps_its_separate_qq_mailbox(self):
+        catalog = (ROOT / 'Yishu/Models/Portfolio.swift').read_text()
+        web_policy = (ROOT / 'Server/app-privacy-policy.html').read_text()
+        address = '369476120@qq.com'
+        self.assertIn(f'static let collaborationEmailAddress = "{address}"', catalog)
+        self.assertIn(f'static let emailURL = AppURL.make("mailto:{address}")', catalog)
+        self.assertIn(f'<a href="mailto:{address}">{address}</a>', web_policy)
+
     def test_collaboration_uses_live_session_not_legacy_keychain(self):
         source = (ROOT / 'Yishu/Views/CollaborationInquiryView.swift').read_text()
         self.assertNotIn('SecItemCopyMatching', source)

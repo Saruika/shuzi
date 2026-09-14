@@ -3093,8 +3093,8 @@ final class ContentAndAccessTests: XCTestCase {
     func testBusinessAndPrivacyMailboxesAreExplicitlySeparated() {
         XCTAssertEqual(ContentCatalog.collaborationEmailAddress, "369476120@qq.com")
         XCTAssertEqual(ContentCatalog.emailURL.absoluteString, "mailto:369476120@qq.com")
-        XCTAssertEqual(ContentCatalog.privacyContactEmailAddress, "sariki@me.com")
-        XCTAssertEqual(ContentCatalog.privacyEmailURL.absoluteString, "mailto:sariki@me.com")
+        XCTAssertEqual(ContentCatalog.privacyContactEmailAddress, "support@shuzijun.com.cn")
+        XCTAssertEqual(ContentCatalog.privacyEmailURL.absoluteString, "mailto:support@shuzijun.com.cn")
         XCTAssertNotEqual(
             ContentCatalog.collaborationEmailAddress,
             ContentCatalog.privacyContactEmailAddress

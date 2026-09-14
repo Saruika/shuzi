@@ -2844,7 +2844,8 @@ expect_true(
         && strpos($privacy_policy_source, '哈希化网络指纹') !== false
         && strpos($privacy_policy_source, '不用于跟踪或广告') !== false
         && strpos($privacy_policy_source, 'mailto:369476120@qq.com') !== false
-        && strpos($privacy_policy_source, 'mailto:sariki@me.com') !== false
+        && strpos($privacy_policy_source, '<a href="mailto:support@shuzijun.com.cn">support@shuzijun.com.cn</a>') !== false
+        && strpos($privacy_policy_source, 'sariki@me.com') === false
         && strpos($privacy_policy_source, '合作邀约、待发邮件记录和关联审计') !== false,
     'Build 33 公开隐私政策必须与 Apple 即时验证、加密撤销凭据和自主删除实现一致'
 );
