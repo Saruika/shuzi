@@ -714,9 +714,9 @@ struct FanAccountView: View {
 
                         Text(
                             !account.hasPushEligibleSession
-                                ? "完成账号资料并处于待审批或已通过状态后，可开启消息通知。"
+                                ? "允许系统通知后，完成账号资料并处于待审批或已通过状态会自动连接通知服务。"
                                 : pushNotifications.notificationsEnabled
-                                ? "用于接收账号审批、合作进度和作品动态。可随时关闭；关闭后会从账号解绑此设备。"
+                                ? "系统允许通知后会自动连接，用于接收账号审批、合作进度和作品动态。可随时关闭；关闭后会从账号解绑此设备。"
                                 : "已关闭，此设备不再接收账号推送。"
                         )
                         .font(.caption)
@@ -745,7 +745,7 @@ struct FanAccountView: View {
                                 .frame(minHeight: 44)
                                 .accessibilityIdentifier("fan-push-notification-retry")
                             case .requiresSignIn:
-                                Text("通知绑定需要更新登录凭据。请退出当前粉丝账号后重新登录，再开启消息通知。")
+                                Text("通知绑定需要更新登录凭据。请退出当前粉丝账号后重新登录，系统允许通知时会自动重新连接。")
                                     .font(.caption)
                                     .foregroundStyle(AppTheme.muted)
                                     .accessibilityIdentifier("fan-push-notification-sign-in-required")

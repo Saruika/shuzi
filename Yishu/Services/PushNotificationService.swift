@@ -22,13 +22,9 @@ enum PushNotificationPreferencePolicy {
         associationKey: String,
         userID: String?
     ) -> Bool {
-        guard let userID,
-              defaults.object(forKey: preferenceKey) != nil,
-              defaults.bool(forKey: preferenceKey),
-              let storedAssociation = defaults.string(forKey: associationKey) else {
-            return false
-        }
-        return storedAssociation == association(for: userID)
+        guard let userID else { return false }
+        return savedChoice(for: userID, in: defaults, preferenceKey: preferenceKey,
+                           associationKey: associationKey) == true
     }
 
     static func setEnabled(
@@ -38,6 +34,19 @@ enum PushNotificationPreferencePolicy {
         preferenceKey: String,
         associationKey: String
     ) {
+        // Keep each account's choice, especially opt-out, when another account
+        // signs in. The legacy pair still describes the last selected account.
+        var choices = defaults.dictionary(forKey: choicesKey(preferenceKey)) as? [String: Bool] ?? [:]
+        if defaults.object(forKey: preferenceKey) != nil {
+            if let previous = defaults.string(forKey: associationKey), choices[previous] == nil {
+                choices[previous] = defaults.bool(forKey: preferenceKey)
+            } else if defaults.string(forKey: associationKey) == nil,
+                      !defaults.bool(forKey: preferenceKey) {
+                defaults.set(true, forKey: legacyOptOutKey(preferenceKey))
+            }
+        }
+        choices[association(for: userID)] = enabled
+        defaults.set(choices, forKey: choicesKey(preferenceKey))
         defaults.set(enabled, forKey: preferenceKey)
         defaults.set(association(for: userID), forKey: associationKey)
     }
@@ -48,14 +57,69 @@ enum PushNotificationPreferencePolicy {
         associationKey: String,
         userID: String
     ) -> Bool {
-        guard defaults.object(forKey: preferenceKey) != nil else { return false }
-        if let storedAssociation = defaults.string(forKey: associationKey) {
-            return storedAssociation == association(for: userID)
-        }
-        // Build 45 removed the association when someone explicitly switched
-        // notifications off. Respect that existing opt-out after upgrading.
-        return !defaults.bool(forKey: preferenceKey)
+        savedChoice(for: userID, in: defaults, preferenceKey: preferenceKey,
+                    associationKey: associationKey) != nil
     }
+
+    /// iOS authorization is the user's opt-in; a second App toggle is not
+    /// required. Quiet/temporary authorization is not an explicit Allow.
+    /// Call only after validating the current account and session.
+    static func enableAfterSystemAuthorization(
+        _ status: UNAuthorizationStatus,
+        for userID: String,
+        in defaults: UserDefaults,
+        preferenceKey: String,
+        associationKey: String
+    ) {
+        guard status == .authorized,
+              !hasExplicitChoice(in: defaults, preferenceKey: preferenceKey,
+                                 associationKey: associationKey, userID: userID) else { return }
+        setEnabled(true, for: userID, in: defaults, preferenceKey: preferenceKey,
+                   associationKey: associationKey)
+    }
+
+    static func remove(
+        for userID: String,
+        in defaults: UserDefaults,
+        preferenceKey: String,
+        associationKey: String
+    ) {
+        var choices = defaults.dictionary(forKey: choicesKey(preferenceKey)) as? [String: Bool] ?? [:]
+        choices.removeValue(forKey: association(for: userID))
+        if choices.isEmpty {
+            defaults.removeObject(forKey: choicesKey(preferenceKey))
+        } else {
+            defaults.set(choices, forKey: choicesKey(preferenceKey))
+        }
+        if defaults.string(forKey: associationKey) == association(for: userID) {
+            defaults.removeObject(forKey: preferenceKey)
+            defaults.removeObject(forKey: associationKey)
+        }
+    }
+
+    private static func savedChoice(
+        for userID: String,
+        in defaults: UserDefaults,
+        preferenceKey: String,
+        associationKey: String
+    ) -> Bool? {
+        let identifier = association(for: userID)
+        if let choices = defaults.dictionary(forKey: choicesKey(preferenceKey)) as? [String: Bool],
+           let choice = choices[identifier] { return choice }
+        if defaults.object(forKey: preferenceKey) != nil {
+            if defaults.string(forKey: associationKey) == identifier {
+                return defaults.bool(forKey: preferenceKey)
+            }
+            // Build 45's unscoped explicit opt-out cannot safely be assigned
+            // to one account. Preserve it unless that account explicitly opts in.
+            if defaults.string(forKey: associationKey) == nil,
+               !defaults.bool(forKey: preferenceKey) { return false }
+        }
+        return defaults.bool(forKey: legacyOptOutKey(preferenceKey)) ? false : nil
+    }
+
+    private static func choicesKey(_ preferenceKey: String) -> String { preferenceKey + "-account-choices" }
+    private static func legacyOptOutKey(_ preferenceKey: String) -> String { preferenceKey + "-legacy-opt-out" }
 
     static func association(for userID: String) -> String {
         SHA256.hash(data: Data(userID.lowercased().utf8))
@@ -401,7 +465,7 @@ final class PushNotificationCoordinator: ObservableObject {
         }
     }
 
-    /// After explicit notification consent and a completed fan login,
+    /// After system notification consent and a completed fan login,
     /// binds the volatile APNs token through that same protected fan session.
     /// The token is deliberately never written to UserDefaults, Keychain or logs.
     func synchronize(with account: any PushNotificationAccount) async {
@@ -448,6 +512,10 @@ final class PushNotificationCoordinator: ObservableObject {
               account.pushEligibleUserID == eligibleUserID,
               account.pushSessionGeneration == sessionGeneration else { return }
         authorizationStatus = status
+        PushNotificationPreferencePolicy.enableAfterSystemAuthorization(
+            status, for: eligibleUserID, in: defaults,
+            preferenceKey: preferenceKey, associationKey: associationKey
+        )
         if status == .authorized || status == .provisional || status == .ephemeral {
             PushStartupConsentPolicy.consume(
                 for: eligibleUserID, in: defaults,
@@ -558,6 +626,14 @@ final class PushNotificationCoordinator: ObservableObject {
         bindingRefreshTask?.cancel()
         bindingRefreshTask = nil
         cancelRecovery(resetAttempts: true)
+    }
+
+    func removePreferenceForDeletedAccount(_ userID: String) {
+        guard !isRetired else { return }
+        PushNotificationPreferencePolicy.remove(
+            for: userID, in: defaults, preferenceKey: preferenceKey, associationKey: associationKey
+        )
+        if accountUserID == userID { accountContextDidChange(to: nil) }
     }
 
     func setNotificationsEnabled(_ enabled: Bool, for account: any PushNotificationAccount) async {

@@ -753,6 +753,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
     @Published private(set) var appleCredentialAccessState: FanAppleCredentialAccessState = .notRequired
     @Published private(set) var sessions: [FanSessionRecord] = []
     @Published private(set) var removedAccountUserID: String?
+    @Published private(set) var confirmedDeletedAccountUserID: String?
     @Published private(set) var isWorking = false
     @Published private(set) var hasSavedSession = false
     @Published private(set) var pushSessionGeneration: UInt64 = 0
@@ -1909,6 +1910,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
             // namespace even if the user switched accounts while awaiting the
             // response, but never clear a newer account's token.
             removedAccountUserID = deletingUserID
+            confirmedDeletedAccountUserID = deletingUserID
             guard FanAccountOperationGuard.canAccept(
                 requestGeneration: operationGeneration,
                 currentGeneration: refreshGeneration,
@@ -1970,7 +1972,10 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
                 authorized: true
             )
             guard response.ok else { throw FanAccountError.invalidResponse }
-            if let deletingUserID { removedAccountUserID = deletingUserID }
+            if let deletingUserID {
+                removedAccountUserID = deletingUserID
+                confirmedDeletedAccountUserID = deletingUserID
+            }
             let isSameAccountContext: Bool
             if let deletingUserID {
                 isSameAccountContext = profile?.userID == deletingUserID

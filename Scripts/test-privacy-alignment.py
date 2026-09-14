@@ -58,6 +58,15 @@ class PrivacyAlignmentTests(unittest.TestCase):
         self.assertIn(f'static let emailURL = AppURL.make("mailto:{address}")', catalog)
         self.assertIn(f'<a href="mailto:{address}">{address}</a>', web_policy)
 
+    def test_both_policies_explain_automatic_notifications_and_account_opt_out(self):
+        for path in ['Yishu/Views/PrivacyPolicyView.swift', 'Server/app-privacy-policy.html']:
+            source = (ROOT / path).read_text()
+            for phrase in ['系统已允许通知', '无需再手动打开 App 内开关',
+                           '未登录或资料未完成时不会上传设备令牌', '账号哈希',
+                           '服务器确认账号删除后清除该账号本机偏好', '不继承旧账号设备绑定或消息']:
+                with self.subTest(path=path, phrase=phrase):
+                    self.assertIn(phrase, source)
+
     def test_collaboration_uses_live_session_not_legacy_keychain(self):
         source = (ROOT / 'Yishu/Views/CollaborationInquiryView.swift').read_text()
         self.assertNotIn('SecItemCopyMatching', source)

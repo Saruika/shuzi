@@ -205,6 +205,10 @@ struct RootView: View {
             favorites.removeData(for: userID)
             recentlyViewed.removeData(for: userID)
         }
+        .onChange(of: fanAccount.confirmedDeletedAccountUserID, initial: true) { _, userID in
+            guard let userID else { return }
+            pushNotifications.removePreferenceForDeletedAccount(userID)
+        }
         .onChange(of: fanAccount.profile?.status) { _, status in
             if fanAccount.isApproved || shouldBypassAccessGate {
                 Task { await prepareAuthorizedContentIfNeeded() }
