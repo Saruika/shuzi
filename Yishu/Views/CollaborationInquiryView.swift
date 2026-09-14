@@ -1,5 +1,4 @@
 import SwiftUI
-import Security
 import UIKit
 
 struct CollaborationInquiryView: View {
@@ -93,7 +92,13 @@ struct CollaborationInquiryView: View {
         } message: {
             Text("邀约尚未发送，也未自动复制。你可以选择复制，再粘贴到邮件中发送。")
         }
-        .task { await refreshSubmissionCapability() }
+        .onChange(of: fanAccount.collaborationContext) { _, _ in
+            serverSubmissionEnabled = false
+            notice = nil
+            showMailFallback = false
+            resetSubmittedForm()
+        }
+        .task(id: fanAccount.collaborationContext) { await refreshSubmissionCapability() }
     }
 
     private var header: some View {
@@ -315,7 +320,8 @@ struct CollaborationInquiryView: View {
     }
 
     private func submitInquiry() async {
-        guard serverSubmissionEnabled, canSend else { return }
+        guard serverSubmissionEnabled, canSend,
+              let context = fanAccount.collaborationContext else { return }
         isSubmitting = true
         defer { isSubmitting = false }
 
@@ -331,10 +337,12 @@ struct CollaborationInquiryView: View {
                 budget: budget,
                 details: details
             )
-            let receipt = try await submissionClient.submit(draft)
+            let receipt = try await submissionClient.submit(draft, using: fanAccount)
+            guard fanAccount.collaborationContext == context, !Task.isCancelled else { return }
             notice = .submitted(requestID: receipt.requestID)
             resetSubmittedForm()
         } catch {
+            guard fanAccount.collaborationContext == context, !Task.isCancelled else { return }
             let message = (error as? LocalizedError)?.errorDescription
                 ?? CollaborationSubmissionError.networkUnavailable.errorDescription
                 ?? "合作邀约暂时无法提交。"
@@ -349,16 +357,17 @@ struct CollaborationInquiryView: View {
         city = ""
         budget = ""
         details = ""
+        projectType = .drama
+        preferredDate = Calendar.current.date(byAdding: .day, value: 14, to: .now) ?? .now
         acceptsSubmissionNotice = false
         submissionID = UUID()
     }
 
     private func refreshSubmissionCapability() async {
-        guard fanAccount.isApproved,
-              let capabilities = try? await submissionClient.fetchCapabilities() else {
-            serverSubmissionEnabled = false
-            return
-        }
+        serverSubmissionEnabled = false
+        guard let context = fanAccount.collaborationContext,
+              let capabilities = try? await submissionClient.fetchCapabilities(using: fanAccount),
+              fanAccount.collaborationContext == context, !Task.isCancelled else { return }
         serverSubmissionEnabled = capabilities.collaborationSubmissionEnabled
     }
 
@@ -711,9 +720,15 @@ enum CollaborationSubmissionError: LocalizedError {
     }
 }
 
+@MainActor
+protocol CollaborationAccount: AnyObject {
+    var collaborationContext: FanNotificationContext? { get }
+    func authorizeCollaborationRequest(_ request: inout URLRequest, context: FanNotificationContext) throws
+}
+
+@MainActor
 struct CollaborationSubmissionClient {
-    private let apiRoot = AppURL.make("https://shuzijun.com.cn/wp-json")
-    private let session: URLSession
+    private let send: (URLRequest) async throws -> (Data, URLResponse)
 
     init(
         session: URLSession = SecureURLSessionFactory.make(
@@ -721,17 +736,22 @@ struct CollaborationSubmissionClient {
             resourceTimeout: 45
         )
     ) {
-        self.session = session
+        self.send = { try await session.data(for: $0) }
     }
 
-    func fetchCapabilities() async throws -> AppFeatureCapabilities {
-        let credentials = try CollaborationFanCredential.load()
-        let endpoint = apiRoot.appending(path: "shuzijun/v1/app-capabilities")
+    init(send: @escaping (URLRequest) async throws -> (Data, URLResponse)) {
+        self.send = send
+    }
+
+    func fetchCapabilities(using account: any CollaborationAccount) async throws -> AppFeatureCapabilities {
+        guard let context = account.collaborationContext else { throw CollaborationSubmissionError.sessionExpired }
+        let endpoint = context.environment.apiRoot.appending(path: "shuzijun/v1/app-capabilities")
         let (data, http) = try await response(
             endpoint: endpoint,
             method: "GET",
             body: nil,
-            credentials: credentials,
+            account: account,
+            context: context,
             maximumBytes: 16 * 1_024
         )
         guard (200..<300).contains(http.statusCode) else {
@@ -751,15 +771,16 @@ struct CollaborationSubmissionClient {
         return capabilities
     }
 
-    func submit(_ draft: CollaborationSubmissionDraft) async throws
+    func submit(_ draft: CollaborationSubmissionDraft, using account: any CollaborationAccount) async throws
         -> CollaborationSubmissionReceipt {
-        let credentials = try CollaborationFanCredential.load()
-        let endpoint = apiRoot.appending(path: "shuzijun/v1/collaboration-requests")
+        guard let context = account.collaborationContext else { throw CollaborationSubmissionError.sessionExpired }
+        let endpoint = context.environment.apiRoot.appending(path: "shuzijun/v1/collaboration-requests")
         let (data, http) = try await response(
             endpoint: endpoint,
             method: "POST",
             body: try JSONEncoder().encode(draft),
-            credentials: credentials,
+            account: account,
+            context: context,
             maximumBytes: 64 * 1_024
         )
         guard (200..<300).contains(http.statusCode) else {
@@ -784,10 +805,13 @@ struct CollaborationSubmissionClient {
         endpoint: URL,
         method: String,
         body: Data?,
-        credentials: CollaborationFanCredential,
+        account: any CollaborationAccount,
+        context: FanNotificationContext,
         maximumBytes: Int
     ) async throws -> (Data, HTTPURLResponse) {
-        guard AppNetworkSecurityPolicy.isTrustedAdminAPIURL(endpoint),
+        guard context.environment.allowsAPIURL(endpoint),
+              account.collaborationContext == context,
+              !Task.isCancelled,
               ["GET", "POST"].contains(method) else {
             throw CollaborationSubmissionError.invalidResponse
         }
@@ -803,18 +827,24 @@ struct CollaborationSubmissionClient {
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
         request.setValue("Yishu-iOS-Collaboration/1.0", forHTTPHeaderField: "User-Agent")
-        request.setValue(credentials.installID, forHTTPHeaderField: "X-Yishu-Install-ID")
-        request.setValue("Bearer \(credentials.token)", forHTTPHeaderField: "Authorization")
+        try account.authorizeCollaborationRequest(&request, context: context)
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await send(request)
         } catch {
+            guard account.collaborationContext == context, !Task.isCancelled else {
+                throw CollaborationSubmissionError.sessionExpired
+            }
             throw CollaborationSubmissionError.networkUnavailable
+        }
+        guard account.collaborationContext == context, !Task.isCancelled else {
+            throw CollaborationSubmissionError.sessionExpired
         }
         guard data.count <= maximumBytes,
               let http = response as? HTTPURLResponse,
-              AppNetworkSecurityPolicy.isTrustedAdminAPIURL(http.url) else {
+              http.url == endpoint,
+              context.environment.allowsAPIURL(http.url) else {
             throw CollaborationSubmissionError.invalidResponse
         }
         return (data, http)
@@ -860,42 +890,4 @@ struct CollaborationSubmissionClient {
 
 private struct CollaborationServerError: Decodable {
     let message: String?
-}
-
-private struct CollaborationFanCredential {
-    let token: String
-    let installID: String
-
-    static func load() throws -> CollaborationFanCredential {
-        guard let tokenData = loadKeychain(account: "session-token"),
-              let token = String(data: tokenData, encoding: .utf8),
-              token.range(
-                of: #"^[A-Za-z0-9_-]{43,128}$"#,
-                options: .regularExpression
-              ) != nil,
-              let installData = loadKeychain(account: "installation-id"),
-              let rawInstallID = String(data: installData, encoding: .utf8),
-              let installUUID = UUID(uuidString: rawInstallID) else {
-            throw CollaborationSubmissionError.sessionExpired
-        }
-        return CollaborationFanCredential(
-            token: token,
-            installID: installUUID.uuidString.lowercased()
-        )
-    }
-
-    private static func loadKeychain(account: String) -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "cn.com.shuzijun.yishu.fan-account",
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else {
-            return nil
-        }
-        return result as? Data
-    }
 }

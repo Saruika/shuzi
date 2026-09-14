@@ -622,6 +622,7 @@ final class Shuzijun_App_Content_API {
         $collaboration_enabled = self::collaboration_phase1_enabled()
             && self::account_authority_enabled()
             && self::collaboration_storage_ready()
+            && self::push_storage_ready()
             && self::collaboration_mail_transport_ready();
         $push_enabled = self::push_service_ready();
         $response = rest_ensure_response(array(

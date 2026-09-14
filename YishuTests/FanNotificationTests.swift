@@ -51,6 +51,117 @@ private final class InboxTestAccount: FanNotificationAccount {
 }
 
 @MainActor
+private final class CollaborationTestAccount: CollaborationAccount {
+    var collaborationContext: FanNotificationContext?
+    let proof = UUID().uuidString
+    var authorizedURLs: [URL] = []
+    func authorizeCollaborationRequest(_ request: inout URLRequest, context: FanNotificationContext) throws {
+        guard context == collaborationContext, context.environment.allowsAPIURL(request.url),
+              let url = request.url else { throw CollaborationSubmissionError.sessionExpired }
+        authorizedURLs.append(url)
+        request.setValue(proof, forHTTPHeaderField: "Authorization")
+    }
+}
+
+@MainActor
+final class CollaborationSessionTests: XCTestCase {
+    private let body = Data(#"{"collaborationSubmissionEnabled":false,"collaborationInboxEnabled":false}"#.utf8)
+
+    func testUsesOnlyCurrentAccountAndEnvironment() async throws {
+        for environment in AppServiceEnvironment.allCases {
+            let account = CollaborationTestAccount()
+            account.collaborationContext = .init(userID: UUID().uuidString, sessionGeneration: 1, environment: environment)
+            let client = CollaborationSubmissionClient { request in
+                XCTAssertEqual(request.url?.host, environment.apiHost)
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), account.proof)
+                return (self.body, try XCTUnwrap(HTTPURLResponse(url: XCTUnwrap(request.url), statusCode: 200,
+                    httpVersion: nil, headerFields: ["Content-Type": "application/json"])))
+            }
+            let result = try await client.fetchCapabilities(using: account)
+            XCTAssertFalse(result.collaborationSubmissionEnabled)
+            XCTAssertEqual(account.authorizedURLs.count, 1)
+        }
+    }
+
+    func testNoSessionCannotSendAnyNetworkRequest() async {
+        let account = CollaborationTestAccount()
+        let client = CollaborationSubmissionClient { _ in
+            XCTFail("No current session must mean no network access")
+            throw URLError(.notConnectedToInternet)
+        }
+        do {
+            _ = try await client.fetchCapabilities(using: account)
+            XCTFail("Missing session must fail")
+        } catch { XCTAssertTrue(account.authorizedURLs.isEmpty) }
+    }
+
+    func testSubmissionRetryUsesSameIDAndAcceptsStoredReceipt() async throws {
+        let account = CollaborationTestAccount()
+        account.collaborationContext = .init(userID: UUID().uuidString, sessionGeneration: 1, environment: .review)
+        let draft = try CollaborationSubmissionDraft(submissionID: UUID(), contactName: "测试联系人",
+            contactMethod: "fixture@example.invalid", organization: "", projectType: "drama", city: "",
+            preferredDate: Date().addingTimeInterval(86400), budget: "", details: "合成验收，不实际发送")
+        var submissions: [Data] = []
+        let client = CollaborationSubmissionClient { request in
+            XCTAssertEqual(request.url?.host, AppServiceEnvironment.review.apiHost)
+            XCTAssertEqual(request.httpMethod, "POST")
+            submissions.append(try XCTUnwrap(request.httpBody))
+            if submissions.count == 1 { throw URLError(.timedOut) }
+            let body = Data(#"{"requestID":"11111111-2222-4333-a444-555555555555","status":"reviewing","receivedAt":"2026-09-14T01:00:00Z","duplicate":true}"#.utf8)
+            return (body, try XCTUnwrap(HTTPURLResponse(url: XCTUnwrap(request.url), statusCode: 200,
+                httpVersion: nil, headerFields: ["Content-Type": "application/json"])))
+        }
+        do {
+            _ = try await client.submit(draft, using: account)
+            XCTFail("Simulated timeout must not report success")
+        } catch CollaborationSubmissionError.networkUnavailable { }
+        let receipt = try await client.submit(draft, using: account)
+        XCTAssertTrue(receipt.duplicate)
+        XCTAssertEqual(receipt.status, .reviewing)
+        let ids = try submissions.map { data in
+            let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            return try XCTUnwrap(object?["submissionID"] as? String)
+        }
+        XCTAssertEqual(ids.count, 2)
+        XCTAssertEqual(ids.first, ids.last, "Network retry must not create a new inquiry")
+    }
+
+    func testLateReplyAfterLogoutSwitchOrSessionRotationIsRejected() async throws {
+        for transition in 0...3 {
+            let account = CollaborationTestAccount()
+            account.collaborationContext = .init(userID: "synthetic-a", sessionGeneration: 1)
+            let client = CollaborationSubmissionClient { request in
+                switch transition {
+                case 0: account.collaborationContext = nil
+                case 1: account.collaborationContext = .init(userID: "synthetic-b", sessionGeneration: 1)
+                case 2: account.collaborationContext = .init(userID: "synthetic-a", sessionGeneration: 2)
+                default: account.collaborationContext = .init(userID: "synthetic-a", sessionGeneration: 1, environment: .review)
+                }
+                return (self.body, try XCTUnwrap(HTTPURLResponse(url: XCTUnwrap(request.url), statusCode: 200,
+                    httpVersion: nil, headerFields: ["Content-Type": "application/json"])))
+            }
+            do {
+                _ = try await client.fetchCapabilities(using: account)
+                XCTFail("Late result cannot cross account/session/environment")
+            } catch CollaborationSubmissionError.sessionExpired { }
+        }
+    }
+
+    func testResponseFromOtherEnvironmentIsRejected() async throws {
+        let account = CollaborationTestAccount()
+        account.collaborationContext = .init(userID: "synthetic-a", sessionGeneration: 1, environment: .review)
+        let client = CollaborationSubmissionClient { _ in
+            (self.body, try XCTUnwrap(HTTPURLResponse(url: AppServiceEnvironment.production.apiRoot,
+                statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])))
+        }
+        do {
+            _ = try await client.fetchCapabilities(using: account)
+            XCTFail("Other origin must be rejected")
+        } catch CollaborationSubmissionError.invalidResponse { }
+    }
+}
+
+@MainActor
 final class FanNotificationTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
@@ -90,6 +201,31 @@ final class FanNotificationTests: XCTestCase {
         XCTAssertEqual(inbox.notifications, [message()])
         XCTAssertEqual(inbox.unreadCount, 1)
         XCTAssertEqual(account.calls, ["list:first"], "读取云消息不需要APNs token、通知偏好或已读写入")
+    }
+
+    func testNonemptyAccountsInSameEnvironmentNeverShareMessagesOrReadReceipts() async {
+        let first = InboxTestAccount()
+        let second = InboxTestAccount()
+        second.notificationContext = .init(userID: "account-b", sessionGeneration: 2)
+        first.pages = [page([message(1)])]
+        second.pages = [page([message(2)])]
+        let inbox = store()
+        await inbox.refresh(using: first)
+        first.message = message(1)
+        await inbox.open(id: message(1).id, using: first)
+        XCTAssertEqual(inbox.unreadCount, 0)
+        inbox.updateContext(second.notificationContext)
+        XCTAssertTrue(inbox.notifications.isEmpty)
+        XCTAssertNil(inbox.detail)
+        await inbox.refresh(using: second)
+        XCTAssertEqual(inbox.notifications.map(\.id), [message(2).id])
+        XCTAssertEqual(inbox.unreadCount, 1)
+        XCTAssertNil(inbox.notifications.first?.readAt)
+        XCTAssertEqual(second.calls, ["list:first"])
+        first.pages = [page([message(1, read: true)], unread: 0)]
+        await inbox.refresh(using: first)
+        XCTAssertEqual(inbox.notifications.map(\.id), [message(1).id])
+        XCTAssertEqual(inbox.unreadCount, 0)
     }
 
     func testInboxPaginationDeduplicatesAndNetworkFailureCanRetry() async {

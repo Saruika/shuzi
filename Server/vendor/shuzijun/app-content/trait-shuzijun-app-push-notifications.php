@@ -1774,6 +1774,16 @@ trait Shuzijun_App_Push_Notifications {
         if ($actor_id <= 0) {
             return new WP_Error('push_admin_required', '需要管理员权限。', array('status' => 403));
         }
+        return self::persist_targeted_push_notification($input, $actor_id);
+    }
+
+    // Shared transactional persistence. Actor 0 is reserved for the private
+    // collaboration worker; no REST parameter can select this actor.
+    private static function persist_targeted_push_notification($input, $actor_id) {
+        if (!self::push_storage_ready()
+            || ($actor_id === 0 && !self::collaboration_phase1_enabled())) {
+            return self::push_storage_error();
+        }
         // Lock every target in deterministic order before opening the
         // transaction. Account deletion/suspension uses the same locks, so it
         // cannot race target validation and leave a new recipient/outbox row.
@@ -1821,6 +1831,9 @@ trait Shuzijun_App_Push_Notifications {
                     "SELECT ID FROM {$wpdb->users} WHERE ID = %d LIMIT 1 FOR UPDATE",
                     (int) $target_user_id
                 ));
+                if ($actor_id === 0 && !self::collaboration_admin_recipient_is_current((int) $target_user_id)) {
+                    return new WP_Error('push_recipient_unavailable', '管理员权限已变更。', array('status' => 409));
+                }
                 $uuid = (string) self::fan_meta_from_database(
                     (int) $target_user_id,
                     self::FAN_META_UUID,

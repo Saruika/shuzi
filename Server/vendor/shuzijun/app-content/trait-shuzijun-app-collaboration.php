@@ -140,6 +140,7 @@ trait Shuzijun_App_Collaboration {
 
     public static function create_collaboration_request(WP_REST_Request $request) {
         if (!self::collaboration_phase1_enabled()
+            || !self::push_storage_ready()
             || !self::collaboration_mail_transport_ready()) {
             return self::collaboration_feature_disabled_error();
         }
@@ -271,21 +272,26 @@ trait Shuzijun_App_Collaboration {
                 ));
                 if ($inserted !== 1) { throw new RuntimeException('request_insert_failed'); }
                 $request_id = (int) $wpdb->insert_id;
-                $outbox_inserted = $wpdb->insert($tables['outbox'], array(
-                    'request_id' => $request_id,
-                    'channel' => 'work_mail',
-                    'dedupe_key' => hash('sha256', $public_id . '|work_mail'),
-                    'status' => 'pending',
-                    'attempts' => 0,
-                    'next_attempt_at' => $now,
-                    'lease_token' => null,
-                    'lease_until' => null,
-                    'last_error_code' => '',
-                    'created_at' => $now,
-                    'updated_at' => $now,
-                ), array('%d', '%s', '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%s', '%s'));
-                if ($outbox_inserted !== 1) { throw new RuntimeException('outbox_insert_failed'); }
-                $outbox_id = (int) $wpdb->insert_id;
+                $outbox_ids = array();
+                // Persist both deliveries in the same transaction as the request.
+                // A mail failure must not suppress the administrator's inbox.
+                foreach (array('admin_notice', 'work_mail') as $channel) {
+                    $outbox_inserted = $wpdb->insert($tables['outbox'], array(
+                        'request_id' => $request_id,
+                        'channel' => $channel,
+                        'dedupe_key' => hash('sha256', $public_id . '|' . $channel),
+                        'status' => 'pending',
+                        'attempts' => 0,
+                        'next_attempt_at' => $now,
+                        'lease_token' => null,
+                        'lease_until' => null,
+                        'last_error_code' => '',
+                        'created_at' => $now,
+                        'updated_at' => $now,
+                    ), array('%d', '%s', '%s', '%s', '%d', '%s', '%s', '%s', '%s', '%s', '%s'));
+                    if ($outbox_inserted !== 1) { throw new RuntimeException('outbox_insert_failed'); }
+                    $outbox_ids[] = (int) $wpdb->insert_id;
+                }
                 if (!self::record_collaboration_audit(
                     $request_id,
                     'fan',
@@ -301,7 +307,9 @@ trait Shuzijun_App_Collaboration {
                 }
                 $committed = true;
 
-                self::schedule_collaboration_outbox_job($outbox_id, time() + 5);
+                foreach ($outbox_ids as $outbox_id) {
+                    self::schedule_collaboration_outbox_job($outbox_id, time() + 5);
+                }
                 return self::collaboration_submission_response(array(
                     'id' => $request_id,
                     'public_id' => $public_id,
@@ -513,7 +521,6 @@ trait Shuzijun_App_Collaboration {
 
     public static function ensure_collaboration_outbox_schedule() {
         if (!self::collaboration_phase1_enabled()
-            || !self::collaboration_mail_transport_ready()
             || !self::account_authority_enabled()
             || !self::collaboration_storage_ready()) {
             return false;
@@ -534,7 +541,6 @@ trait Shuzijun_App_Collaboration {
 
     public static function sweep_collaboration_outbox() {
         if (!self::collaboration_phase1_enabled()
-            || !self::collaboration_mail_transport_ready()
             || !self::account_authority_enabled()
             || !self::collaboration_storage_ready()) {
             return false;
@@ -568,7 +574,6 @@ trait Shuzijun_App_Collaboration {
     public static function process_collaboration_outbox($job_id) {
         $job_id = (int) $job_id;
         if (!self::collaboration_phase1_enabled()
-            || !self::collaboration_mail_transport_ready()
             || $job_id <= 0
             || !self::account_authority_enabled()
             || !self::collaboration_storage_ready()) {
@@ -650,8 +655,18 @@ trait Shuzijun_App_Collaboration {
 
         $sent = false;
         $error_code = 'mail_rejected';
-        if ((string) ($job['channel'] ?? '') !== 'work_mail') {
+        $channel = (string) ($job['channel'] ?? '');
+        if ($channel === 'admin_notice') {
+            try {
+                $sent = self::deliver_collaboration_admin_notice($job) === true;
+                $error_code = 'admin_notice_unavailable';
+            } catch (Throwable $error) {
+                $error_code = 'admin_notice_exception';
+            }
+        } elseif ($channel !== 'work_mail') {
             $error_code = 'channel_invalid';
+        } elseif (!self::collaboration_mail_transport_ready()) {
+            $error_code = 'mail_transport_unavailable';
         } else {
             $recipient = self::collaboration_work_email();
             if (!$recipient) {
@@ -700,11 +715,58 @@ trait Shuzijun_App_Collaboration {
             (int) $job['request_id'],
             'system',
             0,
-            'work_mail_accepted',
+            $channel === 'admin_notice' ? 'admin_notice_accepted' : 'work_mail_accepted',
             'accepted',
-            array('channel' => 'work_mail', 'attempt' => (int) $job['attempts'])
+            array('channel' => $channel, 'attempt' => (int) $job['attempts'])
         );
         return true;
+    }
+
+    private static function collaboration_admin_notice_key($public_id, $user_id) {
+        $hash = hash('sha256', 'collaboration-admin-v1|' . $public_id . '|' . (int) $user_id);
+        return substr($hash, 0, 8) . '-' . substr($hash, 8, 4) . '-4'
+            . substr($hash, 13, 3) . '-a' . substr($hash, 17, 3) . '-' . substr($hash, 20, 12);
+    }
+
+    private static function deliver_collaboration_admin_notice($job) {
+        if (!self::collaboration_phase1_enabled() || !self::push_storage_ready()
+            || !self::is_uuid_v4($job['public_id'] ?? '')) { return false; }
+        // Only approved App accounts which can currently handle inquiries.
+        // Do not give WordPress-only users an App account or any new permission.
+        $users = get_users(array('capability' => self::COLLABORATION_CAPABILITY,
+            'number' => self::PUSH_MAX_RECIPIENTS + 1, 'fields' => 'ID',
+            'orderby' => 'ID', 'order' => 'ASC'));
+        if (!is_array($users) || count($users) > self::PUSH_MAX_RECIPIENTS) { return false; }
+        $delivered = 0;
+        $complete = true;
+        foreach ($users as $user_id) {
+            $user_id = (int) $user_id;
+            if (!self::collaboration_admin_recipient_is_current($user_id)) { continue; }
+            $uuid = (string) self::fan_meta_from_database($user_id, self::FAN_META_UUID, '');
+            $key = self::collaboration_admin_notice_key($job['public_id'], $user_id);
+            // Never include the sender, contact details, budget or project text.
+            // Full details remain behind the current collaboration permission.
+            $title = '新的合作邀约';
+            $body = '请打开内容管理中的合作邀约查看和处理。';
+            $input = array('userIDs' => array($user_id),
+                'selectors' => array($user_id => array('type' => 'uuid', 'value' => $uuid)),
+                'idempotencyKey' => $key,
+                'payloadHash' => hash('sha256', $key . '|' . $title . '|' . $body),
+                'title' => $title, 'body' => $body, 'sensitive' => true);
+            // Each recipient has a stable idempotency key; a worker crash or a
+            // later failure can retry without duplicating already-saved inboxes.
+            $result = self::persist_targeted_push_notification($input, 0);
+            if (is_wp_error($result)) { $complete = false; } else { $delivered++; }
+        }
+        return $complete && $delivered > 0;
+    }
+
+    private static function collaboration_admin_recipient_is_current($user_id) {
+        if ((int) $user_id <= 0) { return false; }
+        clean_user_cache((int) $user_id);
+        return self::fan_meta_from_database($user_id, self::FAN_META_STATUS, '') === 'active'
+            && self::is_uuid_v4(self::fan_meta_from_database($user_id, self::FAN_META_UUID, ''))
+            && user_can($user_id, self::COLLABORATION_CAPABILITY);
     }
 
     public static function purge_collaboration_data_for_fan_user($fan_user_id) {
@@ -1426,6 +1488,8 @@ trait Shuzijun_App_Collaboration {
             || !in_array($actor_type, array('fan', 'administrator', 'system'), true)
             || !in_array($event, array(
                 'request_received', 'request_status_updated', 'work_mail_accepted',
+                'admin_notice_accepted',
+                'admin_notice_retry_scheduled', 'admin_notice_dead',
                 'work_mail_schedule_failed', 'work_mail_retry_scheduled', 'work_mail_dead',
             ), true)
             || !in_array($result, array('accepted', 'retry', 'dead'), true)) {
@@ -1518,7 +1582,7 @@ trait Shuzijun_App_Collaboration {
             return false;
         }
         $rows = $wpdb->get_results($wpdb->prepare(
-            "SELECT id, request_id, attempts FROM {$tables['outbox']}
+            "SELECT id, request_id, attempts, channel FROM {$tables['outbox']}
              WHERE attempts >= %d
                AND (status = 'pending' OR (status = 'processing' AND lease_until <= %s))
              ORDER BY id ASC LIMIT 20",
@@ -1544,10 +1608,10 @@ trait Shuzijun_App_Collaboration {
                     (int) ($row['request_id'] ?? 0),
                     'system',
                     0,
-                    'work_mail_dead',
+                    ($row['channel'] ?? '') === 'admin_notice' ? 'admin_notice_dead' : 'work_mail_dead',
                     'dead',
                     array(
-                        'channel' => 'work_mail',
+                        'channel' => ($row['channel'] ?? '') === 'admin_notice' ? 'admin_notice' : 'work_mail',
                         'attempt' => (int) ($row['attempts'] ?? 0),
                         'errorCode' => 'worker_interrupted',
                     )
@@ -1597,18 +1661,19 @@ trait Shuzijun_App_Collaboration {
         ), array('%s', '%s', '%s', '%s', '%s', '%s'), array('%d', '%s'));
         if ($updated !== 1) { return false; }
         $job = $wpdb->get_row($wpdb->prepare(
-            "SELECT request_id FROM {$tables['outbox']} WHERE id = %d LIMIT 1",
+            "SELECT request_id, channel FROM {$tables['outbox']} WHERE id = %d LIMIT 1",
             (int) $job_id
         ), ARRAY_A);
         if (is_array($job) && (int) ($job['request_id'] ?? 0) > 0) {
+            $channel = ($job['channel'] ?? '') === 'admin_notice' ? 'admin_notice' : 'work_mail';
             self::record_collaboration_audit(
                 (int) $job['request_id'],
                 'system',
                 0,
-                $state['status'] === 'dead' ? 'work_mail_dead' : 'work_mail_retry_scheduled',
+                $channel . ($state['status'] === 'dead' ? '_dead' : '_retry_scheduled'),
                 $state['status'] === 'dead' ? 'dead' : 'retry',
                 array(
-                    'channel' => 'work_mail',
+                    'channel' => $channel,
                     'attempt' => (int) $attempts,
                     'errorCode' => $error_code,
                 )

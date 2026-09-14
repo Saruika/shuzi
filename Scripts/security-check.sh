@@ -76,6 +76,7 @@ if command -v php >/dev/null 2>&1; then
   php -l Server/vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php >/dev/null
   php Server/tests/collaboration-private-payload-test.php
   php Server/tests/collaboration-outbox-deletion-test.php
+  php Server/tests/collaboration-admin-notice-test.php
   php Server/tests/fan-bound-administrator-auth-test.php
   php -l Server/tests/fan-administrator-binding-wordpress-integration.php >/dev/null
   php -l Server/tests/fan-administrator-media-wordpress-integration.php >/dev/null
@@ -104,6 +105,7 @@ python3 Scripts/test-apple-login-lifecycle-contract.py
 python3 Scripts/test-launch-poster-contract.py
 python3 Scripts/test-weather-privacy-contract.py
 python3 Scripts/test-collaboration-mail-privacy-contract.py
+python3 Scripts/test-privacy-alignment.py
 python3 Server/tests/drama-link-monitor-test.py
 python3 Scripts/test-album-title-style-contract.py
 python3 Scripts/test-scroll-chrome-contract.py

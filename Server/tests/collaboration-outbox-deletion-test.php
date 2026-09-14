@@ -43,6 +43,7 @@ final class WorkerDatabase {
     public $deleted = false;
     public $throw_claim = false;
     public $claimable = true;
+    public $channel = 'work_mail';
     public $claims = 0;
     public $reads = 0;
     public $updates = 0;
@@ -74,7 +75,7 @@ final class WorkerDatabase {
         $this->reads++;
         $this->last_error = $this->job_error ? 'synthetic_read_failure' : '';
         return array('id' => 1, 'request_id' => 1, 'fan_user_id' => $this->job_owner,
-            'public_id' => '11111111-2222-4333-8444-555555555555', 'channel' => 'work_mail',
+            'public_id' => '11111111-2222-4333-8444-555555555555', 'channel' => $this->channel,
             'attempts' => 1, 'private_payload' => 'synthetic-envelope');
     }
     public function update(...$arguments) {
@@ -100,6 +101,8 @@ final class WorkerHarness {
     public static $actual_lock = null;
     public static $failures = 0;
     public static $audits = 0;
+    public static $notice_calls = 0;
+    public static $notice_result = true;
     public static function collaboration_phase1_enabled() { return self::$enabled; }
     public static function account_authority_enabled() { return true; }
     private static function collaboration_mail_transport_ready() { return true; }
@@ -135,6 +138,11 @@ final class WorkerHarness {
         self::$releases++;
     }
     private static function collaboration_work_email() { return 'fixture@example.invalid'; }
+    private static function deliver_collaboration_admin_notice($job) {
+        verify_worker(self::$locked, 'administrator notice must serialize with account deletion');
+        self::$notice_calls++;
+        return self::$notice_result;
+    }
     private static function collaboration_mail_body($job) {
         verify_worker(self::$locked, 'decryption must hold deletion lock');
         return 'Synthetic body';
@@ -232,6 +240,16 @@ try {
 }
 verify_worker(!WorkerHarness::$locked && WorkerHarness::$releases === 1 && WorkerHarness::$mail_calls === 0,
     'unexpected storage exception still releases lock without mail');
+reset_worker();
+$wpdb->channel = 'admin_notice';
+WorkerHarness::$notice_result = false;
+verify_worker(WorkerHarness::process_collaboration_outbox(1) === false, 'failed notice remains retryable');
+verify_worker(WorkerHarness::$failures === 1 && WorkerHarness::$mail_calls === 0, 'notice failure never sends mail');
+reset_worker();
+$wpdb->channel = 'admin_notice';
+WorkerHarness::$notice_result = true;
+verify_worker(WorkerHarness::process_collaboration_outbox(1) === true, 'administrator channel independently succeeds');
+verify_worker(WorkerHarness::$audits === 1 && WorkerHarness::$mail_calls === 0, 'administrator success audited without email');
 echo "collaboration-outbox-deletion: passed {$checks} assertions\n";
 if ($worker_mysql) {
     $worker_mysql->close();

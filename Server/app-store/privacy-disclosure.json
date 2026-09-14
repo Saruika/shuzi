@@ -1,0 +1,22 @@
+{
+  "reviewedAt": "2026-09-14",
+  "status": "local-candidate-not-confirmed-in-app-store-connect",
+  "purpose": "AppFunctionality",
+  "tracking": false,
+  "dataTypes": {
+    "Name": {"label": "姓名", "linked": true},
+    "EmailAddress": {"label": "电子邮件地址", "linked": true},
+    "PhoneNumber": {"label": "电话号码", "linked": true},
+    "OtherUserContactInfo": {"label": "其他用户联系信息", "linked": true},
+    "UserID": {"label": "用户 ID", "linked": true},
+    "DeviceID": {"label": "设备 ID", "linked": true},
+    "PhotosorVideos": {"label": "照片或视频", "linked": true},
+    "CustomerSupport": {"label": "客户支持", "linked": true},
+    "OtherUserContent": {"label": "其他用户内容", "linked": true},
+    "EmailsOrTextMessages": {"label": "电子邮件或短信", "linked": true},
+    "ProductInteraction": {"label": "产品交互", "linked": true},
+    "OtherDiagnosticData": {"label": "其他诊断数据", "linked": true},
+    "OtherDataTypes": {"label": "其他数据类型", "linked": true, "note": "密码校验数据的工程映射，提交前需核实适用性，不是 Apple 裁定"},
+    "CoarseLocation": {"label": "粗略位置", "linked": false}
+  }
+}

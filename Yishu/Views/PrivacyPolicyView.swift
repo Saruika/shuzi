@@ -15,7 +15,7 @@ struct PrivacyPolicyView: View {
                             .font(.system(.largeTitle, design: .serif))
                             .accessibilityIdentifier("privacy-policy-heading")
                             .accessibilityAddTraits(.isHeader)
-                        Text("生效日期：2026 年 9 月 5 日")
+                        Text("生效日期：2026 年 9 月 5 日 · 说明更新：2026 年 9 月 14 日")
                             .font(.caption)
                             .foregroundStyle(AppTheme.muted)
                     }
@@ -23,6 +23,7 @@ struct PrivacyPolicyView: View {
                     policySection("适用范围", text: "本政策说明“Hi，梳子”App 如何处理注册申请、管理员审批、账号访问、消息通知、天气和必要安全数据。查看 App 的首页、作品、影视、收藏和关于内容前，需要注册账号并获得管理员批准。")
 
                     policySection("我们处理的数据", bullets: [
+                        "联系方式与客户支持：合作表单可填写邮箱、电话号码或微信等联系方式，这些资料与联系人及邀约关联。你通过隐私邮箱主动发送的支持请求，可包含发件邮箱、问题描述及你主动附加的材料；用于答复和处理请求，与可识别的发件人关联。发送失败不会自动复制表单，只有你主动点击复制才会写入剪贴板。",
                         "粉丝账号：昵称、抖音 ID、服务器生成的 UUID 和粉丝身份码。抖音 ID 是注册、Apple 登录资料补全和邀请账号首次设置的必填项，仅用于管理员核验账号身份，不向其他粉丝公开。",
                         "通过 Apple 登录：登录时将 Apple 签名的短时身份令牌和授权码通过 HTTPS 交给服务器完成验证；验证完成后不写入本地存储或日志。服务器保留经验证的 Apple 账号关联标识，并加密保存 Apple 换取的刷新令牌，只用于维持登录关联及在删号时撤销 Apple 授权，保存至你撤销 Apple 授权或删除账号。App 不请求 Apple 姓名或邮箱。本机 Keychain 可保留 Apple 凭据状态查询所需的账号标识，退出或删号时清除。",
                         "管理员邀请：在你本人完成首次设置前，仅保存随机临时身份、邀请有效期和审批记录；临时密码只在创建时展示一次，服务器仅保存标准密码哈希。",

@@ -5,7 +5,7 @@ from pathlib import Path
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 STANDBY_SEEDER = Path("Server/operations/seed-standby-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE_RECORD = Path("Server/releases/v1.4.0-build6-preview3.md")
+RELEASE_RECORD = Path("Server/releases/v1.4.0-build6-acceptance5.md")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
 SERVER_ROOT = Path("Server")
@@ -25,16 +25,16 @@ PLUGIN_MODULES = (
 )
 LEGACY_MANIFEST_SHA256 = "64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134"
 PREVIOUS_MANIFEST_SHA256 = "5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe"
-TARGET_MANIFEST_SHA256 = "d4a2d15fefcb6c403ee2535010f04065981ca64aaa46c44a4f5e56d69d3ad9a3"
-TARGET_PLUGIN_SHA256 = "ebd820baaa83d45244b9c47e5f8fd474989d13c4d3feac84c213ca97014ed96e"
+TARGET_MANIFEST_SHA256 = "2b632ca195a65f1f0309bf66a9098ef52ca49a5eec9d80a5b7d9c32b8fbdfdee"
+TARGET_PLUGIN_SHA256 = "4cf75b720f6bda71d6a54e40125c5a296467527b882ff57d2a75c58ceae5a26e"
 TARGET_MODULE_SHA256S = (
-    "83e2e8bb61d3e41727d8e75f40daa8465d4a367a4f66c3491370a6bb2ed3f95b",
+    "7175ae3aefb1add1af504c2bbbba355b5e448a81818d7c00ace12c37cc6dc4e5",
     "bd689473956b67b480ce62704b73d39ea6c7a9536a19496120722d2524f65160",
-    "8c4bae3eed0fca9fd8810d04ea29924111b827118aee1f381b39a44f5660e172",
+    "7c5be7cf3347b187f6c88a12ad6a21f0001a5e7c92edbfe7a99e834abc1eebb7",
     "77d2a10cd9df7af2698ec36b3cfcbfe07765dbd2a03b401b8a7effb03bb3bf1c",
     "f27863d35b6a701d45afd6bfcecb5b235983497fee71553d18ec801bcbec2d6a",
     "bdcea372748c79a06284f01570d0863d20316bf3d4d33fe7924c16d100a1b1d7",
-    "c8a0485cb2763cbf131249f7c0cca8e6cd69957b898823b5785ca04242ae7def",
+    "599c64b7d700a691eff7c8d63c7f6e3f8842748970eb3d30e3abfcfcbedc55cc",
 )
 
 

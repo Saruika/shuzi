@@ -743,7 +743,7 @@ protocol FanAdministratorAccount: AnyObject {
 }
 
 @MainActor
-final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdministratorAccount {
+final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdministratorAccount, CollaborationAccount {
     @Published private(set) var profile: FanProfile? {
         didSet { notificationStore.updateContext(notificationContext) }
     }
@@ -826,6 +826,19 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
 #endif
         guard let userID = pushEligibleUserID else { return nil }
         return FanNotificationContext(userID: userID, sessionGeneration: pushSessionGeneration, environment: serviceEnvironment)
+    }
+    var collaborationContext: FanNotificationContext? {
+        guard isApproved, token != nil else { return nil }
+        return notificationContext
+    }
+    func authorizeCollaborationRequest(_ request: inout URLRequest, context: FanNotificationContext) throws {
+        guard collaborationContext == context, let token,
+              context.environment == serviceEnvironment,
+              serviceEnvironment.allowsAPIURL(request.url) else {
+            throw CollaborationSubmissionError.sessionExpired
+        }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(installID.uuidString.lowercased(), forHTTPHeaderField: "X-Yishu-Install-ID")
     }
     var hasPushUnbindingSession: Bool {
         token != nil && profile.map { $0.sessionExpiresAt > Date() } == true
