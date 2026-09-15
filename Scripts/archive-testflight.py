@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Archive a clean, pinned Build 6 source; validate before optional authorized upload.
+"""Archive a clean, pinned Build 7 source; validate before optional authorized upload.
 
 Does not expire builds, change tester groups, or submit an App Store release.
 """
@@ -54,12 +54,12 @@ def main():
     ipa = args.out / 'export/Yishu.ipa'
     run('unpack', ['ditto', '-x', '-k', str(ipa), str(args.out / 'inspect')])
     run('distribution-check', ['python3', 'Scripts/check-distribution-package.py', '--app',
-        str(args.out / 'inspect/Payload/Yishu.app'), '--version', '1.4.0', '--build', '6'])
+        str(args.out / 'inspect/Payload/Yishu.app'), '--version', '1.4.0', '--build', '7'])
     env = dict(os.environ, API_PRIVATE_KEYS_DIR='/Users/mathiashu/.appstoreconnect/private_keys')
     authentication = ['--api-key', '3W68SK9SZA', '--api-issuer', 'e487f187-a519-4b1f-bd5b-4bd9b3d11b66', '--output-format', 'json']
     run('apple-validation', ['xcrun', 'altool', '--validate-app', str(ipa), *authentication], env)
     sha = hashlib.sha256(ipa.read_bytes()).hexdigest()
-    record = {'source': args.source, 'version': '1.4.0', 'build': '6', 'ipa': str(ipa),
+    record = {'source': args.source, 'version': '1.4.0', 'build': '7', 'ipa': str(ipa),
               'sha256': sha, 'bytes': ipa.stat().st_size, 'validated': True, 'uploaded': False}
     with (args.out / 'artifact.json').open('x') as file:
         json.dump(record, file)
