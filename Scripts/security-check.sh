@@ -114,6 +114,11 @@ python3 Scripts/test-scroll-chrome-contract.py
 python3 Scripts/test-ci-permission-isolation.py
 python3 Scripts/test-ci-test-summary.py
 python3 Scripts/test-distribution-package.py
+python3 Scripts/test_archive_testflight.py
+python3 Scripts/test-embedded-game-host-contract.py
+command -v node >/dev/null 2>&1 || fail '内嵌游戏保真与生命周期回归需要 Node.js'
+node --version
+node --test Scripts/test-embedded-game-parity.mjs Scripts/test-embedded-game-lifecycle.mjs
 python3 Server/tests/app-content-release-contract-test.py
 python3 Server/tests/review-bootstrap-test.py
 python3 Server/tests/review-catalog-test.py

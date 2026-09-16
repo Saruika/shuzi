@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		ED0916000000000000000005 /* EmbeddedGameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED0916000000000000000006 /* EmbeddedGameTests.swift */; };
+		ED0916000000000000000001 /* EmbeddedGameView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED0916000000000000000002 /* EmbeddedGameView.swift */; };
+		ED0916000000000000000003 /* GameAssets in Resources */ = {isa = PBXBuildFile; fileRef = ED0916000000000000000004 /* GameAssets */; };
 		100000000000000000000021 /* UserSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000021 /* UserSettingsView.swift */; };
 		10000000000000000000001F /* FanNotificationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000001F /* FanNotificationStore.swift */; };
 		100000000000000000000020 /* FanNotificationInboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000020 /* FanNotificationInboxView.swift */; };
@@ -65,6 +68,9 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		ED0916000000000000000006 /* EmbeddedGameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedGameTests.swift; sourceTree = "<group>"; };
+		ED0916000000000000000002 /* EmbeddedGameView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedGameView.swift; sourceTree = "<group>"; };
+		ED0916000000000000000004 /* GameAssets */ = {isa = PBXFileReference; lastKnownFileType = folder; path = GameAssets; sourceTree = "<group>"; };
 		200000000000000000000021 /* UserSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserSettingsView.swift; sourceTree = "<group>"; };
 		20000000000000000000001F /* FanNotificationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FanNotificationStore.swift; sourceTree = "<group>"; };
 		200000000000000000000020 /* FanNotificationInboxView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FanNotificationInboxView.swift; sourceTree = "<group>"; };
@@ -201,6 +207,7 @@
 		300000000000000000000006 /* Yishu/Views */ = {
 			isa = PBXGroup;
 			children = (
+				ED0916000000000000000002 /* EmbeddedGameView.swift */,
 				200000000000000000000007 /* RootView.swift */,
 				200000000000000000000021 /* UserSettingsView.swift */,
 				200000000000000000000008 /* HomeView.swift */,
@@ -221,6 +228,7 @@
 		300000000000000000000007 /* Yishu/Resources */ = {
 			isa = PBXGroup;
 			children = (
+				ED0916000000000000000004 /* GameAssets */,
 				20000000000000000000000C /* Assets.xcassets */,
 				200000000000000000000014 /* LaunchScreen.storyboard */,
 				200000000000000000000017 /* PrivacyInfo.xcprivacy */,
@@ -241,6 +249,7 @@
 		A30000000000000000000001 /* YishuTests */ = {
 			isa = PBXGroup;
 			children = (
+				ED0916000000000000000006 /* EmbeddedGameTests.swift */,
 				A20000000000000000000001 /* ContentAndAccessTests.swift */,
 				A20000000000000000000002 /* UserScopedLibraryTests.swift */,
 				A20000000000000000000003 /* FanNotificationTests.swift */,
@@ -372,6 +381,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ED0916000000000000000003 /* GameAssets in Resources */,
 				10000000000000000000000C /* Assets.xcassets in Resources */,
 				100000000000000000000014 /* LaunchScreen.storyboard in Resources */,
 				100000000000000000000017 /* PrivacyInfo.xcprivacy in Resources */,
@@ -399,6 +409,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ED0916000000000000000001 /* EmbeddedGameView.swift in Sources */,
 				100000000000000000000019 /* AppDiagnostics.swift in Sources */,
 				10000000000000000000001A /* FanAccountStore.swift in Sources */,
 				10000000000000000000001B /* FanAccountView.swift in Sources */,
@@ -437,6 +448,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				ED0916000000000000000005 /* EmbeddedGameTests.swift in Sources */,
 				A10000000000000000000001 /* ContentAndAccessTests.swift in Sources */,
 				A10000000000000000000002 /* UserScopedLibraryTests.swift in Sources */,
 				A10000000000000000000003 /* FanNotificationTests.swift in Sources */,
@@ -527,7 +539,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -561,7 +573,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Yishu/Yishu.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -593,7 +605,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -611,7 +623,7 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -628,7 +640,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -645,7 +657,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 7;
+				CURRENT_PROJECT_VERSION = 8;
 				DEVELOPMENT_TEAM = 6F34K54BYJ;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;

@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'none'; font-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; worker-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#F4F2EE">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>宦海浮沉录 · 从政模拟器</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- 首次进入：强制 5 秒免责声明 -->
+  <div id="disclaimer" class="disclaimer-mask" role="dialog" aria-modal="true" aria-labelledby="disclaimer-title">
+    <div class="disclaimer-card">
+      <div class="disclaimer-badge">免责声明</div>
+      <h2 class="disclaimer-title" id="disclaimer-title">本游戏仅供娱乐</h2>
+      <div class="disclaimer-body">
+        <p>本游戏仅供娱乐，无任何不良引导。</p>
+        <p>本地版使用匿名玩家身份，不连接 B 站账号，不上传身份或成绩。</p>
+        <p>游戏进度仅保存在本次体验的内存中，退出后不保留。</p>
+      </div>
+      <button id="btn-accept" class="btn btn-primary" disabled>
+        开始体验（<span id="disclaimer-count">5</span>s）
+      </button>
+    </div>
+  </div>
+
+  <!-- 开场 / 身份卡 -->
+  <section id="screen-intro" class="screen active">
+    <div class="container narrow">
+      <div class="brand">宦海浮沉录</div>
+      <div class="brand-sub">A Political Career Simulator</div>
+      <h1>每一次选择<br>都在改写你的人生</h1>
+      <p class="lead">从一名基层公务员出发，你的每一个决定都在累积着六个维度的数值。贪腐、健康、财富、民心……每一条都会通向不同的结局。</p>
+      <div class="form">
+        <label class="lbl">游戏身份</label>
+        <div class="account-card" id="account-card">
+          <div class="account-info">
+            <div class="account-name" id="account-name">本地匿名玩家</div>
+            <div class="account-sub" id="account-sub">不连接 B 站账号，不上传身份或成绩</div>
+          </div>
+        </div>
+        <label class="lbl mt">出身背景（决定初始数值）</label>
+        <div id="origin-list" class="origin-list" role="group" aria-label="出身背景"></div>
+        <button id="btn-start" class="btn btn-primary" disabled>踏入仕途 →</button>
+        <div class="start-tip">原作：LING不道 · 本地离线版</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 主游戏 -->
+  <section id="screen-game" class="screen">
+    <!-- 顶部 -->
+    <header class="topbar">
+      <div class="brand-mini">宦海浮沉录</div>
+      <div class="progress-wrap">
+        <div class="progress-info">
+          <span id="phase-label">试用期</span>
+          <span id="progress-text">第 1 题 / 共 108 题</span>
+        </div>
+        <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+      </div>
+      <button id="btn-restart" class="btn-ghost">重新开始</button>
+    </header>
+
+    <!-- 主区域：左侧状态 / 右侧题目 -->
+    <main class="game-main">
+      <aside class="stats-panel">
+        <div class="player-card">
+          <div>
+            <div id="player-name" class="pname">本地匿名玩家</div>
+            <div id="player-phase" class="ptitle">试用期科员</div>
+          </div>
+        </div>
+
+        <div class="stat-list">
+          <div class="stat-row" data-stat="贪腐">
+            <span class="stat-label">贪腐</span>
+            <div class="stat-bar"><div class="stat-fill bar-贪腐"></div></div>
+            <span class="stat-num">0</span>
+          </div>
+          <div class="stat-row" data-stat="财富">
+            <span class="stat-label">财富</span>
+            <div class="stat-bar"><div class="stat-fill bar-财富"></div></div>
+            <span class="stat-num">0</span>
+          </div>
+          <div class="stat-row" data-stat="民心">
+            <span class="stat-label">民心</span>
+            <div class="stat-bar"><div class="stat-fill bar-民心"></div></div>
+            <span class="stat-num">50</span>
+          </div>
+          <div class="stat-row" data-stat="健康">
+            <span class="stat-label">健康</span>
+            <div class="stat-bar"><div class="stat-fill bar-健康"></div></div>
+            <span class="stat-num">80</span>
+          </div>
+          <div class="stat-row" data-stat="人脉">
+            <span class="stat-label">人脉</span>
+            <div class="stat-bar"><div class="stat-fill bar-人脉"></div></div>
+            <span class="stat-num">30</span>
+          </div>
+          <div class="stat-row" data-stat="事业">
+            <span class="stat-label">事业</span>
+            <div class="stat-bar"><div class="stat-fill bar-事业"></div></div>
+            <span class="stat-num">0</span>
+          </div>
+        </div>
+
+        <div class="legend">
+          <div class="legend-row"><span class="dot dot-贪腐"></span> ≥80 落马风险</div>
+          <div class="legend-row"><span class="dot dot-健康"></span> ≤0 病退</div>
+          <div class="legend-row"><span class="dot dot-财富"></span> ≥80 富贵险中求</div>
+        </div>
+      </aside>
+
+      <section class="card question-card">
+        <div class="question-meta">
+          <span class="q-id" id="q-id">#001</span>
+          <span class="q-tag" id="q-tag">日常</span>
+        </div>
+        <h2 class="q-title" id="q-title" tabindex="-1">走进青溪镇政府</h2>
+        <p class="q-desc" id="q-desc">...</p>
+        <div class="options" id="options"></div>
+        <div id="hint-toast" class="hint-toast" role="status" aria-live="polite"></div>
+      </section>
+    </main>
+  </section>
+
+  <!-- 结局 -->
+  <section id="screen-ending" class="screen">
+    <div class="container ending">
+      <div class="ending-grade" id="ending-grade">S</div>
+      <h1 class="ending-title" id="ending-title">位极人臣</h1>
+      <div class="ending-byline" id="ending-byline">本地匿名玩家</div>
+
+      <div class="ending-stats" id="ending-stats"></div>
+
+      <div class="ending-text" id="ending-text"></div>
+
+      <div class="ending-actions">
+        <button id="btn-play-again" class="btn btn-primary">再走一遍仕途</button>
+      </div>
+
+      <p class="local-mode-note">原作：LING不道 · 本地版不连接平台，不提供排行榜上传、关注或海报保存。</p>
+
+      <div class="ending-tips">
+        每次选择都会重塑结局。贪腐、健康、财富都可能在任意一题被送终。
+      </div>
+    </div>
+  </section>
+
+  <dialog id="restart-dialog" class="restart-dialog" aria-labelledby="restart-title">
+    <h2 id="restart-title">重新开始？</h2>
+    <p>本局进度会清空，返回出身选择。</p>
+    <div class="restart-actions">
+      <button id="btn-cancel-restart" class="btn btn-ghost" type="button">继续本局</button>
+      <button id="btn-confirm-restart" class="btn btn-primary" type="button">重新开始</button>
+    </div>
+  </dialog>
+
+  <script src="js/events.js"></script>
+  <script src="js/endings.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
