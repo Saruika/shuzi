@@ -95,7 +95,8 @@ final class YishuUITests: XCTestCase {
         }
     }
 
-    func testLandscapePortfolioSearchAcceptsInputAfterScrolling() {
+    func testLandscapePortfolioSearchAcceptsInputAfterScrolling() throws {
+#if targetEnvironment(simulator)
         addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
         let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", "ivory",
             "-use-deterministic-gallery-images-for-testing",
@@ -118,6 +119,29 @@ final class YishuUITests: XCTestCase {
         add(beforeInput)
         verifySearchCanBeEditedAndCancelled(in: app)
         XCTAssertEqual(field.frame.minY, initialFrame.minY, accuracy: 1)
+
+        // Keep the same app and search view alive across rotations. Relaunching
+        // would conceal a stale query, focus, keyboard or transition control.
+        for orientation in [UIDeviceOrientation.portrait, .landscapeLeft, .portrait] {
+            XCUIDevice.shared.orientation = orientation
+            let window = app.windows.firstMatch
+            let settled = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                let frame = window.frame
+                return orientation.isLandscape ? frame.width > frame.height : frame.height > frame.width
+            }, object: window)
+            XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 8), .completed)
+            XCTAssertTrue(field.waitForExistence(timeout: 5))
+            XCTAssertTrue(window.frame.contains(field.frame), "旋转后的搜索输入区域必须完整留在窗口内")
+            XCTAssertFalse(app.buttons["清除搜索"].exists, "旋转后不应残留上次搜索的清除按钮")
+            XCTAssertFalse(app.buttons["取消"].exists, "旋转后不应残留上次搜索的取消按钮")
+            XCTAssertFalse(app.keyboards.firstMatch.exists, "旋转不能重新唤起已取消搜索的键盘")
+            let clearedText = field.value as? String
+            XCTAssertTrue(clearedText == "" || clearedText == "搜索作品", "旋转后不应恢复已取消的搜索词")
+            verifySearchCanBeEditedAndCancelled(in: app)
+        }
+#else
+        throw XCTSkip("此回归会重置隔离夹具会话并旋转设备，仅允许在专用模拟器执行")
+#endif
     }
 
     private func verifySearchCanBeEditedAndCancelled(in app: XCUIApplication) {
@@ -128,7 +152,38 @@ final class YishuUITests: XCTestCase {
         field.tap()
         field.typeText("ios27-no-match")
         XCTAssertEqual(field.value as? String, "ios27-no-match")
-        app.buttons["取消"].tap()
+        let clear = app.buttons["清除搜索"]
+        let cancel = app.buttons["取消"]
+        for button in [clear, cancel] {
+            XCTAssertTrue(button.waitForExistence(timeout: 5))
+            XCTAssertGreaterThan(button.frame.width, 0)
+            XCTAssertGreaterThan(button.frame.height, 0)
+            XCTAssertTrue(app.windows.firstMatch.frame.contains(button.frame),
+                          "搜索按钮必须完整显示，不能仅有中心点可点击：button=\(button.frame)，window=\(app.windows.firstMatch.frame)")
+        }
+        clear.tap()
+        let cleared = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let text = field.value as? String
+            return text == "" || text == "搜索作品"
+        }, object: field)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 5), .completed)
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch.waitForExistence(timeout: 5))
+
+        // Re-enter a query so cancellation must clear real text, not only hide
+        // a button after the separate clear action already emptied the field.
+        field.tap()
+        field.typeText("ios27-no-match")
+        XCTAssertEqual(field.value as? String, "ios27-no-match")
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(cancel.frame), "重新输入后取消按钮仍必须完整留在窗口内")
+        cancel.tap()
+        let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            let text = field.value as? String
+            return !cancel.exists && !clear.exists && !app.keyboards.firstMatch.exists &&
+                (text == "" || text == "搜索作品")
+        }, object: field)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed,
+                       "取消后必须清空文本、关闭键盘并移除清除/取消按钮")
         XCTAssertFalse(app.buttons["取消"].exists)
         XCTAssertNotEqual(field.value as? String, "ios27-no-match")
         XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch.waitForExistence(timeout: 5))
@@ -372,6 +427,7 @@ final class YishuUITests: XCTestCase {
     }
 
     private func verifyProtectedScreenshotAndTouch(arguments: [String]) throws {
+#if targetEnvironment(simulator)
         let app = XCUIApplication()
         app.launchArguments = [
             "-skip-launch-poster-for-visual-testing",
@@ -412,6 +468,48 @@ final class YishuUITests: XCTestCase {
             element("portfolio-heading", in: app).waitForExistence(timeout: 8),
             "安全画布开启后页面切换失败"
         )
+
+        let shield = element("window-lifecycle-protection-shield", in: app)
+        let heading = element("portfolio-heading", in: app)
+        let search = app.textFields["portfolio-search-field"]
+        for cycle in 1...2 {
+            XCUIDevice.shared.press(.home)
+            let backgrounded = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                app.state == .runningBackground || app.state == .runningBackgroundSuspended
+            }, object: app)
+            XCTAssertEqual(XCTWaiter.wait(for: [backgrounded], timeout: 5), .completed,
+                           "第 \(cycle) 轮未进入后台，不能计为前后台恢复验证")
+            app.activate()
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: 5),
+                          "第 \(cycle) 轮未恢复前台")
+
+            let restored = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                !shield.exists && heading.exists && search.isHittable
+                    && home.isHittable && portfolio.isHittable
+            }, object: app)
+            XCTAssertEqual(XCTWaiter.wait(for: [restored], timeout: 8), .completed,
+                           "第 \(cycle) 轮恢复后保护遮罩残留，或作品内容/导航仍不可操作")
+            XCTAssertFalse(shield.exists, "前台已确认非捕获状态后不应残留 window 级遮罩")
+
+            // Navigate in both directions, rather than counting a visible Tab
+            // as proof that the recovered window still receives touches.
+            home.tap()
+            XCTAssertTrue(element("home-open-portfolio", in: app).waitForExistence(timeout: 8),
+                          "第 \(cycle) 轮恢复后无法切换到首页")
+            XCTAssertTrue(portfolio.isHittable)
+            portfolio.tap()
+            XCTAssertTrue(heading.waitForExistence(timeout: 8),
+                          "第 \(cycle) 轮恢复后无法重新进入作品页")
+            XCTAssertTrue(search.isHittable, "第 \(cycle) 轮作品搜索仍被遮挡")
+        }
+
+        XCTAssertTrue(home.isHittable)
+        home.tap()
+        XCTAssertTrue(element("home-open-portfolio", in: app).waitForExistence(timeout: 8),
+                      "保护恢复回归结束后未返回首页")
+#else
+        throw XCTSkip("此测试会重置隔离测试账号并保存保护页截图，仅限专用模拟器，不能用于真机现有会话")
+#endif
     }
 
     func testProtectedAdministratorPresentationCanAlwaysClose() {

@@ -653,21 +653,58 @@ enum VideoAudioSession {
     }
 }
 
+enum ScreenCaptureStatus: Int, Equatable {
+    case unknown = -1
+    case inactive = 0
+    case active = 1
+
+    init(_ state: UISceneCaptureState) {
+        switch state {
+        case .active: self = .active
+        case .inactive: self = .inactive
+        case .unspecified: self = .unknown
+        @unknown default: self = .unknown
+        }
+    }
+}
+
+/// One atomic sample from the owning window, never a mixture of unrelated scenes.
+struct ScreenCaptureSample: Equatable {
+    let sceneStatus: ScreenCaptureStatus
+    let screenIsCaptured: Bool
+    let isAttached: Bool
+    let isSceneActive: Bool
+
+    var status: ScreenCaptureStatus {
+        guard isAttached else { return .unknown }
+        if sceneStatus == .active || screenIsCaptured { return .active }
+        // A false screen signal must not override an unknown scene signal.
+        return sceneStatus == .inactive && isSceneActive ? .inactive : .unknown
+    }
+
+    static let detached = ScreenCaptureSample(
+        sceneStatus: .unknown, screenIsCaptured: false,
+        isAttached: false, isSceneActive: false
+    )
+}
+
 struct ScreenProtectionPresentationState: Equatable {
-    private(set) var isCaptureActive = false
+    private(set) var captureStatus = ScreenCaptureStatus.unknown
+    var isCaptureActive: Bool { captureStatus == .active }
     private(set) var hasEnteredActiveState = false
     private(set) var isPrivacyCoverVisible = false
     private(set) var isScreenshotWarningVisible = false
     private(set) var screenshotWarningGeneration: UInt = 0
 
     var shouldShowProtectionCover: Bool {
-        isCaptureActive || isPrivacyCoverVisible || isScreenshotWarningVisible
+        captureStatus != .inactive || isPrivacyCoverVisible || isScreenshotWarningVisible
     }
 
     @discardableResult
-    mutating func updateCapture(active: Bool) -> Bool {
-        let didBeginCapture = active && !isCaptureActive
-        isCaptureActive = active
+    mutating func updateCapture(_ status: ScreenCaptureStatus) -> Bool {
+        guard status != .unknown else { return false }
+        let didBeginCapture = status == .active && !isCaptureActive
+        captureStatus = status
         return didBeginCapture
     }
 
@@ -720,26 +757,22 @@ private struct ScreenCaptureProtectionModifier: ViewModifier {
             if shouldShowProtectionCover {
                 CaptureProtectionCover()
                     .zIndex(10_000)
-                    .transition(.opacity)
+                    .transition(.identity)
+                    .transaction { $0.animation = nil; $0.disablesAnimations = true }
             }
         }
         .background {
-            SceneCaptureStateObserver { captured in
-                applyCaptureState(captured)
+            SceneCaptureStateObserver { status in
+                applyCaptureState(status)
             }
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
         }
         .onAppear {
-            refreshCaptureState()
             updatePrivacyCover(for: scenePhase)
         }
         .onChange(of: scenePhase) { _, phase in
-            refreshCaptureState()
             updatePrivacyCover(for: phase)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
-            refreshCaptureState()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
             showScreenshotWarning()
@@ -751,16 +784,8 @@ private struct ScreenCaptureProtectionModifier: ViewModifier {
         }
     }
 
-    private func refreshCaptureState() {
-        let windowScenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        applyCaptureState(windowScenes
-            .contains { $0.traitCollection.sceneCaptureState == .active }
-        )
-    }
-
-    private func applyCaptureState(_ captured: Bool) {
-        guard protectionState.isCaptureActive != captured else { return }
-        if protectionState.updateCapture(active: captured) {
+    private func applyCaptureState(_ status: ScreenCaptureStatus) {
+        if protectionState.updateCapture(status) {
             Task { await ArtworkImagePrefetcher.purgeMemory() }
         }
     }
@@ -918,7 +943,7 @@ struct CaptureProtectionCover: View {
 }
 
 private struct SceneCaptureStateObserver: UIViewRepresentable {
-    let onChange: @MainActor (Bool) -> Void
+    let onChange: @MainActor (ScreenCaptureStatus) -> Void
 
     func makeUIView(context: Context) -> SceneCaptureStateObserverView {
         SceneCaptureStateObserverView(onChange: onChange)
@@ -926,24 +951,25 @@ private struct SceneCaptureStateObserver: UIViewRepresentable {
 
     func updateUIView(_ view: SceneCaptureStateObserverView, context: Context) {
         view.onChange = onChange
-        view.reportCurrentState()
+    }
+
+    static func dismantleUIView(_ view: SceneCaptureStateObserverView, coordinator: Void) {
+        view.stopObserving()
     }
 }
 
 @MainActor
 private final class SceneCaptureStateObserverView: UIView {
-    var onChange: @MainActor (Bool) -> Void
-    private var traitRegistration: (any UITraitChangeRegistration)?
+    var onChange: @MainActor (ScreenCaptureStatus) -> Void
+    private lazy var captureObserver = WindowCaptureObservation { [weak self] sample in
+        self?.onChange(sample.status)
+    }
 
-    init(onChange: @escaping @MainActor (Bool) -> Void) {
+    init(onChange: @escaping @MainActor (ScreenCaptureStatus) -> Void) {
         self.onChange = onChange
         super.init(frame: .zero)
         backgroundColor = .clear
         isUserInteractionEnabled = false
-        traitRegistration = registerForTraitChanges([UITraitSceneCaptureState.self]) {
-            (view: SceneCaptureStateObserverView, _: UITraitCollection) in
-            view.reportCurrentState()
-        }
     }
 
     @available(*, unavailable)
@@ -953,29 +979,141 @@ private final class SceneCaptureStateObserverView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        reportCurrentState()
+        captureObserver.attach(to: window)
     }
 
-    func reportCurrentState() {
-        onChange(traitCollection.sceneCaptureState == .active)
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        captureObserver.attach(to: window)
+    }
+
+    func stopObserving() {
+        captureObserver.attach(to: nil)
+    }
+}
+
+/// Observes the real owning scene, not a nested secure UIHostingController's
+/// transient traits. Synchronous callbacks are scoped to the current attachment.
+@MainActor
+final class WindowCaptureObservation: NSObject {
+    private weak var observedWindow: UIWindow?
+    private weak var observedScene: UIWindowScene?
+    private weak var observedScreen: UIScreen?
+    private var traitRegistration: (any UITraitChangeRegistration)?
+    private var lastSample: ScreenCaptureSample?
+    private let onChange: @MainActor (ScreenCaptureSample) -> Void
+
+    init(onChange: @escaping @MainActor (ScreenCaptureSample) -> Void) {
+        self.onChange = onChange
+        super.init()
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        let scene = observedScene
+        let registration = traitRegistration
+        Task { @MainActor in
+            if let registration { scene?.unregisterForTraitChanges(registration) }
+        }
+    }
+
+    func attach(to window: UIWindow?) {
+        guard observedWindow !== window || observedScene !== window?.windowScene ||
+                observedScreen !== window?.windowScene?.screen else {
+            resample()
+            return
+        }
+        if let traitRegistration { observedScene?.unregisterForTraitChanges(traitRegistration) }
+        traitRegistration = nil
+        NotificationCenter.default.removeObserver(self)
+        observedWindow = window
+        observedScene = window?.windowScene
+        observedScreen = window?.windowScene?.screen
+        lastSample = nil
+        guard let scene = observedScene else {
+            publish(.detached)
+            return
+        }
+        traitRegistration = scene.registerForTraitChanges([UITraitSceneCaptureState.self]) {
+            [weak self] (source: UIWindowScene, _: UITraitCollection) in
+            guard self?.observedScene === source else { return }
+            self?.resample()
+        }
+        let center = NotificationCenter.default
+        for name in [UIScene.didActivateNotification, UIScene.willDeactivateNotification,
+                     UIScene.didEnterBackgroundNotification] {
+            center.addObserver(self, selector: #selector(sceneChanged(_:)), name: name, object: scene)
+        }
+        center.addObserver(self, selector: #selector(sceneDisconnected(_:)),
+                           name: UIScene.didDisconnectNotification, object: scene)
+        center.addObserver(self, selector: #selector(screenChanged(_:)),
+                           name: UIScreen.capturedDidChangeNotification, object: scene.screen)
+        resample()
+    }
+
+    func resample() {
+        guard let window = observedWindow else {
+            publish(.detached)
+            return
+        }
+        if window.windowScene !== observedScene || window.windowScene?.screen !== observedScreen {
+            attach(to: window)
+            return
+        }
+        guard let scene = observedScene else { publish(.detached); return }
+        publish(ScreenCaptureSample(
+            sceneStatus: ScreenCaptureStatus(scene.traitCollection.sceneCaptureState),
+            screenIsCaptured: scene.screen.isCaptured,
+            isAttached: true,
+            isSceneActive: scene.activationState == .foregroundActive
+        ))
+    }
+
+    @objc private func sceneChanged(_ notification: Notification) {
+        guard let source = notification.object as? UIWindowScene, source === observedScene else { return }
+        resample()
+    }
+
+    @objc private func screenChanged(_ notification: Notification) {
+        guard let source = notification.object as? UIScreen, source === observedScene?.screen else { return }
+        resample()
+    }
+
+    @objc private func sceneDisconnected(_ notification: Notification) {
+        guard let source = notification.object as? UIWindowScene, source === observedScene else { return }
+        attach(to: nil)
+    }
+
+    private func publish(_ sample: ScreenCaptureSample) {
+        guard lastSample != sample else { return }
+        lastSample = sample
+        ScreenProtectionDiagnostics.record(sample: sample)
+        onChange(sample)
     }
 }
 
 struct WindowLifecycleShieldState: Equatable {
     private(set) var hasEnteredActiveState = false
-    private(set) var isVisible = false
+    private var lifecycleVisible = false
+    private var captureStatus = ScreenCaptureStatus.unknown
+    var captureNeedsCover: Bool { captureStatus != .inactive }
+    var isVisible: Bool { lifecycleVisible || captureNeedsCover }
+
+    mutating func updateCapture(_ status: ScreenCaptureStatus) {
+        if status != .unknown { captureStatus = status }
+    }
 
     mutating func sceneDidActivate() {
         hasEnteredActiveState = true
-        isVisible = false
+        lifecycleVisible = false
     }
 
     mutating func sceneWillDeactivate() {
-        isVisible = hasEnteredActiveState
+        lifecycleVisible = hasEnteredActiveState
     }
 
     mutating func sceneDidEnterBackground() {
-        isVisible = hasEnteredActiveState
+        lifecycleVisible = hasEnteredActiveState
     }
 
     mutating func reset() {
@@ -1000,16 +1138,23 @@ private struct WindowLifecycleProtectionInstaller: UIViewRepresentable {
     }
 }
 
-/// Installs a synchronous, scene-specific privacy shield directly above the
-/// app-owned window. SwiftUI's scene phase remains the source for the visible
-/// in-app protection page, while this small UIKit layer closes the timing gap
-/// before the system takes an App Switcher snapshot.
+/// Synchronous, scene-specific window shield, independent of the secure canvas.
+/// Capture uses the same branded cover; inactive App Switcher snapshots retain
+/// the existing black shield. System capture APIs are not a zero-frame DRM API.
 @MainActor
-private final class WindowLifecycleProtectionAttachmentView: UIView {
+final class WindowLifecycleProtectionAttachmentView: UIView {
     private weak var protectedWindow: UIWindow?
     private weak var observedScene: UIScene?
     private let shieldView = UIView(frame: .zero)
+    private let shieldController = UIViewController()
+    private var shieldWindow: UIWindow?
     private var lifecycleState = WindowLifecycleShieldState()
+    private let captureCoverController = UIHostingController(rootView: CaptureProtectionCover())
+    private lazy var captureObserver = WindowCaptureObservation { [weak self] sample in
+        guard let self else { return }
+        self.lifecycleState.updateCapture(sample.status)
+        self.updateShieldVisibility()
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -1023,6 +1168,7 @@ private final class WindowLifecycleProtectionAttachmentView: UIView {
         shieldView.accessibilityViewIsModal = true
         shieldView.accessibilityIdentifier = "window-lifecycle-protection-shield"
         shieldView.accessibilityLabel = "影像内容已保护"
+        shieldController.view = shieldView
     }
 
     @available(*, unavailable)
@@ -1032,31 +1178,53 @@ private final class WindowLifecycleProtectionAttachmentView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        attach(to: window)
+        // UIKit temporarily removes the presenting view after a full-screen
+        // presentation. Keep protecting its window until SwiftUI dismantles
+        // this installer or the scene disconnects; nil here is not disposal.
+        if let window { attach(to: window) }
     }
 
     func refreshForcedState() {
+        attach(to: window ?? protectedWindow)
+        captureObserver.resample()
         updateShieldVisibility()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        attach(to: window ?? protectedWindow)
     }
 
     func detachFromProtectedWindow() {
         NotificationCenter.default.removeObserver(self)
-        shieldView.removeFromSuperview()
         protectedWindow = nil
         observedScene = nil
+        captureObserver.attach(to: nil)
+        removeCaptureCover()
+        shieldWindow?.isHidden = true
+        shieldWindow?.rootViewController = nil
+        shieldWindow = nil
         lifecycleState.reset()
     }
 
     private func attach(to window: UIWindow?) {
-        guard protectedWindow !== window else {
+        guard protectedWindow !== window || observedScene !== window?.windowScene else {
+            captureObserver.attach(to: window)
             updateShieldVisibility()
             return
         }
 
         detachFromProtectedWindow()
-        guard let window, let scene = window.windowScene else { return }
+        guard let window else { return }
+        // A window can briefly lose its scene while the presenting view is
+        // detached. Retain only the weak window binding so a later refresh can
+        // reattach, without leaving a shield on the old scene.
         protectedWindow = window
+        guard let scene = window.windowScene else { return }
         observedScene = scene
+
+        // Sample first. Activating the scene must never clear capture protection.
+        captureObserver.attach(to: window)
 
         if scene.activationState == .foregroundActive {
             lifecycleState.sceneDidActivate()
@@ -1107,6 +1275,7 @@ private final class WindowLifecycleProtectionAttachmentView: UIView {
     @objc private func sceneDidActivate(_ notification: Notification) {
         guard let scene = notification.object as? UIScene,
               scene === observedScene else { return }
+        captureObserver.resample()
         lifecycleState.sceneDidActivate()
         updateShieldVisibility()
     }
@@ -1121,19 +1290,60 @@ private final class WindowLifecycleProtectionAttachmentView: UIView {
         if lifecycleState.isVisible || ScreenProtectionTesting.forcesCover {
             installShieldIfNeeded()
         } else {
-            shieldView.removeFromSuperview()
+            removeCaptureCover()
+            shieldWindow?.isHidden = true
+            shieldWindow?.rootViewController = nil
+            shieldWindow = nil
         }
     }
 
     private func installShieldIfNeeded() {
-        guard let window = protectedWindow else { return }
-        if shieldView.superview !== window {
-            shieldView.removeFromSuperview()
-            shieldView.frame = window.bounds
-            shieldView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            window.addSubview(shieldView)
+        guard let window = protectedWindow, let scene = window.windowScene else { return }
+        if shieldWindow?.windowScene !== scene {
+            removeCaptureCover()
+            shieldWindow?.isHidden = true
+            shieldWindow?.rootViewController = nil
+            shieldWindow = nil
         }
-        window.bringSubviewToFront(shieldView)
+        if shieldWindow == nil {
+            let overlay = UIWindow(windowScene: scene)
+            overlay.rootViewController = shieldController
+            // Do not become key or change keyboard/focus ownership. A separate
+            // app-owned window remains above same-scene full-screen modals.
+            overlay.windowLevel = UIWindow.Level(rawValue: window.windowLevel.rawValue + 1)
+            shieldWindow = overlay
+        }
+        shieldWindow?.frame = window.frame
+        if lifecycleState.captureNeedsCover && !ScreenProtectionTesting.forcesCover {
+            installCaptureCover()
+        } else {
+            removeCaptureCover()
+        }
+        shieldWindow?.isHidden = false
+    }
+
+    private func installCaptureCover() {
+        let parent = shieldController
+        if captureCoverController.parent !== parent {
+            removeCaptureCover()
+            parent.addChild(captureCoverController)
+            captureCoverController.loadViewIfNeeded()
+            guard let cover = captureCoverController.viewIfLoaded else {
+                captureCoverController.removeFromParent()
+                return
+            }
+            cover.frame = shieldView.bounds
+            cover.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            shieldView.addSubview(cover)
+            captureCoverController.didMove(toParent: parent)
+        }
+    }
+
+    private func removeCaptureCover() {
+        guard captureCoverController.parent != nil else { return }
+        captureCoverController.willMove(toParent: nil)
+        captureCoverController.viewIfLoaded?.removeFromSuperview()
+        captureCoverController.removeFromParent()
     }
 }
 
@@ -1181,7 +1391,6 @@ struct SecureCaptureSurface<Content: View>: View {
                         .appAppearance(isAppRoot: owner == .appRoot)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .privacySensitive()
-                        .protectedFromScreenCapture()
                 }
                 // The UIKit hosting surface must reach the window boundary;
                 // otherwise descendants cannot paint outside its safe frame.
@@ -1189,6 +1398,9 @@ struct SecureCaptureSurface<Content: View>: View {
                 .ignoresSafeArea(.container)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Stay in the actual window's scene tree, outside the nested secure
+            // UIHostingController. This also covers full-screen presentations.
+            .protectedFromScreenCapture()
             .background {
                 if owner == .appRoot {
                     WindowLifecycleProtectionInstaller()
@@ -1688,6 +1900,12 @@ private enum ScreenProtectionDiagnostics {
         subsystem: Bundle.main.bundleIdentifier ?? "cn.com.shuzijun.yishu",
         category: "ScreenProtection"
     )
+
+    static func record(sample: ScreenCaptureSample) {
+        // Only enum values/booleans. Never include photo, URL, account, location,
+        // device identifier or accessibility text in these local diagnostics.
+        logger.info("Capture state: scene=\(sample.sceneStatus.rawValue, privacy: .public) screen=\(sample.screenIsCaptured, privacy: .public) attached=\(sample.isAttached, privacy: .public) foreground=\(sample.isSceneActive, privacy: .public) effective=\(sample.status.rawValue, privacy: .public)")
+    }
 
     static func record(
         state: SecureCanvasInstallationState,

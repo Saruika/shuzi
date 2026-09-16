@@ -57,3 +57,34 @@ iPhone 截图保护复测用例曾执行通过，但 `iphone-protection-acceptan
 - [Apple 开发者发行记录](https://developer.apple.com/news/releases/)
 - [iOS / iPadOS 27 Release Notes](https://developer.apple.com/documentation/ios-ipados-release-notes/ios-ipados-27-release-notes)
 - [Xcode 27 Release Notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-27-release-notes)
+
+## 2026-09-16 真机问题后的本地修复
+
+真机 Build 7 的跟进记录位于 `Hi-Shuzi-QA/ios27-physical-20260916-H2OORT/FOLLOWUP_REPORT.md`：镜像可见照片、手机横屏取消按钮部分越界。以下属于本地候选代码，不能据此把手机上的 Build 7 标为已修复。
+
+### 捕获与窗口生命周期
+
+- 捕获状态改为明确的 active / inactive / unknown。初次未取得有效状态时保留遮罩；后续 unknown 不再覆盖已知 active。只有所属前台场景明确 inactive 且屏幕未捕获，才能解除捕获遮罩。
+- 观察实际所属 UIWindowScene 的 trait 和同一 screen 的捕获通知，不再混合所有 connectedScenes，也不依赖嵌套安全 UIHostingController 的临时 trait。SwiftUI 捕获覆盖层移至安全宿主外侧，并取消保护页淡入淡出。
+- 窗口级遮罩独立于根页面，采用同场景、非 key 的高一层窗口。沿用「狐狸姐姐温馨提示」；后台快照仍使用原黑色遮罩。不改变页面设计、账号数据、截图保护开关或服务端。
+- 新增等待 UIKit 全屏呈现完成的回归，实际复现底层视图移出窗口后遮罩被解除。修复后临时移出不等于销毁；SwiftUI dismantle / scene disconnect 才明确解绑。模态仍打开时的 scene 解挂与重新绑定也纳入断言；旧窗口先解除 rootViewController，避免复用控制器时跨窗口挂载。
+- 横屏搜索沿用本分支已完成的紧凑高度修复，补充左横屏／竖屏／右横屏连续切换及输入、清除、取消、键盘关闭的真实操作验证，没有重新设计搜索栏。
+
+### 证据边界
+
+本次证据目录：`/Users/mathiashu/Library/Developer/Hi-Shuzi-QA/capture-fix-3FFgxN`。`phone-final.xcresult` 保留全屏遮罩断言失败的原始记录，后续成功结果另存，不覆盖失败。`phone-fixed.xcresult` 是中间修复版本；最终验收以 `phone-acceptance.xcresult` 及后续设备对照结果为准。
+
+| 最终代码检查 | 结果／证据 |
+| --- | --- |
+| iPhone iOS 27 单元＋UI | `phone-acceptance.xcresult`：301 通过、1 跳过、0 失败。包括 297 项单测（296 通过、1 在线审核环境测试跳过）和 5 项 UI：连续旋转搜索、窗口级遮罩、浅色及深色截图后继续操作和两轮前后台恢复、全屏图片翻页与关闭。 |
+| iPadOS 27 UI | `ipad-acceptance.xcresult`：7 次运行通过、0 失败。保护开启的浅深色／横竖屏图片翻页关闭共 4 组，另含窗口遮罩、浅色反复进入返回与搜索、截图后操作及两轮前后台恢复。结果包将动态配置合并为 4 个测试函数，实际执行 7 次。 |
+| iPhone iOS 26.5 对照 | `legacy-acceptance.xcresult`：299 通过、1 在线审核环境测试跳过、0 失败。包括全部 297 项单测及横屏旋转搜索、受保护图片翻页关闭、截图后操作与前后台恢复 3 项 UI。 |
+| 新设备通知授权 | `ipad-permission.xcresult`、`legacy-permission.xcresult`：各 1 项通过；分别为 iPadOS 27、iOS 26.5 新建隔离模拟器，不是真 APNs 送达验收。 |
+| SDK 27 Release 模拟器编译、静态分析、包内容检查 | `release-acceptance.log`：通过；warnings-as-errors，不含受保护照片、凭据或被检查的 Debug 专用夹具。不是已签名的上传 IPA。 |
+| 本地源码与资源契约 | `security-acceptance.log`：通过。Linux flock / 部分真实部署、PHP / Composer 等本地无法执行的检查不计作服务端验证。 |
+
+捕获信号边界由单元测试注入；模拟器截图检查证明所测渲染和操作路径，不是真机镜像的零帧保护证明。窗口夹具测试仍产生 UIKit appearance-transition 告警，不能把断言通过写成系统日志完全无警告。需要安装包含修复的新测试版本后，重新做真机镜像／录屏和停止捕获后的恢复验收；本轮不覆盖手机 TestFlight、不修改账号、不上传或发布。
+
+另记录既有性能警告：影视页退出时同步 `AVAudioSession.setActive` 可能影响主线程响应，早期适配日志中已存在；本轮未修改播放器或音频策略，也未宣称此项已修复。
+
+本轮最终代码的上述检查均已完成，专用模拟器已关闭，原始失败与通过证据均保留。最低 iOS 17 仍只是编译兼容，未进行该 runtime 的运行测试；GitHub CI、TestFlight 上传、正式真机新包验收均不包含在本地通过结论中。

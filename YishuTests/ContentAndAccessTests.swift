@@ -1913,8 +1913,9 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(controller.scrollView.contentOffset, .zero)
     }
 
-    func testScreenProtectionDoesNotCoverColdLaunchBeforeFirstActiveState() {
+    func testScreenProtectionDoesNotAddLifecycleCoverToVerifiedUncapturedColdLaunch() {
         var state = ScreenProtectionPresentationState()
+        state.updateCapture(.inactive)
 
         state.updateScene(isActive: false)
 
@@ -1925,6 +1926,7 @@ final class ContentAndAccessTests: XCTestCase {
 
     func testScreenProtectionCoversInactiveSceneAfterProtectedContentWasVisible() {
         var state = ScreenProtectionPresentationState()
+        state.updateCapture(.inactive)
 
         state.updateScene(isActive: true)
         state.updateScene(isActive: false)
@@ -1941,6 +1943,7 @@ final class ContentAndAccessTests: XCTestCase {
 
     func testScreenshotWarningExpiresWhileLifecycleCoverRemainsActive() {
         var state = ScreenProtectionPresentationState()
+        state.updateCapture(.inactive)
         state.updateScene(isActive: true)
         let generation = state.beginScreenshotWarning()
 
@@ -1956,20 +1959,21 @@ final class ContentAndAccessTests: XCTestCase {
         var state = ScreenProtectionPresentationState()
         let generation = state.beginScreenshotWarning()
 
-        XCTAssertTrue(state.updateCapture(active: true))
-        XCTAssertFalse(state.updateCapture(active: true), "重复状态不应重复触发开始录屏副作用")
+        XCTAssertTrue(state.updateCapture(.active))
+        XCTAssertFalse(state.updateCapture(.active), "重复状态不应重复触发开始录屏副作用")
         state.expireScreenshotWarning(generation: generation)
 
         XCTAssertFalse(state.isScreenshotWarningVisible)
         XCTAssertTrue(state.isCaptureActive)
         XCTAssertTrue(state.shouldShowProtectionCover)
 
-        XCTAssertFalse(state.updateCapture(active: false))
+        XCTAssertFalse(state.updateCapture(.inactive))
         XCTAssertFalse(state.shouldShowProtectionCover)
     }
 
     func testOlderScreenshotWarningCannotExpireNewerWarning() {
         var state = ScreenProtectionPresentationState()
+        state.updateCapture(.inactive)
         let firstGeneration = state.beginScreenshotWarning()
         let secondGeneration = state.beginScreenshotWarning()
 
@@ -1982,6 +1986,7 @@ final class ContentAndAccessTests: XCTestCase {
 
     func testCancellingScreenshotWarningInvalidatesPendingGeneration() {
         var state = ScreenProtectionPresentationState()
+        state.updateCapture(.inactive)
         let generation = state.beginScreenshotWarning()
 
         state.cancelScreenshotWarning()
@@ -1991,8 +1996,9 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(state.shouldShowProtectionCover)
     }
 
-    func testWindowLifecycleShieldOnlyAppearsAfterFirstActiveState() {
+    func testVerifiedUncapturedWindowLifecycleShieldOnlyAppearsAfterFirstActiveState() {
         var state = WindowLifecycleShieldState()
+        state.updateCapture(.inactive)
 
         state.sceneWillDeactivate()
         state.sceneDidEnterBackground()
@@ -2007,6 +2013,273 @@ final class ContentAndAccessTests: XCTestCase {
 
         state.sceneDidActivate()
         XCTAssertFalse(state.isVisible)
+    }
+
+    func testUnknownCaptureInitiallyCoversUntilExplicitInactiveSample() {
+        var presentation = ScreenProtectionPresentationState()
+        var window = WindowLifecycleShieldState()
+
+        XCTAssertFalse(presentation.isCaptureActive, "未知状态不能误报已经开始录屏")
+        XCTAssertTrue(presentation.shouldShowProtectionCover)
+        XCTAssertTrue(window.captureNeedsCover)
+        XCTAssertTrue(window.isVisible)
+        XCTAssertFalse(presentation.updateCapture(.unknown))
+        window.updateCapture(.unknown)
+        XCTAssertTrue(presentation.shouldShowProtectionCover)
+        XCTAssertTrue(window.isVisible)
+
+        XCTAssertFalse(presentation.updateCapture(.inactive))
+        window.updateCapture(.inactive)
+        XCTAssertFalse(presentation.isCaptureActive)
+        XCTAssertFalse(presentation.shouldShowProtectionCover)
+        XCTAssertFalse(window.captureNeedsCover)
+        XCTAssertFalse(window.isVisible)
+    }
+
+    func testUnknownCaptureCannotOverwritePreviouslyActiveOrInactiveState() {
+        var presentation = ScreenProtectionPresentationState()
+        var window = WindowLifecycleShieldState()
+        XCTAssertTrue(presentation.updateCapture(.active))
+        window.updateCapture(.active)
+
+        XCTAssertFalse(presentation.updateCapture(.unknown))
+        window.updateCapture(.unknown)
+        XCTAssertTrue(presentation.isCaptureActive)
+        XCTAssertTrue(presentation.shouldShowProtectionCover)
+        XCTAssertTrue(window.captureNeedsCover)
+        XCTAssertTrue(window.isVisible)
+        XCTAssertFalse(presentation.updateCapture(.active), "未知采样不能制造第二次开始录屏边沿")
+
+        XCTAssertFalse(presentation.updateCapture(.inactive))
+        window.updateCapture(.inactive)
+        XCTAssertFalse(presentation.updateCapture(.unknown))
+        window.updateCapture(.unknown)
+        XCTAssertFalse(presentation.isCaptureActive)
+        XCTAssertFalse(presentation.shouldShowProtectionCover)
+        XCTAssertFalse(window.captureNeedsCover)
+        XCTAssertFalse(window.isVisible)
+        XCTAssertTrue(presentation.updateCapture(.active), "明确结束后重新开始捕获才产生新边沿")
+    }
+
+    func testDetachedCaptureSamplesAlwaysRemainUnknown() {
+        for sceneStatus in [ScreenCaptureStatus.unknown, .inactive, .active] {
+            for screenIsCaptured in [false, true] {
+                for isSceneActive in [false, true] {
+                    let sample = ScreenCaptureSample(
+                        sceneStatus: sceneStatus, screenIsCaptured: screenIsCaptured,
+                        isAttached: false, isSceneActive: isSceneActive
+                    )
+                    XCTAssertEqual(sample.status, .unknown,
+                                   "未附着所属窗口的采样不能代表真实页面，亦不能清除现有保护")
+                }
+            }
+        }
+    }
+
+    func testForegroundActivationDoesNotRemoveUnknownCaptureShield() {
+        var presentation = ScreenProtectionPresentationState()
+        var window = WindowLifecycleShieldState()
+        presentation.updateScene(isActive: true)
+        window.sceneDidActivate()
+        XCTAssertFalse(presentation.isPrivacyCoverVisible)
+        XCTAssertTrue(presentation.shouldShowProtectionCover)
+        XCTAssertTrue(window.captureNeedsCover)
+        XCTAssertTrue(window.isVisible)
+
+        presentation.updateScene(isActive: false)
+        window.sceneWillDeactivate()
+        window.sceneDidEnterBackground()
+        XCTAssertFalse(presentation.updateCapture(.unknown))
+        window.updateCapture(.unknown)
+        presentation.updateScene(isActive: true)
+        window.sceneDidActivate()
+        XCTAssertTrue(presentation.shouldShowProtectionCover,
+                      "生命周期回到前台不等于已经获得明确非捕获信号")
+        XCTAssertTrue(window.isVisible)
+
+        XCTAssertFalse(presentation.updateCapture(.inactive))
+        window.updateCapture(.inactive)
+        XCTAssertFalse(presentation.shouldShowProtectionCover)
+        XCTAssertFalse(window.isVisible)
+        window.reset()
+        XCTAssertTrue(window.captureNeedsCover, "新窗口不得继承旧窗口的非捕获确认")
+        XCTAssertTrue(window.isVisible)
+    }
+
+    func testWarningExpiryDuringUnknownSampleDoesNotClearActiveCaptureCover() {
+        var presentation = ScreenProtectionPresentationState()
+        var window = WindowLifecycleShieldState()
+        XCTAssertTrue(presentation.updateCapture(.active))
+        window.updateCapture(.active)
+        let generation = presentation.beginScreenshotWarning()
+        XCTAssertFalse(presentation.updateCapture(.unknown))
+        window.updateCapture(.unknown)
+
+        presentation.expireScreenshotWarning(generation: generation)
+        XCTAssertFalse(presentation.isScreenshotWarningVisible)
+        XCTAssertTrue(presentation.isCaptureActive)
+        XCTAssertTrue(presentation.shouldShowProtectionCover)
+        XCTAssertTrue(window.captureNeedsCover)
+        XCTAssertTrue(window.isVisible)
+    }
+
+    func testActiveSceneCaptureOverridesUncapturedScreenSample() {
+        for isSceneActive in [false, true] {
+            let sample = ScreenCaptureSample(
+                sceneStatus: .active, screenIsCaptured: false,
+                isAttached: true, isSceneActive: isSceneActive
+            )
+            XCTAssertEqual(sample.status, .active,
+                           "所属场景明确正在捕获时，屏幕级false不得覆盖active")
+        }
+    }
+
+    func testCapturedScreenOverridesInactiveSceneSample() {
+        for isSceneActive in [false, true] {
+            let sample = ScreenCaptureSample(
+                sceneStatus: .inactive, screenIsCaptured: true,
+                isAttached: true, isSceneActive: isSceneActive
+            )
+            XCTAssertEqual(sample.status, .active,
+                           "任一已附着观察来源报告捕获时均保留保护")
+        }
+    }
+
+    func testUncapturedScreenCannotTurnUnknownOrBackgroundSceneIntoInactive() {
+        for isSceneActive in [false, true] {
+            let unknown = ScreenCaptureSample(
+                sceneStatus: .unknown, screenIsCaptured: false,
+                isAttached: true, isSceneActive: isSceneActive
+            )
+            XCTAssertEqual(unknown.status, .unknown,
+                           "屏幕级false本身不能证明场景未被捕获")
+        }
+        XCTAssertEqual(ScreenCaptureSample(
+            sceneStatus: .inactive, screenIsCaptured: false,
+            isAttached: true, isSceneActive: false
+        ).status, .unknown, "后台场景的inactive不是前台内容的有效解除信号")
+        XCTAssertEqual(ScreenCaptureSample(
+            sceneStatus: .inactive, screenIsCaptured: false,
+            isAttached: true, isSceneActive: true
+        ).status, .inactive)
+    }
+
+    @MainActor
+    func testCaptureObserverRebindsChangedWindowSceneAndIgnoresDetachedEvents() throws {
+#if targetEnvironment(simulator)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let hadOverride = scene.traitOverrides.contains(UITraitSceneCaptureState.self)
+        let original = scene.traitCollection.sceneCaptureState
+        defer {
+            if hadOverride { scene.traitOverrides.sceneCaptureState = original }
+            else { scene.traitOverrides.remove(UITraitSceneCaptureState.self) }
+        }
+        var samples: [ScreenCaptureSample] = []
+        let observer = WindowCaptureObservation { samples.append($0) }
+        let window = UIWindow(windowScene: scene)
+        defer { observer.attach(to: nil) }
+
+        scene.traitOverrides.sceneCaptureState = .active
+        observer.attach(to: window)
+        XCTAssertEqual(samples.last?.status, .active)
+        window.windowScene = nil
+        observer.resample()
+        XCTAssertEqual(samples.last, .detached)
+        let detachedCount = samples.count
+        NotificationCenter.default.post(name: UIScene.didActivateNotification, object: scene)
+        NotificationCenter.default.post(name: UIScreen.capturedDidChangeNotification, object: scene.screen)
+        XCTAssertEqual(samples.count, detachedCount, "已解挂场景和屏幕的通知不能再写入状态")
+
+        window.windowScene = scene
+        observer.resample()
+        XCTAssertEqual(samples.last?.status, .active, "同一窗口重新获得场景时必须重绑")
+        XCTAssertTrue(samples.last?.isAttached == true)
+        observer.attach(to: nil)
+        XCTAssertEqual(samples.last, .detached)
+#else
+        throw XCTSkip("场景 trait 注入仅允许隔离模拟器")
+#endif
+    }
+
+    @MainActor
+    func testCaptureWindowDoesNotTakeKeyFocusAndCoversPresentedController() async throws {
+#if targetEnvironment(simulator)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let hadOverride = scene.traitOverrides.contains(UITraitSceneCaptureState.self)
+        let original = scene.traitCollection.sceneCaptureState
+        let priorKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 380, height: 700)
+        let root = UIViewController()
+        window.rootViewController = root
+        window.isHidden = false
+        let attachment = WindowLifecycleProtectionAttachmentView()
+        root.view.addSubview(attachment)
+        defer {
+            attachment.detachFromProtectedWindow()
+            attachment.removeFromSuperview()
+            window.isHidden = true
+            if hadOverride { scene.traitOverrides.sceneCaptureState = original }
+            else { scene.traitOverrides.remove(UITraitSceneCaptureState.self) }
+        }
+        let modal = UIViewController()
+        modal.modalPresentationStyle = .fullScreen
+        await withCheckedContinuation { continuation in
+            root.present(modal, animated: false) { continuation.resume() }
+        }
+        XCTAssertTrue(root.presentedViewController === modal)
+        scene.traitOverrides.sceneCaptureState = .active
+        attachment.refreshForcedState()
+        let shield = try XCTUnwrap(scene.windows.first {
+            !$0.isHidden && $0.frame == window.frame &&
+            $0.rootViewController?.view.accessibilityIdentifier == "window-lifecycle-protection-shield"
+        })
+        XCTAssertFalse(shield.isKeyWindow)
+        XCTAssertTrue(scene.windows.first(where: \.isKeyWindow) === priorKeyWindow)
+        XCTAssertGreaterThan(shield.windowLevel.rawValue, window.windowLevel.rawValue)
+        XCTAssertTrue(shield.rootViewController?.view.accessibilityViewIsModal == true)
+        let shieldRoot = try XCTUnwrap(shield.rootViewController)
+        let cover = try XCTUnwrap(shieldRoot.children.first)
+        XCTAssertTrue(cover.view.isDescendant(of: shieldRoot.view), "保护页控制器及视图必须具有一致的容纳层级")
+
+        window.frame = CGRect(x: 0, y: 0, width: 700, height: 380)
+        attachment.refreshForcedState()
+        XCTAssertEqual(shield.frame, window.frame)
+        await withCheckedContinuation { continuation in
+            root.dismiss(animated: false) { continuation.resume() }
+        }
+        let secondModal = UIViewController()
+        secondModal.modalPresentationStyle = .fullScreen
+        await withCheckedContinuation { continuation in
+            root.present(secondModal, animated: false) { continuation.resume() }
+        }
+        XCTAssertTrue(root.presentedViewController === secondModal)
+        XCTAssertNil(attachment.window, "确认全屏呈现确实暂时移除了底层安装视图")
+        XCTAssertFalse(shield.isHidden, "捕获中呈现模态不能移除高层级保护窗口")
+
+        // Rebind while the full-screen presentation still owns the hierarchy.
+        window.windowScene = nil
+        attachment.refreshForcedState()
+        XCTAssertTrue(shield.isHidden, "原场景解挂后不能遗留旧保护窗口")
+        XCTAssertNil(shield.rootViewController, "重绑前必须解除旧窗口对保护控制器的持有")
+        window.windowScene = scene
+        attachment.refreshForcedState()
+        let reboundShield = try XCTUnwrap(scene.windows.first {
+            !$0.isHidden && $0.frame == window.frame &&
+            $0.rootViewController?.view.accessibilityIdentifier == "window-lifecycle-protection-shield"
+        })
+        XCTAssertFalse(reboundShield === shield)
+        XCTAssertTrue(reboundShield.windowScene === window.windowScene)
+        scene.traitOverrides.sceneCaptureState = .inactive
+        attachment.refreshForcedState()
+        XCTAssertTrue(reboundShield.isHidden, "明确结束捕获后必须释放遮挡")
+        XCTAssertTrue(scene.windows.first(where: \.isKeyWindow) === priorKeyWindow)
+        await withCheckedContinuation { continuation in
+            root.dismiss(animated: false) { continuation.resume() }
+        }
+#else
+        throw XCTSkip("场景 trait 注入及窗口夹具仅允许隔离模拟器")
+#endif
     }
 
     func testSecureCanvasFallbackPolicyRetriesThenFailsClosed() {
