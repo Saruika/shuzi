@@ -95,6 +95,45 @@ final class YishuUITests: XCTestCase {
         }
     }
 
+    func testLandscapePortfolioSearchAcceptsInputAfterScrolling() {
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+        let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", "ivory",
+            "-use-deterministic-gallery-images-for-testing",
+            "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"])
+        openTab("影视", in: app)
+        XCUIDevice.shared.orientation = .landscapeRight
+        let rotated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.windows.firstMatch.frame.width > app.windows.firstMatch.frame.height
+        }, object: app.windows.firstMatch)
+        XCTAssertEqual(XCTWaiter.wait(for: [rotated], timeout: 8), .completed)
+        openTab("作品", in: app)
+        let field = app.textFields["portfolio-search-field"]
+        XCTAssertTrue(field.waitForExistence(timeout: 8))
+        let initialFrame = field.frame
+        app.scrollViews.firstMatch.swipeUp()
+        app.scrollViews.firstMatch.swipeUp()
+        let beforeInput = XCTAttachment(screenshot: app.screenshot())
+        beforeInput.name = "landscape-search-before-input"
+        beforeInput.lifetime = .keepAlways
+        add(beforeInput)
+        verifySearchCanBeEditedAndCancelled(in: app)
+        XCTAssertEqual(field.frame.minY, initialFrame.minY, accuracy: 1)
+    }
+
+    private func verifySearchCanBeEditedAndCancelled(in app: XCUIApplication) {
+        // iOS 27's field hittability can report false even when native tapping
+        // and typing succeed. Verify the actual user workflow, including the
+        // cancel button that really failed when placed above the window edge.
+        let field = app.textFields["portfolio-search-field"]
+        field.tap()
+        field.typeText("ios27-no-match")
+        XCTAssertEqual(field.value as? String, "ios27-no-match")
+        app.buttons["取消"].tap()
+        XCTAssertFalse(app.buttons["取消"].exists)
+        XCTAssertNotEqual(field.value as? String, "ios27-no-match")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch.waitForExistence(timeout: 5))
+    }
+
     func testScrollChromeContinuityInLightAndDarkThemes() {
         addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
         func capture(_ name: String, app: XCUIApplication) {
@@ -132,7 +171,7 @@ final class YishuUITests: XCTestCase {
                     XCTAssertEqual(scroll.frame.minY, viewport.minY, accuracy: 1)
                     XCTAssertEqual(scroll.frame.height, viewport.height, accuracy: 1)
                     if tab == "作品" {
-                        XCTAssertTrue(element("portfolio-search-field", in: app).isHittable)
+                        verifySearchCanBeEditedAndCancelled(in: app)
                         XCTAssertEqual(search.frame.minY, searchFrame.minY, accuracy: 1)
                         XCTAssertEqual(search.frame.height, searchFrame.height, accuracy: 1)
                     }
@@ -676,7 +715,22 @@ final class YishuUITests: XCTestCase {
                 "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"])
             for title in ["作品", "影视", "收藏", "关于"] {
                 openTab(title, in: app)
-                try assertThemeAtSystemEdges(app, background: background, page: title)
+                if title == "影视" {
+                    try assertThemeAtSystemEdges(app, background: background, page: title, checkBottom: false)
+                    // Photos intentionally continue underneath the translucent
+                    // tab bar. As in the iPad edge audit, inspect plain page
+                    // color only after reaching the image-free footer.
+                    let footer = app.staticTexts["角色与品牌合作"]
+                    for _ in 0..<12 where !footer.isHittable {
+                        app.scrollViews.firstMatch.swipeUp()
+                    }
+                    XCTAssertTrue(footer.isHittable)
+                    app.scrollViews.firstMatch.swipeUp()
+                    try assertThemeAtSystemEdges(app, background: background, page: title, checkTop: false)
+                } else {
+                    let referenceY = title == "作品" ? element("portfolio-search-control", in: app).frame.midY : nil
+                    try assertThemeAtSystemEdges(app, background: background, page: title, topReferenceY: referenceY)
+                }
             }
             let settings = element("about-settings", in: app)
             scrollToElement(settings, in: app)
@@ -700,9 +754,15 @@ final class YishuUITests: XCTestCase {
         }
     }
 
-    private func assertThemeAtSystemEdges(_ app: XCUIApplication, background: UInt32, page: String) throws {
+    private func assertThemeAtSystemEdges(_ app: XCUIApplication, background: UInt32, page: String,
+                                         checkTop: Bool = true, checkBottom: Bool = true,
+                                         topReferenceY: CGFloat? = nil) throws {
         let window = app.windows.firstMatch.frame
         let screenshot = XCUIScreen.main.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = "theme-edges-\(background)-\(page)-top\(checkTop)-bottom\(checkBottom)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         let normalized = UIGraphicsImageRenderer(size: window.size, format: format).image { _ in
@@ -714,7 +774,9 @@ final class YishuUITests: XCTestCase {
         // the centre home indicator; never average scrolling text as background.
         // SE's compact status bar puts the battery close to y=2; its very
         // first raster row is background, unlike that battery-glyph row.
-        for (y, height) in [(CGFloat(0), 1), (window.height - 6, 4)] {
+        let samples = (checkTop ? [(CGFloat(0), 1)] : [])
+            + (checkBottom ? [(window.height - 6, 4)] : [])
+        for (y, height) in samples {
             for x in [CGFloat(8), window.width - 12] {
                 let width = 4
                 let crop = try XCTUnwrap(image.cropping(to: CGRect(x: x,
@@ -727,9 +789,27 @@ final class YishuUITests: XCTestCase {
                     context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
                 }
                 var backgroundPixels = 0
+                // A pinned material bar legitimately tints its background.
+                // Compare the top edge with the same bar's empty side margin,
+                // so a separate black strip still fails with the original
+                // tolerance. Other edges retain the exact theme-color check.
+                var reference = [UInt8](repeating: 0, count: 4)
+                if y == 0, let topReferenceY {
+                    let sample = try XCTUnwrap(image.cropping(to: CGRect(x: x, y: topReferenceY, width: 1, height: 1)))
+                    try reference.withUnsafeMutableBytes { buffer in
+                        let context = try XCTUnwrap(CGContext(data: buffer.baseAddress, width: 1, height: 1,
+                            bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                        context.draw(sample, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+                    }
+                    XCTAssertGreaterThan(reference.prefix(3).max() ?? 0, 25,
+                                         "有色主题的搜索栏不能退化成黑色安全区")
+                }
                 for offset in stride(from: 0, to: pixels.count, by: 4) {
                     let matches = [16, 8, 0].enumerated().allSatisfy { channel, shift in
-                        abs(Int(pixels[offset + channel]) - Int((background >> shift) & 0xff)) <= 18
+                        let expected = y == 0 && topReferenceY != nil
+                            ? Int(reference[channel]) : Int((background >> shift) & 0xff)
+                        return abs(Int(pixels[offset + channel]) - expected) <= 18
                     }
                     if matches { backgroundPixels += 1 }
                 }
@@ -845,14 +925,28 @@ final class YishuUITests: XCTestCase {
     }
 
     func testIPadPortraitPortfolioDoesNotReflowWhenOpeningOrReturning() throws {
+        try verifyIPadPortfolioNavigation(theme: "blackGold", screenProtectionEnabled: false)
+    }
+
+    func testIPadLightThemePortfolioNavigationKeepsGeometryAndSearch() throws {
+        try verifyIPadPortfolioNavigation(theme: "ivory", screenProtectionEnabled: true)
+    }
+
+    private func verifyIPadPortfolioNavigation(theme: String, screenProtectionEnabled: Bool) throws {
         guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("iPad 竖屏导航回归") }
-        let app = launchApp(arguments: ["-trace-portfolio-layout-for-testing",
+        let app = launchApp(arguments: ["-cn.com.shuzijun.yishu.appearance.v1", theme,
+            "-trace-portfolio-layout-for-testing",
             "-use-deterministic-gallery-images-for-testing",
-            "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"])
+            "-hold-home-remote-images-for-visual-testing", "-disable-home-auto-advance-for-visual-testing"],
+            screenProtectionEnabled: screenProtectionEnabled)
         tabButton("作品", in: app).tap()
         let search = element("portfolio-search-control", in: app)
         XCTAssertTrue(search.waitForExistence(timeout: 8))
         let initial = search.frame
+        let initialScreenshot = XCTAttachment(screenshot: app.screenshot())
+        initialScreenshot.name = "ipad-portfolio-before-push"
+        initialScreenshot.lifetime = .keepAlways
+        add(initialScreenshot)
         for _ in 0..<3 {
             let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
             XCTAssertTrue(card.waitForExistence(timeout: 8))
@@ -863,6 +957,11 @@ final class YishuUITests: XCTestCase {
             XCTAssertTrue(back.waitForExistence(timeout: 5))
             back.tap()
             XCTAssertTrue(search.waitForExistence(timeout: 8))
+            let returnedScreenshot = XCTAttachment(screenshot: app.screenshot())
+            returnedScreenshot.name = "ipad-portfolio-after-pop"
+            returnedScreenshot.lifetime = .keepAlways
+            add(returnedScreenshot)
+            print("IPAD_PORTFOLIO_TRACE \(element("portfolio-layout-trace", in: app).value ?? "missing")")
             XCTAssertEqual(search.frame.minY, initial.minY, accuracy: 1)
             XCTAssertEqual(search.frame.height, initial.height, accuracy: 1)
         }
@@ -876,6 +975,7 @@ final class YishuUITests: XCTestCase {
         XCTAssertFalse(topPositions.isEmpty)
         XCTAssertLessThanOrEqual((topPositions.max() ?? 0) - (topPositions.min() ?? 0), 2,
                                  "进入相册或返回时发生二次纵向重排：\(recorded)")
+        verifySearchCanBeEditedAndCancelled(in: app)
     }
 
     func testHomeTouchDefersAutomaticPagingUntilAFullNewInterval() {
@@ -2620,6 +2720,50 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             )
         }
         attachScreenshot(named: "adaptive-portfolio-search", app: app)
+    }
+
+    func testProtectedIPadPortfolioSearchSurvivesRepeatedNavigation() throws {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("iPad 导航与保护容器回归") }
+        let app = launchApp(arguments: [
+            "-open-portfolio-for-visual-testing",
+            "-use-deterministic-gallery-images-for-testing",
+            "-hold-home-remote-images-for-visual-testing",
+            "-disable-home-auto-advance-for-visual-testing"
+        ], screenProtectionEnabled: true)
+        let window = app.windows.firstMatch
+        recordPresentationGeometry("protected-portfolio-navigation", frame: window.frame)
+        let search = element("portfolio-search-control", in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 8))
+        let initial = search.frame
+
+        for _ in 0..<3 {
+            let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
+            XCTAssertTrue(card.waitForExistence(timeout: 8))
+            let portfolioID = card.identifier.replacingOccurrences(of: "portfolio-card-", with: "")
+            card.tap()
+            XCTAssertTrue(element("portfolio-detail-\(portfolioID)", in: app).waitForExistence(timeout: 8))
+            XCTAssertFalse(app.navigationBars.textFields["portfolio-search-field"].exists,
+                           "作品搜索栏不应留在相册详情的导航栏中")
+            let back = app.navigationBars.buttons.firstMatch
+            XCTAssertTrue(back.waitForExistence(timeout: 5))
+            back.tap()
+            XCTAssertTrue(search.waitForExistence(timeout: 8))
+            XCTAssertEqual(search.frame.minY, initial.minY, accuracy: 1)
+            XCTAssertEqual(search.frame.height, initial.height, accuracy: 1)
+        }
+
+        // Verify real keyboard input rather than XCTest's isHittable estimate.
+        let field = app.textFields["portfolio-search-field"]
+        field.tap()
+        field.typeText("ios27-no-match")
+        XCTAssertEqual(field.value as? String, "ios27-no-match")
+        app.buttons["取消"].tap()
+        XCTAssertFalse(app.buttons["取消"].exists)
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-"))
+            .firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.keyboards.firstMatch.exists, "取消搜索后键盘应关闭")
+        XCTAssertEqual(search.frame.minY, initial.minY, accuracy: 1)
+        XCTAssertTrue(tabButton("首页", in: app).isHittable)
     }
 
     func testGalleryViewerMatchesTheCurrentSceneConfiguration() {

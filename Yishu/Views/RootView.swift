@@ -1,12 +1,16 @@
 import AuthenticationServices
 import SwiftUI
 
-private enum AppTab: Hashable {
+enum AppTab: Hashable, CaseIterable {
     case home
     case portfolio
     case credits
     case favorites
     case about
+
+    func resolved(canViewVideo: Bool) -> Self {
+        self == .credits && !canViewVideo ? .home : self
+    }
 }
 
 private enum VisualTestingDestination {
@@ -311,12 +315,25 @@ struct RootView: View {
     }
 
     private var usesDarkMediaCanvas: Bool {
-        hasResolvedAccess && canAccessAppContent && (isLaunchPosterVisible || selectedTab == .home)
+        hasResolvedAccess && canAccessAppContent && (isLaunchPosterVisible || resolvedTab == .home)
+    }
+
+    private var resolvedTab: AppTab {
+        selectedTab.resolved(canViewVideo: canViewVideo)
+    }
+
+    private var visibleTabSelection: Binding<AppTab> {
+        // iOS 27 validates selection while reconciling TabView. An onChange
+        // repair alone runs too late if permissions remove the selected tab.
+        Binding(
+            get: { resolvedTab },
+            set: { selectedTab = $0.resolved(canViewVideo: canViewVideo) }
+        )
     }
 
     private var authorizedAppContent: some View {
         ZStack {
-            TabView(selection: $selectedTab) {
+            TabView(selection: visibleTabSelection) {
                 HomeView(showPortfolio: { selectedTab = .portfolio })
                     .tag(AppTab.home)
                     .tabItem { Label("首页", systemImage: "house") }

@@ -40,8 +40,24 @@ struct PortfolioGridView: View {
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var searchText = ""
+    @State private var availableWidth: CGFloat = 0
+
+    private var usesNativeSearchToolbar: Bool {
+        // iPadOS 27 changes the root safe-area inset when a hidden navigation
+        // bar reappears after a detail pop. Let the navigation bar own the
+        // existing search control so it keeps one layout through push/pop.
+        if #available(iOS 27.0, *) { return UIDevice.current.userInterfaceIdiom == .pad }
+        return false
+    }
+
+    private var searchTopPadding: CGFloat {
+        // Landscape phones have no status-bar inset. Do not position the
+        // input/cancel accessibility frames above the window's top edge.
+        verticalSizeClass == .compact ? 8 : (horizontalSizeClass == .regular ? -1 : 0)
+    }
 
     private var columns: [GridItem] {
         if dynamicTypeSize.isAccessibilitySize {
@@ -64,6 +80,27 @@ struct PortfolioGridView: View {
     }
 
     var body: some View {
+        portfolioContent
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { availableWidth = $0 }
+            .toolbar {
+                if usesNativeSearchToolbar {
+                    ToolbarItem(placement: .principal) {
+                        PortfolioSearchBar(text: $searchText, usesNativeToolbar: true)
+                            .frame(width: max(0, availableWidth - 40))
+                            .background {
+#if DEBUG
+                                if ProcessInfo.processInfo.arguments.contains("-trace-portfolio-layout-for-testing") {
+                                    PortfolioLayoutTrace()
+                                }
+#endif
+                            }
+                    }
+                }
+            }
+            .toolbar(usesNativeSearchToolbar ? .visible : .hidden, for: .navigationBar)
+    }
+
+    private var portfolioContent: some View {
         ZStack {
             AppTheme.ink.ignoresSafeArea()
             ScrollView {
@@ -161,20 +198,21 @@ struct PortfolioGridView: View {
             PortfolioDetailView(portfolio: portfolio)
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            PortfolioSearchBar(text: $searchText)
-                .padding(.horizontal, 20)
-                .padding(.top, horizontalSizeClass == .regular ? -1 : 0)
-                .padding(.bottom, 10)
-                .background(.ultraThinMaterial)
-                .background {
+            if !usesNativeSearchToolbar {
+                PortfolioSearchBar(text: $searchText)
+                    .padding(.horizontal, 20)
+                    .padding(.top, searchTopPadding)
+                    .padding(.bottom, 10)
+                    .background(.ultraThinMaterial)
+                    .background {
 #if DEBUG
-                    if ProcessInfo.processInfo.arguments.contains("-trace-portfolio-layout-for-testing") {
-                        PortfolioLayoutTrace()
-                    }
+                        if ProcessInfo.processInfo.arguments.contains("-trace-portfolio-layout-for-testing") {
+                            PortfolioLayoutTrace()
+                        }
 #endif
-                }
+                    }
+            }
         }
-        .toolbar(.hidden, for: .navigationBar)
     }
 
     private func refreshContent() async {
@@ -248,9 +286,16 @@ private final class PortfolioLayoutTraceView: UIView {
 
 private struct PortfolioSearchBar: View {
     @Binding var text: String
+    var usesNativeToolbar = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @FocusState private var isFocused: Bool
+
+    private var showsCancel: Bool {
+        // A toolbar-hosted field can accept keyboard input without reporting
+        // FocusState on iPadOS 27. A nonempty query must still be cancellable.
+        isFocused || (usesNativeToolbar && !text.isEmpty)
+    }
 
     var body: some View {
         HStack(spacing: 10) {
@@ -298,10 +343,16 @@ private struct PortfolioSearchBar: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("portfolio-search-control")
 
-            if isFocused {
+            if showsCancel {
                 Button("取消") {
                     text = ""
                     isFocused = false
+                    if usesNativeToolbar {
+                        // Public responder action also dismisses the keyboard
+                        // when the system omitted the FocusState transition.
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                                        to: nil, from: nil, for: nil)
+                    }
                 }
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(AppTheme.gold)
@@ -314,7 +365,7 @@ private struct PortfolioSearchBar: View {
                 )
             }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: isFocused)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: showsCancel)
     }
 }
 
@@ -597,6 +648,12 @@ private struct PortfolioEmptyArtwork: View {
     }
 }
 
+enum GallerySelection {
+    static func resolve(_ requestedID: Int, imageIDs: [Int]) -> Int? {
+        imageIDs.contains(requestedID) ? requestedID : imageIDs.first
+    }
+}
+
 struct GalleryViewer: View {
     let portfolio: Portfolio
     let onClose: () -> Void
@@ -616,11 +673,16 @@ struct GalleryViewer: View {
     }
 
     private var selected: PortfolioImage? {
-        accessibleImages.first { $0.id == selection }
+        accessibleImages.first { $0.id == resolvedSelection }
     }
 
     private var selectedIndex: Int {
-        (accessibleImages.firstIndex { $0.id == selection } ?? 0) + 1
+        guard let index = accessibleImages.firstIndex(where: { $0.id == resolvedSelection }) else { return 0 }
+        return index + 1
+    }
+
+    private var resolvedSelection: Int? {
+        GallerySelection.resolve(selection, imageIDs: accessibleImages.map(\.id))
     }
 
     private var accessibleImages: [PortfolioImage] {
@@ -629,6 +691,7 @@ struct GalleryViewer: View {
 
     var body: some View {
         GeometryReader { viewport in
+            let images = accessibleImages
             ZStack {
                 Color.black.ignoresSafeArea()
 
@@ -638,16 +701,31 @@ struct GalleryViewer: View {
                         .padding(.top, 12)
                         .padding(.bottom, 8)
 
-                    TabView(selection: $selection) {
-                        ForEach(accessibleImages) { image in
-                            ZoomableArtwork(image: image)
-                                .tag(image.id)
+                    // Use the same collection snapshot for pages and the
+                    // binding. Never hand iOS 27 a stale or empty selection
+                    // while a manifest/permission update removes a photo.
+                    if let firstID = images.first?.id {
+                        TabView(selection: Binding(
+                            get: { GallerySelection.resolve(selection, imageIDs: images.map(\.id)) ?? firstID },
+                            set: { newID in
+                                guard accessibleImages.contains(where: { $0.id == newID }) else { return }
+                                selection = newID
+                            }
+                        )) {
+                            ForEach(images) { image in
+                                ZoomableArtwork(image: image)
+                                    .tag(image.id)
+                            }
                         }
+                        .tabViewStyle(.page(indexDisplayMode: .never))
+                        .padding(.horizontal, galleryHorizontalInset(in: viewport.size))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .layoutPriority(1)
+                    } else {
+                        Color.clear
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .accessibilityHidden(true)
                     }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                    .padding(.horizontal, galleryHorizontalInset(in: viewport.size))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .layoutPriority(1)
 
                     galleryCaption
                         .padding(.horizontal, 18)
@@ -673,7 +751,7 @@ struct GalleryViewer: View {
         }
         .statusBarHidden()
         .environment(\.colorScheme, .dark)
-        .onChange(of: accessibleImages.map(\.id)) { _, imageIDs in
+        .onChange(of: accessibleImages.map(\.id), initial: true) { _, imageIDs in
             if imageIDs.isEmpty { onClose(); return }
             if !imageIDs.contains(selection), let firstID = imageIDs.first {
                 selection = firstID
@@ -731,7 +809,7 @@ struct GalleryViewer: View {
     }
 
     private var prefetchURLs: [URL] {
-        guard let index = accessibleImages.firstIndex(where: { $0.id == selection }) else {
+        guard let index = accessibleImages.firstIndex(where: { $0.id == resolvedSelection }) else {
             return []
         }
         let lowerBound = max(accessibleImages.startIndex, index - 1)

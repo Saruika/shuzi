@@ -15,7 +15,8 @@ search = grid.split('.safeAreaInset(edge: .top, spacing: 0)', 1)[1]
 assert '.background(AppTheme.ink)' not in search
 assert '.background(.ultraThinMaterial)' in search
 assert '.scrollClipDisabled()' in grid
-assert '.toolbar(.hidden, for: .navigationBar)' in grid
-assert '.padding(.top, horizontalSizeClass == .regular ? -1 : 0)' in search
+assert '.toolbar(usesNativeSearchToolbar ? .visible : .hidden, for: .navigationBar)' in grid
+assert '.padding(.top, searchTopPadding)' in search
+assert 'verticalSizeClass == .compact ? 8 : (horizontalSizeClass == .regular ? -1 : 0)' in grid
 assert 'content.toolbar(UIDevice.current.userInterfaceIdiom == .pad ? .visible : .hidden, for: .tabBar)' in theme
 print('scroll-chrome-contract: internal clearance, translucent pinned search and stable iPad tabs passed')

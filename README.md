@@ -1,5 +1,7 @@
 # Hi，梳子 iOS
 
+**iOS 27 兼容性开发（2026-09-16，本地候选）**：保留 iOS 17 最低版本和现有页面风格；修复 iPad 导航返回位移、搜索取消及无效分页选择。验收证据与真机边界见 [适配记录](IOS27_COMPATIBILITY.md)。本次不上传或更改 TestFlight；本分支下方的发行状态为截至 2026-09-15 的历史快照，不代表当前 Apple 分发状态。
+
 **Build 7 本地归档（2026-09-15，未上传）：[归档与上传阻塞记录](Server/releases/v1.4.0-build7.md)。** 包含通知系统授权后自动接入和隐私邮箱更新，Release 设备归档及本地检查通过。当前只是开发签名归档，尚未导出分发 IPA、执行 Apple 校验或上传 TestFlight；旧包与当前审核提交未修改。Apple 最新状态和构建号可用性本轮未能回读，下方 Build 6 的 Apple 状态属于当时已验证的历史记录。
 
 **通知自动启用候选（2026-09-14）：[变更与回归记录](Server/releases/v1.4.0-build6-notification-auto1.md)。** 系统已允许通知后，账号完成登录及必填资料、处于待审批或已通过状态时会自动登记设备，无需再手动打开 App 内开关；既有主动关闭、系统拒绝及账号/环境隔离保留。仅本地候选，尚未上传新包、部署官网或发送真实测试推送；历史 Build 46 的一次性启动授权规则以本条为准。
@@ -140,7 +142,7 @@ iOS App (SwiftUI / AuthenticationServices / WeatherKit / AVKit)
 
 ## 本地运行
 
-需要 Xcode 17 或兼容 iOS 17 SDK 的新版本 Xcode。
+当前适配工具链为 **Xcode 27 / iOS 27 SDK**；最低部署版本仍为 **iOS 17**，不是要求用户全部升级到 iOS 27。适配范围与验收边界见 [iOS 27 适配记录](IOS27_COMPATIBILITY.md)。
 
 1. 克隆仓库：`git clone git@github.com:Saruika/shuzi.git`
 2. 打开 `Yishu.xcodeproj`。
@@ -155,9 +157,19 @@ iOS App (SwiftUI / AuthenticationServices / WeatherKit / AVKit)
 xcodebuild -project Yishu.xcodeproj \
   -scheme Yishu \
   -configuration Debug \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
+  -destination 'platform=iOS Simulator,name=iPhone 18 Pro Max,OS=27.0' \
   build
 ```
+
+本地完整回归可显式指定系统版本（使用独立临时模拟器，不清空已有设备）：
+
+```bash
+Scripts/ci-ios-tests.sh iPhone 27.0
+Scripts/ci-ios-tests.sh iPad 27.0
+Scripts/ci-ios-tests.sh iPhone 26.5
+```
+
+没有安装指定 runtime 时会明确失败，不会静默改测旧系统；省略版本则按可用 runtime 的数字版本选择最新系统。命令行名称需对应本机已有模拟器。CI 仍使用原有收费策略，本次适配不触发或扩增云端执行。
 
 ## 内容与服务端
 

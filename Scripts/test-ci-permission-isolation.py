@@ -23,7 +23,7 @@ if tool == "uuidgen":
     print(created)
 elif tool == "xcrun" and args[:3] == ["simctl", "list", "devices"]:
     print(json.dumps({"devices": {"com.apple.CoreSimulator.SimRuntime.iOS-26-2": [{
-        "udid": template, "isAvailable": True,
+        "udid": template, "isAvailable": True, "name": family + " Test Device",
         "deviceTypeIdentifier": "com.apple.CoreSimulator.SimDeviceType." + family
     }]}}))
 elif tool == "xcrun" and args[:2] == ["simctl", "create"]:

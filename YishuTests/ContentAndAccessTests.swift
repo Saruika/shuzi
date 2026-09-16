@@ -1417,6 +1417,41 @@ private final class TestAppWorkspace: AppWorkspaceLifecycle {
 }
 
 final class ContentAndAccessTests: XCTestCase {
+    func testTabSelectionCannotReferenceRevokedVideoTab() {
+        for tab in AppTab.allCases {
+            XCTAssertEqual(tab.resolved(canViewVideo: true), tab)
+            XCTAssertEqual(tab.resolved(canViewVideo: false), tab == .credits ? .home : tab)
+        }
+    }
+
+    func testGallerySelectionPreservesAvailablePhotoThroughReordering() {
+        XCTAssertEqual(GallerySelection.resolve(2, imageIDs: [1, 2, 3]), 2)
+        XCTAssertEqual(GallerySelection.resolve(2, imageIDs: [3, 2, 1]), 2)
+    }
+
+    func testGallerySelectionResolvesRemovedOrStaleInitialPhotoBeforeRendering() {
+        XCTAssertEqual(GallerySelection.resolve(3, imageIDs: [1, 2]), 1)
+        XCTAssertEqual(GallerySelection.resolve(99, imageIDs: [2]), 2)
+        XCTAssertEqual(GallerySelection.resolve(0, imageIDs: [3, 4]), 3)
+    }
+
+    func testGallerySelectionDoesNotInventAPageWhenAccessIsRevoked() {
+        XCTAssertNil(GallerySelection.resolve(3, imageIDs: []))
+    }
+
+    func testGallerySelectionRemainsValidAcrossSuccessiveManifestChanges() {
+        var selection = 2
+        for ids in [[1, 2, 3], [1, 3], [3], [], [4, 5]] {
+            let resolved = GallerySelection.resolve(selection, imageIDs: ids)
+            if let resolved {
+                XCTAssertTrue(ids.contains(resolved))
+                selection = resolved
+            } else {
+                XCTAssertTrue(ids.isEmpty)
+            }
+        }
+    }
+
     func testWorkspaceSelectionPersistsOnlyKnownExplicitLocalValues() throws {
         let suite = "workspace-selection-" + UUID().uuidString
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

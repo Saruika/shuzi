@@ -4,10 +4,19 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 device_family="${1:-iPhone}"
+runtime_version="${2:-latest}"
+if (( $# > 2 )); then
+  printf 'usage: %s iPhone|iPad [runtime-version|latest]\n' "$0" >&2
+  exit 2
+fi
+if [[ "$runtime_version" != latest && ! "$runtime_version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+  printf 'Use an explicit runtime version such as 27.0, or latest.\n' >&2
+  exit 2
+fi
 case "$device_family" in
   iPhone|iPad) ;;
   *)
-    printf 'usage: %s iPhone|iPad\n' "$0" >&2
+    printf 'usage: %s iPhone|iPad [runtime-version|latest]\n' "$0" >&2
     exit 2
     ;;
 esac
@@ -15,34 +24,11 @@ esac
 destination_id=""
 destination_listing=""
 for attempt in 1 2 3 4 5 6; do
-  xcrun simctl list devices available >/dev/null 2>&1 || true
   destination_listing="$(
-    xcodebuild -project Yishu.xcodeproj -scheme Yishu -showdestinations 2>&1 || true
+    xcrun simctl list devices available --json 2>/dev/null || true
   )"
-  destination_id="$(printf '%s\n' "$destination_listing" | awk -v family="$device_family" '
-    function identifier(line) {
-      sub(/^.*id:/, "", line)
-      sub(/,.*/, "", line)
-      gsub(/[[:space:]]/, "", line)
-      return line
-    }
-    $0 ~ /platform:iOS Simulator/ && $0 ~ ("name:[[:space:]]*" family) {
-      if (fallback == "") { fallback = identifier($0) }
-      if (family == "iPhone") {
-        preferred = $0 ~ /name:[[:space:]]*iPhone .* Pro Max/
-      } else {
-        preferred = $0 ~ /name:[[:space:]]*iPad Pro 13-inch/
-      }
-      if (preferred) {
-        print identifier($0)
-        found = 1
-        exit
-      }
-    }
-    END {
-      if (!found && fallback != "") { print fallback }
-    }
-  ')"
+  destination_id="$(printf '%s\n' "$destination_listing" |
+    python3 Scripts/select-ios-simulator.py --family "$device_family" --runtime "$runtime_version" || true)"
   [[ -n "$destination_id" ]] && break
   if (( attempt < 6 )); then
     sleep "$attempt"
@@ -50,7 +36,7 @@ for attempt in 1 2 3 4 5 6; do
 done
 
 if [[ -z "$destination_id" ]]; then
-  printf 'No available %s simulator was found.\n' "$device_family" >&2
+  printf 'No available %s simulator was found for runtime %s.\n' "$device_family" "$runtime_version" >&2
   xcodebuild -version >&2 || true
   printf '%s\n' "$destination_listing" >&2
   xcrun simctl list runtimes >&2 || true
