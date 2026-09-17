@@ -512,16 +512,23 @@ final class YishuUITests: XCTestCase {
 #endif
     }
 
-    func testProtectedAdministratorPresentationCanAlwaysClose() {
+    func testProtectedAdministratorPresentationCanAlwaysClose() throws {
+#if targetEnvironment(simulator)
         let app = XCUIApplication()
         app.launchArguments = [
+            "-app-service-environment", "production",
             "-skip-launch-poster-for-visual-testing",
             "-reset-fan-session-for-visual-testing",
             "-bypass-access-gate-for-visual-testing",
             "-open-about-for-visual-testing",
+            "-use-deterministic-gallery-images-for-testing",
+            "-hold-home-remote-images-for-visual-testing",
         ]
         app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
+        // Keep protection enabled: the separate secure hosting root must
+        // receive the account environment even when no account is signed in.
         app.launch()
+        defer { app.terminate() }
 
         let aboutHeading = element("about-heading", in: app)
         XCTAssertTrue(aboutHeading.waitForExistence(timeout: 12), "保护开启后关于页没有出现")
@@ -530,6 +537,12 @@ final class YishuUITests: XCTestCase {
         XCTAssertTrue(adminEntry.isHittable, "保护开启后管理员入口不可点击")
         adminEntry.tap()
 
+        XCTAssertTrue(element("admin-login-heading", in: app).waitForExistence(timeout: 8),
+                      "受保护管理员页未显示登录内容，需检查独立 Hosting 的账号环境")
+        XCTAssertTrue(app.textFields["管理员账号"].waitForExistence(timeout: 5),
+                      "管理员页缺少旧版管理员账号字段")
+        XCTAssertTrue(app.secureTextFields["管理员访问码"].waitForExistence(timeout: 5),
+                      "管理员页缺少旧版管理员访问码字段")
         let close = element("admin-close", in: app)
         XCTAssertTrue(close.waitForExistence(timeout: 8), "管理员页缺少关闭按钮")
         XCTAssertTrue(close.isHittable, "保护开启后管理员关闭按钮不可点击")
@@ -545,6 +558,55 @@ final class YishuUITests: XCTestCase {
             "保护开启后管理员全屏页无法关闭"
         )
         XCTAssertTrue(aboutHeading.waitForExistence(timeout: 5), "关闭管理员页后没有返回关于页")
+#else
+        throw XCTSkip("此测试会重置隔离夹具会话，仅允许在专用模拟器执行")
+#endif
+    }
+
+    func testProtectedAccessGateAdministratorPresentationCanAlwaysClose() throws {
+#if targetEnvironment(simulator)
+        let app = XCUIApplication()
+        // Start signed out without an access-gate or screen-protection bypass.
+        // Only inspect the login controls; never submit credentials.
+        app.launchArguments = [
+            "-app-service-environment", "production",
+            "-skip-startup-notification-authorization-for-testing",
+            "-skip-launch-poster-for-visual-testing",
+            "-reset-fan-session-for-visual-testing",
+            "-use-deterministic-gallery-images-for-testing",
+            "-hold-home-remote-images-for-visual-testing",
+        ]
+        app.launch()
+        defer { app.terminate() }
+
+        let adminEntry = element("access-gate-admin-entry", in: app)
+        XCTAssertTrue(adminEntry.waitForExistence(timeout: 15), "未登录访问页缺少管理员入口")
+        XCTAssertFalse(tabButton("首页", in: app).exists, "未登录夹具不能绕过 App 访问门禁")
+        XCTAssertTrue(adminEntry.isHittable, "受保护访问页的管理员入口不可点击")
+        adminEntry.tap()
+
+        let loginHeading = element("admin-login-heading", in: app)
+        XCTAssertTrue(loginHeading.waitForExistence(timeout: 8),
+                      "未登录访问页的独立 Hosting 未显示管理员登录内容")
+        XCTAssertTrue(app.textFields["管理员账号"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.secureTextFields["管理员访问码"].waitForExistence(timeout: 5))
+        XCTAssertFalse(element("admin-use-bound-account", in: app).exists,
+                       "未登录夹具不能显示当前账号管理员登录按钮")
+        let close = element("admin-close", in: app)
+        XCTAssertTrue(close.waitForExistence(timeout: 5), "管理员页缺少关闭按钮")
+        XCTAssertTrue(close.isHittable, "受保护管理员页的关闭按钮不可点击")
+        close.tap()
+
+        let dismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: loginHeading)
+        XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed,
+                       "管理员页关闭后仍残留登录内容")
+        XCTAssertTrue(adminEntry.waitForExistence(timeout: 5), "关闭后未返回未登录访问页")
+        XCTAssertTrue(adminEntry.isHittable)
+        XCTAssertFalse(tabButton("首页", in: app).exists, "关闭管理员页不能绕过 App 访问门禁")
+#else
+        throw XCTSkip("此测试会重置隔离夹具会话，仅允许在专用模拟器执行")
+#endif
     }
 
     func testProtectedNotificationTapCanOpenReturnAndCloseInbox() {

@@ -134,9 +134,6 @@ enum ContentManifestPolicy {
     private static let maximumImagesPerPortfolio = 300
     private static let maximumTotalImageCount = maximumPortfolioCount * maximumImagesPerPortfolio
     private static let latestSupportedTimestamp: TimeInterval = 4_102_444_800 // 2100-01-01 UTC
-    private static let identifierCharacters = CharacterSet(
-        charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-_"
-    )
 
     static func isValid(_ manifest: AppContentManifest) -> Bool {
         manifest.schemaVersion == currentSchemaVersion
@@ -246,7 +243,14 @@ enum ContentManifestPolicy {
 
     private static func isValidIdentifier(_ identifier: String) -> Bool {
         guard isValidText(identifier, maximum: 80, required: true) else { return false }
-        return identifier.unicodeScalars.allSatisfy(identifierCharacters.contains)
+        // The identifier contract is ASCII only. Use the exact byte allowlist:
+        // This validator's bound CharacterSet predicate misclassified IDs in
+        // Swift 6.4 optimized builds (including accepting some non-ASCII IDs).
+        // Keep this check equivalent in Debug and Release without weakening it.
+        return identifier.utf8.allSatisfy { byte in
+            (97...122).contains(byte) || (48...57).contains(byte)
+                || byte == 45 || byte == 95
+        }
     }
 
     private static func isValidText(

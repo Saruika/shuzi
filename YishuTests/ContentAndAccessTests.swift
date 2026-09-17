@@ -273,6 +273,7 @@ final class ArtworkEnvironmentPipelineTests: XCTestCase {
         await pipeline.purgeMemory()
     }
 
+#if DEBUG
     func testGestureRasterFixtureUsesTheRealDecoderWithoutRemotePhotographs() async throws {
         let url = AppURL.make("https://www.shuzijun.com.cn/wp-content/uploads/gesture-fixture.png")
         let pipeline = ArtworkImagePipeline { try await ArtworkImageUITestFixture.response(for: $0) }
@@ -282,6 +283,7 @@ final class ArtworkEnvironmentPipelineTests: XCTestCase {
         XCTAssertEqual(raster.height, 600)
         await pipeline.purgeMemory()
     }
+#endif
 
     private func fixture() throws -> Data {
         let image = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).image { context in
@@ -592,6 +594,55 @@ private final class BoundAdministratorTestAccount: FanAdministratorAccount {
     }
 }
 
+/// Must also run with -configuration Release; the previous CharacterSet method
+/// reference behaved differently under Swift 6.4's optimized compilation.
+final class ContentIdentifierReleaseRegressionTests: XCTestCase {
+    private func manifest(id: String, poster: Bool) throws -> AppContentManifest {
+        let image = try XCTUnwrap(URL(string: "https://www.shuzijun.com.cn/test/identifier.jpg"))
+        let destination = try XCTUnwrap(URL(string: "https://novelquickapp.com/s/identifier-test/"))
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let launch = LaunchPosterContent(id: id, isEnabled: true, imageURL: image,
+            eyebrow: "东方美学", title: "测试", subtitle: "", startsAt: date,
+            endsAt: date.addingTimeInterval(86_400), displaySeconds: 2.5)
+        let drama = DramaWork(id: id, title: "测试", imageURL: image, destinationURL: destination)
+        let value = AppContentManifest(schemaVersion: 1, updatedAt: date, heroImages: [image],
+            aboutPortraitURL: nil, launchPosters: poster ? [launch] : [], showreel: nil,
+            dramas: poster ? [] : [drama], portfolios: [], contentAudience: .administrator)
+        // Exercise decoded remote input, not only compiler-visible string literals.
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(AppContentManifest.self, from: encoder.encode(value))
+    }
+
+    func testEveryAllowedASCIICharacterIsAcceptedForPosterAndDramaIdentifiers() throws {
+        let ids = "abcdefghijklmnopqrstuvwxyz0123456789-_".map(String.init)
+            + ["synthetic-id", "launch_autumn-2026", "00000000-0000-4000-8000-000000000001",
+               String(repeating: "a", count: 80)]
+        for poster in [true, false] {
+            for id in ids {
+                let value = try manifest(id: id, poster: poster)
+                XCTAssertTrue(ContentManifestPolicy.isValid(value))
+                XCTAssertTrue(ContentSecurityPolicy.isTrusted(value))
+            }
+        }
+    }
+
+    func testNonASCIIAndUnsafeIdentifiersAreRejectedInBothCollections() throws {
+        let ids = ["", " ", "UPPER", "has space", "dot.id", "path/id", "query?id",
+                   "back\\\\slash", "line\nbreak", "zero\u{0000}byte", "é", "ｅ", "中文", "🙂",
+                   "e\u{0301}", String(repeating: "a", count: 81)]
+        for poster in [true, false] {
+            for id in ids {
+                let value = try manifest(id: id, poster: poster)
+                XCTAssertFalse(ContentManifestPolicy.isValid(value))
+                XCTAssertFalse(ContentSecurityPolicy.isTrusted(value))
+            }
+        }
+    }
+}
+
 @MainActor
 final class BoundAdministratorSessionTests: XCTestCase {
     func testRoleHintNeverBypassesApprovalIdentityOrSessionRequirements() throws {
@@ -638,6 +689,280 @@ final class BoundAdministratorSessionTests: XCTestCase {
         let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: status,
             httpVersion: nil, headerFields: ["Content-Type": "application/json"]))
         return (Data((body ?? #"{"authenticated":true,"role":"yishu_content_manager","displayName":"测试管理员"}"#).utf8), response)
+    }
+
+    private func diagnosticManifestData(
+        schemaVersion: Int = 1,
+        audience: AppContentAudience = .administrator,
+        loadedImages: Int = 2,
+        totalImages: Int = 2,
+        untrustedHero: Bool = false
+    ) throws -> Data {
+        let imageURL = try XCTUnwrap(URL(string: "https://www.shuzijun.com.cn/wp-content/uploads/diagnostic-fixture.jpg"))
+        let heroURL = untrustedHero
+            ? try XCTUnwrap(URL(string: "https://untrusted.example/diagnostic-fixture-marker.jpg"))
+            : imageURL
+        let images = (0..<loadedImages).map { index in
+            PortfolioImage(id: index + 1, url: imageURL, fullSizeURL: imageURL, altText: "诊断夹具")
+        }
+        let portfolio = Portfolio(id: 101, title: "诊断夹具", subtitle: "", eyebrow: "", slug: "diagnostic-fixture",
+            websiteURL: try XCTUnwrap(URL(string: "https://www.shuzijun.com.cn/portfolio/diagnostic-fixture/")),
+            coverURL: imageURL, images: images, totalImageCount: totalImages)
+        let manifest = AppContentManifest(schemaVersion: schemaVersion,
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000), heroImages: [heroURL],
+            aboutPortraitURL: nil, launchPosters: [], showreel: nil, dramas: [],
+            portfolios: [portfolio], contentAudience: audience)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(manifest)
+    }
+
+    private func assertAdministratorContentFailure(
+        _ expected: AdminContentFailureStage,
+        body: Data,
+        mime: String = "application/json",
+        responseURL: URL? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let account = BoundAdministratorTestAccount()
+        var sessionRequests = 0
+        var contentRequests = 0
+        let admin = AdminSessionStore { request in
+            if request.url?.path == "/wp-json/shuzijun/v1/app-admin/session" {
+                sessionRequests += 1
+                return try self.reply(request)
+            }
+            contentRequests += 1
+            XCTAssertEqual(request.httpMethod, "GET", file: file, line: line)
+            XCTAssertEqual(request.url?.path, "/wp-json/shuzijun/v1/app-content", file: file, line: line)
+            let url = try XCTUnwrap(responseURL ?? request.url)
+            let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200,
+                httpVersion: nil, headerFields: ["Content-Type": mime]))
+            return (body, response)
+        }
+        defer { admin.lock() }
+        await admin.signIn(using: account)
+        XCTAssertTrue(admin.isAuthenticated, file: file, line: line)
+        do {
+            _ = try await admin.fetchContent()
+            XCTFail("Invalid administrator content was accepted", file: file, line: line)
+        } catch let error as AdminAPIError {
+            guard case .contentLoadFailed(let actual) = error else {
+                XCTFail("Content failure did not report a bounded diagnostic stage", file: file, line: line)
+                return
+            }
+            XCTAssertEqual(actual, expected, file: file, line: line)
+            let message = error.errorDescription ?? ""
+            XCTAssertTrue(message.contains(expected.rawValue), file: file, line: line)
+            for prohibited in ["diagnostic-fixture-marker", "untrusted.example", "synthetic-session", "https://", "<html>"] {
+                XCTAssertFalse(message.contains(prohibited), "Diagnostic exposed input content", file: file, line: line)
+            }
+        } catch {
+            XCTFail("Content failure escaped the safe administrator error boundary", file: file, line: line)
+        }
+        XCTAssertTrue(admin.isAuthenticated, "A content-format failure must not invalidate a verified account", file: file, line: line)
+        XCTAssertEqual(sessionRequests, 1, file: file, line: line)
+        XCTAssertEqual(contentRequests, 1, "Malformed content must not trigger automatic retries", file: file, line: line)
+    }
+
+    func testAdministratorContentStageCodesRemainStableAndMessagesContainNoInput() {
+        let expected: [(AdminContentFailureStage, String)] = [
+            (.responseTooLarge, "AC01"), (.responseOrigin, "AC02"), (.responseFormat, "AC03"),
+            (.decoding, "AC04"), (.contentPolicy, "AC05"), (.incompleteManifest, "AC06"),
+        ]
+        XCTAssertEqual(AdminContentFailureStage.allCases.count, expected.count)
+        for (stage, code) in expected {
+            XCTAssertEqual(stage.rawValue, code)
+            let message = AdminAPIError.contentLoadFailed(stage).errorDescription ?? ""
+            XCTAssertTrue(message.contains(code))
+            XCTAssertFalse(message.contains("https://"))
+            XCTAssertFalse(message.contains("Bearer"))
+        }
+    }
+
+    func testAdministratorContentRejectsHTMLAndEmptySuccessfulBodiesAtFormatStage() async throws {
+        try await assertAdministratorContentFailure(.responseFormat,
+            body: Data("<html>diagnostic-fixture-marker synthetic-session</html>".utf8), mime: "text/html")
+        try await assertAdministratorContentFailure(.responseFormat, body: Data())
+    }
+
+    func testAdministratorContentReportsMissingAndWrongTypedJSONAtDecodingStage() async throws {
+        try await assertAdministratorContentFailure(.decoding, body: Data("{}".utf8))
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: diagnosticManifestData()) as? [String: Any])
+        object["heroImages"] = ["invalid": "diagnostic-fixture-marker"]
+        try await assertAdministratorContentFailure(.decoding, body: JSONSerialization.data(withJSONObject: object))
+    }
+
+    func testAdministratorContentRejectsUnexpectedResponseOriginBeforeDecoding() async throws {
+        let other = try XCTUnwrap(URL(string: "https://untrusted.example/diagnostic-fixture-marker"))
+        try await assertAdministratorContentFailure(.responseOrigin, body: diagnosticManifestData(), responseURL: other)
+    }
+
+    func testAdministratorContentRejectsMoreThanEightMiBAtSizeStage() async throws {
+        try await assertAdministratorContentFailure(.responseTooLarge,
+            body: Data(repeating: 65, count: 8 * 1024 * 1024 + 1))
+    }
+
+    func testAdministratorContentReportsInvalidSchemaAndUntrustedMediaAtPolicyStage() async throws {
+        try await assertAdministratorContentFailure(.contentPolicy, body: diagnosticManifestData(schemaVersion: 999))
+        try await assertAdministratorContentFailure(.contentPolicy, body: diagnosticManifestData(untrustedHero: true))
+    }
+
+    func testAdministratorContentRejectsValidViewerAndPartialAdministratorManifests() async throws {
+        try await assertAdministratorContentFailure(.incompleteManifest, body: diagnosticManifestData(audience: .viewer))
+        try await assertAdministratorContentFailure(.incompleteManifest,
+            body: diagnosticManifestData(loadedImages: 1, totalImages: 2))
+    }
+
+    func testAdministratorContentAcceptsACompleteVerifiedManifestWithoutAdditionalRequests() async throws {
+        let body = try diagnosticManifestData()
+        let account = BoundAdministratorTestAccount()
+        var calls = 0
+        let admin = AdminSessionStore { request in
+            calls += 1
+            if request.url?.path == "/wp-json/shuzijun/v1/app-admin/session" { return try self.reply(request) }
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/wp-json/shuzijun/v1/app-content")
+            return try self.reply(request, body: String(decoding: body, as: UTF8.self))
+        }
+        defer { admin.lock() }
+        await admin.signIn(using: account)
+        let manifest = try await admin.fetchContent()
+        XCTAssertTrue(admin.isAuthenticated)
+        XCTAssertTrue(ContentSecurityPolicy.isTrusted(manifest))
+        XCTAssertTrue(AdminContentEditingPolicy.isFullAdministratorManifest(manifest))
+        XCTAssertEqual(manifest.portfolios.count, 1)
+        XCTAssertEqual(manifest.portfolios.first?.images.count, 2)
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testAdministratorContentAuthorizationDenialsStillLockAndRetainOriginalErrorCases() async throws {
+        for status in [401, 403] {
+            let account = BoundAdministratorTestAccount()
+            var calls = 0
+            let admin = AdminSessionStore { request in
+                calls += 1
+                if request.url?.path == "/wp-json/shuzijun/v1/app-admin/session" { return try self.reply(request) }
+                return try self.reply(request, status: status,
+                    body: #"{"code":"forbidden","message":"diagnostic-fixture-marker synthetic-session"}"#)
+            }
+            await admin.signIn(using: account)
+            XCTAssertTrue(admin.isAuthenticated)
+            do {
+                _ = try await admin.fetchContent()
+                XCTFail("Authorization denial was accepted")
+            } catch let error as AdminAPIError {
+                switch error {
+                case .invalidCredentials: XCTAssertEqual(status, 401)
+                case .insufficientPermission: XCTAssertEqual(status, 403)
+                default: XCTFail("Authorization denial was replaced with a content diagnostic")
+                }
+                XCTAssertFalse((error.errorDescription ?? "").contains("diagnostic-fixture-marker"))
+                XCTAssertFalse((error.errorDescription ?? "").contains("synthetic-session"))
+            } catch {
+                XCTFail("Authorization denial escaped the safe administrator error boundary")
+            }
+            XCTAssertFalse(admin.isAuthenticated)
+            XCTAssertEqual(calls, 2)
+            admin.lock()
+        }
+    }
+
+    func testAdministratorContentStageDoesNotReplaceSessionProbeErrors() async throws {
+        let account = BoundAdministratorTestAccount()
+        let admin = AdminSessionStore { request in
+            try self.reply(request, body: #"{"displayName":"diagnostic-fixture-marker"}"#)
+        }
+        defer { admin.lock() }
+        await admin.signIn(using: account)
+        XCTAssertFalse(admin.isAuthenticated)
+        XCTAssertEqual(admin.errorMessage, AdminAPIError.invalidResponse.errorDescription)
+    }
+
+    /// Opt-in diagnostic: a runner may place a credential-free content response
+    /// in this test host's temporary directory. It is never a bundled fixture,
+    /// and both requests below are intercepted without contacting any server.
+    func testOptInSimulatorAdministratorContentDiagnosticThroughBoundSession() async throws {
+#if targetEnvironment(simulator)
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("administrator-content-diagnostic.json", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw XCTSkip("No opt-in administrator content diagnostic fixture")
+        }
+        let data: Data
+        do {
+            let metadata = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard metadata.isRegularFile == true, metadata.isSymbolicLink != true,
+                  let count = metadata.fileSize, (1...(8 * 1024 * 1024)).contains(count) else {
+                XCTFail("administrator-content-diagnostic: fixture-type-or-size-rejected")
+                return
+            }
+            data = try Data(contentsOf: file)
+            guard !data.isEmpty, data.count <= 8 * 1024 * 1024 else {
+                XCTFail("administrator-content-diagnostic: fixture-size-rejected")
+                return
+            }
+        } catch {
+            // Do not include a filesystem path, body, account or raw error.
+            XCTFail("administrator-content-diagnostic: fixture-unreadable")
+            return
+        }
+
+        let account = BoundAdministratorTestAccount()
+        var sessionRequests = 0
+        var contentRequests = 0
+        var unexpectedRequests = 0
+        let admin = AdminSessionStore(environment: .production) { request in
+            guard request.httpMethod == "GET", let url = request.url else {
+                unexpectedRequests += 1
+                throw AdminAPIError.invalidResponse
+            }
+            switch url.path {
+            case "/wp-json/shuzijun/v1/app-admin/session":
+                sessionRequests += 1
+                return try self.reply(request)
+            case "/wp-json/shuzijun/v1/app-content":
+                contentRequests += 1
+                guard let response = HTTPURLResponse(url: url, statusCode: 200,
+                    httpVersion: nil, headerFields: ["Content-Type": "application/json; charset=UTF-8"]) else {
+                    throw AdminAPIError.invalidResponse
+                }
+                return (data, response)
+            default:
+                unexpectedRequests += 1
+                throw AdminAPIError.invalidResponse
+            }
+        }
+        defer { admin.lock() }
+        await admin.signIn(using: account)
+        guard admin.isAuthenticated else {
+            XCTFail("administrator-content-diagnostic: synthetic-session-rejected; requests=\(sessionRequests)")
+            return
+        }
+        XCTAssertFalse(admin.isIndependentAdministrator)
+        do {
+            let manifest = try await admin.fetchContent()
+            XCTAssertTrue(ContentSecurityPolicy.isTrusted(manifest, environment: .production),
+                "administrator-content-diagnostic: content-security-policy-rejected")
+            XCTAssertTrue(AdminContentEditingPolicy.isFullAdministratorManifest(manifest),
+                "administrator-content-diagnostic: administrator-completeness-rejected")
+            XCTAssertEqual(sessionRequests, 1)
+            XCTAssertEqual(contentRequests, 1)
+            XCTAssertEqual(unexpectedRequests, 0)
+            print("administrator-content-diagnostic: bytes=\(data.count); portfolios=\(manifest.portfolios.count); images=\(manifest.portfolios.reduce(0) { $0 + $1.images.count }); dramas=\(manifest.dramas.count)")
+        } catch {
+            let stage: String
+            if case let AdminAPIError.contentLoadFailed(failure) = error {
+                stage = failure.rawValue
+            } else {
+                stage = "other"
+            }
+            XCTFail("administrator-content-diagnostic: fetch-content-rejected; stage=\(stage); bytes=\(data.count); sessionRequests=\(sessionRequests); contentRequests=\(contentRequests); unexpectedRequests=\(unexpectedRequests)")
+        }
+#else
+        throw XCTSkip("Administrator content diagnostic is simulator-only")
+#endif
     }
 
     func testBoundAccountMustPassServerProbeAndNeverBecomesIndependentAdministrator() async throws {
@@ -1796,13 +2121,19 @@ final class ContentAndAccessTests: XCTestCase {
         controller.view.frame = CGRect(x: 0, y: 0, width: 430, height: 760)
         controller.viewDidLayoutSubviews()
         XCTAssertEqual(controller.serviceEnvironment, .review)
+#if DEBUG
         let initialUpdates = controller.contentUpdateCount
+#endif
         controller.update(image: photo, environment: .review)
+#if DEBUG
         XCTAssertEqual(controller.contentUpdateCount, initialUpdates)
+#endif
         controller.scrollView.setZoomScale(2, animated: false)
         controller.update(image: photo, environment: .production)
         XCTAssertEqual(controller.serviceEnvironment, .production)
+#if DEBUG
         XCTAssertEqual(controller.contentUpdateCount, initialUpdates + 1)
+#endif
         XCTAssertEqual(controller.scrollView.zoomScale, 1)
     }
 
@@ -1816,15 +2147,19 @@ final class ContentAndAccessTests: XCTestCase {
         let photo = try XCTUnwrap(
             controller.scrollView.accessibilityElements?.first(where: { $0 is UIAccessibilityElement }) as? UIAccessibilityElement
         )
+#if DEBUG
         let initialUpdates = controller.contentUpdateCount
+#endif
         for scale in [CGFloat(1.25), 2, 4, 1, 3, 1] {
             controller.scrollView.setZoomScale(scale, animated: false)
             XCTAssertEqual(controller.scrollView.zoomScale, scale, accuracy: 0.001)
             XCTAssertEqual(photo.accessibilityValue, "缩放 \(Int((scale * 100).rounded()))%",
                            "辅助功能必须读取当前原生缩放值，不能依赖滞后的手势结束回调")
         }
+#if DEBUG
         XCTAssertEqual(controller.contentUpdateCount, initialUpdates,
                        "更新辅助功能缩放值不能重建图片加载子树")
+#endif
     }
 
     func testGalleryHostedRetryControlsPrecedeVirtualPhotoInAccessibilityHitTesting() throws {
@@ -1847,8 +2182,10 @@ final class ContentAndAccessTests: XCTestCase {
         controller.loadViewIfNeeded()
         controller.view.frame = CGRect(x: 0, y: 0, width: 430, height: 760)
         controller.viewDidLayoutSubviews()
+#if DEBUG
         let initialUpdates = controller.contentUpdateCount
         XCTAssertEqual(initialUpdates, 1)
+#endif
         XCTAssertFalse(controller.scrollView.gestureRecognizerShouldBegin(controller.scrollView.panGestureRecognizer))
         controller.scrollView.setZoomScale(2, animated: false)
         XCTAssertTrue(controller.scrollView.gestureRecognizerShouldBegin(controller.scrollView.panGestureRecognizer))
@@ -1857,13 +2194,17 @@ final class ContentAndAccessTests: XCTestCase {
             controller.viewDidLayoutSubviews()
             controller.update(image: image)
         }
+#if DEBUG
         XCTAssertEqual(controller.contentUpdateCount, initialUpdates,
                        "拖动/重复 representable 更新不能重建图片加载子树")
+#endif
         XCTAssertEqual(controller.scrollView.zoomScale, 2)
         XCTAssertEqual(controller.scrollView.contentOffset, CGPoint(x: 100, y: 100))
         controller.view.frame = CGRect(x: 0, y: 0, width: 760, height: 430)
         controller.viewDidLayoutSubviews()
+#if DEBUG
         XCTAssertEqual(controller.contentUpdateCount, initialUpdates + 1)
+#endif
         XCTAssertEqual(controller.scrollView.zoomScale, 1)
         XCTAssertEqual(controller.scrollView.contentOffset, .zero)
         XCTAssertFalse(controller.scrollView.gestureRecognizerShouldBegin(controller.scrollView.panGestureRecognizer))

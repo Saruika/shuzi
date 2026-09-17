@@ -1063,7 +1063,7 @@ struct AdminView: View {
             guard administratorContentLoadID == loadID,
                   admin.isAuthenticated else { return }
             guard AdminContentEditingPolicy.isFullAdministratorManifest(manifest) else {
-                throw AdminAPIError.invalidResponse
+                throw AdminAPIError.contentLoadFailed(.incompleteManifest)
             }
             store.applyPublishedManifest(manifest)
             loadDrafts()

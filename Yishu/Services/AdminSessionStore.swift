@@ -17,11 +17,42 @@ struct UploadedMedia: Decodable {
     }
 }
 
+/// Fixed, non-sensitive codes let support distinguish transport/decoding failures
+/// from a viewer-scoped response. Never attach server bodies, URLs or account data.
+enum AdminContentFailureStage: String, CaseIterable {
+    case responseTooLarge = "AC01"
+    case responseOrigin = "AC02"
+    case responseFormat = "AC03"
+    case decoding = "AC04"
+    case contentPolicy = "AC05"
+    case incompleteManifest = "AC06"
+
+    var message: String {
+        let explanation: String
+        switch self {
+        case .responseTooLarge:
+            explanation = "管理内容响应过大，暂时无法载入。"
+        case .responseOrigin:
+            explanation = "管理内容响应来源未通过验证，请检查网络后重试。"
+        case .responseFormat:
+            explanation = "管理接口没有返回有效的 JSON 内容，请稍后重试。"
+        case .decoding:
+            explanation = "管理内容的数据格式不兼容，请联系管理员排查。"
+        case .contentPolicy:
+            explanation = "管理内容未通过数据或资源地址校验，编辑已暂停。"
+        case .incompleteManifest:
+            explanation = "未取得管理员完整内容，编辑已暂停。请重新进入管理并确认权限。"
+        }
+        return "\(explanation)（\(rawValue)）"
+    }
+}
+
 enum AdminAPIError: LocalizedError {
     case invalidCredentials
     case insufficientPermission
     case pushPermissionRequired
     case invalidResponse
+    case contentLoadFailed(AdminContentFailureStage)
     case invalidFile
     case fileTooLarge
     case unsupportedFileType
@@ -39,6 +70,8 @@ enum AdminAPIError: LocalizedError {
             return "当前管理员没有定向推送权限。"
         case .invalidResponse:
             return "服务器返回了无法识别的数据。"
+        case .contentLoadFailed(let stage):
+            return stage.message
         case .invalidFile:
             return "文件为空、无法读取或不是普通文件。"
         case .fileTooLarge:
@@ -785,9 +818,15 @@ final class AdminSessionStore: ObservableObject {
     func fetchContent() async throws -> AppContentManifest {
         let manifest: AppContentManifest = try await authorizedJSON(
             path: "shuzijun/v1/app-content",
-            method: "GET"
+            method: "GET",
+            diagnosesContentResponse: true
         )
-        guard ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else { throw AdminAPIError.invalidResponse }
+        guard ContentSecurityPolicy.isTrusted(manifest, environment: serviceEnvironment) else {
+            throw AdminAPIError.contentLoadFailed(.contentPolicy)
+        }
+        guard AdminContentEditingPolicy.isFullAdministratorManifest(manifest) else {
+            throw AdminAPIError.contentLoadFailed(.incompleteManifest)
+        }
         return manifest
     }
 
@@ -1061,7 +1100,8 @@ final class AdminSessionStore: ObservableObject {
         method: String,
         body: Data? = nil,
         queryItems: [URLQueryItem] = [],
-        authenticationProbe: Bool = false
+        authenticationProbe: Bool = false,
+        diagnosesContentResponse: Bool = false
     ) async throws -> T {
         let requestGeneration = authenticationGeneration
         var request = try authorizedRequest(
@@ -1092,7 +1132,8 @@ final class AdminSessionStore: ObservableObject {
             T.self,
             data: data,
             response: response,
-            lockOnAuthorizationFailure: !authenticationProbe
+            lockOnAuthorizationFailure: !authenticationProbe,
+            diagnosesContentResponse: diagnosesContentResponse
         )
     }
 
@@ -1155,12 +1196,16 @@ final class AdminSessionStore: ObservableObject {
         _ type: T.Type,
         data: Data,
         response: URLResponse,
-        lockOnAuthorizationFailure: Bool = true
+        lockOnAuthorizationFailure: Bool = true,
+        diagnosesContentResponse: Bool = false
     ) throws -> T {
-        guard data.count <= 8 * 1024 * 1024 else { throw AdminAPIError.invalidResponse }
+        func invalid(_ stage: AdminContentFailureStage) -> AdminAPIError {
+            diagnosesContentResponse ? .contentLoadFailed(stage) : .invalidResponse
+        }
+        guard data.count <= 8 * 1024 * 1024 else { throw invalid(.responseTooLarge) }
         guard let http = response as? HTTPURLResponse,
               (serviceEnvironment.allowsAPIURL(http.url) || serviceEnvironment.allowsMediaUploadURL(http.url)) else {
-            throw AdminAPIError.invalidResponse
+            throw invalid(.responseOrigin)
         }
         guard (200..<300).contains(http.statusCode) else {
             let isJSON = AppNetworkSecurityPolicy.isJSONMIMEType(
@@ -1196,13 +1241,13 @@ final class AdminSessionStore: ObservableObject {
         guard !data.isEmpty,
               AppNetworkSecurityPolicy.isJSONMIMEType(
                 http.value(forHTTPHeaderField: "Content-Type")
-              ) else { throw AdminAPIError.invalidResponse }
+              ) else { throw invalid(.responseFormat) }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         do {
             return try decoder.decode(T.self, from: data)
         } catch {
-            throw AdminAPIError.invalidResponse
+            throw invalid(.decoding)
         }
     }
 
