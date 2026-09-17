@@ -79,6 +79,8 @@ if command -v php >/dev/null 2>&1; then
   php Server/tests/collaboration-admin-notice-test.php
   php Server/tests/fan-bound-administrator-auth-test.php
   php Server/tests/game-leaderboard-regression.php
+  php -l Server/operations/test-review-game-leaderboard.php >/dev/null
+  php Server/tests/review-game-leaderboard-harness-test.php
   node --test Scripts/test-game-leaderboard-php.mjs
   php -l Server/tests/fan-administrator-binding-wordpress-integration.php >/dev/null
   php -l Server/tests/fan-administrator-media-wordpress-integration.php >/dev/null
@@ -127,6 +129,7 @@ python3 Server/tests/review-bootstrap-test.py
 python3 Server/tests/review-catalog-test.py
 python3 Server/tests/review-accounts-test.py
 python3 Server/tests/review-upgrade-test.py
+python3 Server/tests/review-game-upgrade-test.py
 python3 Server/tests/review-permalinks-test.py
 python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py
