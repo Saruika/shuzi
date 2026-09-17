@@ -1,5 +1,5 @@
 {
-  "reviewedAt": "2026-09-14",
+  "reviewedAt": "2026-09-17",
   "status": "local-candidate-not-confirmed-in-app-store-connect",
   "purpose": "AppFunctionality",
   "tracking": false,
@@ -13,6 +13,7 @@
     "PhotosorVideos": {"label": "照片或视频", "linked": true},
     "CustomerSupport": {"label": "客户支持", "linked": true},
     "OtherUserContent": {"label": "其他用户内容", "linked": true},
+    "GameplayContent": {"label": "游戏内容", "linked": true, "note": "仅主动确认上榜后处理出身及选项重演；关联内部账号保存最高成绩摘要，可单独移除"},
     "EmailsOrTextMessages": {"label": "电子邮件或短信", "linked": true},
     "ProductInteraction": {"label": "产品交互", "linked": true},
     "OtherDiagnosticData": {"label": "其他诊断数据", "linked": true},

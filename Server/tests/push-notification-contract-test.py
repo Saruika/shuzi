@@ -64,11 +64,13 @@ def main() -> None:
     assert "defined(" not in consent_bridge
     assert "server 1.5.13" in core
 
-    # The reviewed release bundle has five traits plus its core class. Push
+    # The reviewed release bundle has six traits plus its core class. Push
     # delivery is isolated from the fan-account endpoints without changing
     # runtime behavior.
-    assert core.count("require_once __DIR__ . '/trait-") == 5
-    assert core.count("    use Shuzijun_App_") == 5
+    assert core.count("require_once __DIR__ . '/trait-") == 6
+    assert core.count("    use Shuzijun_App_") == 6
+    assert core.count("require_once __DIR__ . '/class-shuzijun-game-rules.php';") == 1
+    assert core.count("require_once __DIR__ . '/trait-shuzijun-app-game-leaderboard.php';") == 1
     assert "trait-shuzijun-app-push-notifications.php" in core
     assert "trait Shuzijun_App_Push_Notifications" in push
 

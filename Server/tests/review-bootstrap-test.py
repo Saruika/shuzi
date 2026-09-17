@@ -31,9 +31,38 @@ class ReviewBootstrapTests(unittest.TestCase):
             bootstrap.configure_permalink_structure()
 
     def test_release_manifest_matches_repository_release(self):
-        release = (SERVER / 'releases/v1.4.0-build6-acceptance5.md').read_text()
+        # Historical acceptance records must not be rewritten when the local
+        # candidate changes. Bind the bootstrap input to the current reviewed
+        # candidate and the separately pinned production release graph.
+        release = (SERVER / 'releases/game-leaderboard-candidate.md').read_text()
         values = [line for line in release.splitlines() if line.startswith('RELEASE_MANIFEST_SHA256=')]
-        self.assertEqual(values, ['RELEASE_MANIFEST_SHA256=' + bootstrap.manifest(SERVER)])
+        expected = '3adaebe7acbdeeb189a703c865f991935cf90a778a8151eaf85f272e7d053576'
+        self.assertEqual(values, ['RELEASE_MANIFEST_SHA256=' + expected])
+        self.assertEqual(bootstrap.manifest(SERVER), expected)
+        deployer = (SERVER / 'operations/deploy-app-content-release').read_text()
+        target_lines = [line for line in deployer.splitlines()
+                        if line.startswith('readonly TARGET_RELEASE_MANIFEST_SHA256=')]
+        self.assertEqual(target_lines, ['readonly TARGET_RELEASE_MANIFEST_SHA256=' + expected])
+
+    def test_current_release_includes_rules_data_and_new_module(self):
+        paths = {path.relative_to(SERVER).as_posix() for path in bootstrap.plugin_files(SERVER)}
+        self.assertEqual(len(paths), 37)
+        self.assertTrue({
+            'vendor/shuzijun/app-content/trait-shuzijun-app-game-leaderboard.php',
+            'vendor/shuzijun/app-content/class-shuzijun-game-rules.php',
+            'vendor/shuzijun/app-content/game-rules-v1.json',
+        }.issubset(paths))
+
+    def test_mismatched_candidate_rejected_before_any_resource_operation(self):
+        expected = bootstrap.manifest(SERVER)
+        changed = expected[:-1] + ('0' if expected[-1] != '0' else '1')
+        with patch.object(bootstrap.os, 'geteuid', return_value=0), \
+                patch.object(bootstrap, 'command') as run, \
+                patch.object(bootstrap, 'absent') as target_check, \
+                self.assertRaisesRegex(ValueError, 'Plugin manifest does not match'):
+            bootstrap.preflight(SERVER, Path('/unused-fixture-core'), changed)
+        run.assert_not_called()
+        target_check.assert_not_called()
 
     def test_source_symlink_rejected(self):
         with tempfile.TemporaryDirectory() as folder:

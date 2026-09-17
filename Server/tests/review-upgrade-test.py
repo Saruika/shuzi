@@ -14,6 +14,36 @@ original_preflight = u.preflight
 original_protected_file = u.protected_file
 
 
+class ReviewUpgradeScopeTests(unittest.TestCase):
+    def test_existing_upgrader_remains_pinned_to_historical_transition(self):
+        previous = (SERVER / 'releases/v1.4.0-build4-review-env-preview32.md').read_text()
+        historical = (SERVER / 'releases/v1.4.0-build6-acceptance5.md').read_text()
+        candidate = (SERVER / 'releases/game-leaderboard-candidate.md').read_text()
+        def manifests(text):
+            return [line.removeprefix('RELEASE_MANIFEST_SHA256=')
+                    for line in text.splitlines()
+                    if line.startswith('RELEASE_MANIFEST_SHA256=')]
+        self.assertEqual(manifests(previous), [u.BASELINE])
+        self.assertEqual(manifests(historical), [u.TARGET])
+        self.assertEqual(len(manifests(candidate)), 1)
+        self.assertNotEqual(manifests(candidate)[0], u.TARGET)
+        self.assertNotEqual(manifests(candidate)[0], u.BASELINE)
+
+    def test_existing_upgrader_does_not_claim_new_file_transaction_support(self):
+        self.assertEqual(u.CHANGED, (
+            'vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php',
+            'vendor/shuzijun/app-content/trait-shuzijun-app-collaboration.php',
+            'vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php',
+            'vendor/shuzijun/app-content/class-shuzijun-app-content-api.php',
+            'shuzijun-app-content.php',
+        ))
+        source = (SERVER / 'operations/upgrade-review-plugin.py').read_text()
+        self.assertIn("check(b.manifest(source) == TARGET, 'candidate differs from reviewed release')", source)
+        self.assertIn("check(b.manifest(LIVE) == BASELINE, 'unexpected live release; do not replay')", source)
+        self.assertIn("check(different == set(CHANGED), 'unexpected plugin changes')", source)
+        self.assertIn("check(b.manifest(LIVE) == BASELINE, 'rollback manifest mismatch')", source)
+
+
 class ReviewUpgradeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

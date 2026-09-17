@@ -1,11 +1,13 @@
 import hashlib
+import json
 from pathlib import Path
 
 
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 STANDBY_SEEDER = Path("Server/operations/seed-standby-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE_RECORD = Path("Server/releases/v1.4.0-build6-acceptance5.md")
+RELEASE_RECORD = Path("Server/releases/game-leaderboard-candidate.md")
+HISTORICAL_RELEASE_RECORD = Path("Server/releases/v1.4.0-build6-acceptance5.md")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
 SERVER_ROOT = Path("Server")
@@ -20,21 +22,28 @@ PLUGIN_MODULES = (
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php",
+    SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-game-leaderboard.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php",
+    SERVER_ROOT / "vendor/shuzijun/app-content/class-shuzijun-game-rules.php",
+    SERVER_ROOT / "vendor/shuzijun/app-content/game-rules-v1.json",
     PLUGIN_IMPLEMENTATION,
 )
 LEGACY_MANIFEST_SHA256 = "64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134"
 PREVIOUS_MANIFEST_SHA256 = "5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe"
-TARGET_MANIFEST_SHA256 = "2b632ca195a65f1f0309bf66a9098ef52ca49a5eec9d80a5b7d9c32b8fbdfdee"
-TARGET_PLUGIN_SHA256 = "4cf75b720f6bda71d6a54e40125c5a296467527b882ff57d2a75c58ceae5a26e"
+PREVIOUS_MODULAR_MANIFEST_SHA256 = "2b632ca195a65f1f0309bf66a9098ef52ca49a5eec9d80a5b7d9c32b8fbdfdee"
+TARGET_MANIFEST_SHA256 = "3adaebe7acbdeeb189a703c865f991935cf90a778a8151eaf85f272e7d053576"
+TARGET_PLUGIN_SHA256 = "b38f8fae4df5ae4f3513666d14da917ae8a10aa22f4eb3bc38b86848f6d4ed96"
 TARGET_MODULE_SHA256S = (
     "7175ae3aefb1add1af504c2bbbba355b5e448a81818d7c00ace12c37cc6dc4e5",
     "bd689473956b67b480ce62704b73d39ea6c7a9536a19496120722d2524f65160",
     "7c5be7cf3347b187f6c88a12ad6a21f0001a5e7c92edbfe7a99e834abc1eebb7",
-    "77d2a10cd9df7af2698ec36b3cfcbfe07765dbd2a03b401b8a7effb03bb3bf1c",
+    "c5f6647843ee58f7db268654cfcbba73d92404d0e3ea4d2e3ac7db9d25199d65",
     "f27863d35b6a701d45afd6bfcecb5b235983497fee71553d18ec801bcbec2d6a",
+    "5d535654e713b60a58059087a35ca086ff35e12cd0e859a302850fb56058fbd9",
     "bdcea372748c79a06284f01570d0863d20316bf3d4d33fe7924c16d100a1b1d7",
-    "599c64b7d700a691eff7c8d63c7f6e3f8842748970eb3d30e3abfcfcbedc55cc",
+    "a75a0b61fe46be1bfe0993c2266b54fc2b30c8766ac8a3efb5fe30e098a1ff09",
+    "1ee7357cbd5018f84618ea610e8c8b648b9857ce22f05d91c91eb052cd36fdf1",
+    "ada9de238bcb239bc72cd8647b0144d90836ead40606238f3f668ba38a4184cb",
 )
 
 
@@ -57,7 +66,7 @@ def function_body(lines: list[str], name: str, next_name: str) -> str:
 
 
 def assert_manifest_lifecycle_regressions(text: str, lines: list[str]) -> None:
-    """Bind the three supported manifest transitions to executable state checks."""
+    """Bind every retained baseline transition to executable state checks."""
 
     seed_text = STANDBY_SEEDER.read_text(encoding="utf-8")
     assert (
@@ -95,7 +104,10 @@ def assert_manifest_lifecycle_regressions(text: str, lines: list[str]) -> None:
 
     # Rollback is presence-sensitive: a manifested baseline restores the exact
     # prior bytes, while the sole legacy transition restores manifest absence.
-    for previous_manifest in (PREVIOUS_MANIFEST_SHA256, LEGACY_MANIFEST_SHA256, None):
+    for previous_manifest in (
+        PREVIOUS_MODULAR_MANIFEST_SHA256, PREVIOUS_MANIFEST_SHA256,
+        LEGACY_MANIFEST_SHA256, None,
+    ):
         before = {entry: "old" for entry in release_entries[:-1]}
         if previous_manifest is not None:
             before["release.sha256"] = previous_manifest
@@ -143,6 +155,8 @@ def main() -> None:
     lines = text.splitlines()
     readme = OPERATIONS_README.read_text(encoding="utf-8")
     release_record = RELEASE_RECORD.read_text(encoding="utf-8")
+    historical_record = HISTORICAL_RELEASE_RECORD.read_text(encoding="utf-8")
+    assert f"RELEASE_MANIFEST_SHA256={PREVIOUS_MODULAR_MANIFEST_SHA256}" in historical_record
     plugin_entry = PLUGIN_ENTRY.read_text(encoding="utf-8")
     plugin_implementation = PLUGIN_IMPLEMENTATION.read_text(encoding="utf-8")
     plugin_modules = [path.read_text(encoding="utf-8") for path in PLUGIN_MODULES]
@@ -159,18 +173,28 @@ def main() -> None:
     assert "final class Shuzijun_App_Content_API" in plugin_implementation
     assert "Shuzijun_App_Content_API::init();" not in plugin_implementation
     assert len(plugin_entry.splitlines()) < 25
-    assert len(plugin_modules) == 7
-    assert len(plugin_modules[:-2]) == 5
-    assert "final class Shuzijun_Collaboration_Private_Payload" in plugin_modules[5]
+    assert len(plugin_modules) == 10
+    assert len(plugin_modules[:6]) == 6
+    assert "final class Shuzijun_Collaboration_Private_Payload" in plugin_modules[6]
+    assert "final class Shuzijun_Game_Rules" in plugin_modules[7]
     assert plugin_implementation.count("require_once __DIR__ . '/class-shuzijun-collaboration-private-payload.php';") == 1
-    assert max(len(source.splitlines()) for source in plugin_modules) < 4_000
-    assert sum(len(source.splitlines()) for source in plugin_modules) > 8_000
-    assert plugin_implementation.count("require_once __DIR__ . '/trait-") == 5
-    assert plugin_implementation.count("    use Shuzijun_App_") == 5
-    for trait_source in plugin_modules[:5]:
+    assert plugin_implementation.count("require_once __DIR__ . '/class-shuzijun-game-rules.php';") == 1
+    php_modules = [source for path, source in zip(PLUGIN_MODULES, plugin_modules) if path.suffix == ".php"]
+    assert max(len(source.splitlines()) for source in php_modules) < 4_000
+    assert sum(len(source.splitlines()) for source in php_modules) > 8_000
+    assert plugin_implementation.count("require_once __DIR__ . '/trait-") == 6
+    assert plugin_implementation.count("    use Shuzijun_App_") == 6
+    for trait_source in plugin_modules[:6]:
         assert trait_source.count("trait Shuzijun_App_") == 1
         assert "final class Shuzijun_App_Content_API" not in trait_source
         assert "Shuzijun_App_Content_API::init();" not in trait_source
+    rules = json.loads(plugin_modules[8])
+    assert rules["version"] == "life-v1" and rules["maxChoices"] == 108
+    assert len(rules["origins"]) == 6 and len(rules["events"]) == 108
+    assert all(len(event["options"]) == 4 for event in rules["events"])
+    assert len(rules["endings"]) == 28 and len(rules["immediateEnds"]) == 3
+    assert f"FILE_SHA256 = '{TARGET_MODULE_SHA256S[8]}'" in plugin_modules[7]
+    assert "__DIR__ . '/game-rules-v1.json'" in plugin_modules[7]
     assert hashlib.sha256(PLUGIN_ENTRY.read_bytes()).hexdigest() == TARGET_PLUGIN_SHA256
     assert tuple(
         hashlib.sha256(path.read_bytes()).hexdigest() for path in PLUGIN_MODULES
@@ -179,14 +203,18 @@ def main() -> None:
     release_trust_values = (
         f"RELEASE_MANIFEST_SHA256={TARGET_MANIFEST_SHA256}",
         f"PLUGIN_ENTRY_SHA256={TARGET_PLUGIN_SHA256}",
-        f"CORE_CLASS_SHA256={TARGET_MODULE_SHA256S[6]}",
-        f"COLLABORATION_CIPHER_SHA256={TARGET_MODULE_SHA256S[5]}",
+        f"CORE_CLASS_SHA256={TARGET_MODULE_SHA256S[9]}",
+        f"COLLABORATION_CIPHER_SHA256={TARGET_MODULE_SHA256S[6]}",
         f"COLLABORATION_TRAIT_SHA256={TARGET_MODULE_SHA256S[0]}",
         f"FAN_ENDPOINTS_TRAIT_SHA256={TARGET_MODULE_SHA256S[1]}",
         f"PUSH_NOTIFICATIONS_TRAIT_SHA256={TARGET_MODULE_SHA256S[2]}",
         f"FAN_IDENTITY_TRAIT_SHA256={TARGET_MODULE_SHA256S[3]}",
         f"CONTENT_DELIVERY_TRAIT_SHA256={TARGET_MODULE_SHA256S[4]}",
+        f"GAME_LEADERBOARD_TRAIT_SHA256={TARGET_MODULE_SHA256S[5]}",
+        f"GAME_RULES_CLASS_SHA256={TARGET_MODULE_SHA256S[7]}",
+        f"GAME_RULES_JSON_SHA256={TARGET_MODULE_SHA256S[8]}",
         f"PREVIOUS_LIVE_MANIFEST_SHA256={PREVIOUS_MANIFEST_SHA256}",
+        f"PREVIOUS_MODULAR_MANIFEST_SHA256={PREVIOUS_MODULAR_MANIFEST_SHA256}",
     )
     for trust_value in release_trust_values:
         assert release_record.count(trust_value) == 1
@@ -202,6 +230,7 @@ def main() -> None:
         f"{path.relative_to(SERVER_ROOT).as_posix()}\n"
         for path in sorted(release_files)
     ).encode("ascii")
+    assert len(release_files) == 37
     assert hashlib.sha256(release_records).hexdigest() == TARGET_MANIFEST_SHA256
     deployer_sha256 = hashlib.sha256(DEPLOYER.read_bytes()).hexdigest()
     seeder_sha256 = hashlib.sha256(STANDBY_SEEDER.read_bytes()).hexdigest()
@@ -230,6 +259,7 @@ def main() -> None:
         "readonly BACKUP_MANIFEST_STATE_NAME=live-release-manifest.state",
         "readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134",
         f"readonly PREVIOUS_RELEASE_MANIFEST_SHA256={PREVIOUS_MANIFEST_SHA256}",
+        f"readonly PREVIOUS_MODULAR_RELEASE_MANIFEST_SHA256={PREVIOUS_MODULAR_MANIFEST_SHA256}",
         f"readonly TARGET_RELEASE_MANIFEST_SHA256={TARGET_MANIFEST_SHA256}",
         "readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a",
         "readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0",
@@ -253,9 +283,11 @@ def main() -> None:
         "validate_manifest",
     )
     assert "PREVIOUS_RELEASE_MANIFEST_SHA256" not in candidate_allowlist
+    assert "PREVIOUS_MODULAR_RELEASE_MANIFEST_SHA256" not in candidate_allowlist
     for reviewed_manifest in (
         "LEGACY_BRIDGE_MANIFEST_SHA256",
         "PREVIOUS_RELEASE_MANIFEST_SHA256",
+        "PREVIOUS_MODULAR_RELEASE_MANIFEST_SHA256",
         "TARGET_RELEASE_MANIFEST_SHA256",
     ):
         assert reviewed_manifest in live_allowlist
@@ -421,14 +453,21 @@ def main() -> None:
         '$sourceMode = $argv[2];',
         '$sizeValues = explode(",", $argv[3]);',
         '$sourceHashes = explode(",", $argv[4]);',
-        '$sourceMode === "modular" && count($sizeValues) !== 8',
+        '$sourceMode === "modular" && count($sizeValues) !== 11',
         'hash_equals($sourceHashes[$index], hash("sha256", $source))',
         '$traitSources = array_slice($sources, 0, 6);',
-        '$classSource = $sources[6];',
-        '$entrypoint = $sources[7];',
+        '$supportSources = array_slice($sources, 6, 2);',
+        '$rulesJSON = $sources[8];',
+        '$classSource = $sources[9];',
+        '$entrypoint = $sources[10];',
         '$quote = chr(39);',
         'substr_count($entrypoint, $entryLoader) !== 1',
         'foreach ($classLoaders as $classLoader)',
+        'if ($position <= $previousLoaderPosition) { exit(27); }',
+        'foreach ($supportSources as $supportSource) { eval("?>" . $supportSource); }',
+        'hash_equals(Shuzijun_Game_Rules::FILE_SHA256, hash("sha256", $rulesJSON))',
+        '$rules = new Shuzijun_Game_Rules(json_decode($rulesJSON, true, 32, JSON_THROW_ON_ERROR));',
+        'catch (Throwable $error) { exit(28); }',
         'exit(25);',
         'define("ABSPATH", "/nonexistent/");',
         'define("YISHU_ENABLE_COLLABORATION_PHASE1", true);',
@@ -457,6 +496,7 @@ def main() -> None:
         "candidate plugin PHP is not in the reviewed release allowlist",
         "candidate plugin source framing is invalid",
         "candidate plugin loader graph is not exact",
+        "candidate game rules JSON is invalid or not bound to the reviewed rules class",
     ):
         assert probe_guard in collaboration_probe, (
             f"missing candidate collaboration fuse probe: {probe_guard}"
@@ -466,6 +506,7 @@ def main() -> None:
         '\n    \' "$COLLABORATION_FUSE_PROBE_SENTINEL"', php_probe_start
     )
     assert "'" not in collaboration_probe[php_probe_start:php_probe_end]
+    assert 'eval("?>" . $rulesJSON)' not in collaboration_probe
     for forbidden_probe_effect in (
         "$SITE",
         "$TARGET_DIR",

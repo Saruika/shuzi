@@ -129,7 +129,7 @@ function runtime() {
   });
   context.window = context;
   const reject = name => { externalAccess.push(name); throw new Error(`Unexpected external capability: ${name}`); };
-  for (const name of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'localStorage', 'sessionStorage', 'indexedDB', 'caches', 'navigator', 'webkit', 'ToySDK']) {
+  for (const name of ['fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'localStorage', 'sessionStorage', 'indexedDB', 'caches', 'navigator', 'ToySDK']) {
     Object.defineProperty(context, name, { get: () => reject(name), set: () => reject(name) });
   }
   for (const { name, source } of scripts) new vm.Script(source, { filename: name }).runInContext(context);
@@ -212,7 +212,7 @@ test('all six origin buttons work and rapid start taps cannot apply their bonus 
     assert.equal(app.snapshot(), before, id);
     assert.equal(app.options().length, 4);
     assert.equal(app.elements.get('q-id').textContent, '#001');
-    assert.equal(app.api.state.name, '本地匿名玩家');
+    assert.equal(app.api.state.name, '本局玩家');
   }
 });
 
@@ -404,7 +404,9 @@ test('offline document uses classic local scripts and a restrictive CSP compatib
   assert.deepEqual(paths, ['css/style.css', 'js/events.js', 'js/endings.js', 'js/main.js']);
   for (const asset of paths) assert.ok((await readFile(path.join(assets, asset))).length > 0);
   const main = scripts.find(script => script.name === 'main.js').source;
-  assert.doesNotMatch(main, /localStorage|sessionStorage|indexedDB|fetch\(|postMessage|XMLHttpRequest|toDataURL|innerHTML|webkit|ToySDK/);
+  assert.doesNotMatch(main, /localStorage|sessionStorage|indexedDB|fetch\(|XMLHttpRequest|toDataURL|innerHTML|ToySDK/);
+  assert.equal((main.match(/\.postMessage\(/g) ?? []).length, 1);
+  assert.match(main, /window\.webkit\?\.messageHandlers\?\.gameLeaderboard\?\.postMessage\(\{/);
   assert.doesNotMatch(css, /@import|url\(/);
 });
 

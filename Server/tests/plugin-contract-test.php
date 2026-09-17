@@ -78,6 +78,7 @@ final class WP_REST_Server {
     public const READABLE = 'GET';
     public const CREATABLE = 'POST';
     public const EDITABLE = 'POST,PUT,PATCH';
+    public const DELETABLE = 'DELETE';
 }
 
 $GLOBALS['yishu_test_options'] = array();
@@ -327,6 +328,8 @@ $plugin_module_paths = array(
     '/vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php',
     '/vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php',
+    '/vendor/shuzijun/app-content/class-shuzijun-game-rules.php',
+    '/vendor/shuzijun/app-content/trait-shuzijun-app-game-leaderboard.php',
 );
 $plugin_module_sources = array_map(
     static fn (string $path) => file_get_contents(dirname(__DIR__) . $path),
@@ -380,18 +383,24 @@ function expect_true(bool $condition, string $message): void {
 expect_true(
     is_string($plugin_entry_source)
         && is_string($plugin_implementation_source)
-        && count(array_filter($plugin_module_sources, 'is_string')) === 7
+        && count(array_filter($plugin_module_sources, 'is_string')) === 9
         && strpos(
             $plugin_entry_source,
             "require_once __DIR__ . '/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php';"
         ) !== false
         && substr_count($plugin_entry_source, 'Shuzijun_App_Content_API::init();') === 1
         && strpos($plugin_implementation_source, 'final class Shuzijun_App_Content_API') !== false
-        && substr_count($plugin_implementation_source, 'require_once __DIR__ . \'/trait-') === 5
-        && substr_count($plugin_implementation_source, '    use Shuzijun_App_') === 5
+        && substr_count($plugin_implementation_source, 'require_once __DIR__ . \'/trait-') === 6
+        && substr_count($plugin_implementation_source, '    use Shuzijun_App_') === 6
         && strpos($plugin_implementation_source, 'Shuzijun_App_Content_API::init();') === false,
     '插件入口必须只装配一次模块化 API 实现并只启动一次'
 );
+foreach (array_slice($plugin_module_paths, 1) as $module_path) {
+    expect_true(
+        substr_count($plugin_implementation_source, "require_once __DIR__ . '/" . basename($module_path) . "';") === 1,
+        '每个受审模块必须由 API 实现精确装配一次'
+    );
+}
 
 function expect_same($expected, $actual, string $message): void {
     expect_true($expected === $actual, $message);
@@ -814,6 +823,29 @@ $default_route_names = array_map(
     static fn (array $record): string => (string) ($record['route'] ?? ''),
     $GLOBALS['yishu_test_registered_routes']
 );
+$game_routes = array_values(array_filter(
+    $GLOBALS['yishu_test_registered_routes'],
+    static fn (array $record): bool => str_starts_with((string) ($record['route'] ?? ''), '/fan/game/')
+));
+$expected_game_routes = array(
+    '/fan/game/leaderboard' => array('GET' => 'get_game_leaderboard'),
+    '/fan/game/scores' => array('POST' => 'submit_game_score', 'DELETE' => 'delete_game_score'),
+);
+expect_same(2, count($game_routes), '排行榜只能注册受审的两条内部账号路由');
+foreach ($game_routes as $route) {
+    expect_same('shuzijun/v1', $route['namespace'], '排行榜必须使用原有 App 命名空间');
+    $definitions = isset($route['arguments']['methods']) ? array($route['arguments']) : $route['arguments'];
+    $actual = array();
+    foreach ($definitions as $definition) {
+        expect_same(array(Shuzijun_App_Content_API::class, 'can_access_game_leaderboard'),
+            $definition['permission_callback'] ?? null, '读榜、提交与删除必须使用同一审批账号门禁');
+        expect_true(is_callable($definition['callback'] ?? null), '排行榜回调必须确实可调用');
+        $actual[$definition['methods']] = $definition['callback'][1];
+    }
+    expect_same($expected_game_routes[$route['route']] ?? null, $actual, '排行榜方法与回调必须精确匹配');
+    unset($expected_game_routes[$route['route']]);
+}
+expect_same(array(), $expected_game_routes, '排行榜不得遗漏读榜或成绩撤回接口');
 expect_true(
     !in_array('/collaboration-requests', $default_route_names, true)
         && !in_array('/app-admin/collaboration-requests', $default_route_names, true)
@@ -869,6 +901,7 @@ expect_true(
         && !in_array(Shuzijun_App_Content_API::COLLABORATION_SWEEP_HOOK, $registered_action_names, true)
         && !in_array('delete_user', $registered_action_names, true)
         && !in_array('save_post_portfolio', $registered_action_names, true)
+        && !in_array('yishu_install_game_leaderboard_storage', $registered_action_names, true)
         && !in_array('init', $registered_action_names, true),
     '未配置权威节点时不得注册异步账号写入回调'
 );
@@ -980,9 +1013,18 @@ expect_true(
         && !in_array(Shuzijun_App_Content_API::COLLABORATION_SWEEP_HOOK, $authority_action_names, true)
         && in_array('delete_user', $authority_action_names, true)
         && in_array('save_post_portfolio', $authority_action_names, true)
+        && in_array('yishu_install_game_leaderboard_storage', $authority_action_names, true)
         && in_array('init', $authority_action_names, true),
     '权威节点必须注册账号回调，但默认仍不得注册合作邀约 worker'
 );
+$game_install_hooks = array_values(array_filter(
+    $GLOBALS['yishu_test_registered_actions'],
+    static fn (array $record): bool => ($record[1] ?? null)
+        === array(Shuzijun_App_Content_API::class, 'ensure_game_leaderboard_storage')
+));
+expect_true(count($game_install_hooks) === 1
+    && $game_install_hooks[0][0] === 'yishu_install_game_leaderboard_storage',
+    '排行榜只能由显式安装 action 建表，不能挂到 HTTP init');
 expect_true(
     Shuzijun_App_Content_API::ensure_collaboration_storage() === false
         && Shuzijun_App_Content_API::process_collaboration_outbox(1) === false
@@ -1865,6 +1907,15 @@ expect_true(
         && strpos($fan_deletion_abort_source, 'throw new RuntimeException') !== false,
     'App 与 WordPress 核心删号都必须在不可逆删除开始前清除合作 PII，失败时必须阻断删号'
 );
+expect_true(
+    strpos($fan_remove_source, 'self::purge_game_leaderboard_for_fan_user($user_id)') !== false
+        && strpos($fan_remove_source, 'self::purge_game_leaderboard_for_fan_user($user_id)')
+            < strpos($fan_remove_source, 'wp_delete_user')
+        && strpos($fan_deletion_hook_source, 'self::purge_game_leaderboard_for_fan_user($user_id)') !== false
+        && strpos($fan_deletion_hook_source, 'self::purge_game_leaderboard_for_fan_user($user_id)')
+            < strpos($fan_deletion_hook_source, 'if (!get_user_meta($user_id, self::FAN_META_UUID, true))'),
+    'App 与核心删号都必须在不可逆删除及缺 UUID 早退之前清理排行榜'
+);
 
 // Physical-table discovery, rather than the advisory schema option, is the
 // deletion authority. Exercise the missing/corrupt-marker cases dynamically so
@@ -1948,6 +1999,12 @@ expect_true(
 );
 $purge_db->collaboration_request_ids = array();
 unset($GLOBALS['yishu_test_options'][Shuzijun_App_Content_API::COLLABORATION_SCHEMA_OPTION]);
+expect_true(Shuzijun_App_Content_API::purge_game_leaderboard_for_fan_user(81) === true
+    && !$purge_db->executed_queries, '未启用排行榜且物理表不存在时不得阻断既有删号或自动建表');
+$purge_db->table_probe_failures = array('wp_yishu_game_leaderboard');
+expect_true(Shuzijun_App_Content_API::purge_game_leaderboard_for_fan_user(81) === false,
+    '排行榜表探测错误必须阻断删号，不能误当成无记录');
+$purge_db->table_probe_failures = array();
 
 $apple_now = time();
 $apple_nonce_hash = str_repeat('a', 64);

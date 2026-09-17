@@ -64,7 +64,7 @@ struct AboutView: View {
                 owner: .fullScreenPresentation,
                 onExit: { presentsEmbeddedGame = false }
             ) {
-                EmbeddedGameView(onClose: { presentsEmbeddedGame = false })
+                EmbeddedGameView(account: fanAccount, onClose: { presentsEmbeddedGame = false })
             }
         }
     }

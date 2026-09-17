@@ -95,6 +95,20 @@ def build_reference(label):
 
 
 class EmbeddedGameHostContract(unittest.TestCase):
+    def test_game_regressions_are_in_the_native_unit_test_compile_phase(self):
+        # A file on disk/in a project group is not evidence that XCTest runs it.
+        targets = [pbx_object(item) for item in declared_ids(pbx_section("PBXNativeTarget"))]
+        unit_targets = [item for item in targets if 'productType = "com.apple.product-type.bundle.unit-test"' in item]
+        self.assertEqual(len(unit_targets), 1)
+        phase_ids = re.search(r"buildPhases\s*=\s*\(([\s\S]*?)\);", unit_targets[0]).group(1)
+        phases = [pbx_object(item) for item in re.findall(r"\b[A-Fa-f0-9]{24}\b", phase_ids)]
+        sources = [item for item in phases if "isa = PBXSourcesBuildPhase;" in item]
+        self.assertEqual(len(sources), 1)
+        for name in ("EmbeddedGameTests.swift", "GameLeaderboardTests.swift", "GameResultBridgeTests.swift"):
+            build_id, file_id = build_reference(name + " in Sources")
+            self.assertIn(build_id, sources[0], name)
+            self.assertIn("path = " + name + ";", pbx_object(file_id))
+
     def test_about_entry_and_presentation_are_not_debug_only(self):
         markers = [
             "@State private var presentsEmbeddedGame",
@@ -117,8 +131,8 @@ class EmbeddedGameHostContract(unittest.TestCase):
         self.assertRegex(presentation, r"^\s*SecureCaptureSurface\(")
         self.assertIn("owner: .fullScreenPresentation", presentation)
         self.assertRegex(presentation, r"onExit:\s*\{\s*presentsEmbeddedGame\s*=\s*false\s*\}")
-        self.assertRegex(presentation, r"EmbeddedGameView\(onClose:\s*\{\s*presentsEmbeddedGame\s*=\s*false\s*\}\)")
-        self.assertNotRegex(presentation, r"logout|signOut|delete|remove|reset|fanAccount|admin|\.environmentObject")
+        self.assertRegex(presentation, r"EmbeddedGameView\(account:\s*fanAccount,\s*onClose:\s*\{\s*presentsEmbeddedGame\s*=\s*false\s*\}\)")
+        self.assertNotRegex(presentation, r"logout|signOut|delete|remove|reset|admin|\.environmentObject")
         self.assertIn('Button("关闭游戏", role: .destructive) { onClose() }', HOST)
 
     def test_host_is_release_code_with_ephemeral_storage_and_no_identity_bridge(self):
@@ -127,8 +141,17 @@ class EmbeddedGameHostContract(unittest.TestCase):
         self.assertIn("configuration.websiteDataStore = .nonPersistent()", HOST)
         self.assertIn("configuration.preferences.javaScriptCanOpenWindowsAutomatically = false", HOST)
         self.assertIn("webView.isInspectable = false", HOST)
-        self.assertNotRegex(HOST, r"WKScriptMessageHandler|addScriptMessageHandler|addUserScript|WKUserScript|evaluateJavaScript|callAsyncJavaScript")
-        self.assertNotRegex(HOST, r"FanAccountStore|AdminSessionStore|Keychain|accessToken|sessionToken|deviceToken|Authorization|URLSession|UserDefaults")
+        self.assertNotRegex(HOST, r"addUserScript|WKUserScript|evaluateJavaScript|callAsyncJavaScript")
+        self.assertNotRegex(HOST, r"AdminSessionStore|Keychain|accessToken|sessionToken|deviceToken|Authorization|URLSession|UserDefaults")
+        self.assertIn('name: "gameLeaderboard"', HOST)
+        self.assertIn('removeScriptMessageHandler(forName: "gameLeaderboard")', HOST)
+        receive = balanced_body(HOST, 'func receive(_ message: WKScriptMessage)')
+        for guard in ['message.frameInfo.isMainFrame', 'message.webView === hostedWebView',
+                      'url.isFileURL', 'indexURL', 'data.count <= 2048',
+                      'Set(body.keys) == Set(["origin", "choices"])', 'GameRunPayload.self']:
+            self.assertIn(guard, receive)
+        self.assertNotRegex(receive, r'URLSession|submitGameScore|submit\(run:')
+        self.assertIn('weak var coordinator:', HOST)
 
     def test_file_read_scope_is_the_resolved_bundled_asset_directory(self):
         self.assertIn('bundle.appendingPathComponent("GameAssets", isDirectory: true)', HOST)
@@ -168,8 +191,11 @@ class EmbeddedGameHostContract(unittest.TestCase):
         self.assertNotRegex(HOST, r"UIApplication\.shared\.open|SFSafariViewController|WKDownloadDelegate")
 
     def test_packaged_javascript_has_no_platform_identity_network_or_persistent_storage(self):
-        self.assertIn("const LOCAL_PLAYER_NAME = '本地匿名玩家';", PRODUCTION_JS)
-        self.assertNotRegex(PRODUCTION_JS, r"ToySDK|TOYID|toyid|PosterMaker|postMessage|messageHandlers|webkit")
+        self.assertIn("const LOCAL_PLAYER_NAME = '本局玩家';", PRODUCTION_JS)
+        self.assertNotRegex(PRODUCTION_JS, r"ToySDK|TOYID|toyid|PosterMaker|accessToken|sessionToken|identityCode|douyinID")
+        self.assertEqual(PRODUCTION_JS.count('messageHandlers'), 1)
+        self.assertEqual(PRODUCTION_JS.count('.postMessage('), 1)
+        self.assertIn('gameLeaderboard', PRODUCTION_JS)
         self.assertNotRegex(PRODUCTION_JS, r"\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon|https?://")
         self.assertNotRegex(PRODUCTION_JS, r"localStorage|sessionStorage|indexedDB|document\.cookie|CacheStorage|\bcaches\.")
         self.assertNotRegex(PRODUCTION_JS, r"toDataURL|createObjectURL|\.download\s*=|window\.open|location\.(?:href|replace|assign)")

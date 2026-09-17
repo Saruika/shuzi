@@ -9,6 +9,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PrivacyAlignmentTests(unittest.TestCase):
+    def test_gameplay_requires_opt_in_and_supports_removal_in_both_policies(self):
+        for path in ['Yishu/Views/PrivacyPolicyView.swift', 'Server/app-privacy-policy.html']:
+            source = (ROOT / path).read_text()
+            for phrase in ['主动确认上榜', '一条最高成绩摘要', '选项仅用于当次重演',
+                           '删除账号也会移除记录', '不接入第三方游戏平台账号', '不参与排行榜不影响离线游玩']:
+                with self.subTest(path=path, phrase=phrase):
+                    self.assertIn(phrase, source)
+
     def test_manifest_matches_reviewed_disclosure(self):
         mapping = json.loads((ROOT / 'Server/app-store/privacy-disclosure.json').read_text())
         manifest = plistlib.loads((ROOT / 'Yishu/Resources/PrivacyInfo.xcprivacy').read_bytes())

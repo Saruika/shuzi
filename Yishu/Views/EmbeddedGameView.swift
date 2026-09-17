@@ -4,14 +4,19 @@ import WebKit
 
 /// Offline host for the authorized, bundled game resources.
 /// The caller must present this inside its existing SecureCaptureSurface.
-/// No account/session values, script bridges, or remote origins enter this view.
+/// The game document receives no account/session values or remote access.
+/// One bounded result-only bridge prepares a run for voluntary native submission.
 struct EmbeddedGameView: View {
+    @ObservedObject private var account: FanAccountStore
+    @StateObject private var leaderboard = GameLeaderboardStore()
     private let onClose: () -> Void
     @State private var loadState = EmbeddedGameLoadState.loading
     @State private var attempt = 0
     @State private var showsExitConfirmation = false
+    @State private var showsLeaderboard = false
 
-    init(onClose: @escaping () -> Void) {
+    init(account: FanAccountStore, onClose: @escaping () -> Void) {
+        self.account = account
         self.onClose = onClose
     }
 
@@ -28,6 +33,15 @@ struct EmbeddedGameView: View {
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("embedded-game-heading")
                 Spacer(minLength: 8)
+                Button { showsLeaderboard = true } label: {
+                    Image(systemName: leaderboard.preparedRun == nil ? "trophy" : "trophy.fill")
+                        .font(.body.weight(.medium))
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(leaderboard.preparedRun == nil ? "排行榜" : "排行榜，可提交最近完成的成绩")
+                .accessibilityIdentifier("embedded-game-leaderboard")
                 Button { showsExitConfirmation = true } label: {
                     Label("关闭", systemImage: "xmark")
                         .font(.body.weight(.medium))
@@ -47,7 +61,10 @@ struct EmbeddedGameView: View {
                 .ignoresSafeArea(edges: .top))
             Divider()
             ZStack {
-                EmbeddedGameWebView(loadState: $loadState)
+                EmbeddedGameWebView(loadState: $loadState) { [expected = account.gameLeaderboardContext] payload in
+                    guard expected != nil, account.gameLeaderboardContext == expected else { return }
+                    _ = leaderboard.prepare(payload, using: account)
+                }
                     .id(attempt)
                 switch loadState {
                 case .loading:
@@ -65,6 +82,7 @@ struct EmbeddedGameView: View {
                         Text(message)
                     } actions: {
                         Button("重新载入") {
+                            leaderboard.discardPreparedRun()
                             loadState = .loading
                             attempt += 1
                         }
@@ -86,6 +104,21 @@ struct EmbeddedGameView: View {
         // Only this presentation uses a dark native/status-bar header. The
         // game canvas stays explicitly light; no stored App theme is changed.
         .preferredColorScheme(.dark)
+        .onAppear { leaderboard.updateContext(account.gameLeaderboardContext) }
+        .onChange(of: account.gameLeaderboardContext) { _, context in
+            leaderboard.updateContext(context)
+            showsLeaderboard = false
+            // A run begun by a previous login cannot become the next user's run.
+            loadState = .loading
+            attempt += 1
+        }
+        .sheet(isPresented: $showsLeaderboard) {
+            SecureCaptureSurface(owner: .fullScreenPresentation, onExit: { showsLeaderboard = false }) {
+                GameLeaderboardView(account: account, store: leaderboard, onClose: { showsLeaderboard = false })
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
         .alert("离开游戏？", isPresented: $showsExitConfirmation) {
             Button("继续游戏", role: .cancel) {}
                 .accessibilityIdentifier("embedded-game-continue")
@@ -97,16 +130,27 @@ struct EmbeddedGameView: View {
     }
 }
 
-private enum EmbeddedGameLoadState: Equatable {
+/// WKUserContentController retains handlers. The proxy must not retain the host.
+@MainActor
+private final class WeakGameResultHandler: NSObject, WKScriptMessageHandler {
+    private weak var coordinator: EmbeddedGameWebView.Coordinator?
+    init(_ coordinator: EmbeddedGameWebView.Coordinator) { self.coordinator = coordinator }
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        coordinator?.receive(message)
+    }
+}
+
+enum EmbeddedGameLoadState: Equatable {
     case loading
     case ready
     case failed(String)
 }
 
-private struct EmbeddedGameWebView: UIViewRepresentable {
+struct EmbeddedGameWebView: UIViewRepresentable {
     @Binding var loadState: EmbeddedGameLoadState
+    let onRunCompleted: (GameRunPayload) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(loadState: $loadState) }
+    func makeCoordinator() -> Coordinator { Coordinator(loadState: $loadState, onRunCompleted: onRunCompleted) }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -115,6 +159,7 @@ private struct EmbeddedGameWebView: UIViewRepresentable {
         configuration.dataDetectorTypes = []
         configuration.allowsInlineMediaPlayback = true
         configuration.mediaTypesRequiringUserActionForPlayback = .all
+        configuration.userContentController.add(WeakGameResultHandler(context.coordinator), name: "gameLeaderboard")
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
@@ -143,6 +188,7 @@ private struct EmbeddedGameWebView: UIViewRepresentable {
 
     static func dismantleUIView(_ webView: WKWebView, coordinator: Coordinator) {
         coordinator.invalidate()
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "gameLeaderboard")
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.uiDelegate = nil
@@ -156,8 +202,28 @@ private struct EmbeddedGameWebView: UIViewRepresentable {
         private var isValid = true
         private var hasFailed = false
         private var isContentAccessible = false
+        private weak var hostedWebView: WKWebView?
+        private var indexURL: URL?
+        private let onRunCompleted: (GameRunPayload) -> Void
 
-        init(loadState: Binding<EmbeddedGameLoadState>) { self.loadState = loadState }
+        init(loadState: Binding<EmbeddedGameLoadState>, onRunCompleted: @escaping (GameRunPayload) -> Void) {
+            self.loadState = loadState
+            self.onRunCompleted = onRunCompleted
+        }
+
+        func receive(_ message: WKScriptMessage) {
+            guard isValid, !hasFailed, isContentAccessible,
+                  message.name == "gameLeaderboard", message.frameInfo.isMainFrame,
+                  message.webView === hostedWebView,
+                  let url = message.frameInfo.request.url, url.isFileURL,
+                  url.resolvingSymlinksInPath().standardizedFileURL == indexURL,
+                  let body = message.body as? [String: Any],
+                  Set(body.keys) == Set(["origin", "choices"]),
+                  let data = try? JSONSerialization.data(withJSONObject: body), data.count <= 2048,
+                  let payload = try? JSONDecoder().decode(GameRunPayload.self, from: data) else { return }
+            // No automatic network request, identity injection, or JS score trust.
+            onRunCompleted(payload)
+        }
 
         func updatePresentation(in webView: WKWebView, state: EmbeddedGameLoadState) {
             let isReady = state == .ready
@@ -190,6 +256,8 @@ private struct EmbeddedGameWebView: UIViewRepresentable {
                 return
             }
             assetsDirectory = assets
+            indexURL = index
+            hostedWebView = webView
 
             // Only local bundle assets are permitted. No remote scripts,
             // styles, analytics, fetches, frames or downloads are needed here.

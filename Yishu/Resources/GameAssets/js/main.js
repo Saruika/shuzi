@@ -45,8 +45,11 @@ const state = {
 };
 
 // ============== 本地交互生命周期 ==============
-// All progress stays in memory. No account, network, persistence, or native bridge.
-const LOCAL_PLAYER_NAME = '本地匿名玩家';
+// All progress stays in memory. The single, optional native adapter receives
+// only an origin and its choice indexes, never an identity or claimed score.
+const LOCAL_PLAYER_NAME = '本局玩家';
+let choiceTrace = [];
+let didPrepareLeaderboard = false;
 let activeScreen = 'intro';
 let gameStarted = false;
 let disclaimerAccepted = false;
@@ -291,6 +294,7 @@ function chooseOption(opt){
   const event = getCurrentEvent();
   if(!event || !event.opts.includes(opt)) return;
   choiceLocked = true;
+  choiceTrace.push(event.opts.indexOf(opt));
   $('options').querySelectorAll('button').forEach(button => { button.disabled = true; });
   // 1. 应用数值
   applyDelta(opt.delta);
@@ -410,8 +414,10 @@ function showEnding(endingId){
     $('ending-text').append(flags);
   }
 
-  // 得分仍使用原版算法，只在本局内存中保留，不上传平台。
+  // 得分仍使用原版算法。原生端仅准备证据，是否上榜由用户主动决定。
   state.score = computeScore();
+  addEndingStat('综合评分', state.score);
+  prepareLeaderboardRun();
 
   // 跳到结局页
   scheduleRunTask('ending', () => showScreen('ending'), 600);
@@ -447,6 +453,8 @@ function renderOrigins(){
 
 function resetState(){
   invalidateRun();
+  choiceTrace = [];
+  didPrepareLeaderboard = false;
   state.name = LOCAL_PLAYER_NAME;
   state.origin = 'peasant';
   state.贪腐 = 0; state.财富 = 0; state.民心 = 50;
@@ -494,7 +502,7 @@ function initDisclaimer(){
 
 function renderIdentity(){
   $('account-name').textContent = LOCAL_PLAYER_NAME;
-  $('account-sub').textContent = '不连接 B 站账号，不上传身份或成绩';
+  $('account-sub').textContent = '排行榜由 App 账号参与，未选择上榜不会上传本局';
   $('btn-start').disabled = !disclaimerAccepted;
 }
 
@@ -531,6 +539,24 @@ function computeScore(){
     (state.贪腐 || 0) * 30
   );
   return Math.max(-16777216, Math.min(16777215, base + detail));
+}
+
+// Only the final, bounded route crosses into the owned native host. Native
+// code attaches its own rules version and authenticated session; the server
+// must replay these untrusted indexes rather than trust a client-side score.
+function prepareLeaderboardRun(){
+  if(!state.dead || didPrepareLeaderboard || choiceTrace.length < 1 || choiceTrace.length > ALL_EVENTS.length) return;
+  if(!ORIGINS.some(origin => origin.id === state.origin)) return;
+  if(!choiceTrace.every(index => Number.isInteger(index) && index >= 0 && index < 4)) return;
+  didPrepareLeaderboard = true;
+  try {
+    window.webkit?.messageHandlers?.gameLeaderboard?.postMessage({
+      origin: state.origin,
+      choices: choiceTrace.slice()
+    });
+  } catch {
+    // An unavailable host cannot affect offline play or the original ending.
+  }
 }
 
 // ============== 本地重开与绑定 ==============

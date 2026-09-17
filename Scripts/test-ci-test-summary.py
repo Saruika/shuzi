@@ -2,6 +2,7 @@
 """Validate summaries and CI continuation without spending Actions minutes."""
 import importlib.util
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -12,6 +13,56 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("ci_test_summary", ROOT / "Scripts/ci-test-summary.py")
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+
+
+def validate_preflight(workflow):
+    """Fail-closed check of this workflow's two-command literal run step.
+
+    This is deliberately not a general YAML parser. Bound the selected step by
+    indentation, then require its current keys and exact commands. A new shell
+    or inherited defaults needs explicit review: the current macOS workflow
+    relies on Actions' default bash -e to stop after either failed command.
+    """
+    lines = workflow.splitlines()
+    matches = [(index, re.fullmatch(r"( +)id: preflight", line))
+               for index, line in enumerate(lines)]
+    matches = [(index, match) for index, match in matches if match]
+    if len(matches) != 1:
+        raise ValueError("Exactly one preflight step is required")
+    index, match = matches[0]
+    child_indent = len(match.group(1))
+    step_indent = child_indent - 2
+    if step_indent < 0:
+        raise ValueError("Invalid preflight indentation")
+
+    def significant(line):
+        return bool(line.strip()) and not line.lstrip().startswith("#")
+
+    def indent(line):
+        return len(line) - len(line.lstrip(" "))
+
+    start = index - 1
+    while start >= 0 and (not significant(lines[start]) or indent(lines[start]) > step_indent):
+        start -= 1
+    header_prefix = " " * step_indent + "- name: "
+    if start < 0 or not lines[start].startswith(header_prefix):
+        raise ValueError("Preflight is not a named step")
+    end = index + 1
+    while end < len(lines) and (not significant(lines[end]) or indent(lines[end]) > step_indent):
+        end += 1
+    step = [line.rstrip() for line in lines[start:end] if significant(line)]
+    child = " " * child_indent
+    commands = ("Scripts/security-check.sh", "python3 Scripts/test-content-identifier-optimization.py")
+    expected = [lines[start], child + "id: preflight", child + "run: |",
+                *(child + "  " + command for command in commands)]
+    if step != expected:
+        raise ValueError("Preflight must run both exact checks, in order, without failure masking")
+    # An inherited custom shell may omit -e even when the literal commands look
+    # correct. No defaults currently exist; review any future addition explicitly.
+    if re.search(r"(?m)^\s*defaults:", workflow):
+        raise ValueError("Inherited run defaults require explicit fail-fast validation")
+    if re.search(r"(?m)^ {" + str(max(0, step_indent - 2)) + r"}continue-on-error:", workflow):
+        raise ValueError("The containing quality job must not ignore failures")
 
 
 def payload(failed=False):
@@ -121,7 +172,23 @@ class TestSummary(unittest.TestCase):
             step = workflow.split(f"- name: {title}\n", 1)[1].split("\n      - name:", 1)[0]
             self.assertIn(condition, step)
             self.assertNotRegex(step, r"(?m)^\s*continue-on-error:")
-        self.assertIn("id: preflight\n        run: Scripts/security-check.sh", workflow)
+        validate_preflight(workflow)
+        commands = "          Scripts/security-check.sh\n          python3 Scripts/test-content-identifier-optimization.py"
+        self.assertIn(commands, workflow)
+        mutations = {
+            "reversed": workflow.replace(commands, "\n".join(reversed(commands.splitlines())), 1),
+            "security-failure-masked": workflow.replace("          Scripts/security-check.sh\n", "          Scripts/security-check.sh || true\n", 1),
+            "optimizer-failure-masked": workflow.replace("          python3 Scripts/test-content-identifier-optimization.py\n", "          python3 Scripts/test-content-identifier-optimization.py || true\n", 1),
+            "errexit-disabled": workflow.replace(commands, "          set +e\n" + commands, 1),
+            "step-ignores-failure": workflow.replace("        id: preflight\n", "        id: preflight\n        continue-on-error: true\n", 1),
+            "custom-shell": workflow.replace("        id: preflight\n", "        id: preflight\n        shell: bash {0}\n", 1),
+            "detached-optimizer-step": workflow.replace(commands, "          Scripts/security-check.sh\n      - name: Detached optimizer\n        run: |\n          python3 Scripts/test-content-identifier-optimization.py", 1),
+            "inherited-shell": "defaults:\n  run:\n    shell: bash {0}\n" + workflow,
+            "job-ignores-failure": workflow.replace("    timeout-minutes: 180\n", "    timeout-minutes: 180\n    continue-on-error: true\n", 1),
+        }
+        for category, altered in mutations.items():
+            with self.subTest(preflight_contract=category), self.assertRaises(ValueError):
+                validate_preflight(altered)
         self.assertIn("timeout-minutes: 180", workflow)
         self.assertIn("run: python3 Scripts/ci-test-summary.py", workflow)
         self.assertIn("if: failure()", workflow)  # Original diagnostics remain.

@@ -78,6 +78,8 @@ if command -v php >/dev/null 2>&1; then
   php Server/tests/collaboration-outbox-deletion-test.php
   php Server/tests/collaboration-admin-notice-test.php
   php Server/tests/fan-bound-administrator-auth-test.php
+  php Server/tests/game-leaderboard-regression.php
+  node --test Scripts/test-game-leaderboard-php.mjs
   php -l Server/tests/fan-administrator-binding-wordpress-integration.php >/dev/null
   php -l Server/tests/fan-administrator-media-wordpress-integration.php >/dev/null
   while IFS= read -r -d '' plugin_module; do
@@ -118,7 +120,8 @@ python3 Scripts/test_archive_testflight.py
 python3 Scripts/test-embedded-game-host-contract.py
 command -v node >/dev/null 2>&1 || fail '内嵌游戏保真与生命周期回归需要 Node.js'
 node --version
-node --test Scripts/test-embedded-game-parity.mjs Scripts/test-embedded-game-lifecycle.mjs
+node Scripts/export-game-rules.mjs --check
+node --test Scripts/test-embedded-game-parity.mjs Scripts/test-embedded-game-lifecycle.mjs Scripts/test-game-leaderboard-bridge.mjs
 python3 Server/tests/app-content-release-contract-test.py
 python3 Server/tests/review-bootstrap-test.py
 python3 Server/tests/review-catalog-test.py

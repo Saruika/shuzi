@@ -10,11 +10,11 @@ import XCTest
 @MainActor
 final class EmbeddedGameTests: XCTestCase {
     private let reviewedHashes = [
-        "index.html": "9ae8f2895f5587bb6aa38e8d40c5d70ae9ee8768d215aad24750d4e879f98baa",
+        "index.html": "d5a4b4b052c4f9481715644ff4e9cd75093d6b419a91eca2a3f1dd5918bff986",
         "css/style.css": "5e89d4a6e7d741900d88c71e2839f3e00daf4b3811daa23c6f7ac2d48bba0a3b",
         "js/events.js": "df10acc91240a31e9ebe336a39aecfd55716a27f82d6a866394db6153261471e",
         "js/endings.js": "ae4f1173f961922e4bc72b65cca513fa5e633e3a5e93797d7e4c4fcfe9d960af",
-        "js/main.js": "690c809e7d55b5a53991e31e6e8f06579e29d744dce56ccc6b1db807f350b797",
+        "js/main.js": "121102c3beb5d6318951b7a74797ffe19adada4f9664148542a4354a8c9ac739",
     ]
 
     func testAppBundleContainsExactlyReviewedOfflineGameResources() throws {
