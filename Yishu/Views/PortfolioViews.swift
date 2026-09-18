@@ -828,27 +828,39 @@ struct ProgressiveGalleryArtwork: View, Equatable {
     let image: PortfolioImage
     let targetSize: CGSize
     let serviceEnvironment: AppServiceEnvironment
+    let loadGeneration: UInt64
+    var onImageSizeLoaded: ((CGSize, URL) -> Void)?
 
-    init(image: PortfolioImage, targetSize: CGSize, environment: AppServiceEnvironment = .production) {
+    init(
+        image: PortfolioImage,
+        targetSize: CGSize,
+        environment: AppServiceEnvironment = .production,
+        loadGeneration: UInt64 = 0,
+        onImageSizeLoaded: ((CGSize, URL) -> Void)? = nil
+    ) {
         self.image = image
         self.targetSize = targetSize
         serviceEnvironment = environment
+        self.loadGeneration = loadGeneration
+        self.onImageSizeLoaded = onImageSizeLoaded
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.image == rhs.image && lhs.targetSize == rhs.targetSize && lhs.serviceEnvironment == rhs.serviceEnvironment
+        lhs.image == rhs.image && lhs.targetSize == rhs.targetSize
+            && lhs.serviceEnvironment == rhs.serviceEnvironment && lhs.loadGeneration == rhs.loadGeneration
     }
 
     var body: some View {
         Group {
             if image.fullSizeURL == image.url {
-                ArtworkImage(url: image.url, contentMode: .fit)
+                previewArtwork
             } else {
                 // Publish one visible image at a time. The loader's phase is
                 // the sole source of readiness, including URL changes/retry.
                 DownsampledAsyncImage(
                     url: image.fullSizeURL,
-                    targetSize: targetSize
+                    targetSize: targetSize,
+                    onImageLoaded: { onImageSizeLoaded?($0.size, image.fullSizeURL) }
                 ) { phase in
                     switch phase {
                     case .success(let fullResolutionImage):
@@ -857,16 +869,59 @@ struct ProgressiveGalleryArtwork: View, Equatable {
                             .aspectRatio(contentMode: .fit)
                             .frame(width: targetSize.width, height: targetSize.height)
                     case .empty, .failure:
-                        ArtworkImage(url: image.url, contentMode: .fit)
+                        previewArtwork
                     @unknown default:
-                        ArtworkImage(url: image.url, contentMode: .fit)
+                        previewArtwork
                     }
                 }
             }
         }
+        // A coalesced A -> B -> A update must republish cached dimensions to
+        // the new receiver, even when the final URL matches the previous one.
+        .id(loadGeneration)
         .frame(width: targetSize.width, height: targetSize.height)
         .clipped()
         .environment(\.appServiceEnvironment, serviceEnvironment)
+    }
+
+    // Use the same loader/placeholder/retry presentation as ArtworkImage, but
+    // report the actual displayed aspect ratio without a second image request.
+    private var previewArtwork: some View {
+        DownsampledAsyncImage(
+            url: image.url,
+            targetSize: targetSize,
+            onImageLoaded: { onImageSizeLoaded?($0.size, image.url) }
+        ) { phase in
+            switch phase {
+            case .success(let preview):
+                preview.resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: targetSize.width, height: targetSize.height)
+                    .animation(.easeOut(duration: 0.25), value: image.url)
+                    .transition(.opacity)
+            case .empty:
+                placeholder.overlay { ProgressView().tint(AppTheme.gold) }
+            case .failure:
+                placeholder.overlay {
+                    Image(systemName: "photo")
+                        .font(.title2)
+                        .foregroundStyle(AppTheme.muted)
+                }
+            @unknown default:
+                placeholder
+            }
+        }
+    }
+
+    private var placeholder: some View {
+        ZStack {
+            AppTheme.elevatedInk
+            LinearGradient(
+                colors: [.white.opacity(0.03), .clear, .white.opacity(0.05)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        }
     }
 }
 
@@ -891,6 +946,9 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
     private var image: PortfolioImage
     private(set) var serviceEnvironment: AppServiceEnvironment
     private var viewportSize: CGSize = .zero
+    private var displayedImageSize: CGSize?
+    private var displayedImageSourceURL: URL?
+    private var artworkGeneration: UInt64 = 0
     private var artworkHost: UIHostingController<EquatableView<ProgressiveGalleryArtwork>>?
     private var zoomAccessibility: GalleryZoomAccessibilityElement?
     private var pinchStartScale: CGFloat = 1
@@ -933,7 +991,9 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
         scrollView.addSubview(zoomCanvas)
 
         let host = UIHostingController(rootView: ProgressiveGalleryArtwork(
-            image: image, targetSize: .zero, environment: serviceEnvironment
+            image: image, targetSize: .zero, environment: serviceEnvironment,
+            loadGeneration: artworkGeneration,
+            onImageSizeLoaded: artworkSizeReceiver()
         ).equatable())
         host.view.backgroundColor = .clear
         addChild(host)
@@ -977,9 +1037,12 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
         let previousScale = scrollView.zoomScale
         let preservesComposition = viewportSize.width > 0 && viewportSize.height > 0
             && (viewportSize.width > viewportSize.height) == (size.width > size.height)
+        let previousImageRect = fittedImageRect(in: viewportSize)
         let focus = preservesComposition ? CGPoint(
-            x: (scrollView.contentOffset.x + viewportSize.width / 2) / (viewportSize.width * previousScale),
-            y: (scrollView.contentOffset.y + viewportSize.height / 2) / (viewportSize.height * previousScale)
+            x: ((scrollView.contentOffset.x + viewportSize.width / 2) / previousScale
+                - previousImageRect.minX) / previousImageRect.width,
+            y: ((scrollView.contentOffset.y + viewportSize.height / 2) / previousScale
+                - previousImageRect.minY) / previousImageRect.height
         ) : CGPoint(x: 0.5, y: 0.5)
         viewportSize = size
         scrollView.frame = view.bounds
@@ -993,9 +1056,10 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
         updateArtwork()
         let restoredScale = preservesComposition ? previousScale : 1
         scrollView.setZoomScale(restoredScale, animated: false)
+        let resizedImageRect = fittedImageRect(in: size)
         scrollView.contentOffset = clampedContentOffset(CGPoint(
-            x: focus.x * size.width * restoredScale - size.width / 2,
-            y: focus.y * size.height * restoredScale - size.height / 2
+            x: (resizedImageRect.minX + focus.x * resizedImageRect.width) * restoredScale - size.width / 2,
+            y: (resizedImageRect.minY + focus.y * resizedImageRect.height) * restoredScale - size.height / 2
         ))
         if pinch.state == .began || pinch.state == .changed {
             // Continue from the resized geometry, not from the scale captured
@@ -1009,6 +1073,9 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
         guard self.image != image || serviceEnvironment != environment else { return }
         self.image = image
         serviceEnvironment = environment
+        artworkGeneration &+= 1
+        displayedImageSize = nil
+        displayedImageSourceURL = nil
         guard isViewLoaded else { return }
         scrollView.setZoomScale(1, animated: false)
         scrollView.contentOffset = .zero
@@ -1019,11 +1086,44 @@ final class GalleryZoomViewController: UIViewController, UIScrollViewDelegate, U
     private func updateArtwork() {
         guard viewportSize.width > 0, viewportSize.height > 0 else { return }
         artworkHost?.rootView = ProgressiveGalleryArtwork(
-            image: image, targetSize: viewportSize, environment: serviceEnvironment
+            image: image, targetSize: viewportSize, environment: serviceEnvironment,
+            loadGeneration: artworkGeneration,
+            onImageSizeLoaded: artworkSizeReceiver()
         ).equatable()
 #if DEBUG
         contentUpdateCount += 1
 #endif
+    }
+
+    func artworkSizeReceiver() -> (CGSize, URL) -> Void {
+        let generation = artworkGeneration
+        return { [weak self] size, sourceURL in
+            guard let self, generation == self.artworkGeneration,
+                  size.width.isFinite, size.height.isFinite,
+                  size.width > 0, size.height > 0,
+                  sourceURL == self.image.url || sourceURL == self.image.fullSizeURL else { return }
+            // A removed preview task must not replace a full-resolution image's
+            // geometry, nor may a previous photo/workspace publish into this one.
+            guard self.displayedImageSourceURL != self.image.fullSizeURL
+                    || sourceURL == self.image.fullSizeURL else { return }
+            self.displayedImageSize = size
+            self.displayedImageSourceURL = sourceURL
+        }
+    }
+
+    private func fittedImageRect(in viewport: CGSize) -> CGRect {
+        let canvas = CGRect(origin: .zero, size: viewport)
+        guard let imageSize = displayedImageSize,
+              viewport.width > 0, viewport.height > 0 else { return canvas }
+        let fitScale = min(viewport.width / imageSize.width, viewport.height / imageSize.height)
+        let fittedSize = CGSize(width: imageSize.width * fitScale, height: imageSize.height * fitScale)
+        guard fittedSize.width.isFinite, fittedSize.height.isFinite,
+              fittedSize.width > 0, fittedSize.height > 0 else { return canvas }
+        return CGRect(
+            x: (viewport.width - fittedSize.width) / 2,
+            y: (viewport.height - fittedSize.height) / 2,
+            width: fittedSize.width, height: fittedSize.height
+        )
     }
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? {

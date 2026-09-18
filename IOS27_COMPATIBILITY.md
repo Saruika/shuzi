@@ -1,5 +1,34 @@
 # iOS 27 适配记录
 
+## 2026-09-18：正式审核与 iPhone Duo 预检
+
+本节为当前补充，下文是既有版本的历史测试，不将旧结果冒充 Build 11 验收。
+
+- 实际已上传 Build 10 的 IPA、xcarchive 和 Mach-O 交叉核对：Xcode 27.0
+  `27A266a`、iPhoneOS 27.0 SDK `24A430`、最低 iOS 17、arm64、iPhone/iPad
+  两种设备族和四方向一致。Apple 已开放 Xcode 27 / iOS 27 SDK 的正式 App Store 提交。
+- Apple 的 iPhone Duo 适配视频区分“能运行”与“使用整个屏幕”：iOS 27 SDK
+  改善展开屏幕利用率，iOS 27.1 SDK 才提供新的全屏及纵向系统栏行为。本机仅有
+  Xcode 27.0，`simctl list devicetypes` 无 iPhone Duo。官方准备页当次仍标注
+  Xcode 27.1 beta 稍后提供；不能据此宣布 Duo 专用模拟器或折叠真机测试通过。
+- 可先核验的原则是使用窗口/视图的实际尺寸和 size class，前景控件遵守各边安全区，
+  背景允许全幅，不能用 iPad 设备类型或方向作为折叠状态的替代。本轮针对实际
+  aspect-fit 图片在连续改宽时的缩放焦点漂移进行修正；保留原有旋转回到完整照片的行为。
+- 待专用运行时可用，应补测合拢、展开、折叠、旋转、左右分屏、非对称安全区、
+  图片放大关闭、游戏进度延续、后台恢复和保护遮罩。普通 iPhone/iPad 尺寸测试
+  不等价于这些硬件/系统姿态验收；正式商店文案不宣称已通过 Duo 全姿态验证。
+
+本轮正式审核/元数据状态另见
+[Build 11 审核预检](Documentation/app-store-build11-review-preflight.md)。
+
+官方来源：
+
+- [App Store 接受最新 SDK 提交](https://developer.apple.com/news/?id=k1mtkt1k)
+- [iPhone Duo 准备页](https://developer.apple.com/iphone-duo/)
+- [Prepare your app for iPhone Duo](https://developer.apple.com/videos/play/tech-talks/111461/)
+
+---
+
 日期：2026-09-16。开发分支：`codex/ios27-compatibility`。
 
 本次为兼容性开发，不重新设计页面，不修改生产服务器、账号、截图保护规则、隐私收集行为或 TestFlight 分发状态。版本号暂时保留，发布前需分配新的构建号，不能覆盖已经上传的 Build 7。

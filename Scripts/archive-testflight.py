@@ -10,6 +10,32 @@ import os
 from pathlib import Path
 import plistlib
 import subprocess
+from xml.parsers.expat import ExpatError
+
+
+# This local distribution gate is separate from the existing CI runner policy.
+# Updating the accepted Apple release requires a reviewed change, not a CLI
+# override that could silently accept a different SDK or Xcode build.
+TOOLCHAIN_SETTINGS = {
+    'DEVELOPER_DIR': '/Applications/Xcode.app/Contents/Developer',
+    'XCODE_VERSION_ACTUAL': '2700',
+    'XCODE_PRODUCT_BUILD_VERSION': '27A266a',
+    'PLATFORM_NAME': 'iphoneos',
+    'SDK_NAME': 'iphoneos27.0',
+    'SDK_VERSION': '27.0',
+    'SDK_PRODUCT_BUILD_VERSION': '24A430',
+    'SDKROOT': '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk',
+}
+TOOLCHAIN_INFO_FIELDS = {
+    'DTXcode': 'XCODE_VERSION_ACTUAL',
+    'DTXcodeBuild': 'XCODE_PRODUCT_BUILD_VERSION',
+    'DTPlatformName': 'PLATFORM_NAME',
+    'DTPlatformVersion': 'SDK_VERSION',
+    'DTPlatformBuild': 'SDK_PRODUCT_BUILD_VERSION',
+    'DTSDKName': 'SDK_NAME',
+    'DTSDKBuild': 'SDK_PRODUCT_BUILD_VERSION',
+}
+XCODEBUILD = '/usr/bin/xcodebuild'
 
 
 def parse_args(argv=None):
@@ -39,11 +65,44 @@ def validate_release_settings(data, version, build):
         'PRODUCT_BUNDLE_IDENTIFIER': 'cn.com.shuzijun.yishu',
         'MARKETING_VERSION': version,
         'CURRENT_PROJECT_VERSION': build,
+        **TOOLCHAIN_SETTINGS,
     }
     mismatches = [key for key, value in expected.items() if settings.get(key) != value]
     if mismatches:
         raise SystemExit('Release build settings do not match requested artifact: ' + ', '.join(mismatches))
     return expected
+
+
+def validate_toolchain_info(info, release_settings):
+    """Cross-check signed-app metadata against the approved preflight tuple."""
+    if not isinstance(info, dict):
+        raise SystemExit('Invalid app toolchain metadata; refusing distribution')
+    if any(release_settings.get(key) != value for key, value in TOOLCHAIN_SETTINGS.items()):
+        raise SystemExit('Unapproved preflight toolchain; refusing distribution')
+    mismatches = [key for key, setting in TOOLCHAIN_INFO_FIELDS.items()
+                  if info.get(key) != release_settings[setting]]
+    if mismatches:
+        raise SystemExit('App toolchain differs from approved Release settings: ' + ', '.join(mismatches))
+    return {
+        'developerDir': release_settings['DEVELOPER_DIR'],
+        'xcodeVersion': '27.0',
+        'xcodeBuild': info['DTXcodeBuild'],
+        'sdkName': info['DTSDKName'],
+        'sdkVersion': info['DTPlatformVersion'],
+        'sdkBuild': info['DTSDKBuild'],
+    }
+
+
+def read_app_toolchain(app, release_settings):
+    info_path = app / 'Info.plist'
+    if not info_path.is_file() or info_path.is_symlink():
+        raise SystemExit('Missing or linked app toolchain metadata; refusing distribution')
+    try:
+        with info_path.open('rb') as file:
+            info = plistlib.load(file)
+    except (OSError, ValueError, TypeError, OverflowError, ExpatError):
+        raise SystemExit('Unreadable app toolchain metadata; refusing distribution') from None
+    return validate_toolchain_info(info, release_settings)
 
 
 def main(argv=None):
@@ -60,6 +119,7 @@ def main(argv=None):
         raise SystemExit('Requires a fresh absolute output directory')
     args.out.mkdir(mode=0o700)
     derived_data = args.out / 'DerivedData'
+    build_env = dict(os.environ, DEVELOPER_DIR=TOOLCHAIN_SETTINGS['DEVELOPER_DIR'])
 
     # Inspect the same Release target before any archive/export/provisioning work.
     # Keep stderr separate so Xcode diagnostics cannot masquerade as settings JSON.
@@ -67,10 +127,10 @@ def main(argv=None):
     with (args.out / 'build-settings.log').open('x') as log:
         try:
             settings_result = subprocess.run(
-                ['xcodebuild', '-showBuildSettings', '-json', '-project', 'Yishu.xcodeproj',
+                [XCODEBUILD, '-showBuildSettings', '-json', '-project', 'Yishu.xcodeproj',
                  '-scheme', 'Yishu', '-configuration', 'Release', '-destination', 'generic/platform=iOS',
                  '-derivedDataPath', str(derived_data)],
-                cwd=root, stdout=subprocess.PIPE, stderr=log, text=True, timeout=120)
+                cwd=root, env=build_env, stdout=subprocess.PIPE, stderr=log, text=True, timeout=120)
         except subprocess.TimeoutExpired:
             raise SystemExit('Stopped at build-settings; no automatic retry') from None
     print('build-settings: exit=' + str(settings_result.returncode), flush=True)
@@ -82,13 +142,13 @@ def main(argv=None):
         settings = json.loads(settings_result.stdout)
     except (json.JSONDecodeError, TypeError):
         raise SystemExit('Invalid Release build settings JSON; refusing archive') from None
-    validate_release_settings(settings, args.version, args.build)
+    release_settings = validate_release_settings(settings, args.version, args.build)
     require_source()
 
     def run(name, command, env=None):
         print(name + ': started', flush=True)
         with (args.out / (name + '.log')).open('x') as log:
-            result = subprocess.run(command, cwd=root, env=env, stdout=log,
+            result = subprocess.run(command, cwd=root, env=build_env if env is None else env, stdout=log,
                                     stderr=subprocess.STDOUT, timeout=2400)
         print(name + ': exit=' + str(result.returncode), flush=True)
         if result.returncode:
@@ -103,24 +163,28 @@ def main(argv=None):
             '-authenticationKeyID', '3W68SK9SZA', '-authenticationKeyIssuerID',
             'e487f187-a519-4b1f-bd5b-4bd9b3d11b66']
     archive = args.out / 'Yishu.xcarchive'
-    run('archive', ['xcodebuild', 'archive', '-project', 'Yishu.xcodeproj', '-scheme', 'Yishu',
+    run('archive', [XCODEBUILD, 'archive', '-project', 'Yishu.xcodeproj', '-scheme', 'Yishu',
         '-configuration', 'Release', '-destination', 'generic/platform=iOS', '-archivePath', str(archive),
         '-derivedDataPath', str(derived_data),
         *auth, 'SWIFT_TREAT_WARNINGS_AS_ERRORS=YES', 'GCC_TREAT_WARNINGS_AS_ERRORS=YES', 'COMPILER_INDEX_STORE_ENABLE=NO'])
-    run('export', ['xcodebuild', '-exportArchive', '-archivePath', str(archive), '-exportPath',
+    toolchain = read_app_toolchain(archive / 'Products/Applications/Yishu.app', release_settings)
+    run('export', [XCODEBUILD, '-exportArchive', '-archivePath', str(archive), '-exportPath',
                   str(args.out / 'export'), '-exportOptionsPlist', str(options), *auth])
     ipa = args.out / 'export/Yishu.ipa'
     run('unpack', ['ditto', '-x', '-k', str(ipa), str(args.out / 'inspect')])
+    if read_app_toolchain(args.out / 'inspect/Payload/Yishu.app', release_settings) != toolchain:
+        raise SystemExit('Exported app toolchain differs from archive; refusing distribution')
     run('distribution-check', ['python3', 'Scripts/check-distribution-package.py', '--app',
         str(args.out / 'inspect/Payload/Yishu.app'), '--version', args.version, '--build', args.build])
-    env = dict(os.environ, API_PRIVATE_KEYS_DIR='/Users/mathiashu/.appstoreconnect/private_keys')
+    env = dict(build_env, API_PRIVATE_KEYS_DIR='/Users/mathiashu/.appstoreconnect/private_keys')
     authentication = ['--api-key', '3W68SK9SZA', '--api-issuer', 'e487f187-a519-4b1f-bd5b-4bd9b3d11b66', '--output-format', 'json']
     sha = hashlib.sha256(ipa.read_bytes()).hexdigest()
     run('apple-validation', ['xcrun', 'altool', '--validate-app', str(ipa), *authentication], env)
     if hashlib.sha256(ipa.read_bytes()).hexdigest() != sha:
         raise SystemExit('Artifact changed during validation; refusing upload')
     record = {'source': args.source, 'version': args.version, 'build': args.build, 'ipa': str(ipa),
-              'sha256': sha, 'bytes': ipa.stat().st_size, 'validated': True, 'uploaded': False}
+              'sha256': sha, 'bytes': ipa.stat().st_size, 'validated': True, 'uploaded': False,
+              'toolchain': toolchain}
     with (args.out / 'artifact.json').open('x') as file:
         json.dump(record, file)
     if args.upload:

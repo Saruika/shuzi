@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import plistlib
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -21,6 +22,14 @@ SPEC.loader.exec_module(archive)
 SOURCE = 'a' * 40
 VERSION = '2.6.3'
 BUILD = '47.2'
+EXPECTED_TOOLCHAIN = {
+    'developerDir': '/Applications/Xcode.app/Contents/Developer',
+    'xcodeVersion': '27.0',
+    'xcodeBuild': '27A266a',
+    'sdkName': 'iphoneos27.0',
+    'sdkVersion': '27.0',
+    'sdkBuild': '24A430',
+}
 
 
 def settings_payload(**overrides):
@@ -29,9 +38,25 @@ def settings_payload(**overrides):
         'PRODUCT_BUNDLE_IDENTIFIER': 'cn.com.shuzijun.yishu',
         'MARKETING_VERSION': VERSION,
         'CURRENT_PROJECT_VERSION': BUILD,
+        'DEVELOPER_DIR': '/Applications/Xcode.app/Contents/Developer',
+        'XCODE_VERSION_ACTUAL': '2700',
+        'XCODE_PRODUCT_BUILD_VERSION': '27A266a',
+        'PLATFORM_NAME': 'iphoneos',
+        'SDK_NAME': 'iphoneos27.0',
+        'SDK_VERSION': '27.0',
+        'SDK_PRODUCT_BUILD_VERSION': '24A430',
+        'SDKROOT': '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk',
     }
     settings.update(overrides)
     return [{'target': 'Yishu', 'buildSettings': settings}]
+
+
+def app_info_payload(**overrides):
+    info = {'DTXcode': '2700', 'DTXcodeBuild': '27A266a',
+            'DTPlatformName': 'iphoneos', 'DTPlatformVersion': '27.0',
+            'DTPlatformBuild': '24A430', 'DTSDKName': 'iphoneos27.0', 'DTSDKBuild': '24A430'}
+    info.update(overrides)
+    return info
 
 
 class ArchiveTestFlightTests(unittest.TestCase):
@@ -40,6 +65,7 @@ class ArchiveTestFlightTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.out = Path(self.temporary.name) / 'release'
         self.commands = []
+        self.environments = []
         self.git_commands = []
         self.settings = json.dumps(settings_payload())
         self.fail_stage = None
@@ -49,6 +75,10 @@ class ArchiveTestFlightTests(unittest.TestCase):
         self.mutate_during_validation = False
         self.timeout_settings = False
         self.ipa_bytes = b'local-test-fixture-not-an-ipa'
+        self.archive_info = app_info_payload()
+        self.export_info = app_info_payload()
+        self.missing_info_stage = None
+        self.malformed_info_stage = None
 
     def arguments(self, upload=False):
         arguments = ['--source', SOURCE, '--out', str(self.out), '--version', VERSION, '--build', BUILD]
@@ -64,11 +94,12 @@ class ArchiveTestFlightTests(unittest.TestCase):
 
     def fake_run(self, command, **kwargs):
         self.commands.append(command)
+        self.environments.append(kwargs.get('env'))
         if '-showBuildSettings' in command:
             if self.timeout_settings:
                 raise subprocess.TimeoutExpired(command, kwargs['timeout'])
             stage = 'build-settings'
-        elif command[:2] == ['xcodebuild', 'archive']:
+        elif command[:2] == ['/usr/bin/xcodebuild', 'archive']:
             stage = 'archive'
         elif '-exportArchive' in command:
             stage = 'export'
@@ -84,6 +115,13 @@ class ArchiveTestFlightTests(unittest.TestCase):
             self.fail(f'Unexpected subprocess: {command}')
         if stage == self.fail_stage:
             return SimpleNamespace(returncode=1, stdout=self.settings)
+        if stage in ['archive', 'unpack'] and self.missing_info_stage != stage:
+            app = (self.out / 'Yishu.xcarchive/Products/Applications/Yishu.app' if stage == 'archive'
+                   else self.out / 'inspect/Payload/Yishu.app')
+            app.mkdir(parents=True)
+            data = (b'invalid plist synthetic fixture' if self.malformed_info_stage == stage
+                    else plistlib.dumps(self.archive_info if stage == 'archive' else self.export_info))
+            (app / 'Info.plist').write_bytes(data)
         if stage == 'export':
             destination = self.out / 'export'
             destination.mkdir()
@@ -137,6 +175,94 @@ class ArchiveTestFlightTests(unittest.TestCase):
         for payload in invalid_payloads:
             with self.subTest(payload=payload), self.assertRaises(SystemExit):
                 archive.validate_release_settings(payload, VERSION, BUILD)
+
+    def test_every_toolchain_setting_is_required_and_exact_before_provisioning(self):
+        for key in archive.TOOLCHAIN_SETTINGS:
+            for invalid in ['unapproved-private-value', None, 2700]:
+                with self.subTest(key=key, invalid=invalid), self.assertRaises(SystemExit) as error:
+                    archive.validate_release_settings(settings_payload(**{key: invalid}), VERSION, BUILD)
+                self.assertIn(key, str(error.exception))
+                self.assertNotIn('unapproved-private-value', str(error.exception))
+            payload = settings_payload()
+            del payload[0]['buildSettings'][key]
+            with self.subTest(key=key, missing=True), self.assertRaises(SystemExit):
+                archive.validate_release_settings(payload, VERSION, BUILD)
+        self.settings = json.dumps(settings_payload(XCODE_PRODUCT_BUILD_VERSION='17F113'))
+        with self.local_processes(), self.assertRaisesRegex(SystemExit, 'XCODE_PRODUCT_BUILD_VERSION'):
+            archive.main(self.arguments(upload=True))
+        self.assertEqual(len(self.commands), 1)
+        self.assertNotIn('-authenticationKeyPath', self.commands[0])
+        self.assertFalse((self.out / 'ExportOptions.plist').exists())
+
+    def test_app_toolchain_must_match_approved_preflight_without_printing_values(self):
+        settings = archive.validate_release_settings(settings_payload(), VERSION, BUILD)
+        self.assertEqual(archive.validate_toolchain_info(app_info_payload(), settings), EXPECTED_TOOLCHAIN)
+        for key in app_info_payload():
+            for invalid in ['unapproved-private-value', None, 2700]:
+                with self.subTest(key=key, invalid=invalid), self.assertRaises(SystemExit) as error:
+                    archive.validate_toolchain_info(app_info_payload(**{key: invalid}), settings)
+                self.assertIn(key, str(error.exception))
+                self.assertNotIn('unapproved-private-value', str(error.exception))
+            info = app_info_payload()
+            del info[key]
+            with self.subTest(key=key, missing=True), self.assertRaises(SystemExit):
+                archive.validate_toolchain_info(info, settings)
+        for info in [None, [], 'not metadata']:
+            with self.subTest(info=info), self.assertRaisesRegex(SystemExit, 'Invalid app toolchain metadata'):
+                archive.validate_toolchain_info(info, settings)
+        with self.assertRaisesRegex(SystemExit, 'Unapproved preflight toolchain'):
+            archive.validate_toolchain_info(app_info_payload(), {**settings, 'XCODE_PRODUCT_BUILD_VERSION': 'different'})
+
+    def test_archive_or_export_toolchain_mismatch_stops_before_apple_validation(self):
+        for stage, expected_commands in [('archive', 2), ('export', 4)]:
+            self.out = Path(self.temporary.name) / stage
+            self.commands = []
+            self.archive_info = app_info_payload(DTXcodeBuild='unreviewed') if stage == 'archive' else app_info_payload()
+            self.export_info = app_info_payload(DTSDKBuild='unreviewed') if stage == 'export' else app_info_payload()
+            with self.subTest(stage=stage), self.local_processes(), self.assertRaisesRegex(SystemExit, 'App toolchain differs'):
+                archive.main(self.arguments(upload=True))
+            self.assertEqual(len(self.commands), expected_commands)
+            self.assertFalse((self.out / 'artifact.json').exists())
+            self.assertFalse(any('--validate-app' in command or '--upload-app' in command for command in self.commands))
+
+    def test_missing_or_malformed_plist_stops_at_archive_or_unpacked_app(self):
+        for stage, expected_commands in [('archive', 2), ('unpack', 4)]:
+            for kind in ['missing', 'malformed']:
+                self.out = Path(self.temporary.name) / (stage + '-' + kind)
+                self.commands = []
+                self.missing_info_stage = stage if kind == 'missing' else None
+                self.malformed_info_stage = stage if kind == 'malformed' else None
+                with self.subTest(stage=stage, kind=kind), self.local_processes(), self.assertRaisesRegex(SystemExit, 'toolchain metadata'):
+                    archive.main(self.arguments(upload=True))
+                self.assertEqual(len(self.commands), expected_commands)
+                self.assertFalse((self.out / 'artifact.json').exists())
+
+    def test_linked_app_toolchain_metadata_is_rejected(self):
+        self.out.mkdir()
+        target = Path(self.temporary.name) / 'fixture.plist'
+        target.write_bytes(plistlib.dumps(app_info_payload()))
+        (self.out / 'Info.plist').symlink_to(target)
+        settings = archive.validate_release_settings(settings_payload(), VERSION, BUILD)
+        with self.assertRaisesRegex(SystemExit, 'Missing or linked'):
+            archive.read_app_toolchain(self.out, settings)
+
+    def test_reviewed_developer_directory_and_system_launcher_are_used(self):
+        with self.local_processes(), patch.dict(archive.os.environ, {'DEVELOPER_DIR': '/unreviewed/Xcode'}):
+            archive.main(self.arguments())
+        for command in self.commands[:3]:
+            self.assertEqual(command[0], '/usr/bin/xcodebuild')
+        for environment in self.environments:
+            self.assertEqual(environment['DEVELOPER_DIR'], EXPECTED_TOOLCHAIN['developerDir'])
+
+    def test_existing_artifact_without_toolchain_is_preserved_not_rewritten(self):
+        self.out.mkdir()
+        original = b'{"source":"historical","validated":true,"uploaded":false}\n'
+        artifact = self.out / 'artifact.json'
+        artifact.write_bytes(original)
+        with self.local_processes(), self.assertRaisesRegex(SystemExit, 'fresh absolute'):
+            archive.main(self.arguments())
+        self.assertEqual(artifact.read_bytes(), original)
+        self.assertEqual(self.commands, [])
 
     def test_dirty_or_wrong_source_refuses_even_settings_inspection(self):
         for dirty, head in [(True, SOURCE), (False, 'b' * 40)]:
@@ -204,6 +330,7 @@ class ArchiveTestFlightTests(unittest.TestCase):
         self.assertEqual(record['sha256'], hashlib.sha256(self.ipa_bytes).hexdigest())
         self.assertTrue(record['validated'])
         self.assertFalse(record['uploaded'])
+        self.assertEqual(record['toolchain'], EXPECTED_TOOLCHAIN)
         self.assertFalse((self.out / 'uploaded.json').exists())
 
     def test_each_failed_stage_stops_without_retry_or_later_upload(self):

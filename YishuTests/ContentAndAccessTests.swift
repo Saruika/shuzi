@@ -236,6 +236,189 @@ private actor ImagePipelineTestLoader {
 }
 
 @MainActor
+final class GalleryResizeCompositionTests: XCTestCase {
+    func testPortraitPhotoKeepsActualFocalPointAcrossContinuousWidthChangesAt2xAnd4x() {
+        assertPhotoFocusIsPreserved(imageSize: CGSize(width: 400, height: 600))
+    }
+
+    func testLandscapePhotoKeepsActualFocalPointAcrossContinuousWidthChangesAt2xAnd4x() {
+        assertPhotoFocusIsPreserved(imageSize: CGSize(width: 600, height: 400))
+    }
+
+    private func assertPhotoFocusIsPreserved(imageSize: CGSize, file: StaticString = #filePath, line: UInt = #line) {
+        let url = AppURL.make("https://example.invalid/synthetic-photo.png")
+        let photo = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "合成比例测试")
+        for scale: CGFloat in [2, 4] {
+            for (height, widths): (CGFloat, [CGFloat]) in [
+                (600, [980, 940, 860, 780, 700, 620, 700, 860, 980]),
+                (1000, [820, 780, 740, 700, 660, 620, 660, 740, 820])
+            ] {
+                let controller = GalleryZoomViewController(image: photo)
+                controller.loadViewIfNeeded()
+                let initialSize = CGSize(width: widths[0], height: height)
+                controller.view.frame.size = initialSize
+                controller.viewDidLayoutSubviews()
+                controller.artworkSizeReceiver()(imageSize, url)
+                controller.scrollView.setZoomScale(scale, animated: false)
+                let initialRect = fittedRect(imageSize, in: initialSize)
+                controller.scrollView.contentOffset = CGPoint(
+                    x: (initialRect.minX + initialRect.width * 0.7) * scale - initialSize.width / 2,
+                    y: (initialRect.minY + initialRect.height * 0.6) * scale - initialSize.height / 2
+                )
+                let initialFocus = imageFocus(of: controller, in: initialRect)
+                let pixel = 1 / max(1, controller.scrollView.traitCollection.displayScale)
+                for width in widths.dropFirst() {
+                    let size = CGSize(width: width, height: height)
+                    controller.view.frame.size = size
+                    controller.viewDidLayoutSubviews()
+                    let rect = fittedRect(imageSize, in: size)
+                    let focus = imageFocus(of: controller, in: rect)
+                    XCTAssertEqual(controller.scrollView.zoomScale, scale, accuracy: 0.001, file: file, line: line)
+                    XCTAssertEqual(focus.x, initialFocus.x, accuracy: 2 * pixel / (rect.width * scale),
+                                   "窗口变化应保留照片坐标，而非包含留白的容器坐标", file: file, line: line)
+                    XCTAssertEqual(focus.y, initialFocus.y, accuracy: 2 * pixel / (rect.height * scale),
+                                   "宽度变化改变上下留白时，也必须保留照片纵向焦点", file: file, line: line)
+                }
+            }
+        }
+    }
+
+    func testFullResolutionGeometryWinsOverLatePreviewAndInvalidSizes() {
+        let preview = AppURL.make("https://example.invalid/preview.png")
+        let full = AppURL.make("https://example.invalid/full.png")
+        let photo = PortfolioImage(id: 1, url: preview, fullSizeURL: full, altText: "合成测试")
+        let controller = configuredController(photo)
+        let receive = controller.artworkSizeReceiver()
+        receive(CGSize(width: 600, height: 400), preview)
+        receive(CGSize(width: 400, height: 600), full)
+        receive(CGSize(width: 600, height: 400), preview)
+        receive(CGSize(width: 600, height: 400), AppURL.make("https://example.invalid/foreign.png"))
+        for invalid in [CGSize.zero, CGSize(width: -1, height: 600),
+                        CGSize(width: CGFloat.infinity, height: 600), CGSize(width: 400, height: CGFloat.nan)] {
+            receive(invalid, full)
+        }
+        assertKnownPortraitResize(controller)
+    }
+
+    func testOldPhotoAndWorkspaceCallbacksCannotRestoreDiscardedGeometry() {
+        let url = AppURL.make("https://example.invalid/synthetic-photo.png")
+        let photo = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "合成测试")
+        let controller = configuredController(photo)
+        let oldPhotoReceiver = controller.artworkSizeReceiver()
+        oldPhotoReceiver(CGSize(width: 400, height: 600), url)
+        controller.update(image: PortfolioImage(id: 2, url: url, fullSizeURL: url, altText: "另一张合成图"))
+        // Return to the same photo to exercise an A -> B -> A callback race.
+        controller.update(image: photo)
+        oldPhotoReceiver(CGSize(width: 400, height: 600), url)
+        assertUnknownSizeResize(controller)
+        controller.view.frame.size = CGSize(width: 980, height: 600)
+        controller.viewDidLayoutSubviews()
+        let oldEnvironmentReceiver = controller.artworkSizeReceiver()
+        oldEnvironmentReceiver(CGSize(width: 400, height: 600), url)
+        controller.update(image: photo, environment: .review)
+        controller.update(image: photo, environment: .production)
+        oldEnvironmentReceiver(CGSize(width: 400, height: 600), url)
+        assertUnknownSizeResize(controller)
+    }
+
+    func testKnownPhotoStillResetsOnRotationAndKeepsUnzoomedImageComplete() {
+        let url = AppURL.make("https://example.invalid/synthetic-photo.png")
+        let photo = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "合成测试")
+        let controller = configuredController(photo)
+        controller.artworkSizeReceiver()(CGSize(width: 400, height: 600), url)
+        assertKnownPortraitResize(controller)
+        controller.view.frame.size = CGSize(width: 430, height: 760)
+        controller.viewDidLayoutSubviews()
+        XCTAssertEqual(controller.scrollView.zoomScale, 1)
+        XCTAssertEqual(controller.scrollView.contentOffset, .zero)
+        for width: CGFloat in [390, 350, 430] {
+            controller.view.frame.size.width = width
+            controller.viewDidLayoutSubviews()
+            XCTAssertEqual(controller.scrollView.zoomScale, 1)
+            XCTAssertEqual(controller.scrollView.contentOffset, .zero)
+        }
+    }
+
+    func testGalleryPreviewKeepsExistingLoadingPlaceholderAppearance() throws {
+        let url = AppURL.make("https://example.invalid/synthetic-photo.png")
+        let photo = PortfolioImage(id: 1, url: url, fullSizeURL: url, altText: "合成测试")
+        let size = CGSize(width: 120, height: 180)
+        // Rendering this empty state does not start a URL request and uses no
+        // real photograph. Compare away from the animated progress glyph.
+        let oldRenderer = ImageRenderer(content: ArtworkImage(url: url, contentMode: .fit)
+            .frame(width: size.width, height: size.height))
+        let newRenderer = ImageRenderer(content: ProgressiveGalleryArtwork(image: photo, targetSize: size))
+        oldRenderer.scale = 1
+        newRenderer.scale = 1
+        let old = try pixels(try XCTUnwrap(oldRenderer.cgImage))
+        let new = try pixels(try XCTUnwrap(newRenderer.cgImage))
+        XCTAssertEqual(old.count, new.count)
+        for x in stride(from: 0, to: 120, by: 10) {
+            for y in [0, 10, 169, 179] {
+                let offset = (y * 120 + x) * 4
+                XCTAssertEqual(Array(old[offset..<(offset + 4)]), Array(new[offset..<(offset + 4)]),
+                               "图库加载占位背景不能因焦点修复发生视觉变化")
+            }
+        }
+    }
+
+    private func pixels(_ image: CGImage) throws -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
+        try bytes.withUnsafeMutableBytes { buffer in
+            let context = try XCTUnwrap(CGContext(data: buffer.baseAddress,
+                width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        }
+        return bytes
+    }
+
+    private func configuredController(_ photo: PortfolioImage) -> GalleryZoomViewController {
+        let controller = GalleryZoomViewController(image: photo)
+        controller.loadViewIfNeeded()
+        controller.view.frame.size = CGSize(width: 980, height: 600)
+        controller.viewDidLayoutSubviews()
+        return controller
+    }
+
+    private func assertKnownPortraitResize(_ controller: GalleryZoomViewController) {
+        controller.scrollView.setZoomScale(2, animated: false)
+        controller.scrollView.contentOffset = CGPoint(x: 710, y: 420)
+        controller.view.frame.size = CGSize(width: 700, height: 600)
+        controller.viewDidLayoutSubviews()
+        XCTAssertEqual(controller.scrollView.contentOffset.x, 570, accuracy: 1,
+                       "2:3 照片焦点应为 77.5%，旧容器算法会漂移约 63pt")
+        XCTAssertEqual(controller.scrollView.contentOffset.y, 420, accuracy: 1)
+    }
+
+    private func assertUnknownSizeResize(_ controller: GalleryZoomViewController) {
+        controller.scrollView.setZoomScale(2, animated: false)
+        controller.scrollView.contentOffset = CGPoint(x: 710, y: 420)
+        controller.view.frame.size = CGSize(width: 700, height: 600)
+        controller.viewDidLayoutSubviews()
+        XCTAssertEqual(controller.scrollView.contentOffset.x, CGFloat(1200) / 1960 * 1400 - 350, accuracy: 1,
+                       "未加载或已切换图片不能沿用旧照片尺寸")
+        XCTAssertEqual(controller.scrollView.contentOffset.y, 420, accuracy: 1)
+    }
+
+    private func fittedRect(_ image: CGSize, in viewport: CGSize) -> CGRect {
+        let ratio = image.width / image.height
+        let width = min(viewport.width, viewport.height * ratio)
+        let height = width / ratio
+        return CGRect(x: (viewport.width - width) / 2, y: (viewport.height - height) / 2,
+                      width: width, height: height)
+    }
+
+    private func imageFocus(of controller: GalleryZoomViewController, in rect: CGRect) -> CGPoint {
+        let scroll = controller.scrollView
+        return CGPoint(
+            x: ((scroll.contentOffset.x + scroll.bounds.width / 2) / scroll.zoomScale - rect.minX) / rect.width,
+            y: ((scroll.contentOffset.y + scroll.bounds.height / 2) / scroll.zoomScale - rect.minY) / rect.height
+        )
+    }
+}
+
+@MainActor
 final class ArtworkEnvironmentPipelineTests: XCTestCase {
     func testTransientDisconnectRecoversInsideBoundedImageRetryAndCachesDecodedImage() async throws {
         let loader = ImagePipelineTestLoader(data: try fixture(),
@@ -2110,6 +2293,8 @@ final class ContentAndAccessTests: XCTestCase {
             targetSize: size
         ))
         XCTAssertNotEqual(original, ProgressiveGalleryArtwork(image: photo, targetSize: size, environment: .review))
+        XCTAssertNotEqual(original, ProgressiveGalleryArtwork(image: photo, targetSize: size, loadGeneration: 1),
+                          "同一帧 A→B→A 时也必须替换旧图片尺寸回调")
     }
 
     @MainActor
