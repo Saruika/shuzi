@@ -79,6 +79,10 @@ if command -v php >/dev/null 2>&1; then
   php Server/tests/collaboration-admin-notice-test.php
   php Server/tests/fan-bound-administrator-auth-test.php
   php Server/tests/game-leaderboard-regression.php
+  php -l Server/operations/install-game-leaderboard-schema.php >/dev/null
+  php Server/tests/game-leaderboard-schema-installer-test.php
+  php -l Server/operations/update-game-privacy-policy.php >/dev/null
+  php Server/tests/game-privacy-policy-update-test.php
   php -l Server/operations/test-review-game-leaderboard.php >/dev/null
   php Server/tests/review-game-leaderboard-harness-test.php
   node --test Scripts/test-game-leaderboard-php.mjs
@@ -145,6 +149,7 @@ python3 Server/tests/sync-scheduler-contract-test.py
 python3 Server/tests/sync-lock-contention-test.py
 python3 Server/tests/sync-release-deployer-contract-test.py
 python3 Server/tests/nginx-server-block-contract-test.py
+python3 Server/tests/game-json-protection-test.py
 python3 Server/tests/install-build34-nginx-routing-contract-test.py
 python3 Server/tests/nginx-sensitive-routing-smoke-contract-test.py
 bash -n Server/operations/deploy-app-content-release
