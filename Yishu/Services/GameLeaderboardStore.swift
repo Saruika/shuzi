@@ -16,7 +16,7 @@ enum GameLeaderboardError: LocalizedError {
         case .invalidRun: "本局记录无效，请重新完成游戏。"
         case .invalidResponse: "排行榜数据暂时无法读取，请稍后刷新。"
         case .signInRequired: "请登录后查看或发布排行榜成绩。"
-        case .confirmationRequired: "请重新确认是否公开本局昵称和成绩。"
+        case .confirmationRequired: "本局同步状态已变化，请重新打开排行榜。"
         case .busy: "上一项操作尚未完成，请稍候。"
         case .unavailable: "操作暂未完成，请检查网络后刷新排行榜。"
         }
@@ -63,14 +63,14 @@ struct GameRunPayload: Decodable, Equatable {
     }
 }
 
-/// Prepared locally; native confirmation is required before publishing. Only replay inputs are encoded.
+/// Prepared after the game's start notice. Only replay inputs are encoded.
 struct GameRunSubmission: Encodable, Equatable {
     let rulesVersion = GameRules.version
     let origin: String
     let choices: [Int]
     let consent = true
     // Distinguish identical runs prepared by different accounts or at different times.
-    // An old confirmation must not accidentally approve a new preparation.
+    // A delayed operation must not accidentally publish another preparation.
     private let preparationID = UUID()
 
     init(payload: GameRunPayload) {
@@ -189,7 +189,8 @@ protocol GameLeaderboardAccount: AnyObject {
     func removeGameScore() async throws -> GameLeaderboardPage
 }
 
-/// Memory only. No disk cache, retry timer, identity in JSON, or automatic publication.
+/// Memory-only results. Completed games publish automatically; opening a leaderboard
+/// never manufactures a result. Failed requests await an explicit retry, not a retry loop.
 @MainActor
 final class GameLeaderboardStore: ObservableObject {
     @Published private(set) var page: GameLeaderboardPage?
@@ -197,6 +198,7 @@ final class GameLeaderboardStore: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var isWriting = false
     @Published private(set) var errorMessage: String?
+    @Published private(set) var pendingRuns: [GameRunSubmission] = []
     var entries: [GameLeaderboardEntry] { page?.entries ?? [] }
     var myEntry: GameLeaderboardEntry? { page?.myEntry }
 
@@ -206,6 +208,52 @@ final class GameLeaderboardStore: ObservableObject {
     private var readGeneration: UInt64 = 0
     // A switched account cannot start a second write while the old request is in flight.
     private var writeID: UUID?
+    private var automaticFlushID: UUID?
+    private weak var pendingAccount: (any GameLeaderboardAccount)?
+
+    /// Called only by a completed, locally bundled game after its start notice.
+    func complete(_ payload: GameRunPayload, using account: any GameLeaderboardAccount) async {
+        bind(account)
+        guard context != nil else { errorMessage = GameLeaderboardError.signInRequired.errorDescription; return }
+        pendingRuns.append(GameRunSubmission(payload: payload))
+        pendingAccount = account
+        await flushCompletedRuns(using: account)
+    }
+
+    /// Serializes completed runs so a slow POST cannot lose the next game's result.
+    /// Same-score requests are idempotent on the server; ambiguous failures are not
+    /// automatically replayed after removal or an account/environment change.
+    func flushCompletedRuns(using account: any GameLeaderboardAccount) async {
+        bind(account)
+        guard let expected = context, !pendingRuns.isEmpty, automaticFlushID == nil else { return }
+        let epoch = generation
+        let flushID = UUID()
+        automaticFlushID = flushID
+        defer {
+            if automaticFlushID == flushID { automaticFlushID = nil }
+            // A new login may finish a run while the previous request is ending.
+            // Resume only that new account's own queue, never the previous result.
+            if generation != epoch, !pendingRuns.isEmpty, let nextAccount = pendingAccount {
+                Task {
+                    guard self.pendingAccount === nextAccount else { return }
+                    await self.flushCompletedRuns(using: nextAccount)
+                }
+            }
+        }
+        while !Task.isCancelled, accepts(account, expected: expected, epoch: epoch),
+              let run = pendingRuns.first {
+            if isWriting {
+                do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+                continue
+            }
+            preparedRun = run
+            await submit(run: run, using: account)
+            guard accepts(account, expected: expected, epoch: epoch), !Task.isCancelled else { return }
+            // Failed or cancelled writes leave their exact result available to retry.
+            guard preparedRun != run else { return }
+            if pendingRuns.first == run { pendingRuns.removeFirst() }
+        }
+    }
 
     func updateContext(_ newContext: FanNotificationContext?) {
         guard context != newContext else { return }
@@ -225,7 +273,7 @@ final class GameLeaderboardStore: ObservableObject {
         return true
     }
 
-    func discardPreparedRun() { preparedRun = nil }
+    func discardPreparedRun() { preparedRun = nil; pendingRuns = []; pendingAccount = nil }
 
     func refresh(using account: any GameLeaderboardAccount) async {
         bind(account)
@@ -251,7 +299,7 @@ final class GameLeaderboardStore: ObservableObject {
         }
     }
 
-    /// The caller must show native publication confirmation before invoking this method.
+    /// Accept only the exact pending result; never accept an arbitrary score or identity.
     func submit(run: GameRunSubmission, using account: any GameLeaderboardAccount) async {
         bind(account)
         guard let expected = context else { errorMessage = GameLeaderboardError.signInRequired.errorDescription; return }
@@ -264,7 +312,7 @@ final class GameLeaderboardStore: ObservableObject {
         bind(account)
         guard let expected = context else { errorMessage = GameLeaderboardError.signInRequired.errorDescription; return }
         guard !isWriting else { errorMessage = GameLeaderboardError.busy.errorDescription; return }
-        preparedRun = nil
+        discardPreparedRun()
         await write(using: account, expected: expected, run: nil)
     }
 
@@ -287,7 +335,7 @@ final class GameLeaderboardStore: ObservableObject {
                   !Task.isCancelled else { return }
             page = result
             // Consume only the preparation this POST confirmed. A newer run
-            // (including one finished during DELETE) still needs its own consent.
+            // (including one finished during DELETE) stays in its own queue slot.
             if let run, preparedRun == run { preparedRun = nil }
             errorMessage = nil
         } catch {
@@ -320,6 +368,8 @@ final class GameLeaderboardStore: ObservableObject {
         readGeneration &+= 1
         page = nil
         preparedRun = nil
+        pendingRuns = []
+        pendingAccount = nil
         isLoading = false
         errorMessage = nil
     }

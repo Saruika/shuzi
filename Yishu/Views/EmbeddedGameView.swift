@@ -5,7 +5,7 @@ import WebKit
 /// Offline host for the authorized, bundled game resources.
 /// The caller must present this inside its existing SecureCaptureSurface.
 /// The game document receives no account/session values or remote access.
-/// One bounded result-only bridge prepares a run for voluntary native submission.
+/// One bounded result-only bridge submits completed runs using the native account.
 struct EmbeddedGameView: View {
     @ObservedObject private var account: FanAccountStore
     @StateObject private var leaderboard = GameLeaderboardStore()
@@ -26,7 +26,7 @@ struct EmbeddedGameView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("宦海浮沉录")
                         .font(.headline)
-                    Text("离线游玩 · 进度仅保留本局")
+                    Text(leaderboard.isWriting ? "正在同步成绩" : leaderboard.pendingRuns.isEmpty ? "完成游戏自动上榜" : "成绩待同步 · 请打开排行榜重试")
                         .font(.caption)
                         .foregroundStyle(.white.opacity(0.75))
                 }
@@ -40,7 +40,7 @@ struct EmbeddedGameView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(leaderboard.preparedRun == nil ? "排行榜" : "排行榜，可提交最近完成的成绩")
+                .accessibilityLabel(leaderboard.pendingRuns.isEmpty ? "排行榜" : "排行榜，有待同步成绩")
                 .accessibilityIdentifier("embedded-game-leaderboard")
                 Button { showsExitConfirmation = true } label: {
                     Label("关闭", systemImage: "xmark")
@@ -63,7 +63,10 @@ struct EmbeddedGameView: View {
             ZStack {
                 EmbeddedGameWebView(loadState: $loadState) { [expected = account.gameLeaderboardContext] payload in
                     guard expected != nil, account.gameLeaderboardContext == expected else { return }
-                    _ = leaderboard.prepare(payload, using: account)
+                    Task {
+                        guard account.gameLeaderboardContext == expected else { return }
+                        await leaderboard.complete(payload, using: account)
+                    }
                 }
                     .id(attempt)
                 switch loadState {
@@ -125,7 +128,7 @@ struct EmbeddedGameView: View {
             Button("关闭游戏", role: .destructive) { onClose() }
                 .accessibilityIdentifier("embedded-game-confirm-close")
         } message: {
-            Text("离开会结束本局。确认关闭游戏吗？")
+            Text(leaderboard.pendingRuns.isEmpty ? "离开会结束本局。确认关闭游戏吗？" : "仍有成绩未同步，离开后内存中的待同步成绩不会保留。建议先在排行榜重试同步。确认关闭游戏吗？")
         }
     }
 }
@@ -221,7 +224,7 @@ struct EmbeddedGameWebView: UIViewRepresentable {
                   Set(body.keys) == Set(["origin", "choices"]),
                   let data = try? JSONSerialization.data(withJSONObject: body), data.count <= 2048,
                   let payload = try? JSONDecoder().decode(GameRunPayload.self, from: data) else { return }
-            // No automatic network request, identity injection, or JS score trust.
+            // Networking remains in the native host; no identity injection or JS score trust.
             onRunCompleted(payload)
         }
 

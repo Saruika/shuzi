@@ -37,6 +37,118 @@ private final class LeaderboardTestAccount: GameLeaderboardAccount {
 
 @MainActor
 final class GameLeaderboardTests: XCTestCase {
+    func testCompletedGamePublishesWithoutOpeningLeaderboardOrConfirmingAgain() async throws {
+        let account = LeaderboardTestAccount(response: try page(isMe: true))
+        let store = GameLeaderboardStore()
+        await store.complete(try payload(), using: account)
+        XCTAssertEqual(account.calls, ["POST"])
+        XCTAssertEqual(account.submissions.first?.choices, [0])
+        XCTAssertEqual(store.myEntry, account.response.myEntry)
+        XCTAssertTrue(store.pendingRuns.isEmpty)
+        XCTAssertNil(store.preparedRun)
+        await store.flushCompletedRuns(using: account)
+        await store.refresh(using: account)
+        XCTAssertEqual(account.calls, ["POST", "GET"], "Opening or refreshing must not republish a completed run")
+    }
+
+    func testAutomaticSubmissionSerializesGamesFinishedDuringSlowRequest() async throws {
+        let account = LeaderboardTestAccount(response: try page(isMe: true))
+        let store = GameLeaderboardStore()
+        account.pauseNext = true
+        let first = Task { await store.complete(try payload(), using: account) }
+        await waitForCalls(1, on: account)
+        await store.complete(try payload([1, 2]), using: account)
+        XCTAssertEqual(store.pendingRuns.count, 2)
+        XCTAssertEqual(account.calls, ["POST"])
+        account.resume()
+        try await first.value
+        XCTAssertEqual(account.submissions.map(\.choices), [[0], [1, 2]])
+        XCTAssertTrue(store.pendingRuns.isEmpty)
+        XCTAssertFalse(store.isWriting)
+    }
+
+    func testFailedAutomaticSubmissionRemainsInMemoryAndCanRetryWithoutConsentDialog() async throws {
+        let account = LeaderboardTestAccount(response: try page(isMe: true))
+        let store = GameLeaderboardStore()
+        account.failure = URLError(.notConnectedToInternet)
+        await store.complete(try payload(), using: account)
+        XCTAssertEqual(store.pendingRuns.count, 1)
+        XCTAssertNil(store.myEntry)
+        XCTAssertNotNil(store.errorMessage)
+        await Task.yield()
+        XCTAssertEqual(account.calls, ["POST"], "No unbounded background retry loop")
+        account.failure = nil
+        await store.flushCompletedRuns(using: account)
+        XCTAssertEqual(account.calls, ["POST", "POST"])
+        XCTAssertEqual(account.submissions[0], account.submissions[1])
+        XCTAssertTrue(store.pendingRuns.isEmpty)
+        XCTAssertNil(store.errorMessage)
+    }
+
+    func testRemoveClearsFailedQueueAndDoesNotResurrectOldScore() async throws {
+        let account = LeaderboardTestAccount(response: try GameLeaderboardPage(entries: []))
+        let store = GameLeaderboardStore()
+        account.failure = URLError(.timedOut)
+        await store.complete(try payload(), using: account)
+        account.failure = nil
+        await store.remove(using: account)
+        await store.flushCompletedRuns(using: account)
+        XCTAssertEqual(account.calls, ["POST", "DELETE"])
+        XCTAssertTrue(store.pendingRuns.isEmpty)
+        await store.complete(try payload([2]), using: account)
+        XCTAssertEqual(account.calls, ["POST", "DELETE", "POST"], "Only a newly completed game may rejoin")
+        XCTAssertEqual(account.submissions.last?.choices, [2])
+    }
+
+    func testNewCompletedGameWaitsForDeletionInsteadOfDroppingItsScore() async throws {
+        let account = LeaderboardTestAccount(response: try GameLeaderboardPage(entries: []))
+        let store = GameLeaderboardStore()
+        account.pauseNext = true
+        let removal = Task { await store.remove(using: account) }
+        await waitForCalls(1, on: account)
+        let finished = Task { await store.complete(try payload([3]), using: account) }
+        await Task.yield()
+        XCTAssertEqual(account.calls, ["DELETE"])
+        account.resume()
+        await removal.value
+        try await finished.value
+        XCTAssertEqual(account.calls, ["DELETE", "POST"])
+        XCTAssertTrue(store.pendingRuns.isEmpty)
+    }
+
+    func testAutomaticQueueNeverCrossesAccountSessionOrEnvironment() async throws {
+        let first = LeaderboardTestAccount(response: try page(name: "first"))
+        let second = LeaderboardTestAccount(response: try page(name: "second"))
+        second.gameLeaderboardContext = .init(userID: "synthetic-b", sessionGeneration: 2, environment: .review)
+        let store = GameLeaderboardStore()
+        first.pauseNext = true
+        let old = Task { await store.complete(try payload(), using: first) }
+        await waitForCalls(1, on: first)
+        await store.complete(try payload([1]), using: first)
+        store.updateContext(second.gameLeaderboardContext)
+        await store.complete(try payload([2]), using: second)
+        first.resume()
+        try await old.value
+        await waitForCalls(1, on: second)
+        XCTAssertEqual(first.submissions.map(\.choices), [[0]])
+        XCTAssertEqual(second.submissions.map(\.choices), [[2]])
+        XCTAssertEqual(store.page, second.response)
+        XCTAssertTrue(store.pendingRuns.isEmpty)
+    }
+
+    func testSignedOutCompletionAndLogoutCannotPublishPendingRuns() async throws {
+        let account = LeaderboardTestAccount(response: try page())
+        let store = GameLeaderboardStore()
+        account.failure = URLError(.notConnectedToInternet)
+        await store.complete(try payload(), using: account)
+        account.gameLeaderboardContext = nil
+        store.updateContext(nil)
+        await store.flushCompletedRuns(using: account)
+        await store.complete(try payload([1]), using: account)
+        XCTAssertEqual(account.calls, ["POST"])
+        XCTAssertTrue(store.pendingRuns.isEmpty)
+    }
+
     private func payload(_ choices: [Int] = [0]) throws -> GameRunPayload {
         try GameRunPayload(origin: "peasant", choices: choices)
     }

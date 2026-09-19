@@ -414,7 +414,7 @@ function showEnding(endingId){
     $('ending-text').append(flags);
   }
 
-  // 得分仍使用原版算法。原生端仅准备证据，是否上榜由用户主动决定。
+  // 得分仍使用原版算法。原生端自动提交出身与选项，服务器重算成绩。
   state.score = computeScore();
   addEndingStat('综合评分', state.score);
   prepareLeaderboardRun();
@@ -485,7 +485,7 @@ function initDisclaimer(){
       return;
     }
     btn.disabled = false;
-    btn.textContent = '开始体验';
+    btn.textContent = '同意并开始体验';
   };
   scheduleRunTask('disclaimer', tick, 1000);
   $('screen-intro').inert = true;
@@ -502,7 +502,7 @@ function initDisclaimer(){
 
 function renderIdentity(){
   $('account-name').textContent = LOCAL_PLAYER_NAME;
-  $('account-sub').textContent = '排行榜由 App 账号参与，未选择上榜不会上传本局';
+  $('account-sub').textContent = '完成游戏自动上榜 · 每人保留最高成绩';
   $('btn-start').disabled = !disclaimerAccepted;
 }
 

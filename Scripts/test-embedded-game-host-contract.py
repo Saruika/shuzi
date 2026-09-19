@@ -95,6 +95,19 @@ def build_reference(label):
 
 
 class EmbeddedGameHostContract(unittest.TestCase):
+    def test_completed_results_publish_automatically_with_upfront_disclosure(self):
+        self.assertIn('await leaderboard.complete(payload, using: account)', HOST)
+        self.assertIn('guard account.gameLeaderboardContext == expected', HOST)
+        self.assertIn('开始体验即参与 App 内排行榜', HTML)
+        self.assertIn('不再单独询问是否上榜', HTML)
+        self.assertIn('同意并开始体验', HTML)
+        self.assertNotIn('未选择上榜不会上传本局', HTML + PRODUCTION_JS)
+        self.assertNotIn('上榜为自愿操作', HTML)
+        board = (ROOT / 'Yishu/Views/GameLeaderboardView.swift').read_text()
+        self.assertNotIn('confirmsSubmission', board)
+        self.assertIn('await store.flushCompletedRuns(using: account)', board)
+        self.assertIn('await store.remove(using: account)', board)
+
     def test_game_regressions_are_in_the_native_unit_test_compile_phase(self):
         # A file on disk/in a project group is not evidence that XCTest runs it.
         targets = [pbx_object(item) for item in declared_ids(pbx_section("PBXNativeTarget"))]

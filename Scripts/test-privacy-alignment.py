@@ -9,11 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class PrivacyAlignmentTests(unittest.TestCase):
-    def test_gameplay_requires_opt_in_and_supports_removal_in_both_policies(self):
+    def test_gameplay_discloses_automatic_ranking_before_play_and_supports_removal(self):
         for path in ['Yishu/Views/PrivacyPolicyView.swift', 'Server/app-privacy-policy.html']:
             source = (ROOT / path).read_text()
-            for phrase in ['主动确认上榜', '一条最高成绩摘要', '选项仅用于当次重演',
-                           '删除账号也会移除记录', '不接入第三方游戏平台账号', '不参与排行榜不影响离线游玩']:
+            for phrase in ['开始游戏前会告知', '完成游戏自动提交', '一条最高成绩摘要', '选项仅用于当次重演',
+                           '删除账号也会移除记录', '不接入第三方游戏平台账号', '旧局不会追溯上传',
+                           '待同步成绩只在本次游戏内存中保留', '旧版本仍按原有主动确认流程']:
                 with self.subTest(path=path, phrase=phrase):
                     self.assertIn(phrase, source)
 

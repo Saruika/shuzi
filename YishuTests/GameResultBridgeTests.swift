@@ -224,6 +224,11 @@ final class GameResultBridgeTests: XCTestCase {
         #if !targetEnvironment(simulator)
         throw XCTSkip("Game bridge integration uses an isolated Simulator host, never an installed real-account App")
         #else
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while !UIApplication.shared.connectedScenes.contains(where: { $0.activationState == .foregroundActive }),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
         let host = try GameResultBridgeHost()
         do {
             try await host.waitUntilReady()

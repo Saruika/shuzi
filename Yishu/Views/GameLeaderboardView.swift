@@ -8,8 +8,6 @@ struct GameLeaderboardView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var minimumNameColumnWidth: CGFloat = 160
-    @State private var confirmsSubmission = false
-    @State private var confirmationRun: GameRunSubmission?
     @State private var confirmsRemoval = false
     @State private var removalContext: FanNotificationContext?
 
@@ -48,7 +46,7 @@ struct GameLeaderboardView: View {
                                 .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 12))
                             }
                             if page.entries.isEmpty {
-                                ContentUnavailableView("还没有上榜成绩", systemImage: "trophy", description: Text("完成一局后，可以选择将成绩加入排行榜。"))
+                                ContentUnavailableView("还没有上榜成绩", systemImage: "trophy", description: Text("完成一局后，成绩会自动加入排行榜。"))
                             } else {
                                 Text("最高成绩榜 · 前 100 名")
                                     .font(.headline)
@@ -68,7 +66,7 @@ struct GameLeaderboardView: View {
                                 .disabled(store.isWriting || store.isLoading)
                         }
                     }
-                    Text("排行榜仅向已审批的 App 用户展示昵称、成绩、出身、结局和上榜时间，不展示邮箱、抖音 ID 或身份码。未选择上榜时不会提交本局；上榜后可随时移除，删除账号也会移除对应记录。离线游玩仍可使用，排行榜需要联网。")
+                    Text("完成游戏后自动提交成绩，每人保留最高成绩。排行榜仅向已审批的 App 用户展示昵称、成绩、出身、结局和上榜时间，不展示邮箱、抖音 ID 或身份码。你可以移除上榜记录，删除账号也会移除记录；再次完成游戏会重新自动上榜。同步需要联网，失败时可在此重试；待同步成绩仅保留在本次游戏的内存中，退出后不保留。")
                         .font(.footnote)
                         .foregroundStyle(AppTheme.muted)
                         .fixedSize(horizontal: false, vertical: true)
@@ -91,25 +89,12 @@ struct GameLeaderboardView: View {
             .refreshable { await store.refresh(using: account) }
             .task(id: account.gameLeaderboardContext) { await store.refresh(using: account) }
             .onChange(of: account.gameLeaderboardContext) { _, context in
-                confirmsSubmission = false
-                confirmationRun = nil
                 confirmsRemoval = false
                 removalContext = nil
                 store.updateContext(context)
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { Task { await store.refresh(using: account) } }
-            }
-            .alert("将成绩加入排行榜？", isPresented: $confirmsSubmission) {
-                Button("取消", role: .cancel) { confirmationRun = nil }
-                Button("确认上榜") {
-                    guard let run = confirmationRun else { return }
-                    confirmationRun = nil
-                    Task { await store.submit(run: run, using: account) }
-                }
-                .accessibilityIdentifier("game-leaderboard-confirm-submit")
-            } message: {
-                Text("将发送最近完成一局的出身和选项，由服务器重新计算成绩。上榜后，其他已审批用户可以看到你的昵称“\(account.profile?.displayName ?? "")”和成绩；每人仅保留最高成绩。")
             }
             .alert("移除上榜记录？", isPresented: $confirmsRemoval) {
                 Button("取消", role: .cancel) { removalContext = nil }
@@ -123,21 +108,20 @@ struct GameLeaderboardView: View {
                 }
                     .accessibilityIdentifier("game-leaderboard-confirm-remove")
             } message: {
-                Text("只移除你的游戏排行榜记录，不删除 App 账号、相册或其他资料。以后可以重新完成游戏并主动上榜。")
+                Text("只移除你的游戏排行榜记录，并清除本次尚未同步的成绩，不删除 App 账号、相册或其他资料。再次完成新的一局会自动上榜。")
             }
         }
     }
 
     private var participation: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(store.preparedRun == nil ? "完成一局后可选择上榜" : "最近完成的一局可以上榜")
+            Text(store.pendingRuns.isEmpty ? "完成游戏自动上榜" : "\(store.pendingRuns.count) 局成绩待同步")
                 .font(.headline)
-            if store.preparedRun != nil {
+            if !store.pendingRuns.isEmpty {
                 Button {
-                    confirmationRun = store.preparedRun
-                    confirmsSubmission = confirmationRun != nil
+                    Task { await store.flushCompletedRuns(using: account) }
                 } label: {
-                    Text("提交最高成绩")
+                    Text("重试同步成绩")
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.borderedProminent)

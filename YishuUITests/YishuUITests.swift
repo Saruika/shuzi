@@ -403,6 +403,27 @@ final class YishuUITests: XCTestCase {
         return app
     }
 
+    /// Explicit preflight for an isolated simulator; preserves capture protection
+    /// and account state while accepting the real system permission prompt.
+    func testIsolatedSimulatorNotificationPermissionPreflightWithProtection() throws {
+#if targetEnvironment(simulator)
+        let app = XCUIApplication()
+        app.launchArguments = ["-skip-launch-poster-for-visual-testing"]
+        app.launch()
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let alert = springboard.alerts.firstMatch
+        if alert.waitForExistence(timeout: 15) {
+            let allow = alert.buttons.matching(NSPredicate(format: "label IN %@", ["Allow", "允许", "允許"])).firstMatch
+            XCTAssertTrue(allow.waitForExistence(timeout: 3), "Expected the notification permission dialog")
+            allow.tap()
+            XCTAssertTrue(alert.waitForNonExistence(timeout: 5))
+        }
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
+#else
+        throw XCTSkip("Permission preflight is restricted to the isolated simulator")
+#endif
+    }
+
     /// Run on a fresh simulator so notification permission is not determined.
     func testStartupAsksSystemNotificationPermissionBeforeLogin() {
         let app = XCUIApplication()

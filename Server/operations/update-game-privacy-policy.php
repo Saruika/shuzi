@@ -31,7 +31,7 @@ final class GamePrivacyPolicy {
     public const HOME = 'https://www.shuzijun.com.cn';
     public const POST_ID = 115;
     public const PAYLOAD = '/var/lib/shuzijun-app-content/privacy/app-privacy-policy.html';
-    public const PAYLOAD_SHA256 = '6ee96c3d7a35d2d19bd1a402900044c24be1208b56e0341cd62054d830ca4e29';
+    public const PAYLOAD_SHA256 = 'f3233402de41144d98720f0d893128c12c1826b9bead45649b2c4a29bfa838ce';
     public const BACKUPS = '/var/backups/shuzijun-app-content';
     public const ROLE = '/etc/shuzijun/account-authority-role';
     public const LOCK = '/var/lib/shuzijun-sync/site-operation.lock';

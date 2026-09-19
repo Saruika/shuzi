@@ -10,11 +10,11 @@ import XCTest
 @MainActor
 final class EmbeddedGameTests: XCTestCase {
     private let reviewedHashes = [
-        "index.html": "d5a4b4b052c4f9481715644ff4e9cd75093d6b419a91eca2a3f1dd5918bff986",
+        "index.html": "9263efe42326ab7a8c746322e278f67203c882306eb03492b57ace733e779185",
         "css/style.css": "5e89d4a6e7d741900d88c71e2839f3e00daf4b3811daa23c6f7ac2d48bba0a3b",
         "js/events.js": "df10acc91240a31e9ebe336a39aecfd55716a27f82d6a866394db6153261471e",
         "js/endings.js": "ae4f1173f961922e4bc72b65cca513fa5e633e3a5e93797d7e4c4fcfe9d960af",
-        "js/main.js": "121102c3beb5d6318951b7a74797ffe19adada4f9664148542a4354a8c9ac739",
+        "js/main.js": "89e707ae1fdb759b40d61d947ecaddbd5c24903b579a0ed736dfb3e9d18380ac",
     ]
 
     func testAppBundleContainsExactlyReviewedOfflineGameResources() throws {
@@ -34,6 +34,28 @@ final class EmbeddedGameTests: XCTestCase {
             XCTAssertEqual(hash, reviewedHashes[relative], "Unreviewed bundled asset: \(relative)")
         }
         XCTAssertEqual(files.sorted(), reviewedHashes.keys.sorted())
+    }
+
+    func testEveryQuestionRendersItsOwnFourDistinctOptions() async throws {
+        let session = try await loadedSession()
+        defer { session.close() }
+        let failures: [String] = try await session.json("""
+        (() => {
+          const failures = [];
+          ALL_EVENTS.forEach((event, index) => {
+            state.currentIdx = index;
+            renderQuestion(event);
+            const rendered = Array.from(document.querySelectorAll('#options .option-text'), e => e.textContent);
+            if (JSON.stringify(rendered) !== JSON.stringify(event.opts.map(o => o.text)) ||
+                new Set(rendered).size !== 4 || document.getElementById('q-title').textContent !== event.title ||
+                document.getElementById('q-id').textContent !== '#' + String(index + 1).padStart(3, '0')) {
+              failures.push(event.id);
+            }
+          });
+          return failures;
+        })()
+        """)
+        XCTAssertTrue(failures.isEmpty, "Repeated or stale option rendering: \(failures)")
     }
 
     func testOfflineResourceContractLoads108Questions432ChoicesAnd28Endings() async throws {
@@ -225,6 +247,13 @@ final class EmbeddedGameTests: XCTestCase {
 
     private func loadedSession() async throws -> GameWebKitSession {
 #if targetEnvironment(simulator)
+        // A focused test run can reach this method before the App scene is active.
+        // Wait for real lifecycle readiness; don't dismiss prompts or alter protection.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while !UIApplication.shared.connectedScenes.contains(where: { $0.activationState == .foregroundActive }),
+              ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
         let session = try GameWebKitSession(assets: assetsDirectory())
         do {
             try await session.load(test: self)
