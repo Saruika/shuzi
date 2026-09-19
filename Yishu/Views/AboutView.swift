@@ -26,6 +26,7 @@ struct AboutView: View {
     // share one boundary instead of placing the caption in letterbox space.
     private let portraitAspectRatio: CGFloat = 2 / 3
     private let portraitCaptionInset: CGFloat = 22
+    private let portraitCaptionBottomInset: CGFloat = 18
     private let singleColumnCaptionSafetyMargin: CGFloat = 12
 
     var body: some View {
@@ -78,14 +79,14 @@ struct AboutView: View {
             // The portrait and its caption live outside every scroll view.
             // Fit one shared 2:3 canvas to the current window, including after
             // rotation or resizing; do not stretch or crop the photograph.
-            portrait(captionBottomPadding: portraitCaptionInset)
+            portrait(captionBottomPadding: portraitCaptionBottomInset)
                 .frame(width: portraitWidth, height: portraitWidth / portraitAspectRatio)
                 .frame(width: columnWidth, alignment: .top)
 
             ScrollView {
                 profileDetails
                     .frame(maxWidth: .infinity)
-                    .padding(.top, 48)
+                    .padding(.top, 24)
             }
             .scrollIndicators(.hidden)
             .floatingTabBarScrollClearance()
@@ -102,7 +103,7 @@ struct AboutView: View {
             Group {
                 if usesTwoColumnLayout(in: scene) {
                     HStack(alignment: .top, spacing: 24) {
-                        portrait(captionBottomPadding: portraitCaptionInset)
+                        portrait(captionBottomPadding: portraitCaptionBottomInset)
                             .frame(
                                 maxWidth: .infinity,
                                 maxHeight: twoColumnPortraitHeight(in: scene),
@@ -110,7 +111,7 @@ struct AboutView: View {
                             )
                         profileDetails
                             .frame(maxWidth: .infinity)
-                            .padding(.top, 48)
+                            .padding(.top, 24)
                     }
                     .frame(maxWidth: 1_164)
                     .padding(.horizontal, 24)
@@ -153,7 +154,7 @@ struct AboutView: View {
     }
 
     private func singleColumnCaptionBottomPadding(in scene: GeometryProxy) -> CGFloat {
-        let minimumPadding = portraitCaptionInset + singleColumnCaptionSafetyMargin
+        let minimumPadding = max(portraitCaptionBottomInset, singleColumnCaptionSafetyMargin)
         let portraitWidth = min(max(scene.size.width, 0), 720)
         let portraitHeight = portraitWidth / portraitAspectRatio
         let visibleHeight = max(
@@ -234,10 +235,21 @@ struct AboutView: View {
             }
             .foregroundStyle(AppTheme.warmWhite)
             .padding(.horizontal, portraitCaptionInset)
-            .padding(.top, portraitCaptionInset)
+            .padding(.top, 14)
             .padding(.bottom, captionBottomPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background { EditorialCaptionBackdrop().padding(.top, -24) }
+            .background {
+                // Match Android's gradual photo-to-page transition locally;
+                // don't change the shared backdrop used on other screens.
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: AppTheme.ink.opacity(0.55), location: 0.35),
+                    .init(color: AppTheme.ink.opacity(0.94), location: 0.75),
+                    .init(color: AppTheme.ink, location: 1),
+                ], startPoint: .top, endPoint: .bottom)
+                .padding(.top, -16)
+                .allowsHitTesting(false)
+            }
         }
         .aspectRatio(portraitAspectRatio, contentMode: .fit)
         .background {
@@ -256,16 +268,13 @@ struct AboutView: View {
     }
 
     private var biography: some View {
-        VStack(alignment: .leading, spacing: 26) {
-            Text("关于")
-                .font(.system(.title, design: .serif))
-                .accessibilityIdentifier("about-heading")
-                .accessibilityAddTraits(.isHeader)
+        VStack(alignment: .leading, spacing: 18) {
             Text("专注于短剧表演、时尚摄影与艺术创作。希望通过克制而真实的情绪、东方气质与镜头表现，让每个角色留下属于自己的余韵。")
                 .font(.body)
                 .lineSpacing(9)
                 .foregroundStyle(AppTheme.muted)
                 .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("about-biography")
 
             if dynamicTypeSize.isAccessibilitySize {
                 VStack(alignment: .leading, spacing: 8) {
@@ -318,7 +327,8 @@ struct AboutView: View {
             }
         }
         .padding(.horizontal, 22)
-        .padding(.vertical, 38)
+        .padding(.top, 12)
+        .padding(.bottom, 24)
     }
 
     private var profileActions: some View {

@@ -3,6 +3,49 @@ import XCTest
 import Vision
 
 final class YishuUITests: XCTestCase {
+    func testAboutCompactLayoutKeepsNavigationAndCompleteCaption() throws {
+#if targetEnvironment(simulator)
+        addTeardownBlock { XCUIDevice.shared.orientation = .portrait }
+        let orientations: [UIDeviceOrientation] = UIDevice.current.userInterfaceIdiom == .pad
+            ? [.portrait, .landscapeRight] : [.portrait]
+        for theme in ["blackGold", "ivory"] {
+            for orientation in orientations {
+                XCUIDevice.shared.orientation = orientation
+                let app = launchApp(arguments: [
+                    "-open-about-for-visual-testing",
+                    "-use-deterministic-gallery-images-for-testing",
+                    "-hold-home-remote-images-for-visual-testing",
+                    "-expose-about-portrait-canvas-for-testing",
+                    "-expose-about-visible-bottom-for-visual-testing",
+                    "-cn.com.shuzijun.yishu.appearance.v1", theme,
+                ], screenProtectionEnabled: true)
+                let role = element("about-role-summary", in: app)
+                let biography = element("about-biography", in: app)
+                let portrait = element("about-portrait-canvas", in: app)
+                let bottom = element("about-visible-bottom", in: app)
+                XCTAssertTrue(tabButton("关于", in: app).exists, "底部/顶部导航仍须保留关于入口")
+                XCTAssertFalse(element("about-heading", in: app).exists, "页面不能重复展示关于标题")
+                XCTAssertTrue(role.waitForExistence(timeout: 8))
+                XCTAssertTrue(biography.exists)
+                XCTAssertEqual(role.label, "短剧演员 / 模特 / 视频创作者")
+                XCTAssertTrue(app.windows.firstMatch.frame.contains(role.frame))
+                XCTAssertLessThanOrEqual(role.frame.maxY + 12, bottom.frame.minY + 1)
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    XCTAssertEqual(biography.frame.minY - portrait.frame.minY, 36, accuracy: 3,
+                                   "双栏简介应使用24+12点顶部间距，不能保留旧标题留白")
+                    let before = portrait.frame
+                    element("about-details-scroll", in: app).swipeUp()
+                    XCTAssertEqual(portrait.frame.minY, before.minY, accuracy: 1,
+                                   "右侧滚动不应移动左侧人物图")
+                }
+                app.terminate()
+            }
+        }
+#else
+        throw XCTSkip("本测试使用独立模拟器夹具，不操作真机账号")
+#endif
+    }
+
     func testReviewBannerLeavesNavigationControlsUncovered() {
         let app = XCUIApplication()
         app.launchArguments = ["-app-service-environment", "review",
@@ -530,7 +573,7 @@ final class YishuUITests: XCTestCase {
         app.launch()
         defer { app.terminate() }
 
-        let aboutHeading = element("about-heading", in: app)
+        let aboutHeading = element("about-biography", in: app)
         XCTAssertTrue(aboutHeading.waitForExistence(timeout: 12), "保护开启后关于页没有出现")
         let adminEntry = element("about-admin-entry", in: app)
         scrollToElement(adminEntry, in: app)
@@ -1071,7 +1114,7 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "04-favorites", app: app)
 
         openTab("关于", in: app)
-        assertExists("about-heading", in: app)
+        assertExists("about-biography", in: app)
         let aboutPortrait = element("about-portrait", in: app)
         let statusBar = app.statusBars.firstMatch
         if statusBar.exists {
@@ -1657,7 +1700,7 @@ final class YishuUITests: XCTestCase {
 
     func testCollaborationAndAdministratorRoutesRemainReachable() {
         let app = launchApp(arguments: ["-open-about-for-visual-testing"])
-        assertExists("about-heading", in: app)
+        assertExists("about-biography", in: app)
 
         let collaboration = element("about-collaboration", in: app)
         scrollToElement(collaboration, in: app)
@@ -1668,7 +1711,7 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "08-collaboration", app: app)
 
         app.navigationBars.buttons.firstMatch.tap()
-        assertExists("about-heading", in: app)
+        assertExists("about-biography", in: app)
 
         let fanEntry = element("about-fan-account", in: app)
         scrollToElement(fanEntry, in: app)
@@ -1686,7 +1729,7 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "09-fan-registration", app: app)
 
         app.navigationBars.buttons.firstMatch.tap()
-        assertExists("about-heading", in: app)
+        assertExists("about-biography", in: app)
 
         let adminEntry = element("about-admin-entry", in: app)
         scrollToElement(adminEntry, in: app)
@@ -1830,7 +1873,7 @@ final class YishuUITests: XCTestCase {
         }
 
         openTab("关于", in: app)
-        assertExists("about-heading", in: app)
+        assertExists("about-biography", in: app)
         // A fixed swipe can leave the copyright paragraph below the floating
         // tab bar. iOS 26 then audits a crop containing only the home indicator
         // as that text's contrast. Establish complete visibility first, then
@@ -1997,13 +2040,13 @@ final class YishuUITests: XCTestCase {
             assertMeaningfulAccessibilityLabel(firstCard, named: "iPad 作品相册")
 
         case "关于":
-            let heading = element("about-heading", in: app)
+            let heading = element("about-biography", in: app)
             let portrait = element("about-portrait", in: app)
-            XCTAssertTrue(heading.waitForExistence(timeout: 8), "iPad 关于页标题不存在")
-            XCTAssertEqual(heading.label, "关于", "iPad 关于页标题语义不正确")
+            XCTAssertTrue(heading.waitForExistence(timeout: 8), "iPad 关于页简介不存在")
+            XCTAssertTrue(heading.label.hasPrefix("专注于短剧表演"), "iPad 关于页应直接呈现简介")
             XCTAssertTrue(portrait.waitForExistence(timeout: 8), "iPad 关于页人物图不存在")
             XCTAssertEqual(portrait.label, "易姝形象照", "iPad 关于页人物图缺少 VoiceOver 语义")
-            assertContainedInWindow(heading, named: "iPad 关于页标题", window: window)
+            assertContainedInWindow(heading, named: "iPad 关于页简介", window: window)
             assertContainedInWindow(portrait, named: "iPad 关于页人物图", window: window)
             assertBelowStatusBar(portrait, named: "iPad 关于页人物图", in: app)
 
@@ -2424,7 +2467,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         let window = app.windows.firstMatch
         recordPresentationGeometry("ivory-page-edges", frame: window.frame)
         for (tab, heading) in [("作品", "portfolio-heading"), ("影视", "credits-heading"),
-                               ("收藏", "favorites-heading"), ("关于", "about-heading")] {
+                               ("收藏", "favorites-heading"), ("关于", "about-biography")] {
             tabButton(tab, in: app).tap()
             XCTAssertTrue(element(heading, in: app).waitForExistence(timeout: 8))
             if tab == "影视" {
@@ -2722,7 +2765,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的应用窗口")
 
-        let heading = element("about-heading", in: app)
+        let heading = element("about-biography", in: app)
         // SwiftUI forwards the image identifier to its retry button when
         // loading fails. Measure the real canvas in BOTH success and failure
         // states, just as the large-text About regressions already do.
@@ -2818,7 +2861,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         recordPresentationGeometry("about-pinned-scroll", frame: window.frame)
         let portrait = element("about-portrait", in: app)
         let role = element("about-role-summary", in: app)
-        let heading = element("about-heading", in: app)
+        let heading = element("about-biography", in: app)
         XCTAssertTrue(portrait.waitForExistence(timeout: 8))
         XCTAssertTrue(role.waitForExistence(timeout: 8))
         XCTAssertTrue(heading.waitForExistence(timeout: 8))
@@ -3143,7 +3186,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             let window = app.windows.firstMatch.frame
             XCTAssertTrue(element("home-open-portfolio", in: app).waitForExistence(timeout: 8))
             for (title, heading) in [("作品", "portfolio-heading"), ("影视", "credits-heading"),
-                                     ("收藏", "favorites-heading"), ("关于", "about-heading")] {
+                                     ("收藏", "favorites-heading"), ("关于", "about-biography")] {
                 tabButton(title, in: app).tap()
                 XCTAssertTrue(element(heading, in: app).waitForExistence(timeout: 6), "\(theme)：\(title)丢失")
             }
