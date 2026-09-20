@@ -3,6 +3,31 @@ import XCTest
 import Vision
 
 final class YishuUITests: XCTestCase {
+    func testAlbumFirstPhotoFillsWidthAndCaptionSitsBelow() {
+        for theme in ["blackGold", "ivory"] {
+            let app = launchApp(arguments: ["-open-portfolio-for-visual-testing",
+                "-use-deterministic-gallery-images-for-testing",
+                "-cn.com.shuzijun.yishu.appearance.v1", theme], screenProtectionEnabled: true)
+            let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
+            XCTAssertTrue(card.waitForExistence(timeout: 8))
+            let title = app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-title-")).firstMatch
+            let cover = app.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-cover-")).firstMatch
+            if cover.exists { XCTAssertGreaterThanOrEqual(title.frame.minY, cover.frame.maxY, "相册名位于封面下方") }
+            card.tap()
+            let photo = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-")).firstMatch
+            XCTAssertTrue(photo.waitForExistence(timeout: 8))
+            let frame = photo.frame
+            XCTAssertEqual(frame.width, app.windows.firstMatch.frame.width, accuracy: 2, "首图必须填满页面宽度")
+            XCTAssertEqual(frame.height / frame.width, 1.5, accuracy: 0.02, "保留测试图的完整 2:3 比例")
+            app.swipeUp()
+            let caption = element("portfolio-hero-caption", in: app)
+            XCTAssertTrue(caption.waitForExistence(timeout: 5))
+            XCTAssertGreaterThanOrEqual(caption.frame.minY, photo.frame.maxY - 2, "标题说明不能覆盖照片")
+            app.terminate()
+        }
+    }
+
+
     func testAboutCompactLayoutKeepsNavigationAndCompleteCaption() throws {
 #if targetEnvironment(simulator)
         addTeardownBlock { XCUIDevice.shared.orientation = .portrait }

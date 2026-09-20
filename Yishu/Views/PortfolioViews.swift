@@ -373,14 +373,16 @@ private struct PortfolioGridCard: View {
     let portfolio: Portfolio
 
     private var editorialEyebrow: String {
-        portfolio.eyebrow.replacingOccurrences(of: " · ", with: "\n")
+        portfolio.eyebrow
     }
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
+        VStack(alignment: .leading, spacing: 0) {
             ArtworkImage(url: portfolio.coverURL, showsRetryButton: false)
                 .aspectRatio(3 / 4, contentMode: .fit)
                 .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .accessibilityIdentifier("portfolio-cover-\(portfolio.id)")
             VStack(alignment: .leading, spacing: 5) {
                 Text(editorialEyebrow)
                     .font(.caption2.weight(.semibold))
@@ -389,20 +391,21 @@ private struct PortfolioGridCard: View {
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
                     .layoutPriority(1)
-                    .foregroundStyle(PortfolioCaptionPalette.current.accent)
+                    .foregroundStyle(AppTheme.muted)
                     .accessibilityLabel(portfolio.eyebrow)
                 Text(portfolio.title)
                     .font(.system(.title3, design: .serif))
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
-                    .foregroundStyle(PortfolioCaptionPalette.current.title)
+                    .foregroundStyle(AppTheme.warmWhite)
+                    .accessibilityIdentifier("portfolio-title-\(portfolio.id)")
             }
-            .padding(14)
+            .padding(.top, 12)
+            .padding(.horizontal, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
 
         }
         .frame(maxWidth: .infinity)
-        .clipShape(RoundedRectangle(cornerRadius: 3))
     }
 }
 
@@ -423,13 +426,6 @@ struct PortfolioDetailView: View {
         return Array(repeating: GridItem(.flexible(), spacing: 8), count: count)
     }
 
-    private var heroHeight: CGFloat {
-        if dynamicTypeSize.isAccessibilitySize {
-            return horizontalSizeClass == .regular ? 720 : 600
-        }
-        return horizontalSizeClass == .regular ? 660 : 500
-    }
-
     private var galleryImages: [PortfolioImage] {
         Array(currentPortfolio.images.dropFirst())
     }
@@ -448,17 +444,14 @@ struct PortfolioDetailView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if let firstImage = currentPortfolio.images.first {
                         Button { selectedImage = firstImage } label: {
-                            PortfolioHeroArtwork(
-                                image: firstImage,
-                                portfolio: currentPortfolio
-                            )
-                            .frame(maxWidth: 760)
-                            .frame(height: heroHeight)
-                            .frame(maxWidth: .infinity)
+                            PortfolioHeroArtwork(image: firstImage)
+                                .id(firstImage.url)
+                                .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("portfolio-open-image-\(firstImage.id)")
                         .accessibilityLabel("打开\(firstImage.altText)")
+                        PortfolioHeroCaption(portfolio: currentPortfolio)
                     } else {
                         PortfolioEmptyArtwork(portfolio: currentPortfolio)
                             .frame(height: 360)
@@ -562,30 +555,58 @@ struct PortfolioDetailView: View {
 
 private struct PortfolioHeroArtwork: View {
     let image: PortfolioImage
+    @State private var sourceAspect: CGFloat = 2 / 3
+
+    var body: some View {
+        GeometryReader { proxy in
+            DownsampledAsyncImage(url: image.url, targetSize: proxy.size, showsRetryButton: false,
+                onImageLoaded: { loaded in
+                    guard loaded.size.width > 0, loaded.size.height > 0 else { return }
+                    let aspect = loaded.size.width / loaded.size.height
+                    if abs(sourceAspect - aspect) > 0.001 { sourceAspect = aspect }
+                }) { phase in
+                    switch phase {
+                    case .success(let photo):
+                        photo.resizable().scaledToFit()
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                    case .empty:
+                        AppTheme.elevatedInk.overlay { ProgressView().tint(AppTheme.gold) }
+                    default:
+                        AppTheme.elevatedInk.overlay { Image(systemName: "photo").foregroundStyle(AppTheme.muted) }
+                    }
+                }
+        }
+        // The canvas follows the actual image instead of imposing a fixed
+        // 500/660-point height that creates side gutters around a portrait.
+        .aspectRatio(sourceAspect, contentMode: .fit)
+        .clipped()
+        .contentShape(Rectangle())
+    }
+}
+
+private struct PortfolioHeroCaption: View {
     let portfolio: Portfolio
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            EditorialArtworkImage(url: image.url)
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text(portfolio.eyebrow)
-                    .font(.caption2.weight(.semibold))
-                    .tracking(2)
-                    .foregroundStyle(PortfolioCaptionPalette.current.accent)
-                Text(portfolio.title)
-                    .font(.system(.largeTitle, design: .serif))
-                Text(portfolio.subtitle)
-                    .font(.subheadline)
-                    .foregroundStyle(PortfolioCaptionPalette.current.subtitle)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .foregroundStyle(PortfolioCaptionPalette.current.title)
-            .multilineTextAlignment(.leading)
-            .padding(.horizontal, 22)
-            .padding(.bottom, 24)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(portfolio.eyebrow)
+                .font(.caption2.weight(.semibold))
+                .tracking(1)
+                .foregroundStyle(AppTheme.muted)
+            Text(portfolio.title)
+                .font(.system(.title, design: .serif))
+                .foregroundStyle(AppTheme.warmWhite)
+                .accessibilityAddTraits(.isHeader)
+            Text(portfolio.subtitle)
+                .font(.subheadline)
+                .foregroundStyle(AppTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .contentShape(Rectangle())
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 20)
+        .padding(.top, 20)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("portfolio-hero-caption")
     }
 }
 
