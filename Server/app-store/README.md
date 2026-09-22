@@ -1,8 +1,9 @@
 # 商店资料与上传前检查
 
 `zh-Hans.json` 是商店文案本地候选，不保存审核密码、身份码或签名凭据。
-2026-09-22 的 1.5 候选增加公开体验说明；须在服务端选片部署、客户端回归通过后再同步到 App Store Connect，尚未在线发布。
-上架实际缺项以仓库根目录 `APP_STORE_READINESS.md` 的最新证据为准。
+2026-09-23，1.5（2）公开体验文案已同步 App Store Connect；TestFlight 内外部可测，
+正式提交等待审核，批准后自动发布。实际状态见 `Docs/V1.5-BUILD2-RELEASE.md`，
+不要将历史 `APP_STORE_READINESS.md` 的旧状态代替当前发行证据。
 
 ## 检查实际导出的签名 App
 
