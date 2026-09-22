@@ -84,7 +84,7 @@ struct AppWorkspaceSelectionView: View {
             } header: {
                 Text("服务环境")
             } footer: {
-                Text("正式环境用于日常使用。演示环境使用独立账号与演示资料，不会修改正式用户或作品；两边均需注册、审批和正常登录。")
+                Text("正式环境用于日常使用。演示环境使用独立账号与演示资料，不会修改正式用户或作品；两边的审批专区均需注册、审批和正常登录；公开体验区只展示各自管理员明确公开的精选内容。")
             }
             .listRowBackground(AppTheme.elevatedInk)
             Section {

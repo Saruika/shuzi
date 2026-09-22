@@ -12,7 +12,9 @@ declare(strict_types=1);
  * A receipt is durable before the single-column SQL update. Only post_content
  * changes: timestamps, title, author, status, slug, metadata and revisions are
  * untouched. WordPress post-update hooks intentionally do not run. Only the
- * exact post's cache is invalidated. This does not claim CDN/page-cache refresh.
+ * exact post's object-cache key/query generation is invalidated without hooks.
+ * This does not claim CDN/page-cache refresh. Bootstrap SQL is read-only; the
+ * transaction uses a no-reconnect connection and process-local object cache.
  * In this CLI process only, the reviewed App API init maintenance callbacks are
  * removed before init. DISABLE_WP_CRON by itself does not prevent init writes.
  * Keep receipts after success/failure; never blindly retry an uncertain commit.
@@ -26,12 +28,19 @@ final class GamePrivacyDiagnostics {
     public static string $stage = 'startup';
 }
 
+final class GamePrivacyRuntime {
+    public static bool $allowPageWrite = false;
+    public static ?string $pageUpdateQuery = null;
+    public static ?object $sharedCache = null;
+    public static bool $persistentCache = false;
+}
+
 final class GamePrivacyPolicy {
     public const SITE = '/var/www/html/shuzijun.com.cn';
     public const HOME = 'https://www.shuzijun.com.cn';
     public const POST_ID = 115;
     public const PAYLOAD = '/var/lib/shuzijun-app-content/privacy/app-privacy-policy.html';
-    public const PAYLOAD_SHA256 = 'f3233402de41144d98720f0d893128c12c1826b9bead45649b2c4a29bfa838ce';
+    public const PAYLOAD_SHA256 = 'c8228b76af95a613c0daf006802370c7341d8c6f75d331056bfd4325c3ea0ff5';
     public const BACKUPS = '/var/backups/shuzijun-app-content';
     public const ROLE = '/etc/shuzijun/account-authority-role';
     public const LOCK = '/var/lib/shuzijun-sync/site-operation.lock';
@@ -79,7 +88,10 @@ function game_privacy_server(): array {
 }
 
 function game_privacy_maintenance_callbacks(): array {
-    return array('ensure_roles' => 20, 'ensure_collaboration_storage' => 21,
+    // This pure add_image_size registration is unnecessary in the one-shot CLI;
+    // explicitly remove it, while continuing to reject every unknown App hook.
+    return array('register_public_preview_image_size' => 10,
+        'ensure_roles' => 20, 'ensure_collaboration_storage' => 21,
         'ensure_push_storage' => 22, 'ensure_fan_apple_revocation_schedule' => 40,
         'ensure_fan_apple_event_schedule' => 41, 'ensure_fan_apple_tombstone_schedule' => 42,
         'ensure_collaboration_outbox_schedule' => 43, 'ensure_push_outbox_schedule' => 44);
@@ -119,6 +131,68 @@ function game_privacy_preinitialize_maintenance_guards(): void {
     $guard = array('function' => 'game_privacy_block_maintenance', 'accepted_args' => 0);
     $GLOBALS['wp_filter']['muplugins_loaded'][PHP_INT_MAX][] = $guard;
     $GLOBALS['wp_filter']['init'][PHP_INT_MIN][] = $guard;
+}
+
+/** Load only the reviewed DB/cache primitives, never the selection CLI. */
+function game_privacy_load_runtime_primitives(): void {
+    $path = __DIR__ . '/apply-public-experience-selection.php';
+    $bytes = game_privacy_read($path, 131072);
+    game_privacy_require(hash('sha256', $bytes) ===
+        'ca1e99bc39a83837d3f71750e03163f0764f6f070c35346ec7d1684f6c07702b', 'runtime_primitives_hash');
+    if (!defined('YISHU_PUBLIC_SELECTION_LIBRARY_ONLY')) { define('YISHU_PUBLIC_SELECTION_LIBRARY_ONLY', true); }
+    require_once $path;
+    game_privacy_require(class_exists('PublicSelectionMemoryCache', false)
+        && function_exists('public_selection_pin_database')
+        && function_exists('public_selection_shared_ready'), 'runtime_primitives_missing');
+}
+
+/** Process-only SQL guard: unknown bootstrap writes fail before execution. */
+function game_privacy_guard_query(string $query): string {
+    $statement = ltrim($query);
+    $read = preg_match('/^(?:SELECT|SHOW|DESCRIBE|EXPLAIN)\s/i', $statement) === 1
+        && preg_match('/\bINTO\s+(?:OUTFILE|DUMPFILE)\b/i', $statement) !== 1;
+    $control = in_array(strtoupper(trim($query)), array('START TRANSACTION', 'COMMIT', 'ROLLBACK'), true);
+    $page = GamePrivacyRuntime::$pageUpdateQuery !== null
+        && hash_equals(GamePrivacyRuntime::$pageUpdateQuery, $query);
+    game_privacy_require($read || (GamePrivacyRuntime::$allowPageWrite && ($control || $page)), 'unreviewed_database_write');
+    return $query;
+}
+
+/** Keep plugin init/shutdown and transaction reads out of shared cache writes. */
+function game_privacy_isolate_cache(): void {
+    global $wpdb;
+    game_privacy_require(GamePrivacyRuntime::$sharedCache === null && isset($wpdb), 'fresh_cache_isolation');
+    $shared = $GLOBALS['wp_object_cache'] ?? null;
+    game_privacy_require(is_object($shared), 'shared_cache_shape');
+    $persistent = wp_using_ext_object_cache();
+    public_selection_shared_ready($shared, $persistent);
+    GamePrivacyRuntime::$sharedCache = $shared;
+    GamePrivacyRuntime::$persistentCache = $persistent;
+    $GLOBALS['wp_object_cache'] = new PublicSelectionMemoryCache((int) $wpdb->blogid);
+}
+
+function game_privacy_preinitialize_runtime_guards(): void {
+    $GLOBALS['wp_filter']['query'][PHP_INT_MAX][] = array('function' => 'game_privacy_guard_query', 'accepted_args' => 1);
+    $GLOBALS['wp_filter']['muplugins_loaded'][PHP_INT_MIN][] = array('function' => 'game_privacy_isolate_cache', 'accepted_args' => 0);
+}
+
+/** Exact shared deletion, no post-update/cache hooks or shared-cache fills. */
+function game_privacy_invalidate_shared(int $postID): void {
+    game_privacy_require($postID === GamePrivacyPolicy::POST_ID, 'cache_post_scope');
+    $shared = GamePrivacyRuntime::$sharedCache;
+    $local = $GLOBALS['wp_object_cache'] ?? null;
+    game_privacy_require(is_object($shared) && $local instanceof PublicSelectionMemoryCache, 'isolated_cache_required');
+    public_selection_shared_ready($shared, GamePrivacyRuntime::$persistentCache);
+    if (GamePrivacyRuntime::$persistentCache) {
+        game_privacy_require($shared->flush_runtime() === true, 'shared_runtime_cache_clear');
+    }
+    $shared->delete($postID, 'posts');
+    $shared->delete('last_changed', 'posts');
+    public_selection_shared_ready($shared, GamePrivacyRuntime::$persistentCache);
+    if (GamePrivacyRuntime::$persistentCache) {
+        game_privacy_require($shared->flush_runtime() === true, 'shared_runtime_cache_clear');
+    }
+    $local->flush();
 }
 
 function game_privacy_require(bool $condition, string $code): void {
@@ -306,9 +380,11 @@ function game_privacy_change(object $db, string $expectedHash, string $target, ?
     callable $backup, callable $authority, callable $invalidate): array {
     $table = game_privacy_table($db);
     game_privacy_stage('transaction_start');
-    game_privacy_require($db->query('START TRANSACTION') !== false, 'transaction_start');
+    game_privacy_require($db->query('START TRANSACTION') !== false && $db->last_error === '', 'transaction_start');
     $committed = false;
+    $commitAttempted = false;
     $backupID = null;
+    $before = null;
     try {
         game_privacy_stage('authority_verify');
         $authority();
@@ -319,7 +395,7 @@ function game_privacy_change(object $db, string $expectedHash, string $target, ?
             game_privacy_require(game_privacy_same_other_fields($before, $original), 'restore_foreign_fields');
         } else { game_privacy_validate_payload($target); }
         if ($before['post_content'] === $target) {
-            game_privacy_require($db->query('ROLLBACK') !== false, 'transaction_rollback');
+            game_privacy_require($db->query('ROLLBACK') !== false && $db->last_error === '', 'transaction_rollback');
             return array('status' => 'unchanged', 'postID' => GamePrivacyPolicy::POST_ID,
                 'currentSha256' => $expectedHash);
         }
@@ -330,13 +406,17 @@ function game_privacy_change(object $db, string $expectedHash, string $target, ?
         game_privacy_stage('page_update');
         $sql = $db->prepare("UPDATE $table SET post_content=%s WHERE ID=%d AND post_type='page'"
             . " AND post_name='app-privacy' AND post_status='publish'", $target, GamePrivacyPolicy::POST_ID);
-        game_privacy_require(is_string($sql) && $db->query($sql) === 1 && $db->last_error === '', 'page_update');
+        game_privacy_require(is_string($sql), 'page_update');
+        GamePrivacyRuntime::$pageUpdateQuery = $sql;
+        try { game_privacy_require($db->query($sql) === 1 && $db->last_error === '', 'page_update'); }
+        finally { GamePrivacyRuntime::$pageUpdateQuery = null; }
         game_privacy_stage('transaction_readback');
         $after = game_privacy_select($db, true);
         game_privacy_require($after['post_content'] === $target
             && game_privacy_same_other_fields($before, $after), 'transaction_readback');
         game_privacy_stage('commit');
-        game_privacy_require($db->query('COMMIT') !== false, 'commit_uncertain_keep_backup');
+        $commitAttempted = true;
+        game_privacy_require($db->query('COMMIT') !== false && $db->last_error === '', 'commit_uncertain_keep_backup');
         $committed = true;
         // Invalidate even if a later verification fails: no stale object cache.
         game_privacy_stage('cache_invalidate');
@@ -348,9 +428,24 @@ function game_privacy_change(object $db, string $expectedHash, string $target, ?
             'postID' => GamePrivacyPolicy::POST_ID, 'currentSha256' => hash('sha256', $target),
             'backupID' => $backupID);
     } catch (Throwable $error) {
-        if (!$committed) { $db->query('ROLLBACK'); }
         // No raw database/body/URL exception is ever printed by the CLI.
         $failure = $error instanceof GamePrivacyFailure ? $error : new GamePrivacyFailure('unexpected_keep_backup');
+        if (!$committed && $commitAttempted) {
+            // A lost COMMIT response cannot prove rollback is safe. Never send
+            // another transaction command/reconnect/replay; keep the receipt.
+            $failure = new GamePrivacyFailure('commit_uncertain_keep_backup');
+            try { $invalidate(GamePrivacyPolicy::POST_ID); } catch (Throwable $cacheError) { /* Keep uncertainty. */ }
+        } elseif (!$committed) {
+            try {
+                game_privacy_require($db->query('ROLLBACK') !== false && $db->last_error === '', 'rollback_uncertain_keep_backup');
+                if ($before !== null) {
+                    game_privacy_require(game_privacy_select($db, false) === $before, 'transaction_outcome_uncertain_keep_backup');
+                }
+            } catch (Throwable $rollbackError) {
+                $failure = new GamePrivacyFailure('transaction_outcome_uncertain_keep_backup');
+                try { $invalidate(GamePrivacyPolicy::POST_ID); } catch (Throwable $cacheError) { /* Keep uncertainty. */ }
+            }
+        }
         $failure->backupID = $backupID;
         if ($failure->diagnostic === null) {
             $failure->diagnostic = game_privacy_diagnostic(0, $error->getFile(), $error->getLine());
@@ -425,12 +520,21 @@ function game_privacy_bootstrap(): mixed {
 }
 
 function game_privacy_main(array $arguments): array {
+    game_privacy_load_runtime_primitives();
+    game_privacy_preinitialize_runtime_guards();
     // Runtime, authority and cron isolation precede all mutation-mode parsing.
     $lock = game_privacy_bootstrap();
     try {
         global $wpdb;
+        // The shared bootstrap also serves the already deployed photo selector;
+        // keep this privacy-only guard outside that reusable bootstrap function.
+        public_selection_pin_database();
+        game_privacy_require((string) $wpdb->get_var('SELECT @@SESSION.autocommit') === '1'
+            && $wpdb->last_error === '' && GamePrivacyRuntime::$sharedCache !== null
+            && $GLOBALS['wp_object_cache'] instanceof PublicSelectionMemoryCache, 'privacy_runtime_isolation');
         game_privacy_stage('arguments');
         [$mode, $value] = game_privacy_arguments($arguments);
+        GamePrivacyRuntime::$allowPageWrite = $mode !== 'dry-run';
         if ($mode === 'restore') {
             game_privacy_stage('receipt_verify');
             $directory = GamePrivacyPolicy::BACKUPS . '/privacy-' . $value;
@@ -440,7 +544,7 @@ function game_privacy_main(array $arguments): array {
             game_privacy_require(is_array($receipt), 'receipt_json');
             $original = game_privacy_validate_receipt($receipt);
             $result = game_privacy_change($wpdb, GamePrivacyPolicy::PAYLOAD_SHA256, $original['post_content'], $original,
-                'game_privacy_backup', 'game_privacy_authority', 'clean_post_cache');
+                'game_privacy_backup', 'game_privacy_authority', 'game_privacy_invalidate_shared');
             $result['backupID'] = $value;
             return $result;
         }
@@ -455,8 +559,13 @@ function game_privacy_main(array $arguments): array {
                 'changeNeeded' => $row['post_content'] !== $payload);
         }
         return game_privacy_change($wpdb, $value, $payload, null,
-            'game_privacy_backup', 'game_privacy_authority', 'clean_post_cache');
-    } finally { flock($lock, LOCK_UN); fclose($lock); }
+            'game_privacy_backup', 'game_privacy_authority', 'game_privacy_invalidate_shared');
+    } finally {
+        GamePrivacyRuntime::$allowPageWrite = false;
+        GamePrivacyRuntime::$pageUpdateQuery = null;
+        // Retain the memory-only cache through WordPress shutdown callbacks.
+        flock($lock, LOCK_UN); fclose($lock);
+    }
 }
 
 if (!defined('YISHU_GAME_PRIVACY_LIBRARY_ONLY')) {

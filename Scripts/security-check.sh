@@ -72,6 +72,7 @@ if grep -q -E '_UIText|NSClassFromString|objc_getClass|object_getClass|value\(fo
 fi
 
 if command -v php >/dev/null 2>&1; then
+  php Server/tests/public-experience-regression.php
   php -l Server/shuzijun-app-content.php >/dev/null
   php -l Server/vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php >/dev/null
   php Server/tests/collaboration-private-payload-test.php
@@ -83,6 +84,8 @@ if command -v php >/dev/null 2>&1; then
   php Server/tests/game-leaderboard-schema-installer-test.php
   php -l Server/operations/update-game-privacy-policy.php >/dev/null
   php Server/tests/game-privacy-policy-update-test.php
+  php -l Server/operations/apply-public-experience-selection.php >/dev/null
+  php Server/tests/public-experience-selection-operation-test.php
   php -l Server/operations/test-review-game-leaderboard.php >/dev/null
   php Server/tests/review-game-leaderboard-harness-test.php
   node --test Scripts/test-game-leaderboard-php.mjs
@@ -134,6 +137,7 @@ python3 Server/tests/review-catalog-test.py
 python3 Server/tests/review-accounts-test.py
 python3 Server/tests/review-upgrade-test.py
 python3 Server/tests/review-game-upgrade-test.py
+python3 Server/tests/review-public-upgrade-test.py
 python3 Server/tests/review-permalinks-test.py
 python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py

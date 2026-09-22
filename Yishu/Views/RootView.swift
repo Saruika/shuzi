@@ -50,6 +50,7 @@ struct RootView: View {
     @State private var hasPreparedLaunchPoster = false
     @State private var isLaunchPosterVisible = false
     @State private var hasResolvedAccess = false
+    @State private var presentsMemberAccess = false
     @State private var hasPreparedAuthorizedContent = false
     @State private var authorizedContentPreparationID: UUID?
     @State private var approvedContentRefreshID = UUID()
@@ -104,7 +105,7 @@ struct RootView: View {
             } else if canAccessAppContent {
                 authorizedAppContent
             } else {
-                AppAccessGateView()
+                PublicExperienceView(onMemberAccess: { presentsMemberAccess = true })
             }
         }
         .tint(usesDarkMediaCanvas ? MediaTheme.gold : AppTheme.gold)
@@ -116,6 +117,14 @@ struct RootView: View {
     var body: some View {
         themedAccessContent
         .task { await restoreAccess() }
+        .fullScreenCover(isPresented: $presentsMemberAccess) {
+            SecureCaptureSurface(owner: .fullScreenPresentation, onExit: { presentsMemberAccess = false }) {
+                AppAccessGateView(onClose: { presentsMemberAccess = false })
+            }
+        }
+        .onChange(of: canAccessAppContent) { _, approved in
+            if approved { presentsMemberAccess = false }
+        }
         .onChange(of: scenePhase, initial: true) { _, phase in
             guard phase == .active else { return }
             // The system permission alert makes the scene inactive. This task

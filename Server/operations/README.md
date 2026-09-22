@@ -194,11 +194,14 @@ symlink。候选 `nginx -t`、reload、service active 或任何后置条件失�
 
 ## App Content API 独立发布器
 
-当前代码候选为 **1.5.13.16 内部账号自愿排行榜**，保留此前相册可见性、红果入口及未启用的合作通知实现。
-精确清单、发布器摘要与验证边界见 [排行榜候选](../releases/game-leaderboard-candidate.md)；
+当前代码候选为 **1.5.13.17 独立公开体验目录**，保留审批专区、此前相册可见性、排行榜、红果入口及未启用的合作通知实现。
+精确清单、发布器摘要与验证边界见 [公开体验候选](../releases/public-experience-candidate.md)；
+[排行榜候选](../releases/game-leaderboard-candidate.md) 与
 [acceptance5](../releases/v1.4.0-build6-acceptance5.md) 保留为历史记录。发布器只接受明确登记的旧版本清单作为
 升级前置状态，不接受未知文件图。排行榜独立数据表必须另行批准、显式安装；HTTP 请求不能自动建表。
-尚未执行部署。下方旧版本路径与摘要仅为历史操作说明，不得直接复制用于新候选。
+2026-09-22 已部署到主备两节点；固定六张公开选择和 image 18 元数据修正
+已在上海主库提交，详见上述发布记录。未执行整站同步或 Apple 发布。
+下方旧版本路径与摘要仅为历史操作说明，不得直接复制用于新候选。
 
 `deploy-app-content-release` 只发布 App Content API 的固定代码单元：
 

@@ -14,6 +14,7 @@ struct FanAppleRegistrationDraft: Equatable {
 }
 
 struct AppAccessGateView: View {
+    var onClose: (() -> Void)? = nil
     @EnvironmentObject private var admin: AdminSessionStore
     @EnvironmentObject private var store: PortfolioStore
     @State private var presentsAdminAccess = false
@@ -25,6 +26,15 @@ struct AppAccessGateView: View {
                 externalAdminAccessPresented: presentsAdminAccess
             )
                 .toolbar {
+                    if let onClose {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button(action: onClose) {
+                                Image(systemName: "xmark").frame(width: 44, height: 44)
+                            }
+                            .accessibilityLabel("返回公开体验")
+                            .accessibilityIdentifier("access-gate-public-close")
+                        }
+                    }
                     ToolbarItem(placement: .topBarLeading) {
                         NavigationLink {
                             AppWorkspaceSelectionView()
@@ -246,7 +256,7 @@ struct FanAccountView: View {
                     .accessibilityIdentifier("fan-account-heading")
                     .accessibilityAddTraits(.isHeader)
                 Text(isAccessGate
-                     ? "请先注册并提交申请。管理员审批通过后，才能进入首页、作品、影视、收藏和关于页面。"
+                    ? "公开精选无需登录。访问完整相册、影视、收藏和会员内容，请先填写抖音 ID 并提交申请，管理员审批通过后即可进入专区。"
                      : "注册后会生成独立身份码和本机安装记录码，管理员可按账号远程分配权限。")
                     .font(.subheadline)
                     .lineSpacing(5)
@@ -630,7 +640,7 @@ struct FanAccountView: View {
 
                 if requiresDouyinCompletion {
                     Label(
-                        "这是旧版未绑定抖音 ID 的账号。为了保护账号身份，暂时不能访问影像内容。请在下方完成资料升级；你仍可退出或主动删除账号。",
+                        "这是旧版未绑定抖音 ID 的账号。为了保护账号身份，暂时不能访问审批专区影像。请在下方完成资料升级；你仍可退出或主动删除账号。",
                         systemImage: "person.text.rectangle"
                     )
                     .font(.subheadline)
@@ -1002,7 +1012,7 @@ struct FanAccountView: View {
     private func passwordRecoveryForm(_ profile: FanProfile) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Label(
-                "管理员已生成一次性恢复凭据。在这里设置新密码后才能继续使用 App。",
+                "管理员已生成一次性恢复凭据。在这里设置新密码后才能继续访问审批专区。",
                 systemImage: "key.horizontal.fill"
             )
             .font(.subheadline.weight(.semibold))
@@ -1084,11 +1094,11 @@ struct FanAccountView: View {
         let message: String
         switch FanAccountStatus(rawValue: status) {
         case .some(.pending):
-            message = "管理员审批通过前，首页、作品、影视、收藏和关于页面不会开放。本页会自动检查审批结果，你也可以手动刷新。"
+            message = "管理员审批通过前，完整相册、影视、收藏等专区内容不会开放。你可以返回公开体验继续浏览精选。本页会自动检查审批结果，你也可以手动刷新。"
         case .some(.rejected):
             message = "本次申请未获批准。你仍可查看和复制身份码、退出登录，或永久删除账号后重新申请。"
         case .some(.suspended):
-            message = "现有 App 内容访问已经停用。你仍可重新登录管理资料，并随时永久删除账号。"
+            message = "现有审批专区访问已经停用，公开精选仍可浏览。你仍可重新登录管理资料，并随时永久删除账号。"
         case .some(.active):
             message = "访问已批准，可按已授予权限使用相应内容。"
         case .none:
@@ -1550,7 +1560,7 @@ struct FanAccessAdminView: View {
             AppTheme.ink.ignoresSafeArea()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    Text("新注册用户会先进入待审批列表。只有管理员批准后，用户才能进入首页、作品、影视、收藏和关于页面。粉丝密码不会在后台显示。")
+                    Text("新注册用户会先进入待审批列表。只有管理员批准后，用户才能进入完整相册、影视、收藏等专区内容；公开精选无需审批。粉丝密码不会在后台显示。")
                         .font(.caption)
                         .lineSpacing(4)
                         .foregroundStyle(AppTheme.muted)
@@ -1692,7 +1702,7 @@ struct FanAccessAdminView: View {
                 .font(.headline)
                 .foregroundStyle(AppTheme.gold)
 
-            Text("临时凭据仅显示这一次，有效期 24 小时。对方首次登录后必须本人填写昵称和抖音 ID、确认隐私政策并设置新密码。在完成设置前无法访问任何作品内容。")
+            Text("临时凭据仅显示这一次，有效期 24 小时。对方首次登录后必须本人填写昵称和抖音 ID、确认隐私政策并设置新密码。在完成设置前无法访问审批专区作品，仍可浏览公开精选。")
                 .font(.caption)
                 .lineSpacing(4)
                 .foregroundStyle(AppTheme.muted)

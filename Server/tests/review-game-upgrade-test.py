@@ -18,7 +18,12 @@ spec.loader.exec_module(u)
 class PinnedContractTests(unittest.TestCase):
     def test_exact_real_manifest_and_asset_pins(self):
         self.assertEqual(u.BASELINE, '5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe')
-        self.assertEqual(u.TARGET, u.b.manifest(SERVER))
+        # This exact historical review upgrader is not a generic upgrade path.
+        # The new public trait requires its own approved review transition.
+        self.assertEqual(u.TARGET, '3adaebe7acbdeeb189a703c865f991935cf90a778a8151eaf85f272e7d053576')
+        self.assertNotEqual(u.TARGET, u.b.manifest(SERVER))
+        self.assertIn("check(map_manifest(candidate) == TARGET, 'candidate differs from reviewed release')",
+                      (SERVER / 'operations/upgrade-review-game-plugin.py').read_text())
         record = (SERVER / 'releases/game-leaderboard-candidate.md').read_text()
         self.assertIn('RELEASE_MANIFEST_SHA256=' + u.TARGET, record)
         self.assertEqual(len(u.CHANGED), 6)

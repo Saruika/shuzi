@@ -327,6 +327,7 @@ $plugin_module_paths = array(
     '/vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php',
+    '/vendor/shuzijun/app-content/trait-shuzijun-app-public-experience.php',
     '/vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php',
     '/vendor/shuzijun/app-content/class-shuzijun-game-rules.php',
     '/vendor/shuzijun/app-content/trait-shuzijun-app-game-leaderboard.php',
@@ -383,15 +384,15 @@ function expect_true(bool $condition, string $message): void {
 expect_true(
     is_string($plugin_entry_source)
         && is_string($plugin_implementation_source)
-        && count(array_filter($plugin_module_sources, 'is_string')) === 9
+        && count(array_filter($plugin_module_sources, 'is_string')) === 10
         && strpos(
             $plugin_entry_source,
             "require_once __DIR__ . '/vendor/shuzijun/app-content/class-shuzijun-app-content-api.php';"
         ) !== false
         && substr_count($plugin_entry_source, 'Shuzijun_App_Content_API::init();') === 1
         && strpos($plugin_implementation_source, 'final class Shuzijun_App_Content_API') !== false
-        && substr_count($plugin_implementation_source, 'require_once __DIR__ . \'/trait-') === 6
-        && substr_count($plugin_implementation_source, '    use Shuzijun_App_') === 6
+        && substr_count($plugin_implementation_source, 'require_once __DIR__ . \'/trait-') === 7
+        && substr_count($plugin_implementation_source, '    use Shuzijun_App_') === 7
         && strpos($plugin_implementation_source, 'Shuzijun_App_Content_API::init();') === false,
     '插件入口必须只装配一次模块化 API 实现并只启动一次'
 );
@@ -823,6 +824,13 @@ $default_route_names = array_map(
     static fn (array $record): string => (string) ($record['route'] ?? ''),
     $GLOBALS['yishu_test_registered_routes']
 );
+$public_routes = array_values(array_filter($GLOBALS['yishu_test_registered_routes'],
+    static fn (array $record): bool => ($record['route'] ?? '') === '/public-experience'));
+expect_same(1, count($public_routes), '公开目录必须是独立单一路由');
+expect_same('GET', $public_routes[0]['arguments']['methods'] ?? null, '公开目录只允许读取');
+expect_same('__return_true', $public_routes[0]['arguments']['permission_callback'] ?? null, '精选公开目录无需登录');
+expect_same(array(Shuzijun_App_Content_API::class, 'get_public_experience'),
+    $public_routes[0]['arguments']['callback'] ?? null, '公开目录不能复用受保护完整清单');
 $game_routes = array_values(array_filter(
     $GLOBALS['yishu_test_registered_routes'],
     static fn (array $record): bool => str_starts_with((string) ($record['route'] ?? ''), '/fan/game/')
@@ -2894,7 +2902,9 @@ expect_true(
         && strpos($privacy_policy_source, '推送内容与投递状态最长保留 30 天') !== false
         && strpos($privacy_policy_source, '消息通知是可选功能') !== false
         && strpos($privacy_policy_source, '抖音 ID 是注册') !== false
-        && strpos($privacy_policy_source, '未填写时不能完成新账号申请或获得内容访问') !== false
+        && strpos($privacy_policy_source, '未填写时不能完成新账号申请或获得审批专区内容访问') !== false
+        && strpos($privacy_policy_source, '公开体验区无需注册') !== false
+        && strpos($privacy_policy_source, '管理员明确公开的精选照片') !== false
         && strpos($privacy_policy_source, '尚未完成 Apple 账号申请的用户也可删除') !== false
         && strpos($privacy_policy_source, '管理员内容上传') !== false
         && strpos($privacy_policy_source, '照片、视频和封面') !== false

@@ -3,6 +3,100 @@ import XCTest
 import Vision
 
 final class YishuUITests: XCTestCase {
+    func testPublicExperienceStartsWithoutLoginOrMemberPermission() throws {
+#if targetEnvironment(simulator)
+        let app = launchPublicExperienceFixture()
+        defer { app.terminate() }
+        assertExists("public-experience-root", in: app, timeout: 12)
+        assertExists("public-album-901", in: app)
+        assertExists("public-member-entry", in: app)
+        XCTAssertFalse(element("fan-account-heading", in: app).exists,
+                       "游客应直接进入公开体验，而不是先被要求注册")
+        XCTAssertFalse(tabButton("首页", in: app).exists, "公开目录不得赋予审批专区主导航")
+        XCTAssertFalse(element("admin-use-bound-account", in: app).exists)
+        XCTAssertFalse(element("fan-message-detail", in: app).exists)
+        let search = element("public-search", in: app)
+        XCTAssertTrue(search.waitForExistence(timeout: 5))
+        search.tap()
+        search.typeText("东方")
+        XCTAssertTrue(element("public-album-901", in: app).waitForExistence(timeout: 5),
+                      "公开目录搜索应保留匹配的真实公开条目")
+#else
+        throw XCTSkip("公开目录测试使用专用模拟器夹具，不改动真机账号")
+#endif
+    }
+
+    func testPublicExperienceMemberGateCanCloseWithoutGrantingAccess() throws {
+#if targetEnvironment(simulator)
+        let app = launchPublicExperienceFixture()
+        defer { app.terminate() }
+        openPublicMemberAccess(in: app)
+        assertExists("fan-register-douyin-id", in: app)
+        assertExists("fan-sign-in-with-apple", in: app)
+        let close = element("access-gate-public-close", in: app)
+        XCTAssertTrue(close.waitForExistence(timeout: 5))
+        XCTAssertTrue(close.isHittable, "注册登录页必须允许返回公开体验")
+        close.tap()
+        XCTAssertTrue(element("public-album-901", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(element("public-member-entry", in: app).isHittable)
+        XCTAssertFalse(element("fan-account-heading", in: app).exists)
+        XCTAssertFalse(tabButton("首页", in: app).exists, "退出注册不能等同审批通过")
+        openPublicMemberAccess(in: app)
+        assertExists("fan-register-douyin-id", in: app)
+#else
+        throw XCTSkip("公开目录测试使用专用模拟器夹具，不改动真机账号")
+#endif
+    }
+
+    func testPublicExperiencePrivacyPolicyIsAvailableWithoutLogin() throws {
+#if targetEnvironment(simulator)
+        let app = launchPublicExperienceFixture()
+        defer { app.terminate() }
+        let privacy = element("public-privacy-entry", in: app)
+        XCTAssertTrue(privacy.waitForExistence(timeout: 12))
+        scrollToElement(privacy, in: app)
+        XCTAssertTrue(privacy.isHittable)
+        privacy.tap()
+        assertExists("privacy-policy-heading", in: app)
+        XCTAssertFalse(element("fan-account-heading", in: app).exists,
+                       "阅读隐私政策不能以注册登录为前提")
+        app.navigationBars.buttons.firstMatch.tap()
+        assertExists("public-experience-root", in: app)
+        XCTAssertFalse(tabButton("首页", in: app).exists)
+#else
+        throw XCTSkip("公开目录测试使用专用模拟器夹具，不改动真机账号")
+#endif
+    }
+
+    func testPublicExperienceFailureStaysRecoverableAndDoesNotInventContent() throws {
+#if targetEnvironment(simulator)
+        let app = launchPublicExperienceFixture(fails: true)
+        defer { app.terminate() }
+        let retry = element("public-catalog-retry", in: app)
+        XCTAssertTrue(retry.waitForExistence(timeout: 12), "公开接口失败必须提供重试")
+        XCTAssertFalse(element("public-album-901", in: app).exists,
+                       "加载失败不能回退到样例或会员相册")
+        XCTAssertFalse(element("public-catalog-empty", in: app).exists,
+                       "网络失败不能伪装为没有公开作品")
+        retry.tap()
+        XCTAssertTrue(retry.waitForExistence(timeout: 8))
+        openPublicMemberAccess(in: app)
+        assertExists("fan-register-douyin-id", in: app)
+        element("access-gate-public-close", in: app).tap()
+        XCTAssertTrue(retry.waitForExistence(timeout: 8), "注册页关闭后应返回可重试的公开页面")
+#else
+        throw XCTSkip("公开目录测试使用专用模拟器夹具，不改动真机账号")
+#endif
+    }
+
+    func testPublicAlbumNavigationAndPhotoCloseKeepPermissionBoundary() throws {
+#if targetEnvironment(simulator)
+        _ = verifyPublicAlbumCurrentWindow()
+#else
+        throw XCTSkip("公开目录测试使用专用模拟器夹具，不改动真机账号")
+#endif
+    }
+
     func testAlbumFirstPhotoFillsWidthAndCaptionSitsBelow() {
         for theme in ["blackGold", "ivory"] {
             let app = launchApp(arguments: ["-open-portfolio-for-visual-testing",
@@ -78,6 +172,7 @@ final class YishuUITests: XCTestCase {
             "-reset-fan-session-for-visual-testing", "-skip-launch-poster-for-visual-testing"]
         app.launch()
         defer { app.terminate() }
+        openPublicMemberAccess(in: app)
 
         let banner = element("workspace-review-banner", in: app)
         let workspaceEntry = element("access-gate-workspace-entry", in: app)
@@ -320,6 +415,7 @@ final class YishuUITests: XCTestCase {
             "-reset-fan-session-for-visual-testing", "-skip-launch-poster-for-visual-testing"]
         app.launch()
         defer { app.terminate() }
+        openPublicMemberAccess(in: app)
         let entry = element("access-gate-workspace-entry", in: app)
         XCTAssertTrue(entry.waitForExistence(timeout: 15))
         XCTAssertFalse(element("workspace-review-banner", in: app).exists)
@@ -331,6 +427,7 @@ final class YishuUITests: XCTestCase {
         XCTAssertFalse(element("workspace-review-banner", in: app).exists)
         element("workspace-select-review", in: app).tap()
         app.buttons["切换至审核演示环境"].firstMatch.tap()
+        openPublicMemberAccess(in: app)
         XCTAssertTrue(entry.waitForExistence(timeout: 15), "Switch must return to the real login gate")
         XCTAssertTrue(element("workspace-review-banner", in: app).waitForExistence(timeout: 5))
         XCTAssertFalse(tabButton("首页", in: app).exists, "Selecting review must not approve or log in a user")
@@ -342,11 +439,13 @@ final class YishuUITests: XCTestCase {
         app.terminate()
         app.launchArguments.removeFirst(2)
         app.launch()
+        openPublicMemberAccess(in: app)
         XCTAssertTrue(entry.waitForExistence(timeout: 15))
         XCTAssertTrue(element("workspace-review-banner", in: app).waitForExistence(timeout: 5))
         entry.tap()
         element("workspace-select-production", in: app).tap()
         app.buttons["切换至正式环境"].firstMatch.tap()
+        openPublicMemberAccess(in: app)
         XCTAssertTrue(entry.waitForExistence(timeout: 15))
         XCTAssertFalse(element("workspace-review-banner", in: app).exists)
         XCTAssertFalse(tabButton("首页", in: app).exists)
@@ -455,10 +554,8 @@ final class YishuUITests: XCTestCase {
         app.launchArguments = [
             "-app-service-environment", "production",
             "-skip-launch-poster-for-visual-testing",
-            "-disable-screen-protection-for-visual-testing",
             "-reset-fan-session-for-visual-testing",
         ]
-        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
         app.launch()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let permissionAlert = springboard.alerts.firstMatch
@@ -468,10 +565,12 @@ final class YishuUITests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(allow.waitForExistence(timeout: 3), "系统授权框缺少允许按钮")
         allow.tap()
+        openPublicMemberAccess(in: app)
         XCTAssertTrue(element("access-gate-admin-entry", in: app).waitForExistence(timeout: 10))
         XCTAssertFalse(tabButton("首页", in: app).exists, "允许通知不得跳过账号登录")
         app.terminate()
         app.launch()
+        openPublicMemberAccess(in: app)
         XCTAssertTrue(element("access-gate-admin-entry", in: app).waitForExistence(timeout: 10))
         XCTAssertFalse(permissionAlert.waitForExistence(timeout: 3), "已授权的下次启动不应重复弹窗")
     }
@@ -668,6 +767,7 @@ final class YishuUITests: XCTestCase {
         app.launch()
         defer { app.terminate() }
 
+        openPublicMemberAccess(in: app)
         let adminEntry = element("access-gate-admin-entry", in: app)
         XCTAssertTrue(adminEntry.waitForExistence(timeout: 15), "未登录访问页缺少管理员入口")
         XCTAssertFalse(tabButton("首页", in: app).exists, "未登录夹具不能绕过 App 访问门禁")
@@ -721,23 +821,24 @@ final class YishuUITests: XCTestCase {
             .joined(separator: " | ")
     }
 
-    func testAppRequiresAdministratorApprovalBeforeShowingContent() {
+    func testAppRequiresAdministratorApprovalBeforeShowingMemberContent() {
         let app = XCUIApplication()
         app.launchArguments = [
+            "-app-service-environment", "production",
             "-skip-launch-poster-for-visual-testing",
-            "-disable-screen-protection-for-visual-testing",
             "-reset-fan-session-for-visual-testing",
         ]
-        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
         app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
+        defer { app.terminate() }
 
+        openPublicMemberAccess(in: app)
         assertExists("fan-account-heading", in: app, timeout: 12)
         assertExists("fan-register-douyin-id", in: app)
         assertExists("fan-sign-in-with-apple", in: app)
         assertExists("fan-apple-prelogin-privacy", in: app)
         assertExists("access-gate-admin-entry", in: app)
-        XCTAssertFalse(app.tabBars.buttons["首页"].exists, "未审批用户不应看到主导航")
+        XCTAssertFalse(tabButton("首页", in: app).exists, "公开体验不能赋予会员主导航权限")
         attachScreenshot(named: "00-access-gate", app: app)
     }
 
@@ -747,6 +848,7 @@ final class YishuUITests: XCTestCase {
         app.launchArguments = ["-reset-fan-session-for-visual-testing",
                                "-skip-startup-notification-authorization-for-testing"]
         app.launch()
+        openPublicMemberAccess(in: app)
         let name = app.textFields["fan-register-display-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 12))
         scrollToElement(name, in: app)
@@ -774,6 +876,7 @@ final class YishuUITests: XCTestCase {
         XCTAssertEqual(name.value as? String, "主题回归", "更换主题不能清空已填写的注册资料")
         app.terminate()
         app.launch()
+        openPublicMemberAccess(in: app)
         XCTAssertTrue(name.waitForExistence(timeout: 12))
         scrollToElement(entry, in: app)
         XCTAssertEqual(entry.value as? String, "月白", "重启后应恢复本机外观偏好")
@@ -787,9 +890,9 @@ final class YishuUITests: XCTestCase {
     func testRegistrationConsentCannotBypassRequiredDouyinID() {
         let app = XCUIApplication()
         app.launchArguments = ["-reset-fan-session-for-visual-testing",
-                               "-skip-startup-notification-authorization-for-testing",
-                               "-disable-screen-protection-for-visual-testing"]
+                               "-skip-startup-notification-authorization-for-testing"]
         app.launch()
+        openPublicMemberAccess(in: app)
         let name = app.textFields["fan-register-display-name"]
         XCTAssertTrue(name.waitForExistence(timeout: 12))
         scrollToElement(name, in: app)
@@ -820,10 +923,10 @@ final class YishuUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-reset-fan-session-for-visual-testing",
                                "-skip-startup-notification-authorization-for-testing",
-                               "-disable-screen-protection-for-visual-testing",
                                "-UIPreferredContentSizeCategoryName",
                                "UICTContentSizeCategoryAccessibilityXXXL"]
         app.launch()
+        openPublicMemberAccess(in: app)
         let entry = element("theme-preference-entry", in: app)
         XCTAssertTrue(entry.waitForExistence(timeout: 12))
         scrollToElement(entry, in: app)
@@ -1072,14 +1175,13 @@ final class YishuUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = [
             "-skip-launch-poster-for-visual-testing",
-            "-disable-screen-protection-for-visual-testing",
             "-reset-fan-session-for-visual-testing",
             "-simulate-apple-registration-for-visual-testing",
         ]
-        app.launchEnvironment["YISHU_DISABLE_SCREEN_PROTECTION_FOR_VISUAL_TESTING"] = "1"
         app.launchArguments.append("-skip-startup-notification-authorization-for-testing")
         app.launch()
 
+        openPublicMemberAccess(in: app)
         assertExists("fan-apple-registration-required", in: app, timeout: 12)
         assertExists("fan-apple-display-name", in: app)
         assertExists("fan-apple-douyin-id", in: app)
@@ -2262,6 +2364,120 @@ final class YishuUITests: XCTestCase {
 }
 
 private extension XCTestCase {
+    /// These fixtures replace only the anonymous public DTO. They never grant
+    /// an account, bypass the approval gate, or turn off screenshot protection.
+    func launchPublicExperienceFixture(fails: Bool = false) -> XCUIApplication {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "-app-service-environment", "production",
+            "-reset-fan-session-for-visual-testing",
+            "-skip-launch-poster-for-visual-testing",
+            "-skip-startup-notification-authorization-for-testing",
+            "-use-deterministic-gallery-images-for-testing",
+            "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
+            fails ? "-fail-public-experience-for-testing" : "-use-public-experience-fixture-for-testing",
+        ]
+        app.launch()
+        return app
+    }
+
+    func openPublicMemberAccess(in app: XCUIApplication) {
+        let entry = presentationElement("public-member-entry", in: app)
+        XCTAssertTrue(entry.waitForExistence(timeout: 15), "未登录用户应先看到公开体验及审批专区入口")
+        // A toolbar element can enter the AX tree before the iPad window has
+        // completed its layout after the adaptive suite changes orientation.
+        // Wait for actual input readiness; never tap a coordinate or bypass
+        // the real member entry when it remains unavailable.
+        let ready = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in entry.exists && entry.isEnabled && entry.isHittable },
+            object: entry
+        )
+        let result = XCTWaiter.wait(for: [ready], timeout: 5)
+        if result != .completed {
+            let attachment = XCTAttachment(string:
+                "window=\(app.windows.firstMatch.frame); entry=\(entry.frame); enabled=\(entry.isEnabled); hittable=\(entry.isHittable)\n\(app.debugDescription)")
+            attachment.name = "public-member-entry-not-ready"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        XCTAssertEqual(result, .completed, "审批专区入口应在 5 秒内完成布局并可点击")
+        XCTAssertTrue(entry.isHittable, "审批专区入口必须可点击")
+        entry.tap()
+        XCTAssertTrue(presentationElement("access-gate-admin-entry", in: app).waitForExistence(timeout: 8),
+                      "公开体验入口应打开真正的注册登录页，不能伪造登录")
+    }
+
+    func verifyPublicAlbumCurrentWindow() -> CGRect {
+        let app = launchPublicExperienceFixture()
+        defer { app.terminate() }
+        let album = presentationElement("public-album-901", in: app)
+        XCTAssertTrue(album.waitForExistence(timeout: 12))
+        scrollPublicElementIntoView(album, in: app)
+        XCTAssertTrue(album.isHittable, "公开相册滚动进入当前窗口后必须可点击")
+        album.tap()
+        let photo = presentationElement("public-photo-9001", in: app)
+        XCTAssertTrue(photo.waitForExistence(timeout: 8))
+        scrollPublicElementIntoView(photo, in: app)
+        XCTAssertTrue(photo.isHittable, "公开相册首图应可打开")
+        photo.tap()
+        let close = presentationElement("public-gallery-close", in: app)
+        XCTAssertTrue(close.waitForExistence(timeout: 8))
+        let window = app.windows.firstMatch.frame
+        XCTAssertGreaterThan(window.width, 0)
+        XCTAssertGreaterThan(window.height, 0)
+        XCTAssertTrue(window.contains(close.frame), "公开照片关闭按钮必须位于当前实际窗口内")
+        XCTAssertTrue(close.isHittable, "iPad 横竖屏公开照片均必须可以关闭")
+        XCTAssertFalse(app.buttons["收藏照片"].exists, "游客照片页不能误用会员收藏操作")
+        XCTAssertFalse(app.buttons["取消收藏"].exists)
+        XCTAssertFalse(presentationElement("admin-use-bound-account", in: app).exists)
+        app.swipeLeft()
+        XCTAssertTrue(close.isHittable, "切换照片后关闭控件不得丢失")
+        close.tap()
+        XCTAssertTrue(close.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(photo.waitForExistence(timeout: 5), "关闭后应回到公开相册而非黑屏")
+        let back = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(back.waitForExistence(timeout: 5))
+        XCTAssertTrue(back.isHittable)
+        back.tap()
+        XCTAssertTrue(album.waitForExistence(timeout: 5))
+        XCTAssertTrue(presentationElement("public-member-entry", in: app).isHittable)
+        XCTAssertFalse(presentationElement("fan-account-heading", in: app).exists)
+        return window
+    }
+
+    func scrollPublicElementIntoView(_ element: XCUIElement, in app: XCUIApplication) {
+        let scene = app.windows.firstMatch
+        for _ in 0..<12 {
+            let window = scene.frame
+            let navigation = app.navigationBars.firstMatch
+            let top = max(window.minY + 20, navigation.exists ? navigation.frame.maxY + 12 : window.minY + 20)
+            let bottom = window.maxY - 30
+            let viewport = CGRect(x: window.minX, y: top, width: window.width,
+                                  height: max(1, bottom - top))
+            let frame = element.exists ? element.frame : .zero
+            // A portrait image may be taller than the current iPad landscape
+            // viewport. Require its tappable centre to be visible, not that the
+            // entire card fit at once or that existence imply visibility.
+            if element.isHittable, viewport.contains(CGPoint(x: frame.midX, y: frame.midY)) {
+                return
+            }
+            let limit = viewport.height * 0.4
+            let delta = frame.isEmpty ? -limit : viewport.midY - frame.midY
+            let start = scene.coordinate(withNormalizedOffset: .zero)
+                .withOffset(CGVector(dx: window.width * 0.7, dy: viewport.midY - window.minY))
+            let end = start.withOffset(CGVector(dx: 0, dy: max(-limit, min(limit, delta))))
+            start.press(forDuration: 0.1, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
+        // Text only: preserve the protected photo rendering rather than
+        // attaching a clean photograph to diagnose a navigation failure.
+        let attachment = XCTAttachment(string:
+            "target=\(element.identifier); frame=\(element.frame); hittable=\(element.isHittable)\n\(app.debugDescription)")
+        attachment.name = "public-navigation-unreachable-\(element.identifier)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTFail("公开元素经滚动仍未进入可点击区域：\(element.identifier)")
+    }
+
     func verifyLaunchPosterCurrentWindow() -> CGRect {
         let app = XCUIApplication()
         app.launchArguments = [
@@ -2425,6 +2641,7 @@ private extension XCTestCase {
         close.tap()
         let dismissed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == 0"), object: close)
         XCTAssertEqual(XCTWaiter.wait(for: [dismissed], timeout: 5), .completed)
+        openPublicMemberAccess(in: app)
         XCTAssertTrue(presentationElement("access-gate-admin-entry", in: app).waitForExistence(timeout: 5), "假消息回归不得绕过真实App登录门禁")
         XCTAssertFalse(app.buttons["发送"].exists)
         XCTAssertFalse(app.buttons["回复"].exists)
@@ -2766,6 +2983,14 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
 
     func testProtectedGalleryWorksInEveryActualWindowConfiguration() {
         recordPresentationGeometry("protected-gallery", frame: verifyProtectedGalleryCurrentWindow())
+    }
+
+    func testPublicAlbumWorksInEveryActualWindowConfiguration() throws {
+#if targetEnvironment(simulator)
+        recordPresentationGeometry("public-album", frame: verifyPublicAlbumCurrentWindow())
+#else
+        throw XCTSkip("公开目录横竖屏测试使用专用模拟器夹具，不改动真机账号")
+#endif
     }
 
     func testProtectedNotificationWorksInEveryActualWindowConfiguration() {

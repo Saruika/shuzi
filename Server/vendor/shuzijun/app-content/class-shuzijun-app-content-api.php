@@ -8,6 +8,7 @@ require_once __DIR__ . '/trait-shuzijun-app-fan-endpoints.php';
 require_once __DIR__ . '/trait-shuzijun-app-push-notifications.php';
 require_once __DIR__ . '/trait-shuzijun-app-fan-identity.php';
 require_once __DIR__ . '/trait-shuzijun-app-content-delivery.php';
+require_once __DIR__ . '/trait-shuzijun-app-public-experience.php';
 require_once __DIR__ . '/class-shuzijun-game-rules.php';
 require_once __DIR__ . '/trait-shuzijun-app-game-leaderboard.php';
 
@@ -161,13 +162,17 @@ final class Shuzijun_App_Content_API {
         add_action('template_redirect', array(__CLASS__, 'block_public_portfolio_pages'), 1);
         add_action('pre_get_posts', array(__CLASS__, 'hide_public_portfolio_queries'));
         add_action('wp_head', array(__CLASS__, 'hide_public_portfolio_section'));
+        add_action('add_meta_boxes_portfolio', array(__CLASS__, 'register_public_experience_meta_box'));
+        add_action('admin_notices', array(__CLASS__, 'public_experience_admin_notice'));
         // Account state is single-writer. Only the node whose root-owned fixed
         // role marker says `authority` may register asynchronous mutations. A
         // copied database, site configuration, hostname or forwarding header can never
         // promote a standby node.
         if (self::account_authority_enabled()) {
+            add_action('init', array(__CLASS__, 'register_public_preview_image_size'));
             add_action('init', array(__CLASS__, 'ensure_roles'), 20);
             add_action('save_post_portfolio', array(__CLASS__, 'portfolio_changed'), 20, 3);
+            add_action('save_post_portfolio', array(__CLASS__, 'save_public_experience_selection'), 21, 3);
             add_action('yishu_cleanup_fan_session', array(__CLASS__, 'cleanup_fan_session'), 10, 2);
             add_action('yishu_cleanup_fan_invitation', array(__CLASS__, 'cleanup_fan_invitation'), 10, 4);
             add_action('yishu_cleanup_fan_apple_challenge', array(__CLASS__, 'cleanup_fan_apple_challenge'), 10, 2);
@@ -354,6 +359,11 @@ final class Shuzijun_App_Content_API {
     }
 
     public static function register_routes() {
+        register_rest_route('shuzijun/v1', '/public-experience', array(
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => array(__CLASS__, 'get_public_experience'),
+            'permission_callback' => '__return_true',
+        ));
         register_rest_route('shuzijun/v1', '/fan/game/leaderboard', array(
             'methods' => WP_REST_Server::READABLE,
             'callback' => array(__CLASS__, 'get_game_leaderboard'),
@@ -739,5 +749,6 @@ final class Shuzijun_App_Content_API {
     use Shuzijun_App_Push_Notifications;
     use Shuzijun_App_Fan_Identity;
     use Shuzijun_App_Content_Delivery;
+    use Shuzijun_App_Public_Experience;
     use Shuzijun_App_Game_Leaderboard;
 }

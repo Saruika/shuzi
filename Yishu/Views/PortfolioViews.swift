@@ -946,7 +946,7 @@ struct ProgressiveGalleryArtwork: View, Equatable {
     }
 }
 
-private struct ZoomableArtwork: UIViewControllerRepresentable {
+struct ZoomableArtwork: UIViewControllerRepresentable {
     let image: PortfolioImage
     @Environment(\.appServiceEnvironment) private var serviceEnvironment
 
