@@ -36,6 +36,27 @@ executable="$app_path/Yishu"
 test -d "$app_path"
 test -x "$executable"
 
+# Inspect the built artifact as well as source: moved or flattened legacy
+# assets and stale native game code must not silently enter a Release bundle.
+python3 - "$app_path" <<'PY'
+import importlib.util
+from pathlib import Path
+import plistlib
+import sys
+
+spec = importlib.util.spec_from_file_location("distribution_package", "Scripts/check-distribution-package.py")
+checker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(checker)
+app = Path(sys.argv[1])
+checker.check_resources(app)
+checker.check_game_binary(app / "Yishu")
+privacy = plistlib.loads((app / "PrivacyInfo.xcprivacy").read_bytes())
+checker.require(not any(item.get("NSPrivacyCollectedDataType") == "NSPrivacyCollectedDataTypeGameplayContent"
+                        for item in privacy.get("NSPrivacyCollectedDataTypes", [])),
+                "gameplay_declaration_in_retired_client")
+print("release-bundle-audit: no game code, resources or gameplay declaration")
+PY
+
 assets_car="$app_path/Assets.car"
 test -f "$assets_car"
 asset_manifest="$temporary_root/assets.json"

@@ -13,7 +13,7 @@ function selection_test(bool $condition, string $label): void {
 }
 function selection_fails(callable $operation, string $expected): void {
     try { $operation(); selection_test(false, 'expected ' . $expected); }
-    catch (GamePrivacyFailure $error) { selection_test($error->getMessage() === $expected, $expected . ': ' . $error->getMessage()); }
+    catch (AppPrivacyFailure $error) { selection_test($error->getMessage() === $expected, $expected . ': ' . $error->getMessage()); }
 }
 
 final class SelectionFakeDB {
@@ -233,7 +233,7 @@ foreach (array(1, 2, 3, 4, 5) as $failWrite) {
     $db = selection_fixture(); $trace = array(); $fx = selection_effects($db, $trace);
     $before = public_selection_snapshot($db, false); $db->failWrite = $failWrite;
     try { public_selection_execute($db, 'apply', PublicSelectionPolicy::OLD_META, null, $fx); selection_test(false, 'failure injected'); }
-    catch (GamePrivacyFailure $error) {
+    catch (AppPrivacyFailure $error) {
         selection_test(in_array($error->getMessage(), array('metadata_update', 'metadata_insert', 'updated_option_write'), true), 'bounded partial failure code');
         selection_test($error->backupID === str_repeat('a', 32), 'partial failure keeps receipt ID');
     }
@@ -267,12 +267,12 @@ foreach (array('gallery', 'hidden', 'firstAlbums', 'foreignSelection') as $issue
 }
 
 $db = selection_fixture(); $trace = array(); $fx = selection_effects($db, $trace); $before = public_selection_snapshot($db, false);
-$fx['policy'] = static function (array $facts, bool $old): void { if (!$old) { throw new GamePrivacyFailure('real_public_image_policy_failed'); } };
+$fx['policy'] = static function (array $facts, bool $old): void { if (!$old) { throw new AppPrivacyFailure('real_public_image_policy_failed'); } };
 selection_fails(static fn() => public_selection_execute($db, 'apply', PublicSelectionPolicy::OLD_META, null, $fx), 'real_public_image_policy_failed');
 selection_test(public_selection_snapshot($db, false) === $before && !$trace['after'], 'policy after repair fails closed before publication');
 
 $db = selection_fixture(); $trace = array(); $fx = selection_effects($db, $trace); $before = public_selection_snapshot($db, false);
-$fx['finishBackup'] = static function (): void { throw new GamePrivacyFailure('backup_sync'); };
+$fx['finishBackup'] = static function (): void { throw new AppPrivacyFailure('backup_sync'); };
 selection_fails(static fn() => public_selection_execute($db, 'apply', PublicSelectionPolicy::OLD_META, null, $fx), 'backup_sync');
 selection_test(public_selection_snapshot($db, false) === $before, 'after receipt must be durable before commit');
 

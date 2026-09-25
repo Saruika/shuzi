@@ -34,9 +34,9 @@ class ReviewBootstrapTests(unittest.TestCase):
         # Historical acceptance records must not be rewritten when the local
         # candidate changes. Bind the bootstrap input to the current reviewed
         # candidate and the separately pinned production release graph.
-        release = (SERVER / 'releases/public-experience-candidate.md').read_text()
+        release = (SERVER / 'releases/no-game-candidate.md').read_text()
         values = [line for line in release.splitlines() if line.startswith('RELEASE_MANIFEST_SHA256=')]
-        expected = 'ae94b05f340b82842cca32beddb2c6ad7a9b69929ac97805a59f823ea28ff8ed'
+        expected = '69e10dcf6f07a68b93590851bfed12c89a832f4c69cbb2ff8953c2601a5896e4'
         self.assertEqual(values, ['RELEASE_MANIFEST_SHA256=' + expected])
         self.assertEqual(bootstrap.manifest(SERVER), expected)
         deployer = (SERVER / 'operations/deploy-app-content-release').read_text()
@@ -44,15 +44,15 @@ class ReviewBootstrapTests(unittest.TestCase):
                         if line.startswith('readonly TARGET_RELEASE_MANIFEST_SHA256=')]
         self.assertEqual(target_lines, ['readonly TARGET_RELEASE_MANIFEST_SHA256=' + expected])
 
-    def test_current_release_includes_rules_data_and_new_module(self):
+    def test_current_release_retains_public_catalog_without_game_payload(self):
         paths = {path.relative_to(SERVER).as_posix() for path in bootstrap.plugin_files(SERVER)}
-        self.assertEqual(len(paths), 38)
-        self.assertTrue({
+        self.assertEqual(len(paths), 35)
+        self.assertIn('vendor/shuzijun/app-content/trait-shuzijun-app-public-experience.php', paths)
+        self.assertFalse({
             'vendor/shuzijun/app-content/trait-shuzijun-app-game-leaderboard.php',
-            'vendor/shuzijun/app-content/trait-shuzijun-app-public-experience.php',
             'vendor/shuzijun/app-content/class-shuzijun-game-rules.php',
             'vendor/shuzijun/app-content/game-rules-v1.json',
-        }.issubset(paths))
+        } & paths)
 
     def test_mismatched_candidate_rejected_before_any_resource_operation(self):
         expected = bootstrap.manifest(SERVER)

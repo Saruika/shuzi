@@ -20,7 +20,6 @@ struct AboutView: View {
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var presentsAdminAccess = false
-    @State private var presentsEmbeddedGame = false
     // The managed About portrait is published as a 2:3 editorial image. Keep
     // the visual canvas on the same ratio so a fitted image and its caption
     // share one boundary instead of placing the caption in letterbox space.
@@ -58,14 +57,6 @@ struct AboutView: View {
                 AdminAccessView(onClose: { presentsAdminAccess = false })
                     .environmentObject(admin)
                     .environmentObject(portfolioStore)
-            }
-        }
-        .fullScreenCover(isPresented: $presentsEmbeddedGame) {
-            SecureCaptureSurface(
-                owner: .fullScreenPresentation,
-                onExit: { presentsEmbeddedGame = false }
-            ) {
-                EmbeddedGameView(account: fanAccount, onClose: { presentsEmbeddedGame = false })
             }
         }
     }
@@ -191,7 +182,6 @@ struct AboutView: View {
             links
             fanAccountAccess
             settingsAccess
-            embeddedGameAccess
             copyrightNotice
             privacyAccess
             adminAccess
@@ -524,34 +514,6 @@ struct AboutView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("about-settings")
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-    }
-
-    private var embeddedGameAccess: some View {
-        Button { presentsEmbeddedGame = true } label: {
-            HStack(spacing: 14) {
-                Image(systemName: "gamecontroller")
-                    .font(.title3)
-                    .foregroundStyle(AppTheme.gold)
-                    .frame(width: 38, height: 38)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("小游戏").font(.subheadline.weight(.semibold))
-                    Text("宦海浮沉录 · 离线游玩")
-                        .font(.caption)
-                        .foregroundStyle(AppTheme.muted)
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(AppTheme.muted)
-            }
-            .foregroundStyle(AppTheme.warmWhite)
-            .padding(15)
-            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("about-embedded-game")
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
     }

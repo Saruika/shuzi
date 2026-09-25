@@ -743,7 +743,7 @@ protocol FanAdministratorAccount: AnyObject {
 }
 
 @MainActor
-final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdministratorAccount, CollaborationAccount, GameLeaderboardAccount {
+final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdministratorAccount, CollaborationAccount {
     @Published private(set) var profile: FanProfile? {
         didSet { notificationStore.updateContext(notificationContext) }
     }
@@ -833,38 +833,6 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         return notificationContext
     }
 
-    /// Rankings use only the real approved App account, never the inbox UI fixture.
-    var gameLeaderboardContext: FanNotificationContext? {
-        guard !isRetired, isApproved, let profile else { return nil }
-        return FanNotificationContext(userID: profile.userID,
-                                      sessionGeneration: pushSessionGeneration,
-                                      environment: serviceEnvironment)
-    }
-
-    func fetchGameLeaderboard() async throws -> GameLeaderboardPage {
-        try await performGameLeaderboard(method: "GET", path: "leaderboard")
-    }
-
-    func submitGameScore(_ run: GameRunSubmission) async throws -> GameLeaderboardPage {
-        try await performGameLeaderboard(method: "POST", path: "scores", body: JSONEncoder().encode(run))
-    }
-
-    func removeGameScore() async throws -> GameLeaderboardPage {
-        try await performGameLeaderboard(method: "DELETE", path: "scores")
-    }
-
-    private func performGameLeaderboard(method: String, path: String, body: Data? = nil) async throws -> GameLeaderboardPage {
-        guard let expected = gameLeaderboardContext else { throw FanAccountError.sessionExpired }
-        let page: GameLeaderboardPage = try await perform(
-            path: "shuzijun/v1/fan/game/" + path, method: method, body: body, authorized: true
-        )
-        // A response from a previous login or service environment cannot be
-        // displayed or treated as a successful submission for the new account.
-        guard !Task.isCancelled, gameLeaderboardContext == expected else {
-            throw FanAccountError.sessionExpired
-        }
-        return page
-    }
     func authorizeCollaborationRequest(_ request: inout URLRequest, context: FanNotificationContext) throws {
         guard collaborationContext == context, let token,
               context.environment == serviceEnvironment,
@@ -2316,14 +2284,6 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
             throw FanAccountError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            if path.hasPrefix("shuzijun/v1/fan/game/") {
-                if http.statusCode == 401 || http.statusCode == 403 {
-                    throw GameLeaderboardError.signInRequired
-                }
-                if http.statusCode == 404 || http.statusCode >= 500 {
-                    throw GameLeaderboardError.unavailable
-                }
-            }
             if path == "shuzijun/v1/fan/notifications" || path.hasPrefix("shuzijun/v1/fan/notifications/") {
                 if http.statusCode == 401 || http.statusCode == 403 {
                     throw FanNotificationError.signInRequired

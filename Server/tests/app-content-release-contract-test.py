@@ -1,12 +1,11 @@
 import hashlib
-import json
 from pathlib import Path
 
 
 DEPLOYER = Path("Server/operations/deploy-app-content-release")
 STANDBY_SEEDER = Path("Server/operations/seed-standby-app-content-release")
 OPERATIONS_README = Path("Server/operations/README.md")
-RELEASE_RECORD = Path("Server/releases/public-experience-candidate.md")
+RELEASE_RECORD = Path("Server/releases/no-game-candidate.md")
 HISTORICAL_RELEASE_RECORD = Path("Server/releases/v1.4.0-build6-acceptance5.md")
 AUTHORITY_VERIFIER = Path("Server/operations/verify-account-authority-role.py")
 WEBROOT_VERIFIER = Path("Server/operations/verify-webroot-security")
@@ -22,31 +21,26 @@ PLUGIN_MODULES = (
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php",
-    SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-game-leaderboard.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/trait-shuzijun-app-public-experience.php",
     SERVER_ROOT / "vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php",
-    SERVER_ROOT / "vendor/shuzijun/app-content/class-shuzijun-game-rules.php",
-    SERVER_ROOT / "vendor/shuzijun/app-content/game-rules-v1.json",
     PLUGIN_IMPLEMENTATION,
 )
 LEGACY_MANIFEST_SHA256 = "64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134"
 PREVIOUS_MANIFEST_SHA256 = "5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe"
 PREVIOUS_MODULAR_MANIFEST_SHA256 = "2b632ca195a65f1f0309bf66a9098ef52ca49a5eec9d80a5b7d9c32b8fbdfdee"
 PREVIOUS_GAME_MANIFEST_SHA256 = "3adaebe7acbdeeb189a703c865f991935cf90a778a8151eaf85f272e7d053576"
-TARGET_MANIFEST_SHA256 = "ae94b05f340b82842cca32beddb2c6ad7a9b69929ac97805a59f823ea28ff8ed"
-TARGET_PLUGIN_SHA256 = "64159cb211d3228494ee73b91f884f7c30a46d7c249c79741d31bae19d71e2af"
+PREVIOUS_PUBLIC_MANIFEST_SHA256 = "ae94b05f340b82842cca32beddb2c6ad7a9b69929ac97805a59f823ea28ff8ed"
+TARGET_MANIFEST_SHA256 = "69e10dcf6f07a68b93590851bfed12c89a832f4c69cbb2ff8953c2601a5896e4"
+TARGET_PLUGIN_SHA256 = "14d94c2abce0c1737deb16bf6fe42bd82e8487a2595ab872ca4deb0f1b95eec4"
 TARGET_MODULE_SHA256S = (
     "7175ae3aefb1add1af504c2bbbba355b5e448a81818d7c00ace12c37cc6dc4e5",
     "bd689473956b67b480ce62704b73d39ea6c7a9536a19496120722d2524f65160",
     "7c5be7cf3347b187f6c88a12ad6a21f0001a5e7c92edbfe7a99e834abc1eebb7",
-    "c5f6647843ee58f7db268654cfcbba73d92404d0e3ea4d2e3ac7db9d25199d65",
+    "77d2a10cd9df7af2698ec36b3cfcbfe07765dbd2a03b401b8a7effb03bb3bf1c",
     "f27863d35b6a701d45afd6bfcecb5b235983497fee71553d18ec801bcbec2d6a",
-    "5d535654e713b60a58059087a35ca086ff35e12cd0e859a302850fb56058fbd9",
     "58a07e016adea07b27652e88b95efb96dbcb228d7dc9d03f2109722b26584b8e",
     "bdcea372748c79a06284f01570d0863d20316bf3d4d33fe7924c16d100a1b1d7",
-    "a75a0b61fe46be1bfe0993c2266b54fc2b30c8766ac8a3efb5fe30e098a1ff09",
-    "1ee7357cbd5018f84618ea610e8c8b648b9857ce22f05d91c91eb052cd36fdf1",
-    "a27bbdb16baee766b4895b63f250de97226f1e7c5d5524f4bf0ad5099e1944a4",
+    "da7493614f9b76dcceead2c8b2871c367583789d4c6ca6651a0d93ee2a0b283f",
 )
 
 
@@ -108,7 +102,8 @@ def assert_manifest_lifecycle_regressions(text: str, lines: list[str]) -> None:
     # Rollback is presence-sensitive: a manifested baseline restores the exact
     # prior bytes, while the sole legacy transition restores manifest absence.
     for previous_manifest in (
-        PREVIOUS_MODULAR_MANIFEST_SHA256, PREVIOUS_GAME_MANIFEST_SHA256, PREVIOUS_MANIFEST_SHA256,
+        PREVIOUS_MODULAR_MANIFEST_SHA256, PREVIOUS_GAME_MANIFEST_SHA256,
+        PREVIOUS_PUBLIC_MANIFEST_SHA256, PREVIOUS_MANIFEST_SHA256,
         LEGACY_MANIFEST_SHA256, None,
     ):
         before = {entry: "old" for entry in release_entries[:-1]}
@@ -176,28 +171,28 @@ def main() -> None:
     assert "final class Shuzijun_App_Content_API" in plugin_implementation
     assert "Shuzijun_App_Content_API::init();" not in plugin_implementation
     assert len(plugin_entry.splitlines()) < 25
-    assert len(plugin_modules) == 11
-    assert len(plugin_modules[:7]) == 7
-    assert "final class Shuzijun_Collaboration_Private_Payload" in plugin_modules[7]
-    assert "final class Shuzijun_Game_Rules" in plugin_modules[8]
+    assert len(plugin_modules) == 8
+    assert len(plugin_modules[:6]) == 6
+    assert " * Version: 1.5.13.18" in plugin_entry
+    assert "final class Shuzijun_Collaboration_Private_Payload" in plugin_modules[6]
     assert plugin_implementation.count("require_once __DIR__ . '/class-shuzijun-collaboration-private-payload.php';") == 1
-    assert plugin_implementation.count("require_once __DIR__ . '/class-shuzijun-game-rules.php';") == 1
     php_modules = [source for path, source in zip(PLUGIN_MODULES, plugin_modules) if path.suffix == ".php"]
     assert max(len(source.splitlines()) for source in php_modules) < 4_000
     assert sum(len(source.splitlines()) for source in php_modules) > 8_000
-    assert plugin_implementation.count("require_once __DIR__ . '/trait-") == 7
-    assert plugin_implementation.count("    use Shuzijun_App_") == 7
-    for trait_source in plugin_modules[:7]:
+    assert plugin_implementation.count("require_once __DIR__ . '/trait-") == 6
+    assert plugin_implementation.count("    use Shuzijun_App_") == 6
+    for trait_source in plugin_modules[:6]:
         assert trait_source.count("trait Shuzijun_App_") == 1
         assert "final class Shuzijun_App_Content_API" not in trait_source
         assert "Shuzijun_App_Content_API::init();" not in trait_source
-    rules = json.loads(plugin_modules[9])
-    assert rules["version"] == "life-v1" and rules["maxChoices"] == 108
-    assert len(rules["origins"]) == 6 and len(rules["events"]) == 108
-    assert all(len(event["options"]) == 4 for event in rules["events"])
-    assert len(rules["endings"]) == 28 and len(rules["immediateEnds"]) == 3
-    assert f"FILE_SHA256 = '{TARGET_MODULE_SHA256S[9]}'" in plugin_modules[8]
-    assert "__DIR__ . '/game-rules-v1.json'" in plugin_modules[8]
+    for removed in (
+        "trait-shuzijun-app-game-leaderboard.php",
+        "class-shuzijun-game-rules.php",
+        "game-rules-v1.json",
+    ):
+        assert not (SERVER_ROOT / "vendor/shuzijun/app-content" / removed).exists()
+        assert removed not in plugin_implementation
+    assert "Shuzijun_App_Game_Leaderboard" not in plugin_implementation
     assert hashlib.sha256(PLUGIN_ENTRY.read_bytes()).hexdigest() == TARGET_PLUGIN_SHA256
     assert tuple(
         hashlib.sha256(path.read_bytes()).hexdigest() for path in PLUGIN_MODULES
@@ -206,19 +201,18 @@ def main() -> None:
     release_trust_values = (
         f"RELEASE_MANIFEST_SHA256={TARGET_MANIFEST_SHA256}",
         f"PLUGIN_ENTRY_SHA256={TARGET_PLUGIN_SHA256}",
-        f"CORE_CLASS_SHA256={TARGET_MODULE_SHA256S[10]}",
-        f"COLLABORATION_CIPHER_SHA256={TARGET_MODULE_SHA256S[7]}",
+        f"CORE_CLASS_SHA256={TARGET_MODULE_SHA256S[7]}",
+        f"COLLABORATION_CIPHER_SHA256={TARGET_MODULE_SHA256S[6]}",
         f"COLLABORATION_TRAIT_SHA256={TARGET_MODULE_SHA256S[0]}",
         f"FAN_ENDPOINTS_TRAIT_SHA256={TARGET_MODULE_SHA256S[1]}",
         f"PUSH_NOTIFICATIONS_TRAIT_SHA256={TARGET_MODULE_SHA256S[2]}",
         f"FAN_IDENTITY_TRAIT_SHA256={TARGET_MODULE_SHA256S[3]}",
         f"CONTENT_DELIVERY_TRAIT_SHA256={TARGET_MODULE_SHA256S[4]}",
-        f"GAME_LEADERBOARD_TRAIT_SHA256={TARGET_MODULE_SHA256S[5]}",
-        f"PUBLIC_EXPERIENCE_TRAIT_SHA256={TARGET_MODULE_SHA256S[6]}",
-        f"GAME_RULES_CLASS_SHA256={TARGET_MODULE_SHA256S[8]}",
-        f"GAME_RULES_JSON_SHA256={TARGET_MODULE_SHA256S[9]}",
+        f"PUBLIC_EXPERIENCE_TRAIT_SHA256={TARGET_MODULE_SHA256S[5]}",
         f"PREVIOUS_LIVE_MANIFEST_SHA256={PREVIOUS_MANIFEST_SHA256}",
         f"PREVIOUS_MODULAR_MANIFEST_SHA256={PREVIOUS_MODULAR_MANIFEST_SHA256}",
+        f"PREVIOUS_GAME_MANIFEST_SHA256={PREVIOUS_GAME_MANIFEST_SHA256}",
+        f"PREVIOUS_PUBLIC_MANIFEST_SHA256={PREVIOUS_PUBLIC_MANIFEST_SHA256}",
     )
     for trust_value in release_trust_values:
         assert release_record.count(trust_value) == 1
@@ -234,7 +228,7 @@ def main() -> None:
         f"{path.relative_to(SERVER_ROOT).as_posix()}\n"
         for path in sorted(release_files)
     ).encode("ascii")
-    assert len(release_files) == 38
+    assert len(release_files) == 35
     assert hashlib.sha256(release_records).hexdigest() == TARGET_MANIFEST_SHA256
     deployer_sha256 = hashlib.sha256(DEPLOYER.read_bytes()).hexdigest()
     seeder_sha256 = hashlib.sha256(STANDBY_SEEDER.read_bytes()).hexdigest()
@@ -264,6 +258,7 @@ def main() -> None:
         "readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687c7633483fa410b8b09d4134",
         f"readonly PREVIOUS_RELEASE_MANIFEST_SHA256={PREVIOUS_MANIFEST_SHA256}",
         f"readonly PREVIOUS_MODULAR_RELEASE_MANIFEST_SHA256={PREVIOUS_MODULAR_MANIFEST_SHA256}",
+        f"readonly PREVIOUS_PUBLIC_RELEASE_MANIFEST_SHA256={PREVIOUS_PUBLIC_MANIFEST_SHA256}",
         f"readonly TARGET_RELEASE_MANIFEST_SHA256={TARGET_MANIFEST_SHA256}",
         "readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a",
         "readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0",
@@ -288,11 +283,14 @@ def main() -> None:
     )
     assert "PREVIOUS_RELEASE_MANIFEST_SHA256" not in candidate_allowlist
     assert "PREVIOUS_MODULAR_RELEASE_MANIFEST_SHA256" not in candidate_allowlist
+    assert "PREVIOUS_GAME_RELEASE_MANIFEST_SHA256" not in candidate_allowlist
+    assert "PREVIOUS_PUBLIC_RELEASE_MANIFEST_SHA256" not in candidate_allowlist
     for reviewed_manifest in (
         "LEGACY_BRIDGE_MANIFEST_SHA256",
         "PREVIOUS_RELEASE_MANIFEST_SHA256",
         "PREVIOUS_MODULAR_RELEASE_MANIFEST_SHA256",
         "PREVIOUS_GAME_RELEASE_MANIFEST_SHA256",
+        "PREVIOUS_PUBLIC_RELEASE_MANIFEST_SHA256",
         "TARGET_RELEASE_MANIFEST_SHA256",
     ):
         assert reviewed_manifest in live_allowlist
@@ -458,21 +456,17 @@ def main() -> None:
         '$sourceMode = $argv[2];',
         '$sizeValues = explode(",", $argv[3]);',
         '$sourceHashes = explode(",", $argv[4]);',
-        '$sourceMode === "modular" && count($sizeValues) !== 12',
+        '$sourceMode === "modular" && count($sizeValues) !== 9',
         'hash_equals($sourceHashes[$index], hash("sha256", $source))',
-        '$traitSources = array_slice($sources, 0, 7);',
-        '$supportSources = array_slice($sources, 7, 2);',
-        '$rulesJSON = $sources[9];',
-        '$classSource = $sources[10];',
-        '$entrypoint = $sources[11];',
+        '$traitSources = array_slice($sources, 0, 6);',
+        '$supportSources = array_slice($sources, 6, 1);',
+        '$classSource = $sources[7];',
+        '$entrypoint = $sources[8];',
         '$quote = chr(39);',
         'substr_count($entrypoint, $entryLoader) !== 1',
         'foreach ($classLoaders as $classLoader)',
         'if ($position <= $previousLoaderPosition) { exit(27); }',
         'foreach ($supportSources as $supportSource) { eval("?>" . $supportSource); }',
-        'hash_equals(Shuzijun_Game_Rules::FILE_SHA256, hash("sha256", $rulesJSON))',
-        '$rules = new Shuzijun_Game_Rules(json_decode($rulesJSON, true, 32, JSON_THROW_ON_ERROR));',
-        'catch (Throwable $error) { exit(28); }',
         'exit(25);',
         'define("ABSPATH", "/nonexistent/");',
         'define("YISHU_ENABLE_COLLABORATION_PHASE1", true);',
@@ -501,7 +495,6 @@ def main() -> None:
         "candidate plugin PHP is not in the reviewed release allowlist",
         "candidate plugin source framing is invalid",
         "candidate plugin loader graph is not exact",
-        "candidate game rules JSON is invalid or not bound to the reviewed rules class",
     ):
         assert probe_guard in collaboration_probe, (
             f"missing candidate collaboration fuse probe: {probe_guard}"
@@ -511,7 +504,8 @@ def main() -> None:
         '\n    \' "$COLLABORATION_FUSE_PROBE_SENTINEL"', php_probe_start
     )
     assert "'" not in collaboration_probe[php_probe_start:php_probe_end]
-    assert 'eval("?>" . $rulesJSON)' not in collaboration_probe
+    assert "Shuzijun_Game_Rules" not in collaboration_probe
+    assert "$rulesJSON" not in collaboration_probe
     for forbidden_probe_effect in (
         "$SITE",
         "$TARGET_DIR",

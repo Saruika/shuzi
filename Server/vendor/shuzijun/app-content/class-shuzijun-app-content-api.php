@@ -9,8 +9,6 @@ require_once __DIR__ . '/trait-shuzijun-app-push-notifications.php';
 require_once __DIR__ . '/trait-shuzijun-app-fan-identity.php';
 require_once __DIR__ . '/trait-shuzijun-app-content-delivery.php';
 require_once __DIR__ . '/trait-shuzijun-app-public-experience.php';
-require_once __DIR__ . '/class-shuzijun-game-rules.php';
-require_once __DIR__ . '/trait-shuzijun-app-game-leaderboard.php';
 
 final class Shuzijun_App_Content_API {
     const OPTION_CONFIG = 'shuzijun_app_content_config';
@@ -109,8 +107,6 @@ final class Shuzijun_App_Content_API {
     const PUSH_LEGACY_SESSION_SCAN_LIMIT = 4096;
     const PUSH_RETENTION_SECONDS = 2592000;
     const PUSH_DEVICE_TTL = 7776000;
-    const GAME_SCHEMA_OPTION = 'yishu_game_leaderboard_schema_version';
-    const GAME_SCHEMA_VERSION = 1;
     private static $fan_session_context = null;
     private static $apns_provider_token_cache = null;
     private static $push_schema_verified = null;
@@ -185,9 +181,6 @@ final class Shuzijun_App_Content_API {
             add_action('init', array(__CLASS__, 'ensure_fan_apple_event_schedule'), 41);
             add_action('init', array(__CLASS__, 'ensure_fan_apple_tombstone_schedule'), 42);
             add_action('init', array(__CLASS__, 'ensure_push_storage'), 22);
-            // Only an explicitly approved CLI deployment action installs this
-            // schema. HTTP init/GET/POST must never cause leaderboard DDL.
-            add_action('yishu_install_game_leaderboard_storage', array(__CLASS__, 'ensure_game_leaderboard_storage'));
             add_action(self::PUSH_OUTBOX_HOOK, array(__CLASS__, 'process_push_outbox'), 10, 1);
             add_action(self::PUSH_SWEEP_HOOK, array(__CLASS__, 'run_push_outbox_sweep'), 10, 0);
             add_action('init', array(__CLASS__, 'ensure_push_outbox_schedule'), 44);
@@ -363,23 +356,6 @@ final class Shuzijun_App_Content_API {
             'methods' => WP_REST_Server::READABLE,
             'callback' => array(__CLASS__, 'get_public_experience'),
             'permission_callback' => '__return_true',
-        ));
-        register_rest_route('shuzijun/v1', '/fan/game/leaderboard', array(
-            'methods' => WP_REST_Server::READABLE,
-            'callback' => array(__CLASS__, 'get_game_leaderboard'),
-            'permission_callback' => array(__CLASS__, 'can_access_game_leaderboard'),
-        ));
-        register_rest_route('shuzijun/v1', '/fan/game/scores', array(
-            array(
-                'methods' => WP_REST_Server::CREATABLE,
-                'callback' => array(__CLASS__, 'submit_game_score'),
-                'permission_callback' => array(__CLASS__, 'can_access_game_leaderboard'),
-            ),
-            array(
-                'methods' => WP_REST_Server::DELETABLE,
-                'callback' => array(__CLASS__, 'delete_game_score'),
-                'permission_callback' => array(__CLASS__, 'can_access_game_leaderboard'),
-            ),
         ));
         register_rest_route('shuzijun/v1', '/app-content', array(
             array(
@@ -750,5 +726,4 @@ final class Shuzijun_App_Content_API {
     use Shuzijun_App_Fan_Identity;
     use Shuzijun_App_Content_Delivery;
     use Shuzijun_App_Public_Experience;
-    use Shuzijun_App_Game_Leaderboard;
 }

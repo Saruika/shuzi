@@ -1,0 +1,63 @@
+# 无游戏候选 — server 1.5.13.18
+
+2026-09-26。当前本地候选删除游戏排行榜、规则实现与规则数据，并移除 API 路由、
+游戏钩子和账号删除时的游戏逻辑。保留账号、审批专区、相册、公开体验和推送功能。
+本记录是当前源码和发布工具的精确材料记录；不是服务器部署或历史数据已删除的收据。
+
+## 发布图与保护
+
+发布包从 38 个文件缩减到 35 个文件。隔离执行器仅接收九段按长度分帧并逐段
+验证 SHA-256 的 PHP：六个 trait、合作私密载荷类、API 类和薄入口。
+固定声明、加载顺序、禁用网络、受限文件访问和合作功能关闭熔断器继续核验。
+游戏 trait、规则类和 JSON 不再进入发布包或执行器。
+
+候选白名单保留明确固定的目标和既有 1.5.8 桥接版本。旧公开体验版本 .17 的
+清单加入线上转换白名单，与其他历史基线一样仅供升级前验证和精确回滚使用。
+固定站点路径、站点操作锁、权限与所有权检查、完整文件图验证、全量代码备份、
+最终原子提交清单、健康检查和失败恢复机制均保留。代码发布不删除数据库行；
+历史游戏数据清理是独立退役操作，必须按该工具自己的预检、锁和备份条件执行。
+
+旧游戏审核升级器和依赖它的公开体验升级包装器已删除；它们固定的旧转换不再
+适用于本候选。历史发布记录保持原样，Git 保留旧工具。本地审核 bootstrap 合同
+核对相同的 35 文件清单。新的 `upgrade-review-no-game-plugin.py` 专门从公开体验
+.17 的精确文件图升级到本候选；支持旧清单文件缺失，最后安装新 `release.sha256`，
+失败恢复原文件、权限和清单存在状态。详见审核操作说明，不能使用旧一次性升级器。
+
+## 精确材料
+
+```text
+RELEASE_MANIFEST_SHA256=69e10dcf6f07a68b93590851bfed12c89a832f4c69cbb2ff8953c2601a5896e4
+PLUGIN_ENTRY_SHA256=14d94c2abce0c1737deb16bf6fe42bd82e8487a2595ab872ca4deb0f1b95eec4
+CORE_CLASS_SHA256=da7493614f9b76dcceead2c8b2871c367583789d4c6ca6651a0d93ee2a0b283f
+COLLABORATION_CIPHER_SHA256=bdcea372748c79a06284f01570d0863d20316bf3d4d33fe7924c16d100a1b1d7
+COLLABORATION_TRAIT_SHA256=7175ae3aefb1add1af504c2bbbba355b5e448a81818d7c00ace12c37cc6dc4e5
+FAN_ENDPOINTS_TRAIT_SHA256=bd689473956b67b480ce62704b73d39ea6c7a9536a19496120722d2524f65160
+PUSH_NOTIFICATIONS_TRAIT_SHA256=7c5be7cf3347b187f6c88a12ad6a21f0001a5e7c92edbfe7a99e834abc1eebb7
+FAN_IDENTITY_TRAIT_SHA256=77d2a10cd9df7af2698ec36b3cfcbfe07765dbd2a03b401b8a7effb03bb3bf1c
+CONTENT_DELIVERY_TRAIT_SHA256=f27863d35b6a701d45afd6bfcecb5b235983497fee71553d18ec801bcbec2d6a
+PUBLIC_EXPERIENCE_TRAIT_SHA256=58a07e016adea07b27652e88b95efb96dbcb228d7dc9d03f2109722b26584b8e
+PREVIOUS_LIVE_MANIFEST_SHA256=5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe
+PREVIOUS_MODULAR_MANIFEST_SHA256=2b632ca195a65f1f0309bf66a9098ef52ca49a5eec9d80a5b7d9c32b8fbdfdee
+PREVIOUS_GAME_MANIFEST_SHA256=3adaebe7acbdeeb189a703c865f991935cf90a778a8151eaf85f272e7d053576
+PREVIOUS_PUBLIC_MANIFEST_SHA256=ae94b05f340b82842cca32beddb2c6ad7a9b69929ac97805a59f823ea28ff8ed
+DEPLOYER_SHA256=65e45b5989add9bbbc5c2d608eea47d7b117ebb6c60ebe6772ebaa53073f9e1b
+REVIEW_UPGRADER_SHA256=2718655ac161f393c4d361067296fcbaa81b7ec863497d5723f284dc91f7e915
+STANDBY_SEEDER_SHA256=bf294cd0d9278d59b8dfd421c96aa9ad27274ec8801f983a2361510250b77ba6
+PUBLIC_SELECTION_HELPER_SHA256=7fed06da806f595fbe82406c2b5968863538f1aa0016acc79dd6fd36541191e6
+```
+
+发布清单采用按相对路径字节序排列的 `SHA256 + 两个空格 + 相对路径 + 换行`，
+范围为入口、composer.json、composer.lock 和 vendor/ 中每个普通文件。
+重新计算后须同步发布器、合同测试及本记录；不得通过放宽校验接受漂移。
+
+## 本地验证
+
+发布合同与 Bash 语法通过；从发布器提取并实际执行的 PHP evaluator 通过 14 个
+正向和故障案例，覆盖哈希漂移、缺失/多余分帧、声明/加载顺序、陌生 require/include、
+游戏加载器重新出现及合作熔断器误开启。审核 bootstrap 23 项、历史审核升级 10 项、
+公开体验发布工具 103 项模拟断言、启动守卫状态机、修改后的 Python Ruff 检查通过。
+这些测试使用本地源码与临时目录，未调用生产服务、数据库或部署操作。
+无游戏审核升级另通过 34 项临时文件事务测试，覆盖三个文件删除、所有替换点、
+原子清单提交、原清单存在/缺失、故障恢复、陌生文件保护、锁竞争、配置漂移、
+损坏备份及错误健康响应。完整同步链源码检查未发现 App 清单固定值依赖；
+sync 只传 SQL 与 uploads，健康监测仅记录 App 清单摘要，既有 verifier 字节未变。

@@ -11,6 +11,34 @@ import Observation
 import Security
 @testable import Yishu
 
+final class RetiredGameBundleTests: XCTestCase {
+    func testInstalledAppBundleDoesNotContainRetiredGameAssets() throws {
+        let root = Bundle.main.bundleURL
+        let candidates = try XCTUnwrap(FileManager.default.enumerator(
+            at: root, includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ))
+        let retiredNames: Set<String> = ["GameAssets", "legacy-game-assets", "GameReference",
+                                        "events.js", "endings.js", "main.js"]
+        for case let url as URL in candidates {
+            XCTAssertFalse(retiredNames.contains(url.lastPathComponent),
+                           "退役游戏资源不得进入实际 App 包：\(url.lastPathComponent)")
+        }
+    }
+
+    func testCurrentClientPrivacyManifestDoesNotCollectGameplay() throws {
+        let url = try XCTUnwrap(Bundle.main.url(forResource: "PrivacyInfo", withExtension: "xcprivacy"))
+        let manifest = try XCTUnwrap(PropertyListSerialization.propertyList(
+            from: Data(contentsOf: url), format: nil
+        ) as? [String: Any])
+        let entries = try XCTUnwrap(manifest["NSPrivacyCollectedDataTypes"] as? [[String: Any]])
+        XCTAssertFalse(entries.contains {
+            $0["NSPrivacyCollectedDataType"] as? String == "NSPrivacyCollectedDataTypeGameplayContent"
+        })
+        XCTAssertEqual(manifest["NSPrivacyTracking"] as? Bool, false)
+    }
+}
+
 final class DramaLinkHealthTests: XCTestCase {
     private func actorPage(name: String = "易姝", status: Int = 0) throws -> Data {
         let payload: [String: Any] = ["loaderData": ["page": ["pageData": [

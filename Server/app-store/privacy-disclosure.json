@@ -1,6 +1,9 @@
 {
-  "reviewedAt": "2026-09-17",
+  "reviewedAt": "2026-09-26",
   "status": "local-candidate-not-confirmed-in-app-store-connect",
+  "scope": "current-app-build-only",
+  "appStoreConnectReviewNote": "2026-09-26 在确认主备及审核环境停止游戏服务、清理在线排行榜记录后，仅移除 Apple 在线披露的游戏内容一项，网页回读 12 项、刚刚发布。其余线上用途与关联设置未改。本文件其他工程映射仍是候选，不宣称与线上问卷逐项完全一致；不能把当前版本移除游戏表述成从未收集游戏内容。",
+  "legacyGameData": {"status": "decommission-release-candidate", "publicationPrerequisite": "须先核实游戏服务停用及在线排行榜记录清理完成，再发布政策与新 App。", "note": "当前版本不再提供游戏或提交成绩；发布候选说明服务停用及在线排行榜记录清理。受限回滚备份可能仍有历史记录，不用于日常业务或恢复游戏，按既有保留期限处理；历史个人信息请求通过隐私邮箱核验。此文件本身不证明线上清理已完成。"},
   "purpose": "AppFunctionality",
   "tracking": false,
   "dataTypes": {
@@ -13,7 +16,6 @@
     "PhotosorVideos": {"label": "照片或视频", "linked": true},
     "CustomerSupport": {"label": "客户支持", "linked": true},
     "OtherUserContent": {"label": "其他用户内容", "linked": true},
-    "GameplayContent": {"label": "游戏内容", "linked": true, "note": "从1.4.0（13）起在开始游戏前告知自动上榜，完成后自动处理出身及选项重演；关联内部账号保存最高成绩摘要，可单独移除；旧版本仍需主动确认"},
     "EmailsOrTextMessages": {"label": "电子邮件或短信", "linked": true},
     "ProductInteraction": {"label": "产品交互", "linked": true},
     "OtherDiagnosticData": {"label": "其他诊断数据", "linked": true},

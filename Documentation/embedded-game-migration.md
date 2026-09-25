@@ -1,4 +1,6 @@
-# 内嵌游戏来源与保真测试
+# 已退役：内嵌游戏历史来源与验收记录
+
+2026-09-26 退役说明：当前 App 已移除小游戏、排行榜、游戏资源、源脚本基线和专用构建测试。本文仅保留此前来源授权与验收事实，不再作为现行实现、构建或发布步骤。当前候选的移除范围与验证见 [Build 3 记录](../Docs/V1.5-BUILD3-NO-GAME.md)。线上停服、数据清理和发行状态以该记录的实际回执为准。
 
 ## 来源及授权说明
 
@@ -6,7 +8,7 @@
 
 题库、结局及主程序基线来自该网页公开可访问的源脚本。本轮用户明确确认原作使用授权；本记录不代表发现了开源许可证，也不以公开可访问代替使用授权。
 
-`YishuTests/GameReference/{events,endings,main}.js` 是原样测试基线，不是 App 资源，未加入 Xcode target 或构建阶段。App 实际加载 `Yishu/Resources/GameAssets/` 下的本地迁移资源。原版的账号/上传/排行榜/海报 SDK 不随测试执行；测试也不会连接外部服务。
+当时的 `YishuTests/GameReference/{events,endings,main}.js` 为原样测试基线，未加入 Xcode target 或构建阶段；当时的 App 从 `Yishu/Resources/GameAssets/` 加载本地迁移资源。这两组文件现均已删除。原版账号、上传、排行榜和海报 SDK 未随当时的测试执行，测试没有连接外部服务。
 
 | 基线文件 | SHA-256 |
 |---|---|
@@ -14,13 +16,9 @@
 | endings.js | ae4f1173f961922e4bc72b65cca513fa5e633e3a5e93797d7e4c4fcfe9d960af |
 | main.js | c2b012490403b85258925d405c6fa52a69236e478758490a62cb7c2909fc7bae |
 
-## 复验
+## 历史复验结果
 
-在仓库根目录运行 Node 20+，无需安装第三方依赖或访问本机原型目录：
-
-```sh
-node --test Scripts/test-embedded-game-parity.mjs
-```
+当时使用 Node 20+ 运行保真测试，无需第三方依赖或访问本机原型目录。该游戏测试脚本已退役删除，以下结果只对应原记录日期。
 
 该测试在独立 Node VM 中直接执行原版与迁移版函数，逐次比较选择后的状态；仅使用最小 DOM、虚拟计时器和阻断外部能力的 SDK 占位，不重写一套游戏规则替代源程序。
 
@@ -33,11 +31,11 @@ node --test Scripts/test-embedded-game-parity.mjs
 - 16,380组阈值边界状态；36条固定路线共3,436次选择；3,072条固定种子路线共331,776次选择，逐步比较六维、隐藏量、flags、计数、日志、段位、结局、得分和回顾顺序。
 - 抽象有界状态分析未发现被前序谓词完全覆盖的结局；这不证明108题路径能到达所有结局。固定种子样本观察到13个结局，不声称28个都已验证可达。
 
-本地原型目录的 `ORIGINAL-RULES.md` 另记录完整规则表及取证过程；该笔记不是运行本仓库测试的依赖。可复验事实与源基线均保存在本仓库。
+当时本地原型目录的 `ORIGINAL-RULES.md` 另记录规则表及取证过程，未作为本仓库测试依赖。源基线已从当前工作树移除；既往字节与测试事实仍可按原提交历史核对。
 
 ## 本轮 QA 快照（2026-09-16）
 
-以下为当前开发候选 `1.4.0 (8)` 的测试记录，区分浏览器、原生模拟器、自动化测试和发布状态，不将其中一种证据替代另一种。
+以下为当时开发候选 `1.4.0 (8)` 的测试记录，区分浏览器、原生模拟器、自动化测试和发布状态，不将其中一种证据替代另一种。
 
 ### 已通过的范围
 
@@ -46,13 +44,7 @@ node --test Scripts/test-embedded-game-parity.mjs
 - **Chrome 实际浏览器**：`peasant` 出身的 108 题完整路线，以及 62 题提前结束路线通过；这是浏览器实测，不是 Node DOM 替身测试。
 - **本地自动化**：Node 保真与生命周期测试合计 28 项通过（各 14 项）；原生宿主静态契约测试 10 项通过；归档脚本本地测试 14 项通过；`Scripts/security-check.sh` 通过。安全脚本通过不代表下面的原生单元测试失败或跳过项已经消除。
 
-可重复执行的本地专项测试：
-
-```sh
-node --test Scripts/test-embedded-game-parity.mjs Scripts/test-embedded-game-lifecycle.mjs
-python3 -B Scripts/test-embedded-game-host-contract.py
-python3 -B Scripts/test_archive_testflight.py
-```
+当时的游戏保真、生命周期和宿主专项测试已删除。当前使用 `Scripts/test-no-game-release.py` 与分发包检查验证游戏代码和资源没有重新进入 App；这些移除检查不替代或改写上面的历史验收结果。
 
 ### 未通过或尚未验收的范围
 

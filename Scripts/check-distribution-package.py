@@ -39,6 +39,9 @@ def check_metadata(info: dict, entitlements: dict, profile: dict,
             and not ats.get("NSExceptionDomains", {}), "insecure_transport")
     require(privacy.get("NSPrivacyTracking") is False
             and privacy.get("NSPrivacyTrackingDomains") == [], "tracking_declaration_changed")
+    require(not any(item.get("NSPrivacyCollectedDataType") == "NSPrivacyCollectedDataTypeGameplayContent"
+                    for item in privacy.get("NSPrivacyCollectedDataTypes", [])),
+            "gameplay_declaration_in_retired_client")
     require(isinstance(profile.get("Entitlements"), dict), "profile_entitlements_missing")
     require(profile.get("TeamIdentifier") == [TEAM], "profile_team_mismatch")
     require("ProvisionedDevices" not in profile and not profile.get("ProvisionsAllDevices", False),
@@ -77,6 +80,25 @@ def decode_plist(data: bytes) -> dict:
     return value
 
 
+def check_resources(app: Path) -> None:
+    paths = list(app.rglob("*"))
+    require(not any(path.name.casefold() in {"gameassets", "legacy-game-assets", "gamereference", "game-rules-v1.json",
+                                           "main.js", "events.js", "endings.js"}
+                    for path in paths), "game_resource_in_package")
+    require(not any(path.suffix.lower() in {".jpg", ".jpeg", ".heic", ".webp", ".avif", ".p8", ".p12", ".pem", ".key"}
+                    or path.name.startswith((".env", "AuthKey_"))
+                    for path in paths if path.is_file()), "content_or_key_file_in_package")
+
+
+def check_game_binary(executable: Path) -> None:
+    require(executable.is_file() and not executable.is_symlink(), "executable_missing_or_linked")
+    content = executable.read_bytes()
+    require(not any(marker in content for marker in (
+        b"EmbeddedGame", b"GameLeaderboard", b"GameResultBridge", b"GameRunPayload",
+        b"gameLeaderboard", b"about-embedded-game", b"fan/game/",
+    )), "game_code_in_package")
+
+
 def check_package(app: Path, version: str, build: str) -> dict:
     require(app.is_absolute() and app.is_dir() and app.suffix == ".app"
             and not app.is_symlink(), "absolute_exported_app_required")
@@ -88,9 +110,11 @@ def check_package(app: Path, version: str, build: str) -> dict:
     entitlements = decode_plist(command(["/usr/bin/codesign", "-d", "--entitlements", ":-", str(app)]))
     profile = decode_plist(command(["/usr/bin/security", "cms", "-D", "-i", str(profile_path)]))
     check_metadata(info, entitlements, profile, privacy, version, build, datetime.now(timezone.utc))
-    require(not any(path.suffix.lower() in {".jpg", ".jpeg", ".heic", ".webp", ".avif", ".p8", ".p12", ".pem", ".key"}
-                    or path.name.startswith((".env", "AuthKey_"))
-                    for path in app.rglob("*") if path.is_file()), "content_or_key_file_in_package")
+    check_resources(app)
+    executable_name = info.get("CFBundleExecutable")
+    require(isinstance(executable_name, str) and executable_name not in {"", ".", ".."}
+            and Path(executable_name).name == executable_name, "invalid_executable_name")
+    check_game_binary(app / executable_name)
     # Only fixed, non-sensitive results leave this process. The profile and
     # signing metadata never enter logs or a generated report.
     return {"packageCheck": "passed", "version": version, "build": build,

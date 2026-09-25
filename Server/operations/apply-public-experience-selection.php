@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 /**
  * One reviewed publication, root PHP 8.3 CLI only. No image bytes are written.
- * Keep update-game-privacy-policy.php beside this root-owned helper; its library
+ * Keep update-app-privacy-policy.php beside this root-owned helper; its library
  * supplies the existing site/authority/cron/network/path guards, not page writes.
  *   php8.3 apply-public-experience-selection.php                 # read-only
  *   php8.3 apply-public-experience-selection.php apply=2504f01680af781b15097409ba49ce58e85c0163804e4b3055719ca42dfa6b13
@@ -11,8 +11,8 @@ declare(strict_types=1);
  * Receipts are fsync'd before writes and again before COMMIT. An uncertain commit
  * is never retried or "fixed" automatically. Preserve both receipt files.
  */
-if (!defined('YISHU_GAME_PRIVACY_LIBRARY_ONLY')) { define('YISHU_GAME_PRIVACY_LIBRARY_ONLY', true); }
-require_once __DIR__ . '/update-game-privacy-policy.php';
+if (!defined('YISHU_APP_PRIVACY_LIBRARY_ONLY')) { define('YISHU_APP_PRIVACY_LIBRARY_ONLY', true); }
+require_once __DIR__ . '/update-app-privacy-policy.php';
 
 final class PublicSelectionPolicy {
     public const SELECTION = array(6 => array(18, 19), 7 => array(33, 34), 39 => array(76, 77));
@@ -28,7 +28,7 @@ final class PublicSelectionPolicy {
         '2026/03/2023-12-19-024812-1027x1536.jpg' => '7961c1432b2f02ffc33007aafd9c426911e2fc51927529a785dccd6a911d0013');
 }
 
-function public_selection_require(bool $ok, string $code): void { game_privacy_require($ok, $code); }
+function public_selection_require(bool $ok, string $code): void { app_privacy_require($ok, $code); }
 
 function public_selection_arguments(array $args): array {
     if ($args === array() || $args === array('dry-run') || $args === array('--dry-run')) { return array('dry-run', null); }
@@ -191,7 +191,7 @@ final class PublicSelectionMemoryCache {
     public function reset(): bool { return $this->flush(); }
     public function close(): bool { return true; }
     public function supports($feature): bool { return in_array($feature, array('get_multiple', 'set_multiple', 'add_multiple', 'delete_multiple', 'flush_runtime', 'flush_group'), true); }
-    public function __call(string $method, array $arguments): never { throw new GamePrivacyFailure('unsupported_isolated_cache_method'); }
+    public function __call(string $method, array $arguments): never { throw new AppPrivacyFailure('unsupported_isolated_cache_method'); }
 }
 
 function public_selection_shared_ready(object $shared, bool $persistent): void {
@@ -313,7 +313,7 @@ function public_selection_validate(array $snapshot): array {
 
 /** Read local files only. No URL access, image decoding output or file writes. */
 function public_selection_files(array $snapshot): array {
-    $root = GamePrivacyPolicy::SITE . '/wp-content/uploads';
+    $root = AppPrivacyPolicy::SITE . '/wp-content/uploads';
     public_selection_require(realpath($root) === $root && !is_link($root), 'uploads_root');
     $read = static function (string $relative) use ($root): array {
         public_selection_require(preg_match('#^2026/(03|08)/[A-Za-z0-9_.-]+\.jpg$#D', $relative) === 1, 'image_path');
@@ -418,7 +418,7 @@ function public_selection_write_option(object $db, array $rows, string $value): 
     public_selection_require($db->query($sql) === 1 && $db->last_error === '', 'updated_option_write');
 }
 
-function public_selection_json(array $value): string { return game_privacy_json($value); }
+function public_selection_json(array $value): string { return app_privacy_json($value); }
 
 function public_selection_write_receipt(string $path, array $value): void {
     $handle = @fopen($path, 'xb');
@@ -435,19 +435,19 @@ function public_selection_write_receipt(string $path, array $value): void {
         }
         public_selection_require(fflush($handle) && fsync($handle), 'backup_sync');
     } finally { fclose($handle); }
-    game_privacy_sync_directory(dirname($path));
-    public_selection_require(game_privacy_read($path, 8388608, 0600) === $bytes, 'backup_readback');
+    app_privacy_sync_directory(dirname($path));
+    public_selection_require(app_privacy_read($path, 8388608, 0600) === $bytes, 'backup_readback');
 }
 
 function public_selection_receipt(array $snapshot, int $timestamp): array {
-    return array('schema' => 1, 'site' => GamePrivacyPolicy::SITE, 'selection' => PublicSelectionPolicy::SELECTION,
+    return array('schema' => 1, 'site' => AppPrivacyPolicy::SITE, 'selection' => PublicSelectionPolicy::SELECTION,
         'oldMetadataSha256' => PublicSelectionPolicy::OLD_META, 'timestamp' => $timestamp,
         'snapshot' => $snapshot, 'snapshotSha256' => hash('sha256', public_selection_json($snapshot)));
 }
 
 function public_selection_validate_receipt(array $receipt): array {
     public_selection_require(array_keys($receipt) === array('schema', 'site', 'selection', 'oldMetadataSha256', 'timestamp', 'snapshot', 'snapshotSha256')
-        && $receipt['schema'] === 1 && $receipt['site'] === GamePrivacyPolicy::SITE
+        && $receipt['schema'] === 1 && $receipt['site'] === AppPrivacyPolicy::SITE
         && $receipt['selection'] === PublicSelectionPolicy::SELECTION && $receipt['oldMetadataSha256'] === PublicSelectionPolicy::OLD_META
         && is_int($receipt['timestamp']) && $receipt['timestamp'] > 0 && is_array($receipt['snapshot'])
         && $receipt['snapshotSha256'] === hash('sha256', public_selection_json($receipt['snapshot'])), 'receipt_identity');
@@ -456,30 +456,30 @@ function public_selection_validate_receipt(array $receipt): array {
 }
 
 function public_selection_backup(array $snapshot, int $timestamp): string {
-    game_privacy_safe_path(GamePrivacyPolicy::BACKUPS, true, 0700);
+    app_privacy_safe_path(AppPrivacyPolicy::BACKUPS, true, 0700);
     $id = bin2hex(random_bytes(16));
-    $directory = GamePrivacyPolicy::BACKUPS . '/public-selection-' . $id;
+    $directory = AppPrivacyPolicy::BACKUPS . '/public-selection-' . $id;
     public_selection_require(@mkdir($directory, 0700), 'backup_directory');
-    game_privacy_safe_path($directory, true, 0700);
-    game_privacy_sync_directory(GamePrivacyPolicy::BACKUPS);
+    app_privacy_safe_path($directory, true, 0700);
+    app_privacy_sync_directory(AppPrivacyPolicy::BACKUPS);
     public_selection_write_receipt($directory . '/before.json', public_selection_receipt($snapshot, $timestamp));
     return $id;
 }
 
 function public_selection_finish_backup(string $id, array $snapshot, int $timestamp): void {
     public_selection_require(preg_match('/^[a-f0-9]{32}$/D', $id) === 1, 'backup_id');
-    $directory = GamePrivacyPolicy::BACKUPS . '/public-selection-' . $id;
-    game_privacy_safe_path($directory, true, 0700);
+    $directory = AppPrivacyPolicy::BACKUPS . '/public-selection-' . $id;
+    app_privacy_safe_path($directory, true, 0700);
     public_selection_write_receipt($directory . '/after.json', public_selection_receipt($snapshot, $timestamp));
 }
 
 function public_selection_load_backup(string $id): array {
     public_selection_require(preg_match('/^[a-f0-9]{32}$/D', $id) === 1, 'backup_id');
-    $directory = GamePrivacyPolicy::BACKUPS . '/public-selection-' . $id;
-    game_privacy_safe_path($directory, true, 0700);
+    $directory = AppPrivacyPolicy::BACKUPS . '/public-selection-' . $id;
+    app_privacy_safe_path($directory, true, 0700);
     $records = array();
     foreach (array('before', 'after') as $name) {
-        $receipt = json_decode(game_privacy_read($directory . '/' . $name . '.json', 8388608, 0600), true);
+        $receipt = json_decode(app_privacy_read($directory . '/' . $name . '.json', 8388608, 0600), true);
         public_selection_require(is_array($receipt), 'receipt_json');
         $records[$name] = public_selection_validate_receipt($receipt);
         $records[$name . 'Timestamp'] = $receipt['timestamp'];
@@ -598,7 +598,7 @@ function public_selection_execute(object $db, string $mode, ?string $hash, ?arra
         return array('status' => $mode === 'apply' ? 'applied' : 'restored', 'backupID' => $backupID,
             'selection' => PublicSelectionPolicy::SELECTION, 'originalImageBytesUnchanged' => true);
     } catch (Throwable $error) {
-        $failure = $error instanceof GamePrivacyFailure ? $error : new GamePrivacyFailure('unexpected_keep_backup');
+        $failure = $error instanceof AppPrivacyFailure ? $error : new AppPrivacyFailure('unexpected_keep_backup');
         $failure->backupID = $backupID;
         if (!$committed) {
             try {
@@ -608,7 +608,7 @@ function public_selection_execute(object $db, string $mode, ?string $hash, ?arra
                         'transaction_outcome_uncertain_keep_backup');
                 }
             } catch (Throwable $rollbackError) {
-                $failure = new GamePrivacyFailure('transaction_outcome_uncertain_keep_backup');
+                $failure = new AppPrivacyFailure('transaction_outcome_uncertain_keep_backup');
                 $failure->backupID = $backupID;
                 // May have committed despite a lost reply; do not leave old
                 // shared data behind, and do not publish local cache entries.
@@ -618,7 +618,7 @@ function public_selection_execute(object $db, string $mode, ?string $hash, ?arra
         }
         try { $effects['invalidate'](); }
         catch (Throwable $cacheError) {
-            $failure = new GamePrivacyFailure('cache_invalidation_failed_keep_backup');
+            $failure = new AppPrivacyFailure('cache_invalidation_failed_keep_backup');
             $failure->backupID = $backupID;
         }
         throw $failure;
@@ -629,11 +629,11 @@ function public_selection_main(array $args): array {
     [$mode, $value] = public_selection_arguments($args);
     // Reuse the reviewed root/site/authority/cron/mail/network guards. The helper
     // library is never asked to read its privacy payload or update a page.
-    $siteLock = game_privacy_bootstrap();
+    $siteLock = app_privacy_bootstrap();
     $publicationLock = null;
     $sharedCache = null;
     try {
-        game_privacy_safe_path(__FILE__, false);
+        app_privacy_safe_path(__FILE__, false);
         global $wpdb;
         public_selection_pin_database();
         $sharedCache = $GLOBALS['wp_object_cache'] ?? null;
@@ -649,7 +649,7 @@ function public_selection_main(array $args): array {
         public_selection_require(is_string($publicationLock) && !is_wp_error($publicationLock), 'publication_lock_busy');
         $restore = $mode === 'rollback' ? public_selection_load_backup($value) : null;
         $effects = array('files' => 'public_selection_files', 'policy' => 'public_selection_policy_images',
-            'authority' => 'game_privacy_authority', 'backup' => 'public_selection_backup',
+            'authority' => 'app_privacy_authority', 'backup' => 'public_selection_backup',
             'finishBackup' => 'public_selection_finish_backup', 'invalidate' => 'public_selection_invalidate',
             'sharedInvalidate' => static fn() => public_selection_invalidate_shared($sharedCache, $localCache, $persistentCache),
             'metadataHash' => static fn(string $raw): string => hash('sha256', $raw));
@@ -665,7 +665,7 @@ function public_selection_main(array $args): array {
 
 if (!defined('YISHU_PUBLIC_SELECTION_LIBRARY_ONLY')) {
     ini_set('display_errors', '0'); ini_set('log_errors', '0');
-    set_error_handler('game_privacy_warning');
+    set_error_handler('app_privacy_warning');
     ob_start(static fn(string $unused): string => '');
     $finished = false;
     register_shutdown_function(static function () use (&$finished): void {
@@ -684,8 +684,8 @@ if (!defined('YISHU_PUBLIC_SELECTION_LIBRARY_ONLY')) {
         if (ob_get_level()) { ob_end_clean(); }
         $finished = true;
         fwrite(STDERR, public_selection_json(array('status' => 'failed',
-            'code' => $error instanceof GamePrivacyFailure ? $error->getMessage() : 'unexpected_keep_receipts',
-            'backupID' => $error instanceof GamePrivacyFailure ? $error->backupID : null)) . "\n");
+            'code' => $error instanceof AppPrivacyFailure ? $error->getMessage() : 'unexpected_keep_receipts',
+            'backupID' => $error instanceof AppPrivacyFailure ? $error->backupID : null)) . "\n");
         exit(1);
     }
 }

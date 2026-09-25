@@ -1,8 +1,9 @@
 # 商店资料与上传前检查
 
 `zh-Hans.json` 是商店文案本地候选，不保存审核密码、身份码或签名凭据。
-2026-09-23，1.5（2）公开体验文案已同步 App Store Connect；TestFlight 内外部可测，
-正式提交等待审核，批准后自动发布。实际状态见 `Docs/V1.5-BUILD2-RELEASE.md`，
+2026-09-26，1.5（2）正式审核被拒，最新拒绝条款为 1.1；含游戏的旧 TestFlight 已按授权过期。
+当前本地文案面向移除游戏的 1.5（3）候选，尚未同步 Apple 或重提；见
+`Docs/V1.5-BUILD3-NO-GAME.md`。9 月 23 日提交时的历史状态见 `Docs/V1.5-BUILD2-RELEASE.md`，
 不要将历史 `APP_STORE_READINESS.md` 的旧状态代替当前发行证据。
 
 ## 检查实际导出的签名 App
@@ -12,15 +13,16 @@
 ```sh
 python3 Scripts/check-distribution-package.py \
   --app /absolute/export-inspection/Payload/Yishu.app \
-  --version 1.4.0 --build 4
+  --version 1.5 --build 3
 ```
 
 必须传入本次计划上传的版本及构建号，不从旧包自动推断预期值。工具只读，检查实际签名、
 设备平台、iPhone/iPad 支持、iOS 17 部署目标、签名及描述文件中的生产 APNs、Apple 登录、
-WeatherKit、禁止调试、团队/App 标识与描述文件有效期。也检查当前无追踪声明及 ATS 边界。
+WeatherKit、禁止调试、团队/App 标识与描述文件有效期。也检查当前无追踪声明、ATS 边界，
+以及实际资源、二进制中无退役游戏代码/资源，隐私清单无 GameplayContent。
 失败返回非零，仅显示固定检查标识；不输出原始描述文件、证书、设备列表或工具错误正文。
 
-这是一条新增的上传前手动校验命令，尚未接管或自动阻断独立的上传工具。
+`Scripts/archive-testflight.py` 在实际导出后、Apple 验证和上传之前调用此检查，失败会停止发行。
 CI 对校验逻辑执行合成单元测试与静态分析；没有签名凭据的 CI 不伪装验证过实际发行包。
 成功只能说明这些包级检查通过：`submissionReady` 和 `liveServices` 都明确标为 `not_assessed`。
 仍需实际登录、定位/天气、APNs、删号、图片连续浏览、审核账号及正式商店资料的完整验收。

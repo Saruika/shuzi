@@ -1846,9 +1846,13 @@ final class YishuUITests: XCTestCase {
         XCTAssertEqual(contact.value as? String, "qa@example.invalid")
     }
 
-    func testCollaborationAndAdministratorRoutesRemainReachable() {
-        let app = launchApp(arguments: ["-open-about-for-visual-testing"])
+    func testAboutRoutesRemainReachableWithoutGameOrLeaderboard() {
+        let app = launchApp(arguments: ["-open-about-for-visual-testing",
+            "-use-deterministic-gallery-images-for-testing",
+            "-hold-home-remote-images-for-visual-testing"], screenProtectionEnabled: true)
+        defer { app.terminate() }
         assertExists("about-biography", in: app)
+        assertGameIsAbsent(in: app)
 
         let collaboration = element("about-collaboration", in: app)
         scrollToElement(collaboration, in: app)
@@ -1879,13 +1883,48 @@ final class YishuUITests: XCTestCase {
         app.navigationBars.buttons.firstMatch.tap()
         assertExists("about-biography", in: app)
 
+        let settings = element("about-settings", in: app)
+        scrollToElement(settings, in: app)
+        XCTAssertTrue(settings.isHittable, "设置入口不可点击")
+        assertGameIsAbsent(in: app)
+        settings.tap()
+        assertExists("settings-account", in: app)
+        assertExists("settings-privacy", in: app)
+        assertExists("theme-preference-entry", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        assertExists("about-biography", in: app)
+
+        let aboutPrivacy = element("about-privacy-policy", in: app)
+        scrollToElement(aboutPrivacy, in: app)
+        XCTAssertTrue(aboutPrivacy.isHittable, "关于页隐私政策入口不可点击")
+        assertGameIsAbsent(in: app)
+        aboutPrivacy.tap()
+        assertExists("privacy-policy-heading", in: app)
+        app.navigationBars.buttons.firstMatch.tap()
+        assertExists("about-biography", in: app)
+
         let adminEntry = element("about-admin-entry", in: app)
         scrollToElement(adminEntry, in: app)
         XCTAssertTrue(adminEntry.isHittable, "管理员入口不可点击")
+        assertGameIsAbsent(in: app)
         adminEntry.tap()
         assertExists("admin-login-heading", in: app)
         XCTAssertTrue(app.secureTextFields["管理员访问码"].waitForExistence(timeout: 5))
         attachScreenshot(named: "10-admin-login", app: app)
+    }
+
+    private func assertGameIsAbsent(
+        in app: XCUIApplication,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for identifier in ["about-embedded-game", "embedded-game-heading", "embedded-game-leaderboard"] {
+            XCTAssertFalse(element(identifier, in: app).exists,
+                           "已移除的小游戏与排行榜不得出现在 App 中", file: file, line: line)
+        }
+        for title in ["小游戏", "宦海浮沉录", "排行榜"] {
+            XCTAssertFalse(app.staticTexts[title].exists, file: file, line: line)
+        }
     }
 
     func testAboutSocialLinksKeepCompleteAccessiblePlatformAndAccountNames() {

@@ -145,6 +145,25 @@ Release 源码已加入登录页/设置页的显式环境选择、切换确认�
 
 ## 审核插件升级（preview26）
 
+当前移除游戏候选使用 `../upgrade-review-no-game-plugin.py`；本节后续 preview26
+记录是历史转换。新工具固定校验 .17 的 38 文件图摘要 `ae94b05…`，升级至 .18 的
+35 文件图；目标完整摘要见 `../../releases/no-game-candidate.md`。
+
+将新工具及其字节固定的 `accept-review-bootstrap.py`、`provision-review-bootstrap.py`
+置于同一 root 所有、非其他用户可写的目录，使用只读、root 所有的完整 Server 源包。
+默认 `--source /绝对路径/Server` 或显式 `--dry-run` 仅预检；通过后再加 `--apply`。
+解释器应使用 `/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /usr/bin/python3 -I`。
+工具先取得既有 `/var/lib/shuzijun-sync/site-operation.lock`，apply 再取得
+`/etc/shuzijun-review/plugin-maintenance.lock`。不创建全站锁，不修改数据库和账号。
+
+旧审核实例允许缺失 `release.sha256`，但全部旧文件仍须精确匹配固定摘要。
+备份目录 `/etc/shuzijun-review/no-game-plugin-backup-<32位ID>` 保存所有旧代码、
+原始权限、旧/新清单、隔离配置摘要和清单存在状态。三份游戏文件删除后，最后
+原子安装新清单；PHP、管理拒绝、游戏路由 404 和公开目录健康通过才记录完成。
+显式恢复使用同一工具 `--restore /完整备份目录`。任何失败或恢复后，审核两项
+服务保持停止；核对已恢复字节与隔离后再单独处理服务启动，不盲目重放升级。
+数据库游戏历史清理由独立 `decommission-game.php` 的审核配置处理。
+
 2026-09-07 已按 preview32 精确清单将独立审核站从 1.5.13.10 升级到 1.5.13.12，
 仅 fan-identity/content-delivery traits、核心类与入口版本四个文件。回滚备份、完整清单、
 PHP/API、匿名管理 401 和原隔离模块均已复核，详见 preview33 发布记录。

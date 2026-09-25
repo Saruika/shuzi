@@ -69,8 +69,8 @@ def main() -> None:
     # runtime behavior.
     assert core.count("require_once __DIR__ . '/trait-") == 6
     assert core.count("    use Shuzijun_App_") == 6
-    assert core.count("require_once __DIR__ . '/class-shuzijun-game-rules.php';") == 1
-    assert core.count("require_once __DIR__ . '/trait-shuzijun-app-game-leaderboard.php';") == 1
+    assert "class-shuzijun-game-rules.php" not in core
+    assert "trait-shuzijun-app-game-leaderboard.php" not in core
     assert "trait-shuzijun-app-push-notifications.php" in core
     assert "trait Shuzijun_App_Push_Notifications" in push
 

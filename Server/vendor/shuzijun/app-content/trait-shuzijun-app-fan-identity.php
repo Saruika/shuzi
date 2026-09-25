@@ -2687,7 +2687,6 @@ trait Shuzijun_App_Fan_Identity {
         try {
             if (!self::purge_collaboration_data_for_fan_user($user_id)
                 || !self::purge_push_data_for_fan_user($user_id)
-                || !self::purge_game_leaderboard_for_fan_user($user_id)
                 || !self::retain_published_work_for_deleting_user($user_id)) {
                 return false;
             }
@@ -3542,8 +3541,7 @@ trait Shuzijun_App_Fan_Identity {
             }
             self::$editorial_deletion_locks[$user_id] = $publication_lock;
             if (!self::purge_collaboration_data_for_fan_user($user_id)
-                || !self::purge_push_data_for_fan_user($user_id)
-                || !self::purge_game_leaderboard_for_fan_user($user_id)) {
+                || !self::purge_push_data_for_fan_user($user_id)) {
                 self::release_fan_user_deletion_lock($user_id);
                 self::abort_fan_user_deletion('account_deletion_cleanup_failed');
             }

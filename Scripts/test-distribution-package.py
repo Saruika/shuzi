@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -82,6 +83,48 @@ class DistributionPackageTests(unittest.TestCase):
         for key, value in (("NSPrivacyTracking", True), ("NSPrivacyTrackingDomains", ["example.invalid"])):
             with patch.dict(self.privacy, {key: value}), self.assertRaises(CHECKER.PackageCheckError):
                 self.check()
+
+    def test_retired_client_rejects_stale_gameplay_declaration(self):
+        self.privacy['NSPrivacyCollectedDataTypes'] = [
+            {'NSPrivacyCollectedDataType': 'NSPrivacyCollectedDataTypeGameplayContent'}]
+        with self.assertRaisesRegex(CHECKER.PackageCheckError, '^gameplay_declaration_in_retired_client$'):
+            self.check()
+
+    def test_packaged_game_resources_are_rejected_even_when_empty_or_nested(self):
+        for name in ('GameAssets', 'gameassets', 'Resources/legacy-game-assets', 'GameReference'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                app = Path(directory)
+                (app / name).mkdir(parents=True)
+                with self.assertRaisesRegex(CHECKER.PackageCheckError, '^game_resource_in_package$'):
+                    CHECKER.check_resources(app)
+        for name in ('game-rules-v1.json', 'main.js', 'events.js', 'endings.js'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                app = Path(directory)
+                (app / name).write_text('synthetic')
+                with self.assertRaisesRegex(CHECKER.PackageCheckError, '^game_resource_in_package$'):
+                    CHECKER.check_resources(app)
+
+    def test_retired_game_code_is_rejected_in_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / 'Yishu'
+            executable.write_bytes(b'Synthetic current App binary')
+            CHECKER.check_game_binary(executable)
+            for marker in (b'EmbeddedGame', b'GameLeaderboard', b'GameResultBridge', b'GameRunPayload',
+                           b'gameLeaderboard', b'about-embedded-game', b'fan/game/leaderboard'):
+                with self.subTest(marker=marker):
+                    executable.write_bytes(b'header\x00' + marker + b'\x00trailer')
+                    with self.assertRaisesRegex(CHECKER.PackageCheckError, '^game_code_in_package$'):
+                        CHECKER.check_game_binary(executable)
+
+    def test_resource_gate_keeps_existing_content_and_key_restrictions(self):
+        for name in ('artwork.jpg', 'secret.p8', '.env.local', 'AuthKey_example'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                app = Path(directory)
+                (app / name).write_text('synthetic')
+                with self.assertRaisesRegex(CHECKER.PackageCheckError, '^content_or_key_file_in_package$'):
+                    CHECKER.check_resources(app)
+        with tempfile.TemporaryDirectory() as directory:
+            CHECKER.check_resources(Path(directory))
 
     def test_tool_failure_and_timeout_never_forward_private_output(self):
         reply = subprocess.CompletedProcess([], 1, b"SYNTHETIC_PROFILE_DATA", b"SYNTHETIC_CERTIFICATE_DATA")

@@ -18,7 +18,7 @@ class ReviewUpgradeScopeTests(unittest.TestCase):
     def test_existing_upgrader_remains_pinned_to_historical_transition(self):
         previous = (SERVER / 'releases/v1.4.0-build4-review-env-preview32.md').read_text()
         historical = (SERVER / 'releases/v1.4.0-build6-acceptance5.md').read_text()
-        candidate = (SERVER / 'releases/game-leaderboard-candidate.md').read_text()
+        candidate = (SERVER / 'releases/no-game-candidate.md').read_text()
         def manifests(text):
             return [line.removeprefix('RELEASE_MANIFEST_SHA256=')
                     for line in text.splitlines()

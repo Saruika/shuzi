@@ -25,7 +25,7 @@ SCRIPT = ROOT / "Scripts/ci-supply-chain.py"
 WORKFLOW = ROOT / ".github/workflows/ios-quality.yml"
 # Current reviewed materials get a new record; immutable historical releases
 # must not be rewritten to pretend they contained today's workflow/scripts.
-RELEASE_RECORD = ROOT / "Server/releases/game-leaderboard-ci-candidate.md"
+RELEASE_RECORD = ROOT / "Server/releases/no-game-ci-candidate.md"
 SPDX_SCHEMA_URL = (
     "https://raw.githubusercontent.com/spdx/spdx-spec/"
     "aadf3b0b8dbbabdb4d880b0fc714255fea436ff7/schemas/spdx-schema.json"
@@ -360,12 +360,13 @@ def test_release_record() -> None:
         "RELEASE_ANALYZE_SHA256": ROOT / "Scripts/ci-release-analyze.sh",
         "TEST_SUMMARY_SHA256": ROOT / "Scripts/ci-test-summary.py",
         "DISTRIBUTION_CHECK_SHA256": ROOT / "Scripts/check-distribution-package.py",
+        "SECURITY_CHECK_SHA256": ROOT / "Scripts/security-check.sh",
     }
     for name, path in trust_materials.items():
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         verify_record_digest(text, name, digest)
     verify_record_digest(text, "SPDX_2_3_SCHEMA_SHA256", SPDX_SCHEMA_SHA256)
-    assert text.count("`game-leaderboard-ci-candidate`") == 1
+    assert text.count("`no-game-ci-candidate`") == 1
 
 
 def main() -> None:

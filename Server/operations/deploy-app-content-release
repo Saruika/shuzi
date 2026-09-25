@@ -41,11 +41,8 @@ readonly -a PLUGIN_MODULE_RELATIVES=(
     vendor/shuzijun/app-content/trait-shuzijun-app-push-notifications.php
     vendor/shuzijun/app-content/trait-shuzijun-app-fan-identity.php
     vendor/shuzijun/app-content/trait-shuzijun-app-content-delivery.php
-    vendor/shuzijun/app-content/trait-shuzijun-app-game-leaderboard.php
     vendor/shuzijun/app-content/trait-shuzijun-app-public-experience.php
     vendor/shuzijun/app-content/class-shuzijun-collaboration-private-payload.php
-    vendor/shuzijun/app-content/class-shuzijun-game-rules.php
-    vendor/shuzijun/app-content/game-rules-v1.json
     vendor/shuzijun/app-content/class-shuzijun-app-content-api.php
 )
 readonly MANIFEST_NAME=release.sha256
@@ -58,22 +55,20 @@ readonly LEGACY_BRIDGE_MANIFEST_SHA256=64aee00b4bb78903577ae9de737eb1cfdd3aae687
 readonly PREVIOUS_RELEASE_MANIFEST_SHA256=5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe
 readonly PREVIOUS_MODULAR_RELEASE_MANIFEST_SHA256=2b632ca195a65f1f0309bf66a9098ef52ca49a5eec9d80a5b7d9c32b8fbdfdee
 readonly PREVIOUS_GAME_RELEASE_MANIFEST_SHA256=3adaebe7acbdeeb189a703c865f991935cf90a778a8151eaf85f272e7d053576
-readonly TARGET_RELEASE_MANIFEST_SHA256=ae94b05f340b82842cca32beddb2c6ad7a9b69929ac97805a59f823ea28ff8ed
+readonly PREVIOUS_PUBLIC_RELEASE_MANIFEST_SHA256=ae94b05f340b82842cca32beddb2c6ad7a9b69929ac97805a59f823ea28ff8ed
+readonly TARGET_RELEASE_MANIFEST_SHA256=69e10dcf6f07a68b93590851bfed12c89a832f4c69cbb2ff8953c2601a5896e4
 readonly LEGACY_PRE_MANIFEST_PHP_SHA256=36c0d27d1dd4ded7497017a41473ede7fdf0dcf234f95c6e697de8cd29a91f4a
 readonly LEGACY_BRIDGE_PHP_SHA256=c109713a02e469bd716767dfd14894c055aeaa68faed473481c119251789d7c0
-readonly TARGET_RELEASE_PHP_SHA256=64159cb211d3228494ee73b91f884f7c30a46d7c249c79741d31bae19d71e2af
+readonly TARGET_RELEASE_PHP_SHA256=14d94c2abce0c1737deb16bf6fe42bd82e8487a2595ab872ca4deb0f1b95eec4
 readonly -a TARGET_RELEASE_MODULE_SHA256S=(
     7175ae3aefb1add1af504c2bbbba355b5e448a81818d7c00ace12c37cc6dc4e5
     bd689473956b67b480ce62704b73d39ea6c7a9536a19496120722d2524f65160
     7c5be7cf3347b187f6c88a12ad6a21f0001a5e7c92edbfe7a99e834abc1eebb7
-    c5f6647843ee58f7db268654cfcbba73d92404d0e3ea4d2e3ac7db9d25199d65
+    77d2a10cd9df7af2698ec36b3cfcbfe07765dbd2a03b401b8a7effb03bb3bf1c
     f27863d35b6a701d45afd6bfcecb5b235983497fee71553d18ec801bcbec2d6a
-    5d535654e713b60a58059087a35ca086ff35e12cd0e859a302850fb56058fbd9
     58a07e016adea07b27652e88b95efb96dbcb228d7dc9d03f2109722b26584b8e
     bdcea372748c79a06284f01570d0863d20316bf3d4d33fe7924c16d100a1b1d7
-    a75a0b61fe46be1bfe0993c2266b54fc2b30c8766ac8a3efb5fe30e098a1ff09
-    1ee7357cbd5018f84618ea610e8c8b648b9857ce22f05d91c91eb052cd36fdf1
-    a27bbdb16baee766b4895b63f250de97226f1e7c5d5524f4bf0ad5099e1944a4
+    da7493614f9b76dcceead2c8b2871c367583789d4c6ca6651a0d93ee2a0b283f
 )
 readonly COLLABORATION_FUSE_PROBE_SENTINEL=shuzijun-collaboration-fuse-probe-complete-v1
 
@@ -119,7 +114,7 @@ and contain only these release entries plus release.sha256:
   composer.json
   composer.lock
   vendor/
-    shuzijun/app-content/ (ten reviewed PHP modules and one rules JSON)
+    shuzijun/app-content/ (eight reviewed PHP modules)
 EOF
 }
 
@@ -496,7 +491,7 @@ validate_allowed_candidate_manifest_sha256() {
 
 validate_allowed_live_manifest_sha256() {
     case "$1" in
-        "$LEGACY_BRIDGE_MANIFEST_SHA256"|"$PREVIOUS_RELEASE_MANIFEST_SHA256"|"$PREVIOUS_MODULAR_RELEASE_MANIFEST_SHA256"|"$PREVIOUS_GAME_RELEASE_MANIFEST_SHA256"|"$TARGET_RELEASE_MANIFEST_SHA256") ;;
+        "$LEGACY_BRIDGE_MANIFEST_SHA256"|"$PREVIOUS_RELEASE_MANIFEST_SHA256"|"$PREVIOUS_MODULAR_RELEASE_MANIFEST_SHA256"|"$PREVIOUS_GAME_RELEASE_MANIFEST_SHA256"|"$PREVIOUS_PUBLIC_RELEASE_MANIFEST_SHA256"|"$TARGET_RELEASE_MANIFEST_SHA256") ;;
         *) fail 'live release manifest SHA256 is not in the reviewed transition allowlist' ;;
     esac
 }
@@ -698,9 +693,8 @@ probe_candidate_collaboration_release_fuse() {
     # through stdin while PHP remains www-data with common stream, socket and
     # DNS network entry points disabled and filesystem-confined. Exact
     # per-file hashes plus decimal byte framing prevent source-boundary
-    # ambiguity. The modular target has six traits, two support classes,
-    # one data-only JSON document, the API class and the thin entrypoint.
-    # JSON is decoded/validated, never evaluated. Reviewed require_once statements are removed
+    # ambiguity. The modular target has six traits, one support class,
+    # the API class and the thin entrypoint. Reviewed require_once statements are removed
     # only inside this evaluator because the root-only bundle deliberately sits
     # outside the PHP worker's open_basedir. Runtime loading is unchanged.
     if cat -- "${source_files[@]}" | \
@@ -718,7 +712,7 @@ probe_candidate_collaboration_release_fuse() {
         $sourceHashes = explode(",", $argv[4]);
         if (count($sizeValues) !== count($sourceHashes)
             || ($sourceMode === "legacy" && count($sizeValues) !== 1)
-            || ($sourceMode === "modular" && count($sizeValues) !== 12)
+            || ($sourceMode === "modular" && count($sizeValues) !== 9)
             || ($sourceMode !== "legacy" && $sourceMode !== "modular")) {
             exit(26);
         }
@@ -746,25 +740,21 @@ probe_candidate_collaboration_release_fuse() {
         if ($sourceMode === "legacy") {
             $traitSources = array();
             $supportSources = array();
-            $rulesJSON = null;
             $classSource = "";
             $entrypoint = $sources[0];
         } else {
-            $traitSources = array_slice($sources, 0, 7);
-            $supportSources = array_slice($sources, 7, 2);
-            $rulesJSON = $sources[9];
-            $classSource = $sources[10];
-            $entrypoint = $sources[11];
+            $traitSources = array_slice($sources, 0, 6);
+            $supportSources = array_slice($sources, 6, 1);
+            $classSource = $sources[7];
+            $entrypoint = $sources[8];
             $declarations = array(
                 "trait Shuzijun_App_Collaboration",
                 "trait Shuzijun_App_Fan_Endpoints",
                 "trait Shuzijun_App_Push_Notifications",
                 "trait Shuzijun_App_Fan_Identity",
                 "trait Shuzijun_App_Content_Delivery",
-                "trait Shuzijun_App_Game_Leaderboard",
                 "trait Shuzijun_App_Public_Experience",
-                "final class Shuzijun_Collaboration_Private_Payload",
-                "final class Shuzijun_Game_Rules"
+                "final class Shuzijun_Collaboration_Private_Payload"
             );
             foreach ($declarations as $index => $declaration) {
                 if (substr_count($sources[$index], $declaration) !== 1) { exit(27); }
@@ -783,8 +773,6 @@ probe_candidate_collaboration_release_fuse() {
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-fan-identity.php" . $quote . ";",
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-content-delivery.php" . $quote . ";",
                 "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-public-experience.php" . $quote . ";",
-                "require_once __DIR__ . " . $quote . "/class-shuzijun-game-rules.php" . $quote . ";",
-                "require_once __DIR__ . " . $quote . "/trait-shuzijun-app-game-leaderboard.php" . $quote . ";",
             );
             $previousLoaderPosition = -1;
             foreach ($classLoaders as $classLoader) {
@@ -803,14 +791,6 @@ probe_candidate_collaboration_release_fuse() {
         function add_action(...$arguments): void {}
         function add_filter(...$arguments): void {}
         foreach ($supportSources as $supportSource) { eval("?>" . $supportSource); }
-        if ($rulesJSON !== null) {
-            if (!class_exists("Shuzijun_Game_Rules", false)
-                || strlen($rulesJSON) > 524288
-                || !hash_equals(Shuzijun_Game_Rules::FILE_SHA256, hash("sha256", $rulesJSON))) { exit(28); }
-            try {
-                $rules = new Shuzijun_Game_Rules(json_decode($rulesJSON, true, 32, JSON_THROW_ON_ERROR));
-            } catch (Throwable $error) { exit(28); }
-        }
         foreach ($traitSources as $traitSource) { eval("?>" . $traitSource); }
         if ($classSource !== "") { eval("?>" . $classSource); }
         eval("?>" . $entrypoint);
@@ -862,7 +842,6 @@ raise SystemExit(0 if payload == expected else 1)
         25) fail 'candidate plugin PHP is not in the reviewed release allowlist' ;;
         26) fail 'candidate plugin source framing is invalid' ;;
         27) fail 'candidate plugin loader graph is not exact' ;;
-        28) fail 'candidate game rules JSON is invalid or not bound to the reviewed rules class' ;;
         124|137) fail 'candidate collaboration release fuse probe timed out' ;;
         0)
             if [[ "${pipeline_status[2]:-1}" -ne 0 ]]; then

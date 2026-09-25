@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Pinned review-only game plugin transaction; default is read-only preflight.
+"""Pinned review-only game removal transaction; default is read-only preflight.
 
-No schema/account/content writes. --apply upgrades the exact predecessor.
+No schema/account/content writes. --apply upgrades only public .17 to no-game .18.
 --restore BACKUP restores a verified interrupted transaction, leaving both
 review services stopped. Never restart automatically after a failed upgrade.
 """
@@ -10,35 +10,68 @@ from contextlib import contextmanager
 import ctypes
 import fcntl
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import stat
 import sys
+import types
 import uuid
 
-spec = importlib.util.spec_from_file_location(
-    'game_review_acceptance', Path(__file__).with_name('accept-review-bootstrap.py'))
-a = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(a)
-b = a.bootstrap
-a.HTTPS_EDGE = True
+DEPENDENCIES = {
+    'accept-review-bootstrap.py': '82a4583aaca627fdc1ae137cfa8098425a1e634c0bc9feeaa08a0b87c647d76e',
+    'provision-review-bootstrap.py': '494ad787c77a535ce62b2b7d9f6b57519d3a5ce8981094cc21720c157a64efa2',
+}
+
+
+def load_dependencies():
+    directory = Path(__file__).resolve().parent
+    sources = {}
+    for name, expected in DEPENDENCIES.items():
+        path = directory / name
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeError('missing or linked review dependency')
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != expected:
+            raise RuntimeError('unreviewed review dependency')
+        sources[name] = data.decode('utf-8')
+    bootstrap = types.ModuleType('no_game_review_bootstrap')
+    bootstrap.__file__ = str(directory / 'provision-review-bootstrap.py')
+    exec(compile(sources['provision-review-bootstrap.py'], bootstrap.__file__, 'exec'),
+         bootstrap.__dict__)
+    acceptance = types.ModuleType('no_game_review_acceptance')
+    acceptance.__file__ = str(directory / 'accept-review-bootstrap.py')
+    # Evaluate already verified bytes, avoiding a second dependency pathname read.
+    loader = ("spec = importlib.util.spec_from_file_location('bootstrap', "
+              "Path(__file__).with_name('provision-review-bootstrap.py'))\n"
+              "bootstrap = importlib.util.module_from_spec(spec)\n"
+              "spec.loader.exec_module(bootstrap)")
+    source = sources['accept-review-bootstrap.py']
+    if source.count(loader) != 1:
+        raise RuntimeError('review dependency loader graph changed')
+    acceptance.bootstrap = bootstrap
+    exec(compile(source.replace(loader, ''), acceptance.__file__, 'exec'),
+         acceptance.__dict__)
+    acceptance.HTTPS_EDGE = True
+    return acceptance, bootstrap
+
+
+a, b = load_dependencies()
 ROOT_UID = 0
+ROOT_GID = 0
 LIVE = b.SITE / 'wp-content/mu-plugins'
-BASELINE = '5038c807d0e15a54b4acb20a7e9fe43ac23e90339708f0cb65561a8730c3acfe'
-TARGET = '3adaebe7acbdeeb189a703c865f991935cf90a778a8151eaf85f272e7d053576'
+BASELINE = 'ae94b05f340b82842cca32beddb2c6ad7a9b69929ac97805a59f823ea28ff8ed'
+TARGET = '69e10dcf6f07a68b93590851bfed12c89a832f4c69cbb2ff8953c2601a5896e4'
 PREFIX = 'vendor/shuzijun/app-content/'
-CHANGED = (PREFIX + 'trait-shuzijun-app-content-delivery.php',
-           PREFIX + 'trait-shuzijun-app-collaboration.php',
-           PREFIX + 'trait-shuzijun-app-push-notifications.php',
-           PREFIX + 'trait-shuzijun-app-fan-identity.php',
+CHANGED = (PREFIX + 'trait-shuzijun-app-fan-identity.php',
            PREFIX + 'class-shuzijun-app-content-api.php', 'shuzijun-app-content.php')
-ADDED = (PREFIX + 'class-shuzijun-game-rules.php', PREFIX + 'game-rules-v1.json',
-         PREFIX + 'trait-shuzijun-app-game-leaderboard.php')
-WRITE_ORDER = ADDED + CHANGED  # Thin entry is always committed last.
-UNITS = ('shuzijun-review-php.service', 'shuzijun-review-web.service')
+REMOVED = (PREFIX + 'class-shuzijun-game-rules.php', PREFIX + 'game-rules-v1.json',
+           PREFIX + 'trait-shuzijun-app-game-leaderboard.php')
+MANIFEST = 'release.sha256'
+WRITE_ORDER = CHANGED + REMOVED + (MANIFEST,)
+UNITS = b.UNITS
+SITE_LOCK = Path('/var/lib/shuzijun-sync/site-operation.lock')
 ASSET_HASHES = {
     '000-review-bootstrap.php': '29f8caf26aebc14a69ed9775df2e78ec2ddf885e73898b0b941012681bd6d8f9',
     'php-fpm.conf': '61be02be75fa5d307a86fad0ebb8d1746d540360b828c3bb6ca16ab60b7ebef9',
@@ -48,13 +81,13 @@ ASSET_HASHES = {
 }
 
 
-class ReviewGameError(RuntimeError):
+class ReviewNoGameError(RuntimeError):
     """Only fixed non-sensitive guard labels may cross the CLI boundary."""
 
 
 def check(condition, message):
     if not condition:
-        raise ReviewGameError(message)
+        raise ReviewNoGameError(message)
 
 
 def digest(data):
@@ -110,7 +143,7 @@ def absent(path):
 def file_map(root):
     directory(root)
     if root == LIVE:
-        check({path.name for path in root.iterdir()} == {
+        check({path.name for path in root.iterdir()} - {MANIFEST} == {
             '000-review-bootstrap.php', 'shuzijun-app-content.php',
             'composer.json', 'composer.lock', 'vendor',
         }, 'unexpected review mu-plugin root inventory')
@@ -118,9 +151,22 @@ def file_map(root):
             for path in b.plugin_files(root)}
 
 
+def manifest_bytes(files):
+    return ''.join(digest(data) + '  ' + relative + '\n'
+                   for relative, (data, _) in sorted(files.items())).encode('ascii')
+
+
 def map_manifest(files):
-    return digest(''.join(digest(data) + '  ' + relative + '\n'
-                         for relative, (data, _) in sorted(files.items())).encode('ascii'))
+    return digest(manifest_bytes(files))
+
+
+def manifest_state(files):
+    path = LIVE / MANIFEST
+    if not os.path.lexists(path):
+        return {'present': False}
+    data, info = protected_file(path)
+    check(data == manifest_bytes(files), 'live manifest does not describe exact release')
+    return {'present': True, 'sha256': digest(data), **metadata_record(info)}
 
 
 def asset_paths():
@@ -178,7 +224,7 @@ def exclusive_rename_api():
         # Public macOS SDK sys/stdio.h and sys/fcntl.h; used by local contracts.
         name, directory_fd, flag = 'renameatx_np', -2, 4  # AT_FDCWD, RENAME_EXCL
     else:
-        raise ReviewGameError('atomic exclusive rename unavailable')
+        raise ReviewNoGameError('atomic exclusive rename unavailable')
     function = getattr(library, name, None)
     check(function is not None, 'atomic exclusive rename unavailable')
     function.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
@@ -196,32 +242,35 @@ def rename_new(source, target):
 def preflight(source):
     check(os.geteuid() == ROOT_UID, 'root required')
     directory(b.CONFIG)
+    for name in DEPENDENCIES:
+        protected_file(Path(__file__).resolve().parent / name)
     current, candidate = file_map(LIVE), file_map(source)
     check(map_manifest(current) == BASELINE, 'unexpected live release; do not replay')
     check(map_manifest(candidate) == TARGET, 'candidate differs from reviewed release')
-    check(set(candidate) - set(current) == set(ADDED)
-          and not set(current) - set(candidate), 'unexpected added or removed files')
-    check({name for name in current if current[name][0] != candidate[name][0]} == set(CHANGED),
+    check(not set(candidate) - set(current)
+          and set(current) - set(candidate) == set(REMOVED), 'unexpected added or removed files')
+    check({name for name in candidate if current[name][0] != candidate[name][0]} == set(CHANGED),
           'unexpected changed files')
-    for name in ADDED:
-        directory((LIVE / name).parent)
-        absent(LIVE / name)
+    state = manifest_state(current)
     exclusive_rename_api()
     check(all((LIVE / name).parent.stat().st_dev == b.CONFIG.stat().st_dev
               for name in WRITE_ORDER), 'private staging and live targets must share a filesystem')
     preserved = invariants()
     assert_services(False)
-    check(a.wp_eval("echo DB_NAME;").strip() == b.DATABASE, 'unexpected review database')
-    for name in WRITE_ORDER:
-        if name.endswith('.php'):
-            b.command(['/usr/bin/php', '-l', str(source / name)])
-    # Validate actual same-directory rules resolution without booting WordPress
-    # or creating tables; no request handler is invoked.
-    result = b.command(['/usr/bin/php', '-n', '-d', 'allow_url_fopen=0', '-r',
-               'require $argv[1]; Shuzijun_Game_Rules::bundled(); echo "rules-ready";',
-               str(source / (PREFIX + 'class-shuzijun-game-rules.php'))])
-    check(result.strip() == 'rules-ready', 'rules initialization not confirmed')
-    return current, candidate, preserved
+    verify_review_identity()
+    for name in CHANGED:
+        b.command(['/usr/bin/php', '-l', str(source / name)])
+    return current, candidate, preserved, state
+
+
+def verify_review_identity():
+    result = a.wp_eval(
+        "global $wpdb; if (DB_NAME !== 'shuzijun_review' || DB_USER !== 'shuzijun_review'"
+        " || DB_HOST !== 'localhost:/var/run/mysqld/mysqld.sock' || $wpdb->prefix !== 'review_'"
+        " || site_url() !== 'https://review.shuzijun.com.cn'"
+        " || !defined('DISABLE_WP_CRON') || DISABLE_WP_CRON !== true) { exit(79); }"
+        " echo 'review-identity-confirmed';")
+    check(result.strip() == 'review-identity-confirmed', 'unexpected review database or origin')
 
 
 def metadata_record(info):
@@ -302,8 +351,8 @@ def record_outcome(backup, state):
         write_new(path, data, {'uid': ROOT_UID, 'gid': os.getgid(), 'mode': 0o600})
 
 
-def backup_transaction(current, candidate, preserved):
-    backup = b.CONFIG / ('game-plugin-backup-' + uuid.uuid4().hex)
+def backup_transaction(current, candidate, preserved, state):
+    backup = b.CONFIG / ('no-game-plugin-backup-' + uuid.uuid4().hex)
     backup.mkdir(mode=0o700)
     (backup / 'staging').mkdir(mode=0o700)
     private = {'uid': ROOT_UID, 'gid': os.getgid(), 'mode': 0o600}
@@ -313,32 +362,34 @@ def backup_transaction(current, candidate, preserved):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         write_new(path, data, private)
         records.append({'path': name, 'sha256': digest(data), **metadata_record(info)})
-    for name in WRITE_ORDER:
+    for name in CHANGED:
         path = backup / 'candidate' / name
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         write_new(path, candidate[name][0], private)
+    write_new(backup / 'original.sha256', manifest_bytes(current), private)
+    write_new(backup / 'candidate.sha256', manifest_bytes(candidate), private)
     journal = {'version': 1, 'baseline': BASELINE, 'target': TARGET,
-               'files': records, 'invariants': preserved}
+               'files': records, 'invariants': preserved, 'manifest': state}
     write_new(backup / 'prepared.json', json.dumps(journal, sort_keys=True).encode(), private)
     for path in sorted((p for p in backup.rglob('*') if p.is_dir()),
                        key=lambda p: len(p.parts), reverse=True):
         sync_directory(path)
     sync_directory(backup)
     sync_directory(b.CONFIG)
-    load_transaction(backup)  # Read back all backup bytes before stopping PHP.
-    print('review-game: prepared backup=' + str(backup), flush=True)
+    load_transaction(backup)
+    print('review-no-game: prepared backup=' + str(backup), flush=True)
     return backup
 
 
 def load_transaction(backup):
     check(backup.parent == b.CONFIG
-          and re.fullmatch(r'game-plugin-backup-[a-f0-9]{32}', backup.name), 'invalid backup target')
+          and re.fullmatch(r'no-game-plugin-backup-[a-f0-9]{32}', backup.name), 'invalid backup target')
     directory(backup, private=True)
     directory(backup / 'staging', private=True)
     raw, _ = protected_file(backup / 'prepared.json')
     check(len(raw) <= 65536, 'oversized backup journal')
     journal = json.loads(raw)
-    check(set(journal) == {'version', 'baseline', 'target', 'files', 'invariants'}
+    check(set(journal) == {'version', 'baseline', 'target', 'files', 'invariants', 'manifest'}
           and journal['version'] == 1 and journal['baseline'] == BASELINE
           and journal['target'] == TARGET, 'unreviewed backup transaction')
     original = file_map(backup / 'original')
@@ -359,8 +410,8 @@ def load_transaction(backup):
         metadata[name] = {key: record[key] for key in ('uid', 'gid', 'mode')}
     new_files = {p.relative_to(backup / 'candidate').as_posix(): protected_file(p)
                  for p in b.regular_tree(backup / 'candidate')}
-    check(set(new_files) == set(WRITE_ORDER), 'backup candidate graph differs')
-    candidate = dict(original)
+    check(set(new_files) == set(CHANGED), 'backup candidate graph differs')
+    candidate = {name: value for name, value in original.items() if name not in REMOVED}
     candidate.update(new_files)
     check(map_manifest(candidate) == TARGET, 'backup candidate manifest mismatch')
     check(set(journal['invariants']) == set(asset_paths()), 'invalid isolation snapshot')
@@ -370,106 +421,191 @@ def load_transaction(backup):
               and all(type(value[key]) is int for key in ('uid', 'gid', 'mode'))
               and value['uid'] == ROOT_UID and value['gid'] >= 0
               and value['mode'] in (0o600, 0o640, 0o644), 'invalid isolation metadata')
-    return original, candidate, metadata, journal['invariants']
+    check(protected_file(backup / 'original.sha256')[0] == manifest_bytes(original)
+          and protected_file(backup / 'candidate.sha256')[0] == manifest_bytes(candidate),
+          'backup manifest bytes differ')
+    state = journal['manifest']
+    check(isinstance(state, dict) and type(state.get('present')) is bool,
+          'invalid original manifest state')
+    if state['present']:
+        check(set(state) == {'present', 'sha256', 'uid', 'gid', 'mode'}
+              and state['sha256'] == BASELINE
+              and all(type(state[key]) is int for key in ('uid', 'gid', 'mode'))
+              and state['uid'] == ROOT_UID and state['gid'] >= 0
+              and state['mode'] in (0o600, 0o640, 0o644), 'invalid original manifest metadata')
+    else:
+        check(state == {'present': False}, 'invalid absent manifest state')
+    return original, candidate, metadata, journal['invariants'], state
 
 
-def assert_known_live(original, candidate, metadata):
+def target_manifest_metadata(metadata, state):
+    return ({key: state[key] for key in ('uid', 'gid', 'mode')}
+            if state['present'] else metadata['shuzijun-app-content.php'])
+
+
+def assert_known_live(original, candidate, metadata, state):
     current = file_map(LIVE)
-    check(set(original) <= set(current) <= set(candidate), 'foreign live file graph')
+    check(set(candidate) <= set(current) <= set(original), 'foreign live file graph')
     for name, (data, info) in current.items():
-        permitted = {candidate[name][0]}
-        if name in original:
-            permitted.add(original[name][0])
+        permitted = {original[name][0]}
+        if name in candidate:
+            permitted.add(candidate[name][0])
         check(data in permitted, 'foreign file change prevents rollback')
-        expected_metadata = metadata[name] if name in original else metadata[CHANGED[0]]
-        check(metadata_record(info) == expected_metadata, 'foreign metadata change prevents rollback')
-    for name in ADDED:
+        check(metadata_record(info) == metadata[name], 'foreign metadata change prevents rollback')
+    for name in REMOVED:
         if name not in current:
-            absent(LIVE / name)  # Also reject dangling symlinks.
+            absent(LIVE / name)
+    path = LIVE / MANIFEST
+    if os.path.lexists(path):
+        data, info = protected_file(path)
+        permitted = [(manifest_bytes(candidate), target_manifest_metadata(metadata, state))]
+        if state['present']:
+            permitted.append((manifest_bytes(original), target_manifest_metadata(metadata, state)))
+        check((data, metadata_record(info)) in permitted, 'foreign live manifest prevents rollback')
+    else:
+        check(not state['present'], 'original manifest unexpectedly missing')
+
+
+def remove_exact(relative, expected, metadata):
+    path = LIVE / relative
+    data, info = protected_file(path)
+    check(data == expected and metadata_record(info) == metadata, 'foreign file before removal')
+    path.unlink()
+    sync_directory(path.parent)
+
+
+def install_manifest(backup, original, candidate, metadata, state):
+    path = LIVE / MANIFEST
+    target_metadata = target_manifest_metadata(metadata, state)
+    if state['present']:
+        replace_exact(path, manifest_bytes(candidate), target_metadata,
+                      manifest_bytes(original), backup)
+    else:
+        install_added(backup, MANIFEST, manifest_bytes(candidate), target_metadata)
 
 
 def restore(backup, *, already_stopped=False):
-    original, candidate, metadata, preserved = load_transaction(backup)
+    original, candidate, metadata, preserved, state = load_transaction(backup)
     if already_stopped:
         assert_services(True)
     else:
         stop_services()
     check(invariants() == preserved, 'configuration changed; leave review stopped')
-    assert_known_live(original, candidate, metadata)  # Entire graph before any overwrite.
-    for name in reversed(WRITE_ORDER):
-        path = LIVE / name
-        if name in ADDED:
-            if os.path.lexists(path):
-                data, info = protected_file(path)
-                check(data == candidate[name][0] and metadata_record(info) == metadata[CHANGED[0]],
-                      'foreign added file')
-                path.unlink()  # Only exact reviewed new path with matching bytes/metadata.
-                sync_directory(path.parent)
-        else:
-            current, _ = protected_file(path)
-            if current != original[name][0]:
-                replace_exact(path, original[name][0], metadata[name], current, backup, 'restore')
-    check(map_manifest(file_map(LIVE)) == BASELINE, 'restored manifest mismatch')
+    assert_known_live(original, candidate, metadata, state)
+    # Restore dependencies before the entrypoint; services remain stopped.
+    for name in REMOVED:
+        if not os.path.lexists(LIVE / name):
+            install_added(backup, name, original[name][0], metadata[name])
+    for name in CHANGED:
+        current, _ = protected_file(LIVE / name)
+        if current != original[name][0]:
+            replace_exact(LIVE / name, original[name][0], metadata[name], current, backup, 'restore')
+    path = LIVE / MANIFEST
+    if state['present']:
+        current, _ = protected_file(path)
+        if current != manifest_bytes(original):
+            replace_exact(path, manifest_bytes(original), target_manifest_metadata(metadata, state),
+                          current, backup, 'restore')
+    elif os.path.lexists(path):
+        remove_exact(MANIFEST, manifest_bytes(candidate), target_manifest_metadata(metadata, state))
+    check(map_manifest(file_map(LIVE)) == BASELINE and manifest_state(original) == state,
+          'restored release or manifest state mismatch')
     check(invariants() == preserved, 'configuration changed during rollback')
     assert_services(True)
     record_outcome(backup, 'restored-stopped')
-    print('review-game: baseline restored; both review services remain stopped', flush=True)
+    print('review-no-game: baseline restored; both review services remain stopped', flush=True)
+
+
+def verify_health():
+    b.wait_for_php()
+    verify_review_identity()
+    status, _ = a.request('app-admin/session')
+    check(status in (401, 403), 'anonymous management not denied')
+    for method, endpoint in (('GET', 'fan/game/leaderboard'), ('POST', 'fan/game/scores'),
+                             ('DELETE', 'fan/game/scores')):
+        status, payload = a.request(endpoint, method=method)
+        check(status == 404 and isinstance(payload, dict) and payload.get('code') == 'rest_no_route',
+              'removed game route remains available')
+    status, payload = a.request('public-experience')
+    check(status == 200 and isinstance(payload, dict)
+          and set(payload) == {'schemaVersion', 'contentAudience', 'updatedAt', 'albums'}
+          and type(payload['schemaVersion']) is int and payload['schemaVersion'] == 1
+          and payload['contentAudience'] == 'public' and isinstance(payload['updatedAt'], str)
+          and bool(payload['updatedAt']) and isinstance(payload['albums'], list),
+          'public catalog health failed')
 
 
 def apply(source):
-    current, candidate, preserved = preflight(source)
-    backup = backup_transaction(current, candidate, preserved)
-    original, saved_candidate, metadata, saved_invariants = load_transaction(backup)
-    check(map_manifest(file_map(LIVE)) == BASELINE and invariants() == saved_invariants,
-          'live changed after backup; no services changed')
+    current, candidate, preserved, state = preflight(source)
+    backup = backup_transaction(current, candidate, preserved, state)
+    original, saved_candidate, metadata, saved_invariants, saved_state = load_transaction(backup)
+    check(map_manifest(file_map(LIVE)) == BASELINE and invariants() == saved_invariants
+          and manifest_state(current) == saved_state, 'live changed after backup; no services changed')
     stop_attempted = False
     try:
         stop_attempted = True
         stop_services()
-        check(map_manifest(file_map(LIVE)) == BASELINE and invariants() == preserved,
-              'live changed after service stop')
-        for name in WRITE_ORDER:
-            if name in ADDED:
-                install_added(backup, name, saved_candidate[name][0], metadata[CHANGED[0]])
-            else:
-                replace_exact(LIVE / name, saved_candidate[name][0], metadata[name], original[name][0], backup)
-        check(map_manifest(file_map(LIVE)) == TARGET and invariants() == preserved,
+        check(map_manifest(file_map(LIVE)) == BASELINE and invariants() == preserved
+              and manifest_state(original) == state, 'live changed after service stop')
+        for name in CHANGED:
+            replace_exact(LIVE / name, saved_candidate[name][0], metadata[name], original[name][0], backup)
+        for name in REMOVED:
+            remove_exact(name, original[name][0], metadata[name])
+        install_manifest(backup, original, saved_candidate, metadata, state)
+        check(map_manifest(file_map(LIVE)) == TARGET and invariants() == preserved
+              and protected_file(LIVE / MANIFEST)[0] == manifest_bytes(saved_candidate),
               'installed candidate or isolation mismatch')
-        assert_known_live(original, saved_candidate, metadata)
+        assert_known_live(original, saved_candidate, metadata, state)
         b.command(['/usr/bin/systemctl', 'start', *UNITS])
         assert_services(False)
-        b.wait_for_php()
-        status, _ = a.request('app-admin/session')
-        check(status in (401, 403), 'anonymous management not denied')
-        status, _ = a.request('fan/game/leaderboard')
-        check(status in (401, 403), 'anonymous leaderboard not denied')
-        check(invariants() == preserved and map_manifest(file_map(LIVE)) == TARGET,
+        verify_health()
+        check(invariants() == preserved and map_manifest(file_map(LIVE)) == TARGET
+              and protected_file(LIVE / MANIFEST)[0] == manifest_bytes(saved_candidate),
               'post-health candidate changed')
         record_outcome(backup, 'completed')
-        print('review-game: candidate installed; schema and account acceptance still pending', flush=True)
+        print('review-no-game: candidate installed; game data cleanup remains separate', flush=True)
     except BaseException:
         if stop_attempted:
-            # If stop confirmation or foreign-change validation fails, do not
-            # overwrite anything else and never attempt to start either unit.
-            stop_services()  # Stop first, even if the backup itself became unreadable.
+            stop_services()
             restore(backup, already_stopped=True)
         raise
+
+
+@contextmanager
+def existing_site_lock():
+    directory(SITE_LOCK.parent, private=True)
+    descriptor = os.open(SITE_LOCK, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, 'rb') as handle:
+        info = os.fstat(handle.fileno())
+        check(stat.S_ISREG(info.st_mode) and info.st_uid == ROOT_UID and info.st_gid == ROOT_GID
+              and info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600
+              and info.st_size == 0 and info.st_dev == SITE_LOCK.parent.stat().st_dev,
+              'unsafe site-operation lock')
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        current = SITE_LOCK.lstat()
+        check((info.st_dev, info.st_ino) == (current.st_dev, current.st_ino),
+              'replaced site-operation lock')
+        yield
 
 
 @contextmanager
 def maintenance_lock():
     check(os.geteuid() == ROOT_UID, 'root required')
     directory(b.CONFIG)
-    lock_path = b.CONFIG / 'plugin-maintenance.lock'  # Same lock as legacy tool.
-    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, 'rb') as handle:
-        info = os.fstat(handle.fileno())
-        check(stat.S_ISREG(info.st_mode) and info.st_uid == ROOT_UID and info.st_nlink == 1
-              and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == 0, 'unsafe maintenance lock')
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        current = lock_path.lstat()
-        check((info.st_dev, info.st_ino) == (current.st_dev, current.st_ino), 'replaced maintenance lock')
-        yield
+    # Match the decommission/global deployer lock before the review-only lock.
+    with existing_site_lock():
+        lock_path = b.CONFIG / 'plugin-maintenance.lock'
+        descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'rb') as handle:
+            info = os.fstat(handle.fileno())
+            check(stat.S_ISREG(info.st_mode) and info.st_uid == ROOT_UID and info.st_nlink == 1
+                  and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size == 0,
+                  'unsafe maintenance lock')
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            current = lock_path.lstat()
+            check((info.st_dev, info.st_ino) == (current.st_dev, current.st_ino),
+                  'replaced maintenance lock')
+            yield
 
 
 def main():
@@ -477,6 +613,7 @@ def main():
     parser.add_argument('--source', type=Path)
     action = parser.add_mutually_exclusive_group()
     action.add_argument('--apply', action='store_true')
+    action.add_argument('--dry-run', action='store_true', help='Read-only preflight (the default)')
     action.add_argument('--restore', type=Path, metavar='BACKUP')
     args = parser.parse_args()
     if args.restore:
@@ -489,15 +626,16 @@ def main():
             with maintenance_lock():
                 apply(args.source)
         else:
-            preflight(args.source)
-            print('review-game: read-only preflight passed; no writes or service changes')
+            with existing_site_lock():
+                preflight(args.source)
+            print('review-no-game: read-only preflight passed; no writes or service changes')
 
 
 if __name__ == '__main__':
     try:
         main()
     except Exception as error:
-        label = str(error) if isinstance(error, ReviewGameError) else type(error).__name__
-        print('review-game: failed: ' + label
+        label = str(error) if isinstance(error, ReviewNoGameError) else type(error).__name__
+        print('review-no-game: failed: ' + label
               + '; inspect backup; do not restart isolated services without verification')
         raise SystemExit(1) from None

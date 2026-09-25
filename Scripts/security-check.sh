@@ -79,16 +79,12 @@ if command -v php >/dev/null 2>&1; then
   php Server/tests/collaboration-outbox-deletion-test.php
   php Server/tests/collaboration-admin-notice-test.php
   php Server/tests/fan-bound-administrator-auth-test.php
-  php Server/tests/game-leaderboard-regression.php
-  php -l Server/operations/install-game-leaderboard-schema.php >/dev/null
-  php Server/tests/game-leaderboard-schema-installer-test.php
-  php -l Server/operations/update-game-privacy-policy.php >/dev/null
-  php Server/tests/game-privacy-policy-update-test.php
+  php Server/tests/no-game-contract-test.php
+  php Server/tests/game-decommission-test.php
+  php -l Server/operations/update-app-privacy-policy.php >/dev/null
+  php Server/tests/privacy-policy-update-test.php
   php -l Server/operations/apply-public-experience-selection.php >/dev/null
   php Server/tests/public-experience-selection-operation-test.php
-  php -l Server/operations/test-review-game-leaderboard.php >/dev/null
-  php Server/tests/review-game-leaderboard-harness-test.php
-  node --test Scripts/test-game-leaderboard-php.mjs
   php -l Server/tests/fan-administrator-binding-wordpress-integration.php >/dev/null
   php -l Server/tests/fan-administrator-media-wordpress-integration.php >/dev/null
   while IFS= read -r -d '' plugin_module; do
@@ -126,18 +122,13 @@ python3 Scripts/test-ci-permission-isolation.py
 python3 Scripts/test-ci-test-summary.py
 python3 Scripts/test-distribution-package.py
 python3 Scripts/test_archive_testflight.py
-python3 Scripts/test-embedded-game-host-contract.py
-command -v node >/dev/null 2>&1 || fail '内嵌游戏保真与生命周期回归需要 Node.js'
-node --version
-node Scripts/export-game-rules.mjs --check
-node --test Scripts/test-embedded-game-parity.mjs Scripts/test-embedded-game-lifecycle.mjs Scripts/test-game-leaderboard-bridge.mjs
+python3 Scripts/test-no-game-release.py
 python3 Server/tests/app-content-release-contract-test.py
 python3 Server/tests/review-bootstrap-test.py
 python3 Server/tests/review-catalog-test.py
 python3 Server/tests/review-accounts-test.py
 python3 Server/tests/review-upgrade-test.py
-python3 Server/tests/review-game-upgrade-test.py
-python3 Server/tests/review-public-upgrade-test.py
+python3 Server/tests/review-no-game-upgrade-test.py
 python3 Server/tests/review-permalinks-test.py
 python3 Server/tests/account-authority-role-contract-test.py
 python3 Server/tests/deploy-app-content-boot-guard-state-machine-test.py
@@ -153,7 +144,6 @@ python3 Server/tests/sync-scheduler-contract-test.py
 python3 Server/tests/sync-lock-contention-test.py
 python3 Server/tests/sync-release-deployer-contract-test.py
 python3 Server/tests/nginx-server-block-contract-test.py
-python3 Server/tests/game-json-protection-test.py
 python3 Server/tests/install-build34-nginx-routing-contract-test.py
 python3 Server/tests/nginx-sensitive-routing-smoke-contract-test.py
 bash -n Server/operations/deploy-app-content-release
