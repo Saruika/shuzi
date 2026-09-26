@@ -2,8 +2,10 @@
 
 `zh-Hans.json` 是商店文案本地候选，不保存审核密码、身份码或签名凭据。
 2026-09-26，1.5（2）正式审核被拒，最新拒绝条款为 1.1；含游戏的旧 TestFlight 已按授权过期。
-移除游戏的 1.5（3）已发行内外 TestFlight，双语 Beta 文案和备注已回读，未重提正式审核；见
-`Docs/V1.5-BUILD3-RELEASE.md`。正式商店 `zh-Hans.json` 仍是本地候选，不冒称已同步到正式审核。
+移除游戏的 1.5（3）已发行内外 TestFlight，双语 Beta 文案和备注已回读。
+2026-09-26 12:49（UTC+8），按用户授权重提正式审核，网页及 API 均确认 `WAITING_FOR_REVIEW`。
+`zh-Hans.json` 的 description、promotionalText 已同步正式版本并回读；其余资料保留原值，
+不把本地文件全部字段视为本轮重新发布或全量合规认证。见 `Docs/V1.5-BUILD3-FORMAL-RESUBMISSION.md`。
 9 月 23 日提交时的历史状态见 `Docs/V1.5-BUILD2-RELEASE.md`，
 不要将历史 `APP_STORE_READINESS.md` 的旧状态代替当前发行证据。
 
