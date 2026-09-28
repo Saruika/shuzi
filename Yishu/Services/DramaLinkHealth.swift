@@ -13,6 +13,9 @@ enum DramaLinkHealth: Equatable {
 }
 
 enum DramaLinkPolicy {
+    static func allowsRedirect(_ request: URLRequest, count: Int) -> Bool {
+        (1...5).contains(count) && request.url.map(isHongguo) == true
+    }
     static func isHongguo(_ url: URL) -> Bool {
         url.scheme?.lowercased() == "https" && url.user == nil && url.password == nil
             && (url.port == nil || url.port == 443)
@@ -89,9 +92,7 @@ enum DramaLinkChecker {
                     if http.statusCode == 404 || http.statusCode == 410 { throw DramaLinkResponseError.expired }
                     guard http.statusCode == 200 else { throw URLError(.badServerResponse) }
                 },
-                allowsRedirect: { request, count in
-                    count <= 5 && request.url.map(DramaLinkPolicy.isHongguo) == true
-                })
+                allowsRedirect: { DramaLinkPolicy.allowsRedirect($0, count: $1) })
             try Task.checkCancellation()
             return DramaLinkPolicy.evaluate(status: http.statusCode, body: data, requireActor: requireActor)
         } catch DramaLinkResponseError.expired { return .expired }

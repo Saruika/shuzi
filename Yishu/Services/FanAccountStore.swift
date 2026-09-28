@@ -2252,7 +2252,7 @@ final class FanAccountStore: ObservableObject, FanNotificationAccount, FanAdmini
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-        request.setValue(AppNetworkIdentity.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(AppNetworkIdentity.userAgent(for: .fan), forHTTPHeaderField: "User-Agent")
         request.setValue(installID.uuidString.lowercased(), forHTTPHeaderField: "X-Yishu-Install-ID")
         if let body {
             request.httpBody = body

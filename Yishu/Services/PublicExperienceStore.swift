@@ -27,7 +27,7 @@ enum PublicExperiencePolicy {
         var request = URLRequest(url: environment.apiRoot.appending(path: "shuzijun/v1/public-experience"))
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(AppNetworkIdentity.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(AppNetworkIdentity.userAgent(for: .publicExperience), forHTTPHeaderField: "User-Agent")
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpShouldHandleCookies = false
         request.timeoutInterval = 12

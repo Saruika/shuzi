@@ -1,6 +1,11 @@
 import Foundation
 
 enum AppNetworkIdentity {
+    enum Source: String, CaseIterable { case fan, admin, collaboration, image, publicExperience = "public-experience" }
+
+    static func userAgent(for source: Source) -> String {
+        "\(userAgent) (\(source.rawValue))"
+    }
     static let userAgent = userAgent(version: Bundle.main.object(
         forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
 
@@ -170,7 +175,7 @@ final class BoundedResponseLoader: NSObject, URLSessionDataDelegate, @unchecked 
     private var cancelled = false
     private var redirectCount = 0 // Accessed only by the serial delegate queue.
 
-    private init(maximumBytes: Int, validate: @escaping ResponseValidator,
+    init(maximumBytes: Int, validate: @escaping ResponseValidator,
                  allowsRedirect: @escaping RedirectValidator) {
         self.maximumBytes = maximumBytes
         self.validate = validate

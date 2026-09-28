@@ -23,6 +23,18 @@ def release_init(source):
 
 
 class NetworkAuditContractTests(unittest.TestCase):
+    def test_first_party_requests_retain_distinct_source_labels(self):
+        for path, label in {
+            "Services/FanAccountStore.swift": "fan",
+            "Services/AdminSessionStore.swift": "admin",
+            "Views/CollaborationInquiryView.swift": "collaboration",
+            "Components/ArtworkImage.swift": "image",
+            "Services/PublicExperienceStore.swift": "publicExperience",
+        }.items():
+            with self.subTest(path=path):
+                self.assertIn(f"AppNetworkIdentity.userAgent(for: .{label})",
+                              (ROOT / "Yishu" / path).read_text())
+
     def test_release_initializer_never_reads_visual_launch_arguments(self):
         source = (ROOT / "Yishu/Views/RootView.swift").read_text()
         release = release_init(source)
@@ -56,7 +68,8 @@ class NetworkAuditContractTests(unittest.TestCase):
         self.assertIn("data.count <= maximumBytes - body.count", source)
         self.assertIn("session?.invalidateAndCancel()", source)
         drama = (ROOT / "Yishu/Services/DramaLinkHealth.swift").read_text()
-        self.assertIn("count <= 5 && request.url.map(DramaLinkPolicy.isHongguo) == true", drama)
+        self.assertIn("(1...5).contains(count) && request.url.map(isHongguo) == true", drama)
+        self.assertIn("allowsRedirect: { DramaLinkPolicy.allowsRedirect($0, count: $1) }", drama)
 
 
 if __name__ == "__main__":

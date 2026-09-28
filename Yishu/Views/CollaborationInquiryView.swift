@@ -828,7 +828,7 @@ struct CollaborationSubmissionClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-        request.setValue(AppNetworkIdentity.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(AppNetworkIdentity.userAgent(for: .collaboration), forHTTPHeaderField: "User-Agent")
         try account.authorizeCollaborationRequest(&request, context: context)
         let data: Data
         let response: URLResponse

@@ -43,6 +43,60 @@ private final class ChunkFixtureProtocol: URLProtocol {
 }
 
 final class BoundedResponseLoaderTests: XCTestCase {
+    func testUserAgentIncludesEachRequestSource() {
+        for source in AppNetworkIdentity.Source.allCases {
+            XCTAssertEqual(AppNetworkIdentity.userAgent(for: source),
+                           "\(AppNetworkIdentity.userAgent) (\(source.rawValue))")
+        }
+        XCTAssertEqual(Set(AppNetworkIdentity.Source.allCases.map {
+            AppNetworkIdentity.userAgent(for: $0)
+        }).count, 5)
+    }
+
+    // Exercise the real URLSession delegate decision and redirect counter with
+    // the same policy used in production; no external requests are performed.
+    func testRedirectDelegateRejectsSixthHongguoRedirect() throws {
+        let url = try XCTUnwrap(URL(string: "https://novelquickapp.com/s/test"))
+        let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 302,
+                                                    httpVersion: nil, headerFields: nil))
+        let loader = BoundedResponseLoader(maximumBytes: 100, validate: { _ in },
+            allowsRedirect: { DramaLinkPolicy.allowsRedirect($0, count: $1) })
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: url)
+        for count in 1...6 {
+            var called = false
+            loader.urlSession(session, task: task, willPerformHTTPRedirection: response,
+                              newRequest: URLRequest(url: url)) { accepted in
+                called = true
+                if count <= 5 { XCTAssertEqual(accepted?.url, url) }
+                else { XCTAssertNil(accepted, "第六次跳转必须被拒绝") }
+            }
+            XCTAssertTrue(called)
+        }
+    }
+
+    func testRedirectDelegateRejectsNonHongguoDestination() throws {
+        let origin = try XCTUnwrap(URL(string: "https://novelquickapp.com/s/test"))
+        let response = try XCTUnwrap(HTTPURLResponse(url: origin, statusCode: 302,
+                                                    httpVersion: nil, headerFields: nil))
+        let loader = BoundedResponseLoader(maximumBytes: 100, validate: { _ in },
+            allowsRedirect: { DramaLinkPolicy.allowsRedirect($0, count: $1) })
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let task = session.dataTask(with: origin)
+        for destination in ["https://example.com/", "https://novelquickapp.com.example.com/"] {
+            let url = try XCTUnwrap(URL(string: destination))
+            var called = false
+            loader.urlSession(session, task: task, willPerformHTTPRedirection: response,
+                              newRequest: URLRequest(url: url)) { accepted in
+                called = true
+                XCTAssertNil(accepted, "非红果域名不得跟随")
+            }
+            XCTAssertTrue(called)
+        }
+    }
+
     func testUserAgentUsesActualVersionWithoutUntrustedHeaderCharacters() {
         XCTAssertEqual(AppNetworkIdentity.userAgent(version: "1.5"), "Yishu-iOS/1.5")
         XCTAssertEqual(AppNetworkIdentity.userAgent(version: "2.0.1"), "Yishu-iOS/2.0.1")

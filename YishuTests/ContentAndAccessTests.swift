@@ -2827,14 +2827,16 @@ final class ContentAndAccessTests: XCTestCase {
         scene.traitOverrides.sceneCaptureState = .inactive
         attachment.refreshForcedState()
         XCTAssertEqual(scene.traitCollection.sceneCaptureState, .inactive)
-        // A hosted suite can be foreground-inactive (e.g. while system UI is
-        // presented). Ending capture alone must not uncover that scene. The
-        // state-machine tests cover both lifecycle branches deterministically.
-        if scene.activationState == .foregroundActive && !scene.screen.isCaptured {
-            XCTAssertTrue(reboundShield.isHidden, "前台明确结束捕获后必须释放遮挡")
-        } else {
+        // Do not report the release assertion as tested when the host scene
+        // cannot legally uncover content. Never override real lifecycle safety.
+        guard scene.activationState == .foregroundActive && !scene.screen.isCaptured else {
             XCTAssertFalse(reboundShield.isHidden, "非活跃场景或屏幕仍在捕获时必须保留遮挡")
+            await withCheckedContinuation { continuation in
+                root.dismiss(animated: false) { continuation.resume() }
+            }
+            throw XCTSkip("释放遮挡的集成验证需要活跃且未捕获的场景；本次仅验证了保留遮挡")
         }
+        XCTAssertTrue(reboundShield.isHidden, "前台明确结束捕获后必须释放遮挡")
         XCTAssertTrue(scene.windows.first(where: \.isKeyWindow) === priorKeyWindow)
         await withCheckedContinuation { continuation in
             root.dismiss(animated: false) { continuation.resume() }

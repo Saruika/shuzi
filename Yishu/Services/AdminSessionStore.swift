@@ -1184,7 +1184,7 @@ final class AdminSessionStore: ObservableObject {
         } else {
             throw AdminAPIError.invalidCredentials
         }
-        request.setValue(AppNetworkIdentity.userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(AppNetworkIdentity.userAgent(for: .admin), forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("zh-CN,zh;q=0.9", forHTTPHeaderField: "Accept-Language")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
