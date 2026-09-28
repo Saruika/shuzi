@@ -1372,7 +1372,7 @@ def test_operation_lock_foundation_and_metadata_are_fail_closed() -> None:
                     held_descriptor = os.open(fixture.operation_lock, os.O_RDONLY)
                     fcntl.flock(held_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
-                expect_failure(lambda: module.deploy("backup", "standby", "dry-run"))
+                expect_failure(lambda module=module: module.deploy("backup", "standby", "dry-run"))
                 assert not fixture.backup_root.exists()
             finally:
                 if held_descriptor is not None:
@@ -1598,7 +1598,7 @@ def test_primary_generation_temp_inventory_is_exact_and_not_deleted() -> None:
             path = fixture.sync_root / (".highest-issued." + suffix)
             write_file(path, payload, 0o600)
             expect_failure(
-                lambda: module.deploy("primary", "authority", "dry-run"),
+                lambda module=module: module.deploy("primary", "authority", "dry-run"),
                 "highest-issued",
             )
             assert not fixture.backup_root.exists()
@@ -1622,7 +1622,7 @@ def test_primary_generation_temp_inventory_is_exact_and_not_deleted() -> None:
                     fixture.highest_issued.unlink()
                     os.mkfifo(fixture.highest_issued, 0o600)
             expect_failure(
-                lambda: module.deploy("primary", "authority", "dry-run"),
+                lambda module=module: module.deploy("primary", "authority", "dry-run"),
                 "highest-issued-generation"
                 if state in {"missing", "below-lineage"}
                 else "unsafe regular file metadata",
@@ -1704,7 +1704,7 @@ def test_primary_generation_and_standby_receipt_are_exactly_bound() -> None:
             receipt = fixture.primary_stage / "standby-first.receipt"
             before_receipt = receipt.read_bytes()
             expect_failure(
-                lambda: module.deploy("primary", "authority", "dry-run"),
+                lambda module=module: module.deploy("primary", "authority", "dry-run"),
                 "generation",
             )
             assert receipt.read_bytes() == before_receipt
@@ -1807,7 +1807,7 @@ def test_primary_receipt_state_inventory_is_exact() -> None:
             payload = module.canonical_json(document)
             write_file(resolution, payload, 0o600)
             expect_failure(
-                lambda: module.deploy("primary", "authority", "dry-run")
+                lambda module=module: module.deploy("primary", "authority", "dry-run")
             )
             assert resolution.read_bytes() == payload
             assert not fixture.backup_root.exists()
@@ -1854,7 +1854,7 @@ def test_primary_receipt_state_inventory_is_exact() -> None:
                 else:
                     os.link(outside, resolution)
             expect_failure(
-                lambda: module.deploy("primary", "authority", "dry-run")
+                lambda module=module: module.deploy("primary", "authority", "dry-run")
             )
             assert not fixture.backup_root.exists()
 
@@ -1874,7 +1874,7 @@ def test_primary_receipt_state_inventory_is_exact() -> None:
             temporary_state = fixture.sync_root / filename
             write_file(temporary_state, b"partial\n", 0o600)
             expect_failure(
-                lambda: module.deploy("primary", "authority", "dry-run"),
+                lambda module=module: module.deploy("primary", "authority", "dry-run"),
                 message,
             )
             assert temporary_state.read_bytes() == b"partial\n"

@@ -2,6 +2,151 @@ import Foundation
 import XCTest
 @testable import Yishu
 
+private final class ChunkFixtureRegistry: @unchecked Sendable {
+    struct Reply: Sendable {
+        var chunks: [Data] = []
+        var headers: [String: String] = [:]
+        var failure: URLError?
+        var staysOpen = false
+        var onStart: @Sendable () -> Void = {}
+    }
+    private let lock = NSLock()
+    private var replies: [URL: Reply] = [:]
+    func insert(_ reply: Reply, for url: URL) {
+        lock.lock(); defer { lock.unlock() }
+        replies[url] = reply
+    }
+    func take(_ url: URL) -> Reply? {
+        lock.lock(); defer { lock.unlock() }
+        return replies.removeValue(forKey: url)
+    }
+}
+
+private final class ChunkFixtureProtocol: URLProtocol {
+    static let registry = ChunkFixtureRegistry()
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        guard let url = request.url, let reply = Self.registry.take(url),
+              let response = HTTPURLResponse(url: url, statusCode: 200,
+                  httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"].merging(
+                    reply.headers, uniquingKeysWith: { _, value in value })) else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL)); return
+        }
+        reply.onStart()
+        if let failure = reply.failure { client?.urlProtocol(self, didFailWithError: failure); return }
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        for chunk in reply.chunks { client?.urlProtocol(self, didLoad: chunk) }
+        if !reply.staysOpen { client?.urlProtocolDidFinishLoading(self) }
+    }
+    override func stopLoading() {}
+}
+
+final class BoundedResponseLoaderTests: XCTestCase {
+    func testUserAgentUsesActualVersionWithoutUntrustedHeaderCharacters() {
+        XCTAssertEqual(AppNetworkIdentity.userAgent(version: "1.5"), "Yishu-iOS/1.5")
+        XCTAssertEqual(AppNetworkIdentity.userAgent(version: "2.0.1"), "Yishu-iOS/2.0.1")
+        for invalid in [nil, "", "1.5\r\nInjected: true", "１.５"] {
+            XCTAssertEqual(AppNetworkIdentity.userAgent(version: invalid), "Yishu-iOS/unknown")
+        }
+    }
+    private func request(_ reply: ChunkFixtureRegistry.Reply) throws -> URLRequest {
+        let url = try XCTUnwrap(URL(string: "https://fixture.invalid/\(UUID().uuidString)"))
+        ChunkFixtureProtocol.registry.insert(reply, for: url)
+        return URLRequest(url: url)
+    }
+
+    private func configuration() -> URLSessionConfiguration {
+        let config = SecureURLSessionFactory.configuration(
+            requestTimeout: 2, resourceTimeout: 3, waitsForConnectivity: false)
+        config.protocolClasses = [ChunkFixtureProtocol.self]
+        return config
+    }
+
+    func testMultipleChunksAtExactLimitArePreserved() async throws {
+        let chunks = (0..<4).map { Data(repeating: UInt8($0), count: 65_536) }
+        let request = try request(.init(chunks: chunks))
+        let (data, response) = try await BoundedResponseLoader.data(
+            for: request, configuration: configuration(), maximumBytes: 262_144, validate: { _ in })
+        XCTAssertEqual(data, chunks.reduce(into: Data()) { $0.append($1) })
+        XCTAssertEqual(response.url, request.url)
+    }
+
+    func testUnknownLengthOverLimitIsRejectedDuringChunks() async throws {
+        let request = try request(.init(chunks: [Data([1, 2]), Data([3, 4]), Data([5, 6])]))
+        do {
+            _ = try await BoundedResponseLoader.data(
+                for: request, configuration: configuration(), maximumBytes: 5, validate: { _ in })
+            XCTFail("Must reject bytes beyond limit")
+        } catch let error as URLError { XCTAssertEqual(error.code, .dataLengthExceedsMaximum) }
+    }
+
+    func testOversizedDeclaredLengthFailsBeforeWaitingForBody() async throws {
+        // URLProtocol may buffer headers until the first body callback. Leave
+        // the response unfinished after that callback to prove early rejection.
+        let request = try request(.init(chunks: [Data([1])], headers: ["Content-Length": "100"], staysOpen: true))
+        do {
+            _ = try await BoundedResponseLoader.data(
+                for: request, configuration: configuration(), maximumBytes: 5, validate: { _ in })
+            XCTFail("Must reject oversized header immediately")
+        } catch let error as URLError { XCTAssertEqual(error.code, .dataLengthExceedsMaximum) }
+    }
+
+    func testValidatorFailureIsPreservedWithoutReadingBody() async throws {
+        let request = try request(.init(chunks: [Data([1])], staysOpen: true))
+        do {
+            _ = try await BoundedResponseLoader.data(
+                for: request, configuration: configuration(), maximumBytes: 5,
+                validate: { _ in throw URLError(.unsupportedURL) })
+            XCTFail("Validator must fail closed")
+        } catch let error as URLError { XCTAssertEqual(error.code, .unsupportedURL) }
+    }
+
+    func testCancellationDuringResponseDoesNotWaitForTimeout() async throws {
+        let started = expectation(description: "transport started")
+        let request = try request(.init(staysOpen: true, onStart: { started.fulfill() }))
+        let config = configuration()
+        let task = Task {
+            try await BoundedResponseLoader.data(
+                for: request, configuration: config, maximumBytes: 5, validate: { _ in })
+        }
+        await fulfillment(of: [started], timeout: 1)
+        task.cancel()
+        do { _ = try await task.value; XCTFail("Must cancel") }
+        catch is CancellationError {}
+    }
+
+    func testAlreadyCancelledTaskDoesNotStartRequest() async throws {
+        let url = try XCTUnwrap(URL(string: "https://fixture.invalid/not-registered"))
+        let config = configuration()
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await BoundedResponseLoader.data(
+                for: URLRequest(url: url), configuration: config, maximumBytes: 5, validate: { _ in })
+        }
+        do { _ = try await task.value; XCTFail("Must cancel before transport") }
+        catch is CancellationError {}
+    }
+
+    func testNetworkFailureIsPreserved() async throws {
+        let request = try request(.init(failure: URLError(.notConnectedToInternet)))
+        do {
+            _ = try await BoundedResponseLoader.data(
+                for: request, configuration: configuration(), maximumBytes: 5, validate: { _ in })
+            XCTFail("Must propagate failure")
+        } catch let error as URLError { XCTAssertEqual(error.code, .notConnectedToInternet) }
+    }
+
+    func testTransportHasNoPersistentCacheCookieOrCredentialStorage() {
+        let config = configuration()
+        XCTAssertNil(config.urlCache)
+        XCTAssertNil(config.httpCookieStorage)
+        XCTAssertNil(config.urlCredentialStorage)
+        XCTAssertFalse(config.httpShouldSetCookies)
+        XCTAssertEqual(config.requestCachePolicy, .reloadIgnoringLocalCacheData)
+    }
+}
+
 /// A deterministic transport that deliberately ignores cancellation. This models
 /// responses already in flight when a guest leaves or changes workspace.
 private actor PublicExperienceControlledLoader {

@@ -190,7 +190,7 @@ actor ArtworkImagePipeline {
                         "image/avif,image/webp,image/heic,image/heif,image/jpeg,image/png",
                         forHTTPHeaderField: "Accept"
                     )
-                    request.setValue("Yishu-iOS/2.1", forHTTPHeaderField: "User-Agent")
+                    request.setValue(AppNetworkIdentity.userAgent, forHTTPHeaderField: "User-Agent")
 
                     let (data, response): (Data, URLResponse)
                     if let dataLoader { (data, response) = try await dataLoader(request) }

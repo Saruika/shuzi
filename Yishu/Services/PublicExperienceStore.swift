@@ -27,6 +27,7 @@ enum PublicExperiencePolicy {
         var request = URLRequest(url: environment.apiRoot.appending(path: "shuzijun/v1/public-experience"))
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue(AppNetworkIdentity.userAgent, forHTTPHeaderField: "User-Agent")
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.httpShouldHandleCookies = false
         request.timeoutInterval = 12
@@ -68,22 +69,21 @@ enum PublicExperiencePolicy {
 
 enum PublicExperienceNetwork {
     static func fetch(_ request: URLRequest) async throws -> PublicExperienceManifest {
-        let session = SecureURLSessionFactory.make(requestTimeout: 12, resourceTimeout: 20, waitsForConnectivity: false)
-        defer { session.invalidateAndCancel() }
-        let (bytes, response) = try await session.bytes(for: request)
         let maximumBytes = 256 * 1024
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              http.url == request.url, AppNetworkSecurityPolicy.isJSONMIMEType(http.mimeType),
-              AppNetworkSecurityPolicy.permitsResponseLength(http.expectedContentLength,
-                                                             maximumBytes: Int64(maximumBytes)) else {
-            throw URLError(.badServerResponse)
+        let (data, _) = try await BoundedResponseLoader.data(
+            for: request,
+            configuration: SecureURLSessionFactory.configuration(
+                requestTimeout: 12, resourceTimeout: 20, waitsForConnectivity: false),
+            maximumBytes: maximumBytes
+        ) { http in
+            guard http.statusCode == 200, http.url == request.url,
+                  AppNetworkSecurityPolicy.isJSONMIMEType(http.mimeType),
+                  AppNetworkSecurityPolicy.permitsResponseLength(http.expectedContentLength,
+                                                                 maximumBytes: Int64(maximumBytes)) else {
+                throw URLError(.badServerResponse)
+            }
         }
-        var data = Data()
-        for try await byte in bytes {
-            try Task.checkCancellation()
-            guard data.count < maximumBytes else { throw URLError(.dataLengthExceedsMaximum) }
-            data.append(byte)
-        }
+        try Task.checkCancellation()
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(PublicExperienceManifest.self, from: data)

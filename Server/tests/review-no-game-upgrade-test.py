@@ -210,7 +210,7 @@ class TransactionTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.states = dict.fromkeys(u.UNITS, True)
 
-                def fail_replacement(path, data, metadata, expected, backup, operation='replace'):
+                def fail_replacement(path, data, metadata, expected, backup, operation='replace', *, name=name):
                     if path == self.live / name and data.startswith(b'candidate:'):
                         raise OSError('fixture replacement failure')
                     real_replace(path, data, metadata, expected, backup, operation)
@@ -371,7 +371,7 @@ class TransactionTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.states = dict.fromkeys(u.UNITS, True)
 
-                def failure(relative, data, metadata):
+                def failure(relative, data, metadata, *, name=name):
                     if relative == name:
                         raise OSError('fixture removal failure')
                     return real_remove(relative, data, metadata)

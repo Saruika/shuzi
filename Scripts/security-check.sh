@@ -123,6 +123,7 @@ python3 Scripts/test-ci-test-summary.py
 python3 Scripts/test-distribution-package.py
 python3 Scripts/test_archive_testflight.py
 python3 Scripts/test-no-game-release.py
+python3 Scripts/test-network-audit-contract.py
 python3 Server/tests/app-content-release-contract-test.py
 python3 Server/tests/review-bootstrap-test.py
 python3 Server/tests/review-catalog-test.py

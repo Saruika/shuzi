@@ -1,5 +1,16 @@
 import Foundation
 
+enum AppNetworkIdentity {
+    static let userAgent = userAgent(version: Bundle.main.object(
+        forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+
+    static func userAgent(version: String?) -> String {
+        let version = version ?? ""
+        let valid = !version.isEmpty && version.utf8.allSatisfy { (48...57).contains($0) || $0 == 46 }
+        return "Yishu-iOS/\(valid ? version : "unknown")"
+    }
+}
+
 enum AppURL {
     private static let invalidURL = URL(fileURLWithPath: "/__invalid_app_url__")
 
@@ -112,6 +123,20 @@ enum SecureURLSessionFactory {
         resourceTimeout: TimeInterval,
         waitsForConnectivity: Bool = true
     ) -> URLSession {
+        URLSession(
+            configuration: configuration(requestTimeout: requestTimeout,
+                                         resourceTimeout: resourceTimeout,
+                                         waitsForConnectivity: waitsForConnectivity),
+            delegate: RejectingRedirectURLSessionDelegate(),
+            delegateQueue: nil
+        )
+    }
+
+    static func configuration(
+        requestTimeout: TimeInterval,
+        resourceTimeout: TimeInterval,
+        waitsForConnectivity: Bool = true
+    ) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
@@ -123,10 +148,134 @@ enum SecureURLSessionFactory {
         configuration.waitsForConnectivity = waitsForConnectivity
         configuration.httpMaximumConnectionsPerHost = 4
         configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
-        return URLSession(
-            configuration: configuration,
-            delegate: RejectingRedirectURLSessionDelegate(),
-            delegateQueue: nil
-        )
+        return configuration
+    }
+}
+
+/// Receives Foundation's Data chunks, with a hard limit enforced before each
+/// append (including unknown/chunked or decompressed response lengths). No disk
+/// cache or temporary download file. Each request owns and invalidates its session.
+/// The lock protects state shared by cancellation and the serial delegate queue.
+final class BoundedResponseLoader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    typealias ResponseValidator = @Sendable (HTTPURLResponse) throws -> Void
+    typealias RedirectValidator = @Sendable (URLRequest, Int) -> Bool
+    private let maximumBytes: Int
+    private let validate: ResponseValidator
+    private let allowsRedirect: RedirectValidator
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>?
+    private var session: URLSession?
+    private var response: HTTPURLResponse?
+    private var body = Data()
+    private var cancelled = false
+    private var redirectCount = 0 // Accessed only by the serial delegate queue.
+
+    private init(maximumBytes: Int, validate: @escaping ResponseValidator,
+                 allowsRedirect: @escaping RedirectValidator) {
+        self.maximumBytes = maximumBytes
+        self.validate = validate
+        self.allowsRedirect = allowsRedirect
+    }
+
+    static func data(for request: URLRequest, configuration: URLSessionConfiguration,
+                     maximumBytes: Int, validate: @escaping ResponseValidator,
+                     allowsRedirect: @escaping RedirectValidator = { _, _ in false }) async throws
+        -> (Data, HTTPURLResponse) {
+        guard maximumBytes > 0 else { throw URLError(.dataLengthExceedsMaximum) }
+        let loader = BoundedResponseLoader(maximumBytes: maximumBytes, validate: validate,
+                                           allowsRedirect: allowsRedirect)
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                loader.start(request, configuration: configuration, continuation: continuation)
+            }
+        } onCancel: {
+            loader.cancel()
+        }
+    }
+
+    private func start(_ request: URLRequest, configuration: URLSessionConfiguration,
+                       continuation: CheckedContinuation<(Data, HTTPURLResponse), Error>) {
+        lock.lock()
+        guard !cancelled else {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        self.continuation = continuation
+        let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+        self.session = session
+        let task = session.dataTask(with: request)
+        lock.unlock()
+        task.resume()
+    }
+
+    private func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+        finish(.failure(CancellationError()))
+    }
+
+    private func finish(_ result: Result<(Data, HTTPURLResponse), Error>) {
+        lock.lock()
+        guard let continuation else { lock.unlock(); return }
+        self.continuation = nil
+        let session = self.session
+        self.session = nil
+        body = Data()
+        response = nil
+        lock.unlock()
+        session?.invalidateAndCancel()
+        continuation.resume(with: result)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        do {
+            guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            try validate(http)
+            guard http.expectedContentLength <= Int64(maximumBytes) else {
+                throw URLError(.dataLengthExceedsMaximum)
+            }
+            lock.lock()
+            let active = continuation != nil && !cancelled
+            if active { self.response = http }
+            lock.unlock()
+            completionHandler(active ? .allow : .cancel)
+        } catch {
+            completionHandler(.cancel)
+            finish(.failure(error))
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        guard continuation != nil, !cancelled else { lock.unlock(); return }
+        guard data.count <= maximumBytes - body.count else {
+            lock.unlock()
+            finish(.failure(URLError(.dataLengthExceedsMaximum)))
+            return
+        }
+        body.append(data)
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        let result: Result<(Data, HTTPURLResponse), Error>
+        if let error { result = .failure(error) }
+        else if let response { result = .success((body, response)) }
+        else { result = .failure(URLError(.badServerResponse)) }
+        lock.unlock()
+        finish(result)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        redirectCount += 1
+        completionHandler(allowsRedirect(request, redirectCount) ? request : nil)
     }
 }

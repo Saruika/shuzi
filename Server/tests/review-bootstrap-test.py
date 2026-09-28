@@ -133,7 +133,7 @@ class ReviewBootstrapTests(unittest.TestCase):
         directories = []
         for outcome in ('success', 'failure', 'timeout'):
             with self.subTest(outcome=outcome):
-                def invoke(args, **kwargs):
+                def invoke(args, outcome=outcome, **kwargs):
                     directory = Path(kwargs['env']['HOME'])
                     directories.append(directory)
                     self.assertTrue(directory.is_dir())

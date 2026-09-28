@@ -72,44 +72,29 @@ enum DramaLinkPolicy {
     }
 }
 
-private final class DramaLinkRedirectGuard: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private var redirects = 0 // URLSession's serial delegate queue owns this state.
-    func urlSession(_ session: URLSession, task: URLSessionTask,
-                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
-                    completionHandler: @escaping (URLRequest?) -> Void) {
-        redirects += 1
-        guard redirects <= 5, let url = request.url, DramaLinkPolicy.isHongguo(url) else {
-            completionHandler(nil); return
-        }
-        completionHandler(request)
-    }
-}
+private enum DramaLinkResponseError: Error { case expired }
 
 enum DramaLinkChecker {
     static func check(_ url: URL, requireActor: Bool = false) async -> DramaLinkHealth {
         guard !Task.isCancelled, DramaLinkPolicy.isHongguo(url) else { return .unverified }
-        let config = URLSessionConfiguration.ephemeral
-        config.urlCache = nil
-        config.httpCookieStorage = nil
-        config.urlCredentialStorage = nil
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        config.timeoutIntervalForRequest = 8
-        config.timeoutIntervalForResource = 12
-        let session = URLSession(configuration: config, delegate: DramaLinkRedirectGuard(), delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
         do {
-            let (bytes, response) = try await session.bytes(from: url)
-            guard let http = response as? HTTPURLResponse, let finalURL = http.url,
-                  DramaLinkPolicy.isHongguo(finalURL), http.expectedContentLength <= 524_288 else { return .unverified }
-            if http.statusCode == 404 || http.statusCode == 410 { return .expired }
-            guard http.statusCode == 200 else { return .unverified }
-            var data = Data()
-            for try await byte in bytes {
-                try Task.checkCancellation()
-                guard data.count < 524_288 else { return .unverified }
-                data.append(byte)
-            }
+            let (data, http) = try await BoundedResponseLoader.data(
+                for: URLRequest(url: url),
+                configuration: SecureURLSessionFactory.configuration(
+                    requestTimeout: 8, resourceTimeout: 12, waitsForConnectivity: false),
+                maximumBytes: 524_288,
+                validate: { http in
+                    guard let finalURL = http.url, DramaLinkPolicy.isHongguo(finalURL),
+                          http.expectedContentLength <= 524_288 else { throw URLError(.badServerResponse) }
+                    if http.statusCode == 404 || http.statusCode == 410 { throw DramaLinkResponseError.expired }
+                    guard http.statusCode == 200 else { throw URLError(.badServerResponse) }
+                },
+                allowsRedirect: { request, count in
+                    count <= 5 && request.url.map(DramaLinkPolicy.isHongguo) == true
+                })
+            try Task.checkCancellation()
             return DramaLinkPolicy.evaluate(status: http.statusCode, body: data, requireActor: requireActor)
-        } catch { return .unverified }
+        } catch DramaLinkResponseError.expired { return .expired }
+        catch { return .unverified }
     }
 }

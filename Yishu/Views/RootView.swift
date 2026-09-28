@@ -58,12 +58,16 @@ struct RootView: View {
     private let visualTestingDestination: VisualTestingDestination?
 
     init() {
+#if DEBUG
         let arguments = ProcessInfo.processInfo.arguments
         let prefix = "-visual-portfolio-title="
         let title = arguments
             .first { $0.hasPrefix(prefix) }
             .map { String($0.dropFirst(prefix.count)) }
         visualPortfolioTitle = title
+#else
+        visualPortfolioTitle = nil
+#endif
         let destination: VisualTestingDestination?
 #if DEBUG
         if arguments.contains("-open-fan-administrator-for-testing") {
@@ -93,7 +97,7 @@ struct RootView: View {
             initialTab = .home
         }
 #else
-        initialTab = title == nil ? .home : .portfolio
+        initialTab = .home
 #endif
         _selectedTab = State(initialValue: initialTab)
     }

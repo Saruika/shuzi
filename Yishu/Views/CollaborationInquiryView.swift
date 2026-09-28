@@ -728,14 +728,16 @@ protocol CollaborationAccount: AnyObject {
 
 @MainActor
 struct CollaborationSubmissionClient {
+    // View values are recreated frequently. Keep one stateless, cookie/cache-free
+    // transport for the process rather than creating a retained delegate session
+    // on every View initialization. Account authorization remains per request.
+    private static let sharedSession = SecureURLSessionFactory.make(
+        requestTimeout: 30, resourceTimeout: 45
+    )
     private let send: (URLRequest) async throws -> (Data, URLResponse)
 
-    init(
-        session: URLSession = SecureURLSessionFactory.make(
-            requestTimeout: 30,
-            resourceTimeout: 45
-        )
-    ) {
+    init(session: URLSession? = nil) {
+        let session = session ?? Self.sharedSession
         self.send = { try await session.data(for: $0) }
     }
 
@@ -826,7 +828,7 @@ struct CollaborationSubmissionClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("no-cache", forHTTPHeaderField: "Pragma")
-        request.setValue("Yishu-iOS-Collaboration/1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue(AppNetworkIdentity.userAgent, forHTTPHeaderField: "User-Agent")
         try account.authorizeCollaborationRequest(&request, context: context)
         let data: Data
         let response: URLResponse
