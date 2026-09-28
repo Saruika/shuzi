@@ -1,7 +1,8 @@
 # Hi，梳子 iOS
 
 **当前维护发行（2026-09-26）：1.5（Build 3）已移除小游戏与排行榜。**
-内部、外部 TestFlight 均已可测试，Beta Review 已通过；未重新提交正式审核。
+内部、外部 TestFlight 均已可测试，Beta Review 已通过；9 月 26 日 12:49 已重提正式审核，
+当时网页与 API 均确认等待审核，见 [正式重提回执](Docs/V1.5-BUILD3-FORMAL-RESUBMISSION.md)。
 不改变原有影像、账号和审批功能；见 [发布回执](Docs/V1.5-BUILD3-RELEASE.md) 与
 [移除及验证记录](Docs/V1.5-BUILD3-NO-GAME.md)。下文为历史阶段记录，不代表当前版本仍含小游戏。
 
@@ -27,7 +28,7 @@
 
 **服务端开发候选：[相册可见性开关](Server/releases/v1.4.0-build6-preview1.md)。** 设计为管理员在 App「内容管理 → 照片作品」隐藏或恢复单个相册，照片保留、普通用户清单同步过滤。客户端代码已包含在 Build 6，但服务端候选尚未部署，旧 API 下开关保持禁用，不宣称该功能已上线。
 
-“Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
+“Hi，梳子”是易姝的原生 iPhone / iPad 艺人作品 App，是狐狸姐姐做给她爱人的，用于展示摄影作品、演员 Showreel、影视履历与合作信息。客户端使用 SwiftUI 实现，通过稳定的版本化内容清单同步，不是 WebView 封装。当前兼容清单由 WordPress 发布，下一代后台将按 [`ARCHITECTURE_V2.md`](ARCHITECTURE_V2.md) 分阶段迁移。
 
 > 最新 TestFlight 上传版本：`1.4.0 (9)`，Apple 处理通过、“梳子乖乖”内部测试可用；Build 9 外部审核未提交 · 最低系统：iOS 17 · Bundle ID：`cn.com.shuzijun.yishu`
 
