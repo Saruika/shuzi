@@ -1528,8 +1528,25 @@ final class YishuUITests: XCTestCase {
             visibleBottom.frame.minY,
             "辅助功能字号下职业说明没有留足底部安全余量"
         )
-        try app.performAccessibilityAudit(for: [.textClipped])
+        try performAuditRetryingFrameworkTimeout(for: [.textClipped], in: app)
         attachScreenshot(named: "05-about-accessibility-xxxl", app: app)
+    }
+
+    /// Retries only XCTest's own "Audit failed to complete in time" (-56) once,
+    /// as the primary-page gate does; a real issue or a second timeout fails.
+    private func performAuditRetryingFrameworkTimeout(
+        for types: XCUIAccessibilityAuditType, in app: XCUIApplication
+    ) throws {
+        do {
+            try app.performAccessibilityAudit(for: types)
+        } catch let error as NSError
+            where error.domain == "com.apple.xcode.xctest.accessibilityAudit" && error.code == -56 {
+            try XCTContext.runActivity(named: "审计框架暂时超时，2 秒后重试一次") { _ in
+                Thread.sleep(forTimeInterval: 2)
+                _ = app.wait(for: .runningForeground, timeout: 2)
+                try app.performAccessibilityAudit(for: types)
+            }
+        }
     }
 
     func testAboutRoleSummaryStaysAboveTheVisibleBottomOnPhone() {
