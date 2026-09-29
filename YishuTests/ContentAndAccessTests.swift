@@ -294,6 +294,9 @@ final class GalleryResizeCompositionTests: XCTestCase {
                     y: (initialRect.minY + initialRect.height * 0.6) * scale - initialSize.height / 2
                 )
                 let initialFocus = imageFocus(of: controller, in: initialRect)
+                // UIScrollView snaps each contentOffset to the pixel grid and the
+                // next resize starts from that snapped offset, so allow half a
+                // pixel of drift per resize (8 resizes) rather than a fixed 2.
                 let pixel = 1 / max(1, controller.scrollView.traitCollection.displayScale)
                 for width in widths.dropFirst() {
                     let size = CGSize(width: width, height: height)
@@ -302,9 +305,9 @@ final class GalleryResizeCompositionTests: XCTestCase {
                     let rect = fittedRect(imageSize, in: size)
                     let focus = imageFocus(of: controller, in: rect)
                     XCTAssertEqual(controller.scrollView.zoomScale, scale, accuracy: 0.001, file: file, line: line)
-                    XCTAssertEqual(focus.x, initialFocus.x, accuracy: 2 * pixel / (rect.width * scale),
+                    XCTAssertEqual(focus.x, initialFocus.x, accuracy: 4 * pixel / (rect.width * scale),
                                    "窗口变化应保留照片坐标，而非包含留白的容器坐标", file: file, line: line)
-                    XCTAssertEqual(focus.y, initialFocus.y, accuracy: 2 * pixel / (rect.height * scale),
+                    XCTAssertEqual(focus.y, initialFocus.y, accuracy: 4 * pixel / (rect.height * scale),
                                    "宽度变化改变上下留白时，也必须保留照片纵向焦点", file: file, line: line)
                 }
             }
