@@ -1639,12 +1639,14 @@ final class YishuUITests: XCTestCase {
             ], screenProtectionEnabled: protectionEnabled)
             let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
             XCTAssertTrue(card.waitForExistence(timeout: 8))
-            // The cover's portfolio-cover-* identifier propagates to the
-            // failure symbol, so match it and require symbol size rather than
-            // a full-bleed loaded photo.
+            // The cover's portfolio-cover-* identifier replaces the failure
+            // symbol's default "photo" identifier and the element spans the
+            // whole cover, so tell failure apart from a loaded photo by the
+            // symbol's label: a loaded bitmap has none.
             let failedCover = card.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-cover-")).firstMatch
             XCTAssertTrue(failedCover.waitForExistence(timeout: 5), "测试必须在封面失败状态下操作")
-            XCTAssertLessThan(failedCover.frame.width, card.frame.width / 2, "测试必须在封面失败状态下操作：\(failedCover.frame)")
+            XCTAssertFalse(failedCover.label.isEmpty,
+                           "测试必须在封面失败状态下操作：label=\(failedCover.label) frame=\(failedCover.frame)")
             XCTAssertFalse(card.buttons["artwork-image-retry"].exists, "卡片不能嵌套另一个抢占点击的重试按钮")
             card.tap()
             let firstImage = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-")).firstMatch
