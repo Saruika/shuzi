@@ -36,9 +36,11 @@ def load_dependencies():
         if hashlib.sha256(data).hexdigest() != expected:
             raise RuntimeError('unreviewed review dependency')
         sources[name] = data.decode('utf-8')
+    # Both exec calls below run only bytes whose SHA-256 matched DEPENDENCIES above,
+    # so Bandit B102 is suppressed deliberately.
     bootstrap = types.ModuleType('no_game_review_bootstrap')
     bootstrap.__file__ = str(directory / 'provision-review-bootstrap.py')
-    exec(compile(sources['provision-review-bootstrap.py'], bootstrap.__file__, 'exec'),
+    exec(compile(sources['provision-review-bootstrap.py'], bootstrap.__file__, 'exec'),  # nosec B102
          bootstrap.__dict__)
     acceptance = types.ModuleType('no_game_review_acceptance')
     acceptance.__file__ = str(directory / 'accept-review-bootstrap.py')
@@ -51,7 +53,7 @@ def load_dependencies():
     if source.count(loader) != 1:
         raise RuntimeError('review dependency loader graph changed')
     acceptance.bootstrap = bootstrap
-    exec(compile(source.replace(loader, ''), acceptance.__file__, 'exec'),
+    exec(compile(source.replace(loader, ''), acceptance.__file__, 'exec'),  # nosec B102
          acceptance.__dict__)
     acceptance.HTTPS_EDGE = True
     return acceptance, bootstrap
