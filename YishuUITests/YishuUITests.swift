@@ -1528,8 +1528,25 @@ final class YishuUITests: XCTestCase {
             visibleBottom.frame.minY,
             "辅助功能字号下职业说明没有留足底部安全余量"
         )
-        try app.performAccessibilityAudit(for: [.textClipped])
+        try performAuditRetryingFrameworkTimeout(for: [.textClipped], in: app)
         attachScreenshot(named: "05-about-accessibility-xxxl", app: app)
+    }
+
+    /// Retries only XCTest's own "Audit failed to complete in time" (-56) once,
+    /// as the primary-page gate does; a real issue or a second timeout fails.
+    private func performAuditRetryingFrameworkTimeout(
+        for types: XCUIAccessibilityAuditType, in app: XCUIApplication
+    ) throws {
+        do {
+            try app.performAccessibilityAudit(for: types)
+        } catch let error as NSError
+            where error.domain == "com.apple.xcode.xctest.accessibilityAudit" && error.code == -56 {
+            try XCTContext.runActivity(named: "审计框架暂时超时，2 秒后重试一次") { _ in
+                Thread.sleep(forTimeInterval: 2)
+                _ = app.wait(for: .runningForeground, timeout: 2)
+                try app.performAccessibilityAudit(for: types)
+            }
+        }
     }
 
     func testAboutRoleSummaryStaysAboveTheVisibleBottomOnPhone() {
@@ -1639,7 +1656,14 @@ final class YishuUITests: XCTestCase {
             ], screenProtectionEnabled: protectionEnabled)
             let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-card-")).firstMatch
             XCTAssertTrue(card.waitForExistence(timeout: 8))
-            XCTAssertTrue(card.images["photo"].firstMatch.waitForExistence(timeout: 5), "测试必须在封面失败状态下操作")
+            // The cover's portfolio-cover-* identifier replaces the failure
+            // symbol's default "photo" identifier and the element spans the
+            // whole cover, so tell failure apart from a loaded photo by the
+            // symbol's label: a loaded bitmap has none.
+            let failedCover = card.images.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-cover-")).firstMatch
+            XCTAssertTrue(failedCover.waitForExistence(timeout: 5), "测试必须在封面失败状态下操作")
+            XCTAssertFalse(failedCover.label.isEmpty,
+                           "测试必须在封面失败状态下操作：label=\(failedCover.label) frame=\(failedCover.frame)")
             XCTAssertFalse(card.buttons["artwork-image-retry"].exists, "卡片不能嵌套另一个抢占点击的重试按钮")
             card.tap()
             let firstImage = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "portfolio-open-image-")).firstMatch
@@ -2324,7 +2348,20 @@ final class YishuUITests: XCTestCase {
     private func performAppleAccessibilityAudit(in app: XCUIApplication) throws {
         try app.performAccessibilityAudit(
             for: [.contrast, .hitRegion, .textClipped, .trait]
-        )
+        ) { issue in
+            // XCTest reports only "Contrast failed for SwiftUI.AccessibilityNode";
+            // record which element so a failure is actionable. Never ignored.
+            let element = issue.element
+            let detail = "\(issue.auditType) \(issue.compactDescription); "
+                + "identifier=\(element?.identifier ?? "nil") label=\(element?.label ?? "nil") "
+                + "frame=\(element.map { "\($0.frame)" } ?? "nil")"
+            print("ACCESSIBILITY_AUDIT_ISSUE \(detail)")
+            let attachment = XCTAttachment(string: detail)
+            attachment.name = "accessibility-audit-issue"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+            return false
+        }
     }
 
     private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication) {
@@ -2453,12 +2490,12 @@ private extension XCTestCase {
         XCTAssertTrue(album.waitForExistence(timeout: 12))
         scrollPublicElementIntoView(album, in: app)
         XCTAssertTrue(album.isHittable, "公开相册滚动进入当前窗口后必须可点击")
-        album.tap()
+        tapVisiblePart(of: album, in: app)
         let photo = presentationElement("public-photo-9001", in: app)
         XCTAssertTrue(photo.waitForExistence(timeout: 8))
         scrollPublicElementIntoView(photo, in: app)
         XCTAssertTrue(photo.isHittable, "公开相册首图应可打开")
-        photo.tap()
+        tapVisiblePart(of: photo, in: app)
         let close = presentationElement("public-gallery-close", in: app)
         XCTAssertTrue(close.waitForExistence(timeout: 8))
         let window = app.windows.firstMatch.frame
@@ -2484,6 +2521,17 @@ private extension XCTestCase {
         return window
     }
 
+    /// Taps the centre of the element's on-screen part. A card taller than
+    /// the landscape viewport can have its own centre below the window.
+    func tapVisiblePart(of element: XCUIElement, in app: XCUIApplication) {
+        let window = app.windows.firstMatch.frame
+        let visible = element.frame.intersection(window)
+        guard !visible.isNull, !visible.isEmpty else { return element.tap() }
+        app.windows.firstMatch.coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: visible.midX - window.minX, dy: visible.midY - window.minY))
+            .tap()
+    }
+
     func scrollPublicElementIntoView(_ element: XCUIElement, in app: XCUIApplication) {
         let scene = app.windows.firstMatch
         for _ in 0..<12 {
@@ -2494,10 +2542,15 @@ private extension XCTestCase {
             let viewport = CGRect(x: window.minX, y: top, width: window.width,
                                   height: max(1, bottom - top))
             let frame = element.exists ? element.frame : .zero
-            // A portrait image may be taller than the current iPad landscape
-            // viewport. Require its tappable centre to be visible, not that the
-            // entire card fit at once or that existence imply visibility.
-            if element.isHittable, viewport.contains(CGPoint(x: frame.midX, y: frame.midY)) {
+            // A portrait image may be taller than the current landscape
+            // viewport. On an iPhone in landscape the last public album card
+            // (about 663pt) is twice the viewport, so its centre can never
+            // enter it at the end of the list. Require a substantial tappable
+            // part to be visible, not the centre or the entire card.
+            let visible = frame.intersection(viewport)
+            let enough = min(frame.height, viewport.height) * 0.5
+            if !visible.isNull, visible.height >= enough, visible.width >= min(frame.width, 44),
+               element.isHittable {
                 return
             }
             let limit = viewport.height * 0.4
@@ -2798,7 +2851,13 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         let albumID = card.identifier.replacingOccurrences(of: "portfolio-card-", with: "")
         card.tap()
         XCTAssertTrue(element("portfolio-detail-\(albumID)", in: app).waitForExistence(timeout: 8))
-        try assertIvoryScreenEdges(app, page: "相册详情")
+        // Since 2a1ba4b the first photo fills the page width, so in landscape
+        // it legitimately runs under the bottom edge (see
+        // testAlbumFirstPhotoFillsWidthAndCaptionSitsBelow). As on 影视, check
+        // the top now and the bottom at the end of the album, not the photo.
+        try assertIvoryScreenEdges(app, page: "相册详情", edges: [.top])
+        for _ in 0..<10 { app.scrollViews.firstMatch.swipeUp() }
+        try assertIvoryScreenEdges(app, page: "相册详情末尾", edges: [.bottom])
         app.navigationBars.buttons.firstMatch.tap()
         XCTAssertTrue(element("portfolio-heading", in: app).waitForExistence(timeout: 8))
         try assertIvoryScreenEdges(app, page: "相册返回")
@@ -2882,17 +2941,27 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         let app = launchApp(arguments: ["-open-about-for-visual-testing"])
         let entry = element("about-settings", in: app)
         let scene = app.windows.firstMatch.frame
-        for _ in 0..<16 {
+        for _ in 0..<24 {
             // A partly exposed row may be reported as hittable while its
             // center is still covered by the floating landscape tab bar.
-            if entry.isHittable, entry.frame.midY > scene.minY + 80,
-               entry.frame.midY < scene.maxY - 130 { break }
+            // Only ask isHittable once the row is on screen: on an iPhone in
+            // landscape a full-page drag can carry it past the top, and
+            // XCTest then throws "Activation point invalid" instead of false.
+            let frame = entry.exists ? entry.frame : .zero
+            let onScreen = !frame.isEmpty && scene.intersects(frame)
+            if onScreen, frame.midY > scene.minY + 80, frame.midY < scene.maxY - 130,
+               entry.isHittable { break }
             let details = app.scrollViews["about-details-scroll"]
             let scroll = details.exists ? details : app.scrollViews.firstMatch
-            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.8))
-                .press(forDuration: 0.05, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: 0.2)))
+            // Drag down (toward the start) when the row has gone above the
+            // safe band, otherwise keep moving toward the end of the page.
+            let overshot = !frame.isEmpty && frame.midY <= scene.minY + 80
+            let (from, to): (CGFloat, CGFloat) = overshot ? (0.35, 0.65) : (0.65, 0.35)
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: from))
+                .press(forDuration: 0.05, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.75, dy: to)))
         }
-        XCTAssertTrue(entry.isHittable, "关于页必须能进入用户设置：entry=\(entry.frame)，window=\(app.windows.firstMatch.frame)")
+        XCTAssertTrue(entry.exists && scene.intersects(entry.frame) && entry.isHittable,
+                      "关于页必须能进入用户设置：entry=\(entry.frame)，window=\(app.windows.firstMatch.frame)")
         entry.tap()
         let themeEntry = element("theme-preference-entry", in: app)
         XCTAssertTrue(themeEntry.waitForExistence(timeout: 5))

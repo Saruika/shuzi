@@ -1,25 +1,42 @@
 version: 2
+# Every Dependabot PR runs the full iOS Quality Gate (~2.75 macOS hours).
+# Check monthly and group each ecosystem's updates into one PR so a month
+# costs at most four gate runs instead of one per dependency per week.
+# These groups apply to version updates only; Dependabot security updates,
+# when enabled in repository settings, are not delayed by this schedule.
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]
 
   - package-ecosystem: pip
     directory: /Server/entitlement-verifier
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
+    groups:
+      entitlement-verifier:
+        patterns: ["*"]
 
   - package-ecosystem: pip
     directory: /.github
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
+    groups:
+      quality-tools:
+        patterns: ["*"]
 
   - package-ecosystem: composer
     directory: /Server
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
+    groups:
+      server-composer:
+        patterns: ["*"]
