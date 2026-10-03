@@ -40,6 +40,26 @@ final class RetiredGameBundleTests: XCTestCase {
 }
 
 final class DramaLinkHealthTests: XCTestCase {
+    func testModernBareAssignmentWithTrailingScriptPasses() throws {
+        let original = String(decoding: try actorPage(), as: UTF8.self)
+        let modern = original.replacingOccurrences(of: "window._ROUTER_DATA = ", with: "_ROUTER_DATA=\n")
+            .replacingOccurrences(of: "</script>", with: ";window.extra = {};</script>")
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: Data(modern.utf8), requireActor: true), .available)
+    }
+
+    func testModernAssignmentDoesNotAcceptInvalidActorOrTruncatedJSON() throws {
+        let original = String(decoding: try actorPage(name: "其他演员"), as: UTF8.self)
+            .replacingOccurrences(of: "window._ROUTER_DATA = ", with: "_ROUTER_DATA = ")
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: Data(original.utf8), requireActor: true), .unverified)
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200,
+            body: Data(#"<script>_ROUTER_DATA={"loaderData":{</script>"#.utf8)), .unverified)
+    }
+
+    func testRouterExtractionKeepsEscapedQuotesAndBracesInStrings() {
+        let body = Data(#"<script>_ROUTER_DATA={"loaderData":{"p":{"pageData":{"BaseResp":{"StatusCode":0},"actor_data":{"actor_name":"易姝","works":[{"series_title":"剧名 } ; \" ["}]}}}}};window.extra={};</script>"#.utf8)
+        XCTAssertEqual(DramaLinkPolicy.evaluate(status: 200, body: body, requireActor: true), .available)
+    }
+
     private func actorPage(name: String = "易姝", status: Int = 0) throws -> Data {
         let payload: [String: Any] = ["loaderData": ["page": ["pageData": [
             "BaseResp": ["StatusCode": status], "actor_data": ["actor_name": name,

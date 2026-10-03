@@ -33,11 +33,9 @@ enum DramaLinkPolicy {
             return .expired
         }
         guard let html = String(data: body, encoding: .utf8),
-              let start = html.range(of: "window._ROUTER_DATA = "),
+              let start = html.range(of: #"(?:window\.)?\b_ROUTER_DATA\s*=\s*"#, options: .regularExpression),
               let end = html.range(of: "</script>", range: start.upperBound..<html.endIndex),
-              let json = html[start.upperBound..<end.lowerBound]
-                .trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: ";"))
-                .data(using: .utf8),
+              let json = routerJSON(html[start.upperBound..<end.lowerBound]),
               let root = try? JSONSerialization.jsonObject(with: json) as? [String: Any],
               let loaders = root["loaderData"] as? [String: Any] else { return .unverified }
         for value in loaders.values {
@@ -57,6 +55,30 @@ enum DramaLinkPolicy {
             }
         }
         return .unverified
+    }
+
+    // ModernJS may append JavaScript after the JSON assignment. Extract one
+    // balanced object without evaluating JS or treating delimiters in strings
+    // as structure; JSONSerialization still performs the actual validation.
+    private static func routerJSON(_ script: Substring) -> Data? {
+        let bytes = Array(script.trimmingCharacters(in: .whitespacesAndNewlines).utf8)
+        guard bytes.first == 123 else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index, byte) in bytes.enumerated() {
+            if inString {
+                if escaped { escaped = false }
+                else if byte == 92 { escaped = true }
+                else if byte == 34 { inString = false }
+            } else if byte == 34 { inString = true }
+            else if byte == 123 || byte == 91 { depth += 1 }
+            else if byte == 125 || byte == 93 {
+                depth -= 1
+                if depth == 0 { return Data(bytes[...index]) }
+            }
+        }
+        return nil
     }
 
     static func replacing(_ works: [DramaWork], from: URL, to: URL) -> [DramaWork] {
