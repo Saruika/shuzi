@@ -35,6 +35,10 @@ class DramaLinkMonitorTests(unittest.TestCase):
         body = ('<script>window._ROUTER_DATA = ' + json.dumps(data) + '</script>').encode()
         self.assertEqual(monitor.evaluate(200, body, ['京春夜']), 'available')
         self.assertEqual(monitor.evaluate(200, body, ['往生酒店']), 'content-mismatch')
+        modern = ('<script>_ROUTER_DATA=' + json.dumps(data)
+                  + ';window.someOtherData = {};</script>').encode()
+        self.assertEqual(monitor.evaluate(200, modern, ['京春夜']), 'available')
+        self.assertEqual(monitor.evaluate(200, modern, ['往生酒店']), 'content-mismatch')
 
     def test_host_and_redirect_boundary(self):
         self.assertTrue(monitor.trusted('https://novelquickapp.com/s/example/'))

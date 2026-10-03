@@ -41,10 +41,12 @@ def evaluate(status, body, expected_titles=()):
     except (ValueError, UnicodeError):
         pass
     try:
-        match = re.search(r'window\._ROUTER_DATA = (.*?)</script>', body.decode('utf-8'), re.S)
+        # ModernJS now emits a bare assignment and may append more JS after the
+        # JSON. Decode only the JSON value; never execute the following script.
+        match = re.search(r'(?:window\.)?\b_ROUTER_DATA\s*=\s*(.*?)</script>', body.decode('utf-8'), re.S)
         if not match:
             return 'unverified'
-        root = json.loads(match[1].strip().rstrip(';'))
+        root, _ = json.JSONDecoder().raw_decode(match[1].lstrip())
         for page in root['loaderData'].values():
             if not isinstance(page, dict):
                 continue
