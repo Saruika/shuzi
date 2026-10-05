@@ -39,8 +39,8 @@ final class AppPrivacyPolicy {
     public const SITE = '/var/www/html/shuzijun.com.cn';
     public const HOME = 'https://www.shuzijun.com.cn';
     public const POST_ID = 115;
-    public const PAYLOAD = '/var/lib/shuzijun-app-content/privacy/app-privacy-policy.html';
-    public const PAYLOAD_SHA256 = 'c91dd8dbab47983c9e7c17b8222f43679099117726ed4199e6f709e4b39ec4b6';
+    public const PAYLOAD = '/var/lib/shuzijun-app-content/privacy-20261006/app-privacy-policy.html';
+    public const PAYLOAD_SHA256 = 'a9b98700d3a444ac57171dd93ab81cdd1cf496aa8d2beed0701ef40a3c32f1b2';
     public const BACKUPS = '/var/backups/shuzijun-app-content';
     public const ROLE = '/etc/shuzijun/account-authority-role';
     public const LOCK = '/var/lib/shuzijun-sync/site-operation.lock';

@@ -60,9 +60,18 @@ class PrivacyAlignmentTests(unittest.TestCase):
         for path in ['Yishu/Views/PrivacyPolicyView.swift', 'Server/app-privacy-policy.html']:
             source = (ROOT / path).read_text()
             for phrase in ['电话号码或微信', '客户支持', '与可识别的发件人关联', '不会自动复制表单',
-                           '合作邮箱', '粗略位置', '消息箱']:
+                           '合作邮箱', '消息箱']:
                 with self.subTest(path=path, phrase=phrase):
                     self.assertIn(phrase, source)
+
+    def test_weather_retirement_is_version_scoped(self):
+        web = (ROOT / 'Server/app-privacy-policy.html').read_text()
+        self.assertIn('自 1.5（Build 4）起', web)
+        self.assertIn('不请求定位权限', web)
+        self.assertIn('此前版本仅在用户主动开启时', web)
+        self.assertNotIn('提供用户主动请求的天气', web)
+        listing = json.loads((ROOT / 'Server/app-store/zh-Hans.json').read_text())
+        self.assertNotIn('天气', listing['description'])
 
     def test_privacy_mailbox_and_link_match_in_app_and_website(self):
         catalog = (ROOT / 'Yishu/Models/Portfolio.swift').read_text()
