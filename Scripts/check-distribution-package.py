@@ -49,12 +49,15 @@ def check_metadata(info: dict, entitlements: dict, profile: dict,
     expiry = profile.get("ExpirationDate")
     require(isinstance(expiry, datetime), "profile_expiry_missing")
     require(expiry.replace(tzinfo=expiry.tzinfo or timezone.utc) > now, "profile_expired")
+    require("com.apple.developer.weatherkit" not in entitlements, "retired_weatherkit_entitlement")
+    require(not any(key.startswith("NSLocation") for key in info), "retired_location_permission")
+    require(not any("Location" in item.get("NSPrivacyCollectedDataType", "")
+                    for item in privacy.get("NSPrivacyCollectedDataTypes", [])), "retired_location_declaration")
     for rights in (entitlements, profile["Entitlements"]):
         require(rights.get("application-identifier") == TEAM + "." + BUNDLE, "application_identifier_mismatch")
         require(rights.get("com.apple.developer.team-identifier") == TEAM, "entitlement_team_mismatch")
         require(rights.get("get-task-allow") is False, "debugger_entitlement_present")
         require(rights.get("aps-environment") == "production", "push_not_production")
-        require(rights.get("com.apple.developer.weatherkit") is True, "weatherkit_entitlement_missing")
         require(rights.get("com.apple.developer.applesignin") == ["Default"], "apple_login_entitlement_missing")
 
 
@@ -118,7 +121,7 @@ def check_package(app: Path, version: str, build: str) -> dict:
     # Only fixed, non-sensitive results leave this process. The profile and
     # signing metadata never enter logs or a generated report.
     return {"packageCheck": "passed", "version": version, "build": build,
-            "pushEnvironment": "production", "appleLogin": True, "weatherKit": True,
+            "pushEnvironment": "production", "appleLogin": True, "weatherKit": False,
             "submissionReady": "not_assessed", "liveServices": "not_assessed"}
 
 

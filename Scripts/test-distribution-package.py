@@ -26,7 +26,7 @@ class DistributionPackageTests(unittest.TestCase):
                      "UIDeviceFamily": [1, 2], "MinimumOSVersion": "17.0"}
         self.rights = {"application-identifier": CHECKER.TEAM + "." + CHECKER.BUNDLE,
                        "com.apple.developer.team-identifier": CHECKER.TEAM, "get-task-allow": False,
-                       "aps-environment": "production", "com.apple.developer.weatherkit": True,
+                       "aps-environment": "production",
                        "com.apple.developer.applesignin": ["Default"]}
         self.profile = {"TeamIdentifier": [CHECKER.TEAM], "ExpirationDate": self.now + timedelta(days=1),
                         "Entitlements": copy.deepcopy(self.rights)}
@@ -46,6 +46,19 @@ class DistributionPackageTests(unittest.TestCase):
             with self.subTest(key=key), patch.dict(self.info, {key: value}), self.assertRaises(CHECKER.PackageCheckError):
                 self.check()
 
+    def test_retired_weather_and_location_are_rejected(self):
+        with patch.dict(self.rights, {"com.apple.developer.weatherkit": True}), self.assertRaises(CHECKER.PackageCheckError):
+            self.check()
+        with patch.dict(self.info, {"NSLocationWhenInUseUsageDescription": "legacy"}), self.assertRaises(CHECKER.PackageCheckError):
+            self.check()
+        with patch.dict(self.privacy, {"NSPrivacyCollectedDataTypes": [
+            {"NSPrivacyCollectedDataType": "NSPrivacyCollectedDataTypeCoarseLocation"}
+        ]}), self.assertRaises(CHECKER.PackageCheckError):
+            self.check()
+        # A profile may allow more capabilities than the app actually signs.
+        with patch.dict(self.profile["Entitlements"], {"com.apple.developer.weatherkit": True}):
+            self.check()
+
     def test_simulator_missing_ipad_or_wrong_minimum_rejected(self):
         for key, value in (("CFBundleSupportedPlatforms", ["iPhoneSimulator"]), ("UIDeviceFamily", [1]),
                            ("MinimumOSVersion", "26.0")):
@@ -54,7 +67,7 @@ class DistributionPackageTests(unittest.TestCase):
 
     def test_effective_and_profile_permissions_are_both_required(self):
         changes = {"aps-environment": "development", "get-task-allow": True,
-                   "com.apple.developer.weatherkit": False, "com.apple.developer.applesignin": [],
+                   "com.apple.developer.applesignin": [],
                    "application-identifier": CHECKER.TEAM + ".*", "com.apple.developer.team-identifier": "OTHER"}
         for rights in (self.rights, self.profile["Entitlements"]):
             for key, value in changes.items():
