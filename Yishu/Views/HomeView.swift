@@ -490,23 +490,30 @@ private struct HeroPager: View {
     private var weatherRow: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
-            VStack(alignment: .trailing, spacing: 0) {
+            VStack(spacing: 0) {
                 weatherButton
                 Link(destination: localWeather.attributionLegalURL) {
-                    HStack(spacing: 6) {
-                        WeatherAttributionMark(weather: localWeather, onDarkBackground: true)
-                        Text("数据来源")
-                            .font(.caption2)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color(white: 0.08), in: Capsule())
-                    .frame(minHeight: 44)
-                    .contentShape(Rectangle())
+                    WeatherAttributionMark(weather: localWeather, onDarkBackground: true)
+                        .padding(.horizontal, 12)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Apple Weather 天气数据来源与许可")
                 .accessibilityIdentifier("home-weather-legal-link")
+            }
+            // One translucent surface, with two independent 44-point actions.
+            // A dark material keeps the white official mark legible over all
+            // carousel photos without a solid black backing or drop shadow.
+            .background {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(.thinMaterial)
+                    .environment(\.colorScheme, .dark)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(.white.opacity(0.18), lineWidth: 0.5)
+                    .allowsHitTesting(false)
             }
         }
         .foregroundStyle(.white)
@@ -519,16 +526,6 @@ private struct HeroPager: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 11)
                 .padding(.vertical, 7)
-                // This small control sits over changing, sometimes very bright
-                // photographs. Keep its caption legible independently of the
-                // photo, without darkening the full-screen artwork itself.
-                .background(Color(white: 0.08), in: Capsule())
-                .overlay {
-                    Capsule()
-                        .stroke(.white.opacity(0.30), lineWidth: 0.5)
-                }
-                .compositingGroup()
-                .shadow(color: AppTheme.surfaceShadow, radius: 6, y: 2)
                 .frame(minHeight: 44)
                 .contentShape(Rectangle())
                 // VoiceOver receives one complete button summary below,

@@ -2005,6 +2005,8 @@ final class YishuUITests: XCTestCase {
         assertMinimumTapTarget(homeAttribution, named: "首页天气来源")
         XCTAssertTrue(homeAttribution.isHittable)
         XCTAssertTrue(homeAttribution.label.contains("Apple Weather"))
+        XCTAssertGreaterThanOrEqual(homeAttribution.frame.minY, weather.frame.maxY - 1)
+        XCTAssertEqual(homeAttribution.frame.midX, weather.frame.midX, accuracy: 1)
         attachScreenshot(named: "11-home-weather-attribution", app: app)
 
         openTab("关于", in: app)
