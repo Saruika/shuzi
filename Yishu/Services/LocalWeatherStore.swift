@@ -375,7 +375,7 @@ enum WeatherFailureCategory: Int {
 enum WeatherAttributionPresentation {
     static let defaultProviderName = "Apple Weather"
     static let officialLegalURL = AppURL.make(
-        "https://developer.apple.com/weatherkit/data-source-attribution/"
+        "https://weatherkit.apple.com/legal-attribution.html"
     )
 
     static func providerName(_ candidate: String?) -> String {

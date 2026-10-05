@@ -91,7 +91,7 @@ struct HomeHeroOverlayLayout: Equatable {
         let gap = min(safeHeight / 12, 16.0)
         let innerWidth = max(0, safeWidth - 2 * inset)
         let innerHeight = max(0, safeHeight - 2 * inset)
-        let header = min(44.0, innerHeight)
+        let header = min(92.0, innerHeight)
         isCompact = width > height || height < 620
         image = CGRect(x: 0, y: 0, width: width, height: height)
         weather = CGRect(x: left + inset, y: top + inset, width: innerWidth, height: header)
@@ -490,7 +490,24 @@ private struct HeroPager: View {
     private var weatherRow: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
-            weatherButton
+            VStack(alignment: .trailing, spacing: 0) {
+                weatherButton
+                Link(destination: localWeather.attributionLegalURL) {
+                    HStack(spacing: 6) {
+                        WeatherAttributionMark(weather: localWeather, onDarkBackground: true)
+                        Text("数据来源")
+                            .font(.caption2)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color(white: 0.08), in: Capsule())
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Apple Weather 天气数据来源与许可")
+                .accessibilityIdentifier("home-weather-legal-link")
+            }
         }
         .foregroundStyle(.white)
     }

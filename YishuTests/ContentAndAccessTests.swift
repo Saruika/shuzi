@@ -3075,7 +3075,7 @@ final class ContentAndAccessTests: XCTestCase {
     func testWeatherAttributionAlwaysHasAnOfficialLegalFallback() {
         XCTAssertEqual(
             WeatherAttributionPresentation.officialLegalURL.absoluteString,
-            "https://developer.apple.com/weatherkit/data-source-attribution/"
+            "https://weatherkit.apple.com/legal-attribution.html"
         )
         XCTAssertEqual(
             WeatherAttributionPresentation.legalURL(from: nil),

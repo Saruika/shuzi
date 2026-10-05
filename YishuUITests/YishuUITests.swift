@@ -1986,11 +1986,12 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "11-accessibility-xxxl", app: app)
     }
 
-    func testWeatherAttributionAppearsOnlyOnAboutPage() {
+    func testWeatherAttributionAppearsOnHomeAndAboutPage() {
         let app = launchApp(
             arguments: [
                 "-simulate-ready-weather-for-visual-testing",
             ],
+            screenProtectionEnabled: true,
             environment: ["YISHU_SIMULATE_READY_WEATHER_FOR_VISUAL_TESTING": "1"]
         )
 
@@ -2000,11 +2001,11 @@ final class YishuUITests: XCTestCase {
             weather.label.contains("Apple Weather"),
             "天气胶囊本身只应读出地点和当前天气：\(weather.label)"
         )
-        let homeAttribution = element("home-weather-attribution-control", in: app)
-        XCTAssertFalse(homeAttribution.exists, "首页不应再显示 Apple Weather 来源入口")
-        XCTAssertFalse(element("home-weather-provider", in: app).exists)
-        XCTAssertFalse(element("home-weather-legal-link", in: app).exists)
-        attachScreenshot(named: "11-home-weather-without-source", app: app)
+        let homeAttribution = element("home-weather-legal-link", in: app)
+        assertMinimumTapTarget(homeAttribution, named: "首页天气来源")
+        XCTAssertTrue(homeAttribution.isHittable)
+        XCTAssertTrue(homeAttribution.label.contains("Apple Weather"))
+        attachScreenshot(named: "11-home-weather-attribution", app: app)
 
         openTab("关于", in: app)
         // SwiftUI exposes this styled Link as XCUIElementTypeOther on iOS 26,

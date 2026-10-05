@@ -1,5 +1,30 @@
 import SwiftUI
 
+/// Both weather surfaces use the WeatherKit-provided mark. The native fallback
+/// keeps attribution visible while offline or while the remote mark loads.
+struct WeatherAttributionMark: View {
+    let weather: LocalWeatherStore
+    let onDarkBackground: Bool
+
+    var body: some View {
+        AsyncImage(url: onDarkBackground ? weather.attributionLightMarkURL : weather.attributionMarkURL) { phase in
+            if case .success(let image) = phase {
+                image.resizable().scaledToFit()
+            } else {
+                HStack(spacing: 3) {
+                    Image(systemName: "apple.logo")
+                    Text("Weather")
+                }
+                .font(.system(size: 13, weight: .medium))
+            }
+        }
+        .frame(width: 86, height: 20)
+        .foregroundStyle(onDarkBackground ? Color.white : Color.black)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Apple Weather")
+    }
+}
+
 private enum AboutContactIcon {
     case system(String)
     case brandAsset(String)
@@ -577,19 +602,10 @@ struct AboutView: View {
         Link(destination: localWeather.attributionLegalURL) {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 14) {
-                    AsyncImage(url: AppearanceStore.shared.theme.colorScheme == .light
-                               ? localWeather.attributionLightMarkURL : localWeather.attributionMarkURL) { phase in
-                        if case .success(let image) = phase {
-                            image
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 108, height: 28, alignment: .leading)
-                        } else {
-                            Text(localWeather.weatherProviderName)
-                                .font(.caption.weight(.semibold))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
+                    WeatherAttributionMark(
+                        weather: localWeather,
+                        onDarkBackground: AppearanceStore.shared.theme.colorScheme == .dark
+                    )
                     Spacer()
                     Image(systemName: "arrow.up.right")
                         .font(.caption2)
