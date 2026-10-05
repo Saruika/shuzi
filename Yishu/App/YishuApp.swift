@@ -9,7 +9,6 @@ struct YishuApp: App {
     ) {
         AppServiceWorkspace(environment: $0)
     }
-    @State private var localWeather = LocalWeatherStore()
 
     init() {
         AppDiagnostics.shared.start()
@@ -91,7 +90,6 @@ struct YishuApp: App {
                 .environmentObject(workspace.fanAccount)
                 .environmentObject(workspace.pushNotifications)
                 .environmentObject(workspaces)
-                .environment(localWeather)
         }
     }
 }

@@ -990,7 +990,7 @@ final class YishuUITests: XCTestCase {
                            "photo=\(photo.frame), window=\(window), protected=\(protected), geometry=\(element("home-canvas-geometry", in: app).value ?? "missing")")
             XCTAssertEqual(photo.frame.maxY, window.maxY, accuracy: 0.5,
                            "photo=\(photo.frame), window=\(window), protected=\(protected)")
-            for identifier in ["home-weather", "home-open-portfolio", "home-hero-subtitle"] {
+            for identifier in ["home-open-portfolio", "home-hero-subtitle"] {
                 let control = element(identifier, in: app)
                 XCTAssertTrue(control.exists)
                 XCTAssertTrue(window.contains(control.frame))
@@ -1030,7 +1030,6 @@ final class YishuUITests: XCTestCase {
                 ])
                 let indicator = element("home-hero-page-indicator", in: app)
                 XCTAssertEqual(indicator.value as? String, "第 \(index + 1) 张，共 5 张")
-                XCTAssertTrue(element("home-weather", in: app).isHittable)
                 let subtitle = element("home-hero-subtitle", in: app)
                 XCTAssertTrue(subtitle.isHittable, "不能通过隐藏副标题使对比度检查通过")
                 XCTAssertEqual(subtitle.label, "短剧演员 · 模特 · 视频创作者")
@@ -1973,9 +1972,7 @@ final class YishuUITests: XCTestCase {
             "UICTContentSizeCategoryAccessibilityXXXL",
         ])
 
-        let weather = element("home-weather", in: app)
         let portfolioAction = element("home-open-portfolio", in: app)
-        assertMinimumTapTarget(weather, named: "首页天气")
         assertMinimumTapTarget(portfolioAction, named: "查看作品")
         XCTAssertTrue(portfolioAction.isHittable, "辅助功能大字号下首页主操作不可点击")
 
@@ -1986,42 +1983,12 @@ final class YishuUITests: XCTestCase {
         attachScreenshot(named: "11-accessibility-xxxl", app: app)
     }
 
-    func testWeatherAttributionAppearsOnHomeAndAboutPage() {
-        let app = launchApp(
-            arguments: [
-                "-simulate-ready-weather-for-visual-testing",
-            ],
-            screenProtectionEnabled: true,
-            environment: ["YISHU_SIMULATE_READY_WEATHER_FOR_VISUAL_TESTING": "1"]
-        )
-
-        let weather = element("home-weather", in: app)
-        assertMinimumTapTarget(weather, named: "首页天气")
-        XCTAssertFalse(
-            weather.label.contains("Apple Weather"),
-            "天气胶囊本身只应读出地点和当前天气：\(weather.label)"
-        )
-        let homeAttribution = element("home-weather-legal-link", in: app)
-        assertMinimumTapTarget(homeAttribution, named: "首页天气来源")
-        XCTAssertTrue(homeAttribution.isHittable)
-        XCTAssertTrue(homeAttribution.label.contains("Apple Weather"))
-        XCTAssertGreaterThanOrEqual(homeAttribution.frame.minY, weather.frame.maxY - 1)
-        XCTAssertEqual(homeAttribution.frame.midX, weather.frame.midX, accuracy: 1)
-        attachScreenshot(named: "11-home-weather-attribution", app: app)
-
+    func testWeatherFeatureIsAbsent() {
+        let app = launchApp(screenProtectionEnabled: true)
+        XCTAssertFalse(element("home-weather", in: app).exists)
+        XCTAssertFalse(element("home-weather-legal-link", in: app).exists)
         openTab("关于", in: app)
-        // SwiftUI exposes this styled Link as XCUIElementTypeOther on iOS 26,
-        // even when it carries the `.isLink` accessibility trait. Locate it
-        // by its stable identifier and separately gate its label and action.
-        let legalLink = element("about-weather-legal-link", in: app)
-        scrollToElement(legalLink, in: app)
-        assertMinimumTapTarget(legalLink, named: "关于页 Apple Weather 数据与许可")
-        XCTAssertTrue(legalLink.isHittable, "关于页 Apple Weather 数据与许可链接不可点击")
-        XCTAssertTrue(
-            legalLink.label.contains("Apple Weather"),
-            "关于页没有标明 Apple Weather：\(legalLink.label)"
-        )
-        attachScreenshot(named: "11-about-weather-attribution", app: app)
+        XCTAssertFalse(element("about-weather-legal-link", in: app).exists)
     }
 
     func testPrimaryPagesMeetFocusedAccessibilityGate() throws {
@@ -2079,7 +2046,7 @@ final class YishuUITests: XCTestCase {
             // The attribution follows the copyright block. Bring this final
             // card in too, otherwise its not-yet-visible title can produce
             // the same blank-strip contrast artifact on light page surfaces.
-            scrollFullyAbovePhoneTabBar(element("about-weather-legal-link", in: app), in: app)
+            scrollFullyAbovePhoneTabBar(element("about-privacy-policy", in: app), in: app)
         }
         try auditPrimaryPageAccessibilityBaseline(pageNamed: "关于", in: app)
         app.terminate()
@@ -2117,7 +2084,7 @@ final class YishuUITests: XCTestCase {
     }
 
     private func tabButton(_ title: String, in app: XCUIApplication) -> XCUIElement {
-        let phoneTab = app.tabBars.buttons[title]
+        let phoneTab = app.tabBars.buttons[title].firstMatch
         return phoneTab.exists ? phoneTab : app.buttons[title].firstMatch
     }
 
@@ -2204,15 +2171,10 @@ final class YishuUITests: XCTestCase {
 
         switch pageName {
         case "首页":
-            let weather = element("home-weather", in: app)
             let portfolioAction = element("home-open-portfolio", in: app)
-            assertMinimumTapTarget(weather, named: "iPad 首页天气")
             assertMinimumTapTarget(portfolioAction, named: "iPad 查看作品")
-            assertMeaningfulAccessibilityLabel(weather, named: "iPad 首页天气")
             assertMeaningfulAccessibilityLabel(portfolioAction, named: "iPad 查看作品")
-            assertContainedInWindow(weather, named: "iPad 首页天气", window: window)
             assertContainedInWindow(portfolioAction, named: "iPad 查看作品", window: window)
-            assertBelowStatusBar(weather, named: "iPad 首页天气", in: app)
 
         case "作品":
             let heading = element("portfolio-heading", in: app)
@@ -3203,7 +3165,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         let privacy = element("about-privacy-policy", in: app)
         for _ in 0..<6 where !privacy.isHittable { scroll.swipeUp() }
         XCTAssertTrue(privacy.isHittable, "右栏底部隐私入口无法滚动到达")
-        let lastLink = element("about-weather-legal-link", in: app)
+        let lastLink = element("about-privacy-policy", in: app)
         for _ in 0..<6 where !lastLink.isHittable { scroll.swipeUp() }
         XCTAssertTrue(lastLink.isHittable, "右栏最后的许可入口无法滚动到达")
         XCTAssertEqual(portrait.frame.minY, portraitBefore.minY, accuracy: 1)
@@ -3504,7 +3466,6 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
                 XCTAssertTrue(element(heading, in: app).waitForExistence(timeout: 6), "\(theme)：\(title)丢失")
             }
             tabButton("首页", in: app).tap()
-            assertMinimumTapTarget(element("home-weather", in: app), named: "天气")
             assertMinimumTapTarget(element("home-open-portfolio", in: app), named: "查看作品")
             let title = element("home-hero-title", in: app)
             XCTAssertTrue(title.waitForExistence(timeout: 5))
@@ -3514,7 +3475,7 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             }
             let photo = heroPhoto(0, in: app)
             XCTAssertTrue(photo.waitForExistence(timeout: 5))
-            for identifier in ["home-hero-title", "home-hero-subtitle", "home-weather", "home-open-portfolio"] {
+            for identifier in ["home-hero-title", "home-hero-subtitle", "home-open-portfolio"] {
                 let control = element(identifier, in: app)
                 XCTAssertTrue(control.exists)
                 // Classic 1.3 deliberately overlays copy on the full photo.
@@ -3540,27 +3501,6 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
                 screenshot.image.draw(in: CGRect(origin: .zero, size: window.size))
             }
             let source = try XCTUnwrap(normalized.cgImage)
-            // iPadOS 26's native audit can hang with XCTest -56. Check the
-            // rendered capsule itself in every configuration as well as the
-            // source palette contrast tests; retain the native audit on phone.
-            let weather = element("home-weather", in: app).frame.offsetBy(dx: -window.minX, dy: -window.minY)
-            let weatherCrop = try XCTUnwrap(source.cropping(to: weather.insetBy(dx: 8, dy: 10)))
-            let pixelCount = weatherCrop.width * weatherCrop.height
-            var weatherPixels = [UInt8](repeating: 0, count: pixelCount * 4)
-            let weatherContext = try XCTUnwrap(CGContext(data: &weatherPixels, width: weatherCrop.width,
-                height: weatherCrop.height, bitsPerComponent: 8, bytesPerRow: weatherCrop.width * 4,
-                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
-            weatherContext.draw(weatherCrop, in: CGRect(x: 0, y: 0, width: weatherCrop.width, height: weatherCrop.height))
-            func linear(_ value: UInt8) -> Double {
-                let component = Double(value) / 255
-                return component <= 0.04045 ? component / 12.92 : pow((component + 0.055) / 1.055, 2.4)
-            }
-            let luminances = stride(from: 0, to: weatherPixels.count, by: 4).map { offset in
-                0.2126 * linear(weatherPixels[offset]) + 0.7152 * linear(weatherPixels[offset + 1])
-                    + 0.0722 * linear(weatherPixels[offset + 2])
-            }.sorted()
-            XCTAssertGreaterThanOrEqual((luminances[pixelCount * 95 / 100] + 0.05)
-                / (luminances[pixelCount * 5 / 100] + 0.05), 4.5, "\(theme)：实际天气胶囊文字不清晰")
             // The system regions must contain photograph pixels, not the
             // previous solid theme strips. Use the synthetic artwork only.
             if window.height > window.width {
@@ -3698,22 +3638,15 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
         let app = launchApp(arguments: [
             "-UIPreferredContentSizeCategoryName",
             "UICTContentSizeCategoryAccessibilityXXXL",
-            "-simulate-ready-weather-for-visual-testing",
             "-hold-home-remote-images-for-visual-testing",
             "-disable-home-auto-advance-for-visual-testing",
         ])
         let window = app.windows.firstMatch
         XCTAssertTrue(window.waitForExistence(timeout: 8), "缺少可验证的应用窗口")
 
-        let weather = element("home-weather", in: app)
-        let weatherAttribution = element("home-weather-attribution-control", in: app)
         let portfolioAction = element("home-open-portfolio", in: app)
-        assertMinimumTapTarget(weather, named: "当前 UI 配置的首页天气")
         assertMinimumTapTarget(portfolioAction, named: "当前 UI 配置的查看作品")
-        XCTAssertTrue(weather.isHittable, "辅助功能大字号下天气入口不可点击")
-        XCTAssertFalse(weatherAttribution.exists, "辅助功能大字号下首页不应出现天气署名入口")
         XCTAssertTrue(portfolioAction.isHittable, "辅助功能大字号下查看作品不可点击")
-        XCTAssertTrue(window.frame.contains(weather.frame), "辅助功能大字号下天气入口超出窗口")
         XCTAssertTrue(window.frame.contains(portfolioAction.frame), "辅助功能大字号下查看作品超出窗口")
         let copy = app.scrollViews["home-hero-copy-scroll"]
         let role = element("home-hero-subtitle", in: app)
@@ -3740,8 +3673,6 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
             XCTAssertEqual(titleFrame.minX - app.windows.firstMatch.frame.minX, 22, accuracy: 1,
                            "经典首页标题必须保留 1.3 左对齐")
         }
-        let weather = element("home-weather", in: app)
-        let weatherFrame = weather.frame
         let page = element("home-hero-page-indicator", in: app)
         let ratios = [959.0 / 1440, 1440.0 / 959, 1, 4, 0.5]
         for index in 0..<5 {
@@ -3756,10 +3687,8 @@ final class YishuAdaptiveLayoutUITests: XCTestCase {
                 XCTAssertTrue(photo.frame.contains(title.frame), "经典文案应叠在照片左下角")
             }
             XCTAssertTrue(app.windows.firstMatch.frame.contains(photo.frame))
-            XCTAssertFalse(title.frame.intersects(weather.frame))
             XCTAssertEqual(title.frame.minY, titleFrame.minY, accuracy: 1)
             XCTAssertEqual(title.frame.minX, titleFrame.minX, accuracy: 1)
-            XCTAssertEqual(weather.frame, weatherFrame)
             assertHomeHeroIsVisiblyRendered(in: app, page: index + 1)
             if index < 4 { swipeHero(in: app, forward: true) }
         }

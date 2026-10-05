@@ -52,15 +52,6 @@ final class AppDiagnostics: NSObject, MXMetricManagerSubscriber {
         }
     }
 
-    func recordWeatherUpdate(succeeded: Bool, errorCode: Int = 0) {
-        if succeeded {
-            logger.info("Weather update succeeded")
-        } else {
-            logger.error(
-                "Weather update failed: category=\(errorCode, privacy: .public)"
-            )
-        }
-    }
 
     func recordImageLoadFailure(category: Int) {
         logger.error(

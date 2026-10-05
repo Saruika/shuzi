@@ -31,7 +31,6 @@
 		10000000000000000000000E /* CreditsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000E /* CreditsView.swift */; };
 		10000000000000000000000F /* AdminSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000F /* AdminSessionStore.swift */; };
 		100000000000000000000010 /* AdminView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* AdminView.swift */; };
-		100000000000000000000011 /* LocalWeatherStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* LocalWeatherStore.swift */; };
 		100000000000000000000012 /* CollaborationInquiryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* CollaborationInquiryView.swift */; };
 		100000000000000000000013 /* LaunchPosterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* LaunchPosterView.swift */; };
 		100000000000000000000014 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* LaunchScreen.storyboard */; };
@@ -92,7 +91,6 @@
 		20000000000000000000000E /* CreditsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CreditsView.swift; sourceTree = "<group>"; };
 		20000000000000000000000F /* AdminSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminSessionStore.swift; sourceTree = "<group>"; };
 		200000000000000000000010 /* AdminView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminView.swift; sourceTree = "<group>"; };
-		200000000000000000000011 /* LocalWeatherStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalWeatherStore.swift; sourceTree = "<group>"; };
 		200000000000000000000012 /* CollaborationInquiryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CollaborationInquiryView.swift; sourceTree = "<group>"; };
 		200000000000000000000013 /* LaunchPosterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchPosterView.swift; sourceTree = "<group>"; };
 		200000000000000000000014 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
@@ -192,7 +190,6 @@
 				20000000000000000000001D /* AppleSignInService.swift */,
 				20000000000000000000001E /* PushNotificationService.swift */,
 				20000000000000000000001F /* FanNotificationStore.swift */,
-				200000000000000000000011 /* LocalWeatherStore.swift */,
 			);
 			path = Yishu/Services;
 			sourceTree = "<group>";
@@ -340,9 +337,6 @@
 							com.apple.SignInWithApple = {
 								enabled = 1;
 							};
-							com.apple.WeatherKit = {
-								enabled = 1;
-							};
 						};
 					};
 					A50000000000000000000001 = {
@@ -435,7 +429,6 @@
 				10000000000000000000000E /* CreditsView.swift in Sources */,
 				10000000000000000000000F /* AdminSessionStore.swift in Sources */,
 				100000000000000000000010 /* AdminView.swift in Sources */,
-				100000000000000000000011 /* LocalWeatherStore.swift in Sources */,
 				100000000000000000000012 /* CollaborationInquiryView.swift in Sources */,
 				100000000000000000000013 /* LaunchPosterView.swift in Sources */,
 				100000000000000000000018 /* SecureNetworkClient.swift in Sources */,
@@ -546,7 +539,6 @@
 				INFOPLIST_FILE = Yishu/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Hi，梳子";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "用于在首页通过 Apple WeatherKit 显示所在城市的当地天气；仅在前台请求约三公里精度的位置。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
@@ -580,7 +572,6 @@
 				INFOPLIST_FILE = Yishu/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Hi，梳子";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.entertainment";
-				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "用于在首页通过 Apple WeatherKit 显示所在城市的当地天气；仅在前台请求约三公里精度的位置。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;

@@ -1,29 +1,5 @@
 import SwiftUI
 
-/// Both weather surfaces use the WeatherKit-provided mark. The native fallback
-/// keeps attribution visible while offline or while the remote mark loads.
-struct WeatherAttributionMark: View {
-    let weather: LocalWeatherStore
-    let onDarkBackground: Bool
-
-    var body: some View {
-        AsyncImage(url: onDarkBackground ? weather.attributionLightMarkURL : weather.attributionMarkURL) { phase in
-            if case .success(let image) = phase {
-                image.resizable().scaledToFit()
-            } else {
-                HStack(spacing: 3) {
-                    Image(systemName: "apple.logo")
-                    Text("Weather")
-                }
-                .font(.system(size: 13, weight: .medium))
-            }
-        }
-        .frame(width: 86, height: 20)
-        .foregroundStyle(onDarkBackground ? Color.white : Color.black)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Apple Weather")
-    }
-}
 
 private enum AboutContactIcon {
     case system(String)
@@ -38,7 +14,6 @@ struct AboutView: View {
     @State private var hongguoMessage = ""
     @State private var showsHongguoMessage = false
     @EnvironmentObject private var admin: AdminSessionStore
-    @Environment(LocalWeatherStore.self) private var localWeather
     @EnvironmentObject private var portfolioStore: PortfolioStore
     @EnvironmentObject private var fanAccount: FanAccountStore
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -210,7 +185,6 @@ struct AboutView: View {
             copyrightNotice
             privacyAccess
             adminAccess
-            weatherAttribution
         }
     }
 
@@ -598,39 +572,6 @@ struct AboutView: View {
         .padding(.bottom, 8)
     }
 
-    private var weatherAttribution: some View {
-        Link(destination: localWeather.attributionLegalURL) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 14) {
-                    WeatherAttributionMark(
-                        weather: localWeather,
-                        onDarkBackground: AppearanceStore.shared.theme.colorScheme == .dark
-                    )
-                    Spacer()
-                    Image(systemName: "arrow.up.right")
-                        .font(.caption2)
-                        .foregroundStyle(AppTheme.muted)
-                }
-
-                Text("天气数据由 Apple Weather 提供")
-                    .font(.footnote.weight(.medium))
-                Text("查看数据来源、版权与许可信息")
-                    .font(.caption)
-                    .foregroundStyle(AppTheme.muted)
-            }
-            .foregroundStyle(AppTheme.warmWhite)
-            .padding(15)
-            .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
-            .background(AppTheme.elevatedInk, in: RoundedRectangle(cornerRadius: 4))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Apple Weather 天气数据来源与许可")
-        .accessibilityAddTraits(.isLink)
-        .accessibilityIdentifier("about-weather-legal-link")
-        .accessibilityHint("打开 Apple Weather 数据来源与许可页")
-        .padding(.horizontal, 16)
-        .padding(.bottom, 70)
-    }
 
     private func stat(_ value: String, _ label: String) -> some View {
         VStack(spacing: 7) {

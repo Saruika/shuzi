@@ -4,8 +4,6 @@ import Combine
 import SwiftUI
 import UIKit
 import UserNotifications
-import WeatherKit
-import CoreLocation
 import Network
 import Observation
 import Security
@@ -3007,102 +3005,12 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertEqual(posters.first?.subtitle, "安全写回")
     }
 
-    func testWeatherLocationDiscardsPrecisionAndMotionMetadata() throws {
-        let timestamp = Date(timeIntervalSince1970: 1_700_000_000)
-        let precise = CLLocation(
-            coordinate: CLLocationCoordinate2D(latitude: 22.543099, longitude: 114.057868),
-            altitude: 102, horizontalAccuracy: 5, verticalAccuracy: 3,
-            course: 91, speed: 8, timestamp: timestamp
-        )
-        let coarse = try XCTUnwrap(WeatherLocationPrivacy.approximate(precise))
-        XCTAssertEqual(coarse.coordinate.latitude, 22.55, accuracy: 0.000001)
-        XCTAssertEqual(coarse.coordinate.longitude, 114.05, accuracy: 0.000001)
-        XCTAssertEqual(coarse.altitude, 0)
-        XCTAssertLessThan(coarse.verticalAccuracy, 0)
-        XCTAssertLessThan(coarse.course, 0)
-        XCTAssertLessThan(coarse.speed, 0)
-        XCTAssertEqual(coarse.timestamp, timestamp)
-        XCTAssertGreaterThanOrEqual(coarse.horizontalAccuracy, 6_000)
-        let repeated = try XCTUnwrap(WeatherLocationPrivacy.approximate(coarse))
-        XCTAssertEqual(repeated.coordinate.latitude, coarse.coordinate.latitude)
-        XCTAssertEqual(repeated.coordinate.longitude, coarse.coordinate.longitude)
-    }
 
-    func testWeatherNearbyPointsShareOneCoarseCoordinate() throws {
-        let first = try XCTUnwrap(WeatherLocationPrivacy.approximate(
-            CLLocation(latitude: 22.543099, longitude: 114.057868)
-        ))
-        let next = try XCTUnwrap(WeatherLocationPrivacy.approximate(
-            CLLocation(latitude: 22.543101, longitude: 114.057872)
-        ))
-        XCTAssertEqual(first.coordinate.latitude, next.coordinate.latitude)
-        XCTAssertEqual(first.coordinate.longitude, next.coordinate.longitude)
-    }
 
-    func testWeatherCoarseCoordinatesRejectInvalidInputAndSupportWorldEdges() throws {
-        for coordinate in [
-            CLLocationCoordinate2D(latitude: 90, longitude: 180),
-            CLLocationCoordinate2D(latitude: -90, longitude: -180),
-            CLLocationCoordinate2D(latitude: 0, longitude: 0),
-        ] {
-            let location = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
-            let result = try XCTUnwrap(WeatherLocationPrivacy.approximate(location))
-            XCTAssertTrue(CLLocationCoordinate2DIsValid(result.coordinate))
-        }
-        XCTAssertNil(WeatherLocationPrivacy.approximate(CLLocation(latitude: 91, longitude: 0)))
-        XCTAssertNil(WeatherLocationPrivacy.approximate(CLLocation(latitude: .nan, longitude: 0)))
-        XCTAssertEqual(Bundle.main.object(forInfoDictionaryKey: "NSLocationDefaultAccuracyReduced") as? Bool, true)
-    }
 
-    func testWeatherLocationAlwaysKeepsAConcisePlaceName() {
-        XCTAssertEqual(WeatherPresentation.conciseLocationText("杭州市"), "杭州")
-        XCTAssertEqual(WeatherPresentation.conciseLocationText("香港特别行政区"), "香港")
-        XCTAssertEqual(WeatherPresentation.conciseLocationText("浙江·杭州"), "浙江·杭州")
-        XCTAssertEqual(WeatherPresentation.conciseLocationText("  "), "当前位置")
-    }
 
-    func testCompactWeatherSummaryOnlyContainsLocationAndCurrentWeather() {
-        XCTAssertEqual(
-            WeatherPresentation.compactSummary(location: "杭州市", weather: "晴 24°"),
-            "杭州 · 晴 24°"
-        )
-        XCTAssertFalse(
-            WeatherPresentation.compactSummary(location: "杭州市", weather: "晴 24°")
-                .localizedCaseInsensitiveContains("Apple Weather")
-        )
-    }
 
-    func testWeatherAttributionAlwaysHasAnOfficialLegalFallback() {
-        XCTAssertEqual(
-            WeatherAttributionPresentation.officialLegalURL.absoluteString,
-            "https://weatherkit.apple.com/legal-attribution.html"
-        )
-        XCTAssertEqual(
-            WeatherAttributionPresentation.legalURL(from: nil),
-            WeatherAttributionPresentation.officialLegalURL
-        )
-        XCTAssertEqual(
-            WeatherAttributionPresentation.legalURL(
-                from: URL(string: "http://weatherkit.apple.com/legal-attribution.html")
-            ),
-            WeatherAttributionPresentation.officialLegalURL
-        )
-        XCTAssertEqual(
-            WeatherAttributionPresentation.legalURL(
-                from: URL(string: "https://weatherkit.apple.com/legal-attribution.html")
-            ).host,
-            "weatherkit.apple.com"
-        )
-    }
 
-    func testWeatherAttributionProviderNameNeverDisappears() {
-        XCTAssertEqual(WeatherAttributionPresentation.providerName(nil), "Apple Weather")
-        XCTAssertEqual(WeatherAttributionPresentation.providerName("  \n"), "Apple Weather")
-        XCTAssertEqual(
-            WeatherAttributionPresentation.providerName("Apple Weather"),
-            "Apple Weather"
-        )
-    }
 
     func testPrivacyManifestCoversAdminMediaAndSecurityDiagnostics() throws {
         let manifestURL = try XCTUnwrap(
@@ -3353,7 +3261,7 @@ final class ContentAndAccessTests: XCTestCase {
                          CGSize(width: 834, height: 1100), CGSize(width: 1376, height: 910)] {
             for largeText in [false, true] {
                 let layout = HomeHeroOverlayLayout(viewport: viewport, accessibilityText: largeText)
-                for frame in [layout.image, layout.caption, layout.weather] {
+                for frame in [layout.image, layout.caption] {
                     XCTAssertTrue(CGRect(origin: .zero, size: viewport).contains(frame))
                     XCTAssertGreaterThan(frame.width, 0)
                     XCTAssertGreaterThan(frame.height, 0)
@@ -3361,8 +3269,6 @@ final class ContentAndAccessTests: XCTestCase {
                 XCTAssertEqual(layout.image, CGRect(origin: .zero, size: viewport),
                                "经典首页图片必须铺满内容区，不能退回独立画廊照片框")
                 XCTAssertTrue(layout.image.contains(layout.caption))
-                XCTAssertTrue(layout.image.contains(layout.weather))
-                XCTAssertFalse(layout.caption.intersects(layout.weather))
                 for source in sources {
                     let fitted = HomeHeroRenderPolicy.fittedSize(sourceSize: source, in: layout.image.size)
                     XCTAssertEqual(fitted.width / fitted.height, source.width / source.height, accuracy: 0.0001)
@@ -3388,9 +3294,7 @@ final class ContentAndAccessTests: XCTestCase {
                     let layout = HomeHeroOverlayLayout(viewport: viewport,
                         accessibilityText: large, safeAreaInsets: insets)
                     XCTAssertEqual(layout.image, CGRect(origin: .zero, size: viewport))
-                    XCTAssertTrue(safe.contains(layout.weather))
                     XCTAssertTrue(safe.contains(layout.caption))
-                    XCTAssertFalse(layout.weather.intersects(layout.caption))
                 }
             }
         }
@@ -7226,38 +7130,7 @@ final class ContentAndAccessTests: XCTestCase {
         XCTAssertFalse(AdminCollaborationValidation.isValid(invalidDelivery, now: now))
     }
 
-    func testWeatherKitConditionsHaveChinesePresentation() {
-        XCTAssertEqual(WeatherPresentation.conditionText(for: .clear), "晴")
-        XCTAssertEqual(WeatherPresentation.conditionText(for: .heavyRain), "大雨")
-        XCTAssertEqual(WeatherPresentation.conditionText(for: .wintryMix), "雨雪混合")
 
-        for condition in WeatherCondition.allCases {
-            XCTAssertFalse(WeatherPresentation.conditionText(for: condition).isEmpty)
-        }
-    }
-
-    func testWeatherFailuresHaveStableNonSensitiveCategories() {
-        XCTAssertEqual(
-            WeatherFailurePresentation.diagnosticCode(for: WeatherError.permissionDenied),
-            WeatherFailureCategory.permissionDenied.rawValue
-        )
-        XCTAssertEqual(
-            WeatherFailurePresentation.diagnosticCode(for: WeatherError.unknown),
-            WeatherFailureCategory.weatherUnknown.rawValue
-        )
-        XCTAssertEqual(
-            WeatherFailurePresentation.diagnosticCode(for: URLError(.timedOut)),
-            WeatherFailureCategory.urlLoadingBase.rawValue + abs(URLError.Code.timedOut.rawValue)
-        )
-        XCTAssertEqual(
-            WeatherFailurePresentation.message(for: WeatherError.permissionDenied),
-            "天气服务未授权"
-        )
-        XCTAssertEqual(
-            WeatherFailurePresentation.message(for: URLError(.notConnectedToInternet)),
-            "网络未连接"
-        )
-    }
 
     private func makePushStartupDefaults() throws -> UserDefaults {
         let suiteName = "PushStartupAuthorizationTests-\(UUID().uuidString)"

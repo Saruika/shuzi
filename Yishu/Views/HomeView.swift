@@ -76,7 +76,6 @@ enum HomeHeroRenderPolicy {
 /// or a delayed geometry preference. A new image cannot move the whole page.
 struct HomeHeroOverlayLayout: Equatable {
     let image: CGRect
-    let weather: CGRect
     let caption: CGRect
     let isCompact: Bool
 
@@ -94,7 +93,6 @@ struct HomeHeroOverlayLayout: Equatable {
         let header = min(92.0, innerHeight)
         isCompact = width > height || height < 620
         image = CGRect(x: 0, y: 0, width: width, height: height)
-        weather = CGRect(x: left + inset, y: top + inset, width: innerWidth, height: header)
         let preferredCaption = accessibilityText ? 280.0 : (isCompact ? 136.0 : 242.0)
         let captionHeight = min(preferredCaption, max(0, innerHeight - header - gap))
         caption = CGRect(x: left + inset, y: top + safeHeight - inset - captionHeight,
@@ -119,7 +117,6 @@ struct HomeHeroAdvanceRequest: Equatable {
 
 struct HomeView: View {
     @EnvironmentObject private var portfolioStore: PortfolioStore
-    @Environment(LocalWeatherStore.self) private var localWeather
     let showPortfolio: () -> Void
 
     var body: some View {
@@ -129,7 +126,6 @@ struct HomeView: View {
             GeometryReader { proxy in
                 HeroPager(
                     imageURLs: portfolioStore.heroImages,
-                    localWeather: localWeather,
                     viewport: proxy.size,
                     safeAreaInsets: safeProxy.safeAreaInsets,
                     showPortfolio: showPortfolio
@@ -151,9 +147,6 @@ struct HomeView: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .tabBar)
-        .task {
-            localWeather.refreshIfAuthorized()
-        }
     }
 }
 
@@ -192,14 +185,12 @@ final class HomeHeroPlaybackState {
 
 private struct HeroPager: View {
     let imageURLs: [URL]
-    let localWeather: LocalWeatherStore
     let viewport: CGSize
     let safeAreaInsets: EdgeInsets
     let showPortfolio: () -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.displayScale) private var displayScale
     @Environment(\.appServiceEnvironment) private var serviceEnvironment
@@ -320,9 +311,6 @@ private struct HeroPager: View {
                 .offset(y: max(0, layout.caption.minY - 40))
                 .allowsHitTesting(false)
 
-            weatherRow
-                .frame(width: layout.weather.width, height: layout.weather.height)
-                .offset(x: layout.weather.minX, y: layout.weather.minY)
 
             heroCaption(in: layout)
                 .frame(width: layout.caption.width, height: layout.caption.height, alignment: .bottomLeading)
@@ -487,84 +475,6 @@ private struct HeroPager: View {
         .accessibilityIdentifier("home-open-portfolio")
     }
 
-    private var weatherRow: some View {
-        HStack(spacing: 6) {
-            Spacer(minLength: 0)
-            VStack(spacing: 0) {
-                weatherButton
-                Link(destination: localWeather.attributionLegalURL) {
-                    WeatherAttributionMark(weather: localWeather, onDarkBackground: true)
-                        .padding(.horizontal, 12)
-                        .frame(minHeight: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Apple Weather 天气数据来源与许可")
-                .accessibilityIdentifier("home-weather-legal-link")
-            }
-            // One translucent surface, with two independent 44-point actions.
-            // A dark material keeps the white official mark legible over all
-            // carousel photos without a solid black backing or drop shadow.
-            .background {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(.thinMaterial)
-                    .environment(\.colorScheme, .dark)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(.white.opacity(0.18), lineWidth: 0.5)
-                    .allowsHitTesting(false)
-            }
-        }
-        .foregroundStyle(.white)
-    }
-
-    private var weatherButton: some View {
-        Button { openWeatherOrSettings() } label: {
-            weatherSummary
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 7)
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
-                // VoiceOver receives one complete button summary below,
-                // rather than duplicate icon and text nodes.
-                .animation(
-                    reduceMotion ? nil : .easeInOut(duration: 0.22),
-                    value: localWeather.locationText
-                )
-                .animation(
-                    reduceMotion ? nil : .easeInOut(duration: 0.22),
-                    value: localWeather.weatherText
-                )
-        }
-        .buttonStyle(.plain)
-        // Keep this photographic overlay compact; VoiceOver still receives
-        // the complete weather summary at all text sizes.
-        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
-        .foregroundStyle(.white)
-        .accessibilityIdentifier("home-weather")
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(localWeather.accessibilitySummary)
-        .accessibilityHint(weatherAccessibilityHint)
-    }
-
-    private var weatherSummary: some View {
-        HStack(spacing: 6) {
-            weatherStatusIcon
-                .fixedSize()
-            Text(
-                WeatherPresentation.compactSummary(
-                    location: localWeather.locationText,
-                    weather: localWeather.weatherText
-                )
-            )
-            .lineLimit(1)
-            .minimumScaleFactor(0.85)
-            .allowsTightening(true)
-        }
-    }
 
     private var pageIndicator: some View {
         HStack(spacing: 7) {
@@ -720,34 +630,6 @@ private struct HeroPager: View {
 #endif
     }
 
-    private func openWeatherOrSettings() {
-        if localWeather.phase == .ready {
-            localWeather.activate()
-        } else if localWeather.needsSettings,
-           let settingsURL = URL(string: UIApplication.openSettingsURLString) {
-            openURL(settingsURL)
-        } else {
-            localWeather.activate()
-        }
-    }
-
-    private var weatherAccessibilityHint: String {
-        if localWeather.phase == .ready {
-            return "刷新当前位置与天气"
-        }
-        return localWeather.needsSettings ? "打开系统设置" : "更新位置与天气"
-    }
-
-    @ViewBuilder
-    private var weatherStatusIcon: some View {
-        if localWeather.phase == .locating || localWeather.phase == .loading {
-            ProgressView()
-                .controlSize(.mini)
-                .tint(AppTheme.gold)
-        } else {
-            Image(systemName: localWeather.symbolName)
-        }
-    }
 }
 
 private struct HomePhotoScrollEdges: ViewModifier {
