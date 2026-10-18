@@ -32,7 +32,7 @@ struct AboutView: View {
         GeometryReader { scene in
             ZStack {
                 AppTheme.ink.ignoresSafeArea()
-                if UIDevice.current.userInterfaceIdiom == .pad,
+                if isTabletSizedCanvas,
                    usesTwoColumnLayout(in: scene) {
                     pinnedPortraitLayout(in: scene)
                         .overlay(alignment: .bottom) { visibleBottomTestProbe }
@@ -132,7 +132,15 @@ struct AboutView: View {
         !dynamicTypeSize.isAccessibilitySize
             && dynamicTypeSize < .xxxLarge
             && (horizontalSizeClass == .regular || verticalSizeClass == .compact)
-            && (UIDevice.current.userInterfaceIdiom != .pad || scene.size.width >= 700)
+            && (!isTabletSizedCanvas || scene.size.width >= 700)
+    }
+
+    private var isTabletSizedCanvas: Bool {
+        AppLayoutCanvas.isTabletSized(
+            idiom: UIDevice.current.userInterfaceIdiom,
+            horizontal: horizontalSizeClass,
+            vertical: verticalSizeClass
+        )
     }
 
     private func twoColumnPortraitHeight(in scene: GeometryProxy) -> CGFloat {

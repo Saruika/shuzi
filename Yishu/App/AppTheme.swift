@@ -149,6 +149,18 @@ enum MediaTheme {
     static let muted = Color.white.opacity(0.58)
 }
 
+/// iPhone Duo's unfolded display reports the phone idiom but gives the window
+/// regular width and height, so tablet layouts must not be keyed on idiom alone.
+enum AppLayoutCanvas {
+    static func isTabletSized(
+        idiom: UIUserInterfaceIdiom,
+        horizontal: UserInterfaceSizeClass?,
+        vertical: UserInterfaceSizeClass?
+    ) -> Bool {
+        idiom == .pad || (horizontal == .regular && vertical == .regular)
+    }
+}
+
 @MainActor
 enum AppTheme {
     private static var palette: ThemePalette { AppearanceStore.shared.theme.palette }

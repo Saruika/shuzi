@@ -24,11 +24,11 @@ VERSION = '2.6.3'
 BUILD = '47.2'
 EXPECTED_TOOLCHAIN = {
     'developerDir': '/Applications/Xcode.app/Contents/Developer',
-    'xcodeVersion': '27.0',
-    'xcodeBuild': '27A266a',
-    'sdkName': 'iphoneos27.0',
-    'sdkVersion': '27.0',
-    'sdkBuild': '24A430',
+    'xcodeVersion': '27.1',
+    'xcodeBuild': '27A9275',
+    'sdkName': 'iphoneos27.1',
+    'sdkVersion': '27.1',
+    'sdkBuild': '24A94232',
 }
 
 
@@ -39,22 +39,22 @@ def settings_payload(**overrides):
         'MARKETING_VERSION': VERSION,
         'CURRENT_PROJECT_VERSION': BUILD,
         'DEVELOPER_DIR': '/Applications/Xcode.app/Contents/Developer',
-        'XCODE_VERSION_ACTUAL': '2700',
-        'XCODE_PRODUCT_BUILD_VERSION': '27A266a',
+        'XCODE_VERSION_ACTUAL': '2710',
+        'XCODE_PRODUCT_BUILD_VERSION': '27A9275',
         'PLATFORM_NAME': 'iphoneos',
-        'SDK_NAME': 'iphoneos27.0',
-        'SDK_VERSION': '27.0',
-        'SDK_PRODUCT_BUILD_VERSION': '24A430',
-        'SDKROOT': '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk',
+        'SDK_NAME': 'iphoneos27.1',
+        'SDK_VERSION': '27.1',
+        'SDK_PRODUCT_BUILD_VERSION': '24A94232',
+        'SDKROOT': '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.1.sdk',
     }
     settings.update(overrides)
     return [{'target': 'Yishu', 'buildSettings': settings}]
 
 
 def app_info_payload(**overrides):
-    info = {'DTXcode': '2700', 'DTXcodeBuild': '27A266a',
-            'DTPlatformName': 'iphoneos', 'DTPlatformVersion': '27.0',
-            'DTPlatformBuild': '24A430', 'DTSDKName': 'iphoneos27.0', 'DTSDKBuild': '24A430'}
+    info = {'DTXcode': '2710', 'DTXcodeBuild': '27A9275',
+            'DTPlatformName': 'iphoneos', 'DTPlatformVersion': '27.1',
+            'DTPlatformBuild': '24A94232', 'DTSDKName': 'iphoneos27.1', 'DTSDKBuild': '24A94232'}
     info.update(overrides)
     return info
 

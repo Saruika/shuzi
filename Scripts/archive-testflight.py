@@ -18,13 +18,13 @@ from xml.parsers.expat import ExpatError
 # override that could silently accept a different SDK or Xcode build.
 TOOLCHAIN_SETTINGS = {
     'DEVELOPER_DIR': '/Applications/Xcode.app/Contents/Developer',
-    'XCODE_VERSION_ACTUAL': '2700',
-    'XCODE_PRODUCT_BUILD_VERSION': '27A266a',
+    'XCODE_VERSION_ACTUAL': '2710',
+    'XCODE_PRODUCT_BUILD_VERSION': '27A9275',
     'PLATFORM_NAME': 'iphoneos',
-    'SDK_NAME': 'iphoneos27.0',
-    'SDK_VERSION': '27.0',
-    'SDK_PRODUCT_BUILD_VERSION': '24A430',
-    'SDKROOT': '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk',
+    'SDK_NAME': 'iphoneos27.1',
+    'SDK_VERSION': '27.1',
+    'SDK_PRODUCT_BUILD_VERSION': '24A94232',
+    'SDKROOT': '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.1.sdk',
 }
 TOOLCHAIN_INFO_FIELDS = {
     'DTXcode': 'XCODE_VERSION_ACTUAL',
@@ -85,7 +85,7 @@ def validate_toolchain_info(info, release_settings):
         raise SystemExit('App toolchain differs from approved Release settings: ' + ', '.join(mismatches))
     return {
         'developerDir': release_settings['DEVELOPER_DIR'],
-        'xcodeVersion': '27.0',
+        'xcodeVersion': '27.1',
         'xcodeBuild': info['DTXcodeBuild'],
         'sdkName': info['DTSDKName'],
         'sdkVersion': info['DTPlatformVersion'],

@@ -3122,6 +3122,17 @@ final class ContentAndAccessTests: XCTestCase {
         )
     }
 
+    func testTabletLayoutCoversIPadAndUnfoldedIPhoneDuoOnly() {
+        // iPad keeps its tablet layout in every window size.
+        XCTAssertTrue(AppLayoutCanvas.isTabletSized(idiom: .pad, horizontal: .compact, vertical: .regular))
+        // iPhone Duo unfolded: phone idiom with regular width and height.
+        XCTAssertTrue(AppLayoutCanvas.isTabletSized(idiom: .phone, horizontal: .regular, vertical: .regular))
+        // Ordinary iPhone portrait and large-iPhone landscape stay on phone layouts.
+        XCTAssertFalse(AppLayoutCanvas.isTabletSized(idiom: .phone, horizontal: .compact, vertical: .regular))
+        XCTAssertFalse(AppLayoutCanvas.isTabletSized(idiom: .phone, horizontal: .regular, vertical: .compact))
+        XCTAssertFalse(AppLayoutCanvas.isTabletSized(idiom: .phone, horizontal: nil, vertical: nil))
+    }
+
     func testLandscapeIPadHeroFitPreservesThePortraitAspectRatio() {
         let source = CGSize(width: 959, height: 1_440)
         let viewport = CGSize(width: 1_376, height: 1_032)

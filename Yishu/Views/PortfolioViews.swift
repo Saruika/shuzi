@@ -681,6 +681,8 @@ struct GalleryViewer: View {
     @EnvironmentObject private var store: PortfolioStore
     @EnvironmentObject private var favorites: FavoritesStore
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @State private var selection: Int
 
     init(
@@ -825,7 +827,11 @@ struct GalleryViewer: View {
     }
 
     private func galleryHorizontalInset(in size: CGSize) -> CGFloat {
-        guard UIDevice.current.userInterfaceIdiom == .pad else { return 0 }
+        guard AppLayoutCanvas.isTabletSized(
+            idiom: UIDevice.current.userInterfaceIdiom,
+            horizontal: horizontalSizeClass,
+            vertical: verticalSizeClass
+        ) else { return 0 }
         return size.width > size.height ? 36 : 24
     }
 
