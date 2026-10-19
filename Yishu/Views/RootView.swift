@@ -51,6 +51,7 @@ struct RootView: View {
     @State private var isLaunchPosterVisible = false
     @State private var hasResolvedAccess = false
     @State private var presentsMemberAccess = false
+    @State private var presentsStartupNotificationIntro = false
     @State private var hasPreparedAuthorizedContent = false
     @State private var authorizedContentPreparationID: UUID?
     @State private var approvedContentRefreshID = UUID()
@@ -130,10 +131,23 @@ struct RootView: View {
             if approved { presentsMemberAccess = false }
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
-            guard phase == .active else { return }
-            // The system permission alert makes the scene inactive. This task
-            // must survive that transition to retain the user's answer.
-            Task { await pushNotifications.requestStartupAuthorizationIfNeeded() }
+            guard phase == .active, !presentsStartupNotificationIntro else { return }
+            Task {
+                if await pushNotifications.needsStartupAuthorization() {
+                    presentsStartupNotificationIntro = true
+                }
+            }
+        }
+        // One action only: the explanation always leads to the system prompt,
+        // which remains the user's real allow/deny choice.
+        .alert("开启通知，福利不错过", isPresented: $presentsStartupNotificationIntro) {
+            Button("继续") {
+                // The system permission alert makes the scene inactive. This task
+                // must survive that transition to retain the user's answer.
+                Task { await pushNotifications.requestStartupAuthorizationIfNeeded() }
+            }
+        } message: {
+            Text("开启后，我们会根据你的账号推送专属福利、活动预告、作品上新和审批结果。不想接收时，可随时在系统设置中关闭。")
         }
         .task(id: "\(fanAccount.profile?.status ?? "none"):\(fanAccount.profile?.requiresAccountSetup == true)") {
             await monitorApprovedAccess()
@@ -180,6 +194,7 @@ struct RootView: View {
             isPresented: Binding(
                 get: {
                     hasResolvedAccess && !isLaunchPosterVisible
+                        && !presentsStartupNotificationIntro
                         && pushNotifications.shouldPresentAuthorizationRationale
                 },
                 set: { presented in

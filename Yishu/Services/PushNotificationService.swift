@@ -430,6 +430,21 @@ final class PushNotificationCoordinator: ObservableObject {
         scheduleRecovery(for: account)
     }
 
+    /// Read-only form of the startup request's guards, so the app can explain
+    /// the system prompt first without changing when that prompt is allowed.
+    func needsStartupAuthorization() async -> Bool {
+        guard !isRetired, !isRequestingAuthorization else { return false }
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-skip-startup-notification-authorization-for-testing") {
+            return false
+        }
+#endif
+        let status = await authorizationClient.currentStatus()
+        let hasOptedOut = defaults.object(forKey: preferenceKey) != nil
+            && !defaults.bool(forKey: preferenceKey)
+        return !isRetired && status == .notDetermined && !hasOptedOut
+    }
+
     /// System permission is app-wide and may be requested before login. Device
     /// registration and server binding still require an eligible fan session.
     func requestStartupAuthorizationIfNeeded() async {

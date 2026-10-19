@@ -534,6 +534,7 @@ final class YishuUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-skip-launch-poster-for-visual-testing"]
         app.launch()
+        continueStartupNotificationIntro(in: app)
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let alert = springboard.alerts.firstMatch
         if alert.waitForExistence(timeout: 15) {
@@ -557,6 +558,10 @@ final class YishuUITests: XCTestCase {
             "-reset-fan-session-for-visual-testing",
         ]
         app.launch()
+        let intro = app.alerts["开启通知，福利不错过"]
+        XCTAssertTrue(intro.waitForExistence(timeout: 15), "首次启动没有先说明通知用途")
+        XCTAssertEqual(intro.buttons.count, 1, "通知说明只能引导到系统授权，不能替代允许/拒绝")
+        intro.buttons["继续"].tap()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let permissionAlert = springboard.alerts.firstMatch
         XCTAssertTrue(permissionAlert.waitForExistence(timeout: 15), "未登录首次启动没有显示系统通知授权")
@@ -573,6 +578,12 @@ final class YishuUITests: XCTestCase {
         openPublicMemberAccess(in: app)
         XCTAssertTrue(element("access-gate-admin-entry", in: app).waitForExistence(timeout: 10))
         XCTAssertFalse(permissionAlert.waitForExistence(timeout: 3), "已授权的下次启动不应重复弹窗")
+        XCTAssertFalse(intro.exists, "已授权的下次启动不应重复显示通知说明")
+    }
+
+    private func continueStartupNotificationIntro(in app: XCUIApplication) {
+        let intro = app.alerts["开启通知，福利不错过"]
+        if intro.waitForExistence(timeout: 15) { intro.buttons["继续"].tap() }
     }
 
     override func setUpWithError() throws {
