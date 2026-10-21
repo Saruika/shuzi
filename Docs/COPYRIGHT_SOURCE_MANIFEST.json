@@ -1,0 +1,264 @@
+{
+  "candidate_software_name": "Hi，梳子艺人作品展示软件",
+  "candidate_version": "V1.5",
+  "commit": "65329cd8d54492fba565779a6279311671328198",
+  "tag": "v1.5-build3",
+  "scope": "client Swift only; authorship and registration scope pending owner confirmation",
+  "file_order": "relative UTF-8 path byte order",
+  "files": [
+    {
+      "path": "Yishu/App/AppTheme.swift",
+      "sha256": "c6a6ab892734621b184e20541a167d76a2404214da433b11c81f2f00baa5d840",
+      "bytes": 12783,
+      "physical_lines": 325,
+      "nonblank_lines": 294
+    },
+    {
+      "path": "Yishu/App/YishuApp.swift",
+      "sha256": "36bc4a11117abf3b5acfb78cce01ad62d8c7881d93b282eecc21cf15ed1437d1",
+      "bytes": 3458,
+      "physical_lines": 97,
+      "nonblank_lines": 90
+    },
+    {
+      "path": "Yishu/Components/ArtworkImage.swift",
+      "sha256": "9fbd2712ed0d58f48a54e03471b1dddd9d950affbd16134785f87d2c109815f2",
+      "bytes": 71304,
+      "physical_lines": 1933,
+      "nonblank_lines": 1734
+    },
+    {
+      "path": "Yishu/Models/Portfolio.swift",
+      "sha256": "758ae52be7b5ea60c76d14aefd230b0dbdf3aa13e4cea6c346d8ad66b447f5f6",
+      "bytes": 16126,
+      "physical_lines": 391,
+      "nonblank_lines": 359
+    },
+    {
+      "path": "Yishu/Services/AdminSessionStore.swift",
+      "sha256": "29d149ec9a383f3528077bdae301d28dbb53edefb98e7910049f89bc2ee1d2ef",
+      "bytes": 57738,
+      "physical_lines": 1480,
+      "nonblank_lines": 1364
+    },
+    {
+      "path": "Yishu/Services/AppDiagnostics.swift",
+      "sha256": "889c836757e34ff90ef01670bfc2c1ca7ab543801fd8a8cc8daa436f73e5d07d",
+      "bytes": 3506,
+      "physical_lines": 96,
+      "nonblank_lines": 85
+    },
+    {
+      "path": "Yishu/Services/AppServiceEnvironment.swift",
+      "sha256": "25585a5bed1f67c51ad07929ef22203554c44bcc37da6e2870a0613bb28d98d1",
+      "bytes": 2468,
+      "physical_lines": 63,
+      "nonblank_lines": 54
+    },
+    {
+      "path": "Yishu/Services/AppServiceWorkspace.swift",
+      "sha256": "02dd963d6803f0669b750ad17920964471b5875655d8be80c5767ab4b240d825",
+      "bytes": 7309,
+      "physical_lines": 164,
+      "nonblank_lines": 151
+    },
+    {
+      "path": "Yishu/Services/AppleSignInService.swift",
+      "sha256": "7f4efc57ec7166b37208945b31d12002209ef709b3223309746abd2fb0ca000d",
+      "bytes": 9696,
+      "physical_lines": 272,
+      "nonblank_lines": 244
+    },
+    {
+      "path": "Yishu/Services/DramaLinkHealth.swift",
+      "sha256": "78cc27413a5b00a2e2a1663b9aebb648121dc609793755d08db2c3d35bc98806",
+      "bytes": 6066,
+      "physical_lines": 115,
+      "nonblank_lines": 107
+    },
+    {
+      "path": "Yishu/Services/FanAccountStore.swift",
+      "sha256": "b3bcddf208b6fec854d4d4c4de1c105068ce63024479a6d27027f961aad69cf2",
+      "bytes": 112429,
+      "physical_lines": 2836,
+      "nonblank_lines": 2667
+    },
+    {
+      "path": "Yishu/Services/FanNotificationStore.swift",
+      "sha256": "a9b49c3b4b02e593dd045d5ecf0b7d7d02784f8ea012781572d88a3908cbe367",
+      "bytes": 16163,
+      "physical_lines": 371,
+      "nonblank_lines": 341
+    },
+    {
+      "path": "Yishu/Services/FavoritesStore.swift",
+      "sha256": "0e3556ae29bfd0c6c345b0532705daea4b95bd7d8f67ec8c6352a337b849bede",
+      "bytes": 2924,
+      "physical_lines": 84,
+      "nonblank_lines": 71
+    },
+    {
+      "path": "Yishu/Services/LocalWeatherStore.swift",
+      "sha256": "4ca5b5e355e628e248b285a9d01e8244e5e3626938e0faa595f6e1ee22f7c814",
+      "bytes": 20066,
+      "physical_lines": 533,
+      "nonblank_lines": 487
+    },
+    {
+      "path": "Yishu/Services/PortfolioStore.swift",
+      "sha256": "0fc853c2a337b609074c249681f0d875c3856dfb5519d1b486e33885af627a76",
+      "bytes": 27675,
+      "physical_lines": 657,
+      "nonblank_lines": 610
+    },
+    {
+      "path": "Yishu/Services/PublicExperienceStore.swift",
+      "sha256": "f00240161a52ca98fa79e3332b876e3f82ae94a9432b71a67b1accf38ed25d91",
+      "bytes": 7595,
+      "physical_lines": 164,
+      "nonblank_lines": 151
+    },
+    {
+      "path": "Yishu/Services/PushNotificationService.swift",
+      "sha256": "4ee5f733b0980e9058efe87cf03c320f96a3801a89935a6b29fa1ec2217f59da",
+      "bytes": 39902,
+      "physical_lines": 961,
+      "nonblank_lines": 887
+    },
+    {
+      "path": "Yishu/Services/RecentlyViewedStore.swift",
+      "sha256": "774b5e69ab40e2a45f988613974da9cf24547add9914b79242ef11b9c30f35aa",
+      "bytes": 2828,
+      "physical_lines": 81,
+      "nonblank_lines": 69
+    },
+    {
+      "path": "Yishu/Services/SecureNetworkClient.swift",
+      "sha256": "df7aa413273d336c76f4c651a1b62c463cead58e7a9bd531401fd9d0a7e26101",
+      "bytes": 5058,
+      "physical_lines": 132,
+      "nonblank_lines": 117
+    },
+    {
+      "path": "Yishu/Views/AboutView.swift",
+      "sha256": "8c44878de5620c914f7cd9407f57684d1802c0fc754c9efcf12817e33c6c3bb2",
+      "bytes": 28056,
+      "physical_lines": 680,
+      "nonblank_lines": 647
+    },
+    {
+      "path": "Yishu/Views/AdminView.swift",
+      "sha256": "69833bbd992f9844a439da7fa4979ff997528b789b1976d9a404e1243affe7fe",
+      "bytes": 84419,
+      "physical_lines": 1928,
+      "nonblank_lines": 1775
+    },
+    {
+      "path": "Yishu/Views/CollaborationInquiryView.swift",
+      "sha256": "b27d41719a50e59bdf05d37011c9ee3ec9eeb64128bf9fc55e0305550a1cefa5",
+      "bytes": 34435,
+      "physical_lines": 893,
+      "nonblank_lines": 819
+    },
+    {
+      "path": "Yishu/Views/CreditsView.swift",
+      "sha256": "504a82dba62e7ecd2e0262dfad3356123851a15aba47eb15bcc0fc104a0ae9df",
+      "bytes": 29151,
+      "physical_lines": 721,
+      "nonblank_lines": 669
+    },
+    {
+      "path": "Yishu/Views/FanAccountView.swift",
+      "sha256": "25774fbc7fde52f3ef635b672a4057ab0093dffcd7abdf03f1f0f95a5613a888",
+      "bytes": 135321,
+      "physical_lines": 2921,
+      "nonblank_lines": 2732
+    },
+    {
+      "path": "Yishu/Views/FanNotificationInboxView.swift",
+      "sha256": "e61dc887603744a2fdc401445ec06b1238ae452dfd6d7297e1ab40ea66eb6157",
+      "bytes": 10035,
+      "physical_lines": 209,
+      "nonblank_lines": 200
+    },
+    {
+      "path": "Yishu/Views/FavoritesView.swift",
+      "sha256": "6688ab962d4c29bedd81554743e52cb049e62c430c677e793a06e688f02fed74",
+      "bytes": 11684,
+      "physical_lines": 298,
+      "nonblank_lines": 278
+    },
+    {
+      "path": "Yishu/Views/HomeView.swift",
+      "sha256": "ed0e70f51c3e9f4ce6871c812e41021f47a6018aac8f545957ba2673184b92de",
+      "bytes": 47923,
+      "physical_lines": 1205,
+      "nonblank_lines": 1106
+    },
+    {
+      "path": "Yishu/Views/LaunchPosterView.swift",
+      "sha256": "ad475339e133a60d5abfe49636ab34a21a08e9c62ea8e8765cf3c5c52f709511",
+      "bytes": 13998,
+      "physical_lines": 364,
+      "nonblank_lines": 332
+    },
+    {
+      "path": "Yishu/Views/PortfolioViews.swift",
+      "sha256": "955027709829e194c51025c7d8776f0ae6605162e9a81a6258bffd834c9850e8",
+      "bytes": 54325,
+      "physical_lines": 1274,
+      "nonblank_lines": 1166
+    },
+    {
+      "path": "Yishu/Views/PrivacyPolicyView.swift",
+      "sha256": "5d807232cb2303d63add05def9e524ad80fb7af6f8506f692a01a56292ef47bf",
+      "bytes": 18287,
+      "physical_lines": 135,
+      "nonblank_lines": 120
+    },
+    {
+      "path": "Yishu/Views/PublicExperienceView.swift",
+      "sha256": "910991558507b53ab9018cb27562e104b0ba05f7e1ea0b7cb634b2a58d3f89f0",
+      "bytes": 11958,
+      "physical_lines": 256,
+      "nonblank_lines": 243
+    },
+    {
+      "path": "Yishu/Views/RootView.swift",
+      "sha256": "0658ac348a0c8a4ef8e7d3eef7020b04a94b7ebfc9563e74c2b9da95d2de6917",
+      "bytes": 26075,
+      "physical_lines": 650,
+      "nonblank_lines": 612
+    },
+    {
+      "path": "Yishu/Views/UserSettingsView.swift",
+      "sha256": "13cb986a7717b4729c19f43a15413ddf2b998028e4df871255db17d19bf65989",
+      "bytes": 7577,
+      "physical_lines": 178,
+      "nonblank_lines": 170
+    }
+  ],
+  "physical_lines": 22467,
+  "nonblank_lines": 20751,
+  "selection": "Full stream omits blank lines, expands tabs to four columns and wraps at a fixed 9.5pt width. Select first and last 1500 typeset rows. No nonblank source characters removed or rewritten.",
+  "formatted_rows": 21440,
+  "selected_typeset_rows": 3000,
+  "selected_original_lines": 2836,
+  "pages": 60,
+  "typeset_rows_per_page": 50,
+  "excluded": "media, fonts, vendor libraries, backend PHP, tests, build products, new documentation",
+  "source_order_rights": "Path order is a preparation convention, not a copyright or original authorship finding",
+  "manual_pages": 5,
+  "confirmation_pages": 2,
+  "artifacts": {
+    "一次性确认表.md": "447dedf907f0dd5dfe4c1a9d99fbcf3ec2a93c35424dec4bce66a69c0f662ef1",
+    "一次性确认表.pdf": "21a98e6fdb25fbb102b0e8632602b927a8328c275aed5299d3090a0bc493a299",
+    "冻结源码快照_客户端V1.5.zip": "72ce33ec7d0d1614e0124c78f7ccebeed56a043520c6e742531c69f12e6c663e",
+    "操作说明书_V1.5.md": "a264768fad115cc99dea13a0e9cd2fdca69001f0c31f5a77574f376b3ec934ba",
+    "操作说明书_V1.5.pdf": "c75620b2db713316aa4bbe1c41da8f8d9b1b61385d6a53deaa21a18f8c0472de",
+    "源码交存候选稿_客户端V1.5.pdf": "1219d4924a365aab6c746629f7e7ab0ff9cdba1c9523c3880049af1e3c94a10e",
+    "源码交存候选稿_客户端V1.5.txt": "2d3d019a1f2185e36c5729c658decfae026ade26ee0ad40aa57acad4f619a3e2",
+    "源码逐行映射.csv": "01d8c1b80862262c6f6b1d9c515cf94143fe5217b945c2cc1855ba78536df539",
+    "阅读说明.txt": "a9e1d16f3dc98bd070943bd5c4a3da4eb988e23a53617e5e39f272d97773db67"
+  }
+}
