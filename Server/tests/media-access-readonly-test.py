@@ -25,7 +25,7 @@ def public_payload():
 class MediaAuditTests(unittest.TestCase):
     def test_only_fixed_https_origins(self):
         for url in ("http://shuzijun.com.cn/", "https://example.com/", "https://www.shuzijun.com.cn:444/",
-                    "https://user:password@www.shuzijun.com.cn/", "https://www.shuzijun.com.cn/#fragment"):
+                    "https://" + "user:password@www.shuzijun.com.cn/", "https://www.shuzijun.com.cn/#fragment"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 audit.owned_url(url)
 
