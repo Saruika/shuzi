@@ -3,6 +3,7 @@
 > 当前入口：[版本与验证状态](STATUS.md) · [代码许可边界](LICENSING.md) ·
 > [素材权利说明](ASSET_RIGHTS.md) · [媒体访问核查](Docs/MEDIA_ACCESS_AUDIT.md)。
 > 以下发行与审核叙述按各自日期解释，不代表今天的实时分发状态。
+> 代码目前未授予开源许可；软件著作权登记材料正在准备，见 [准备清单](Docs/COPYRIGHT_REGISTRATION_PREPARATION.md)。
 
 ## 写在最前面：一封写成 App 的情书
 

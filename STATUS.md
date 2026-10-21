@@ -44,8 +44,9 @@
 [香港查询](https://itunes.apple.com/lookup?id=6806714461&country=hk) 均返回 `resultCount: 0`。
 此结果只反映这两个公开查询，不能代替 App Store Connect 或其他发行地区的状态。
 
-代码开源许可尚待权利人选择；现有元数据仍为 `proprietary`。
+维护者已选择暂不授权代码、先准备软著登记；现有元数据保持 `proprietary`。
 素材来源及授权范围有待补证明，详见 [许可边界](LICENSING.md) 和 [素材清单](ASSET_RIGHTS.md)。
+登记资料草稿见 [软著登记准备](Docs/COPYRIGHT_REGISTRATION_PREPARATION.md)，尚未提交申请。
 
 ## 后续更新规则
 
