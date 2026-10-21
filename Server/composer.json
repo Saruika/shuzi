@@ -5,7 +5,7 @@
     "license": "proprietary",
     "require": {
         "php": "^8.3",
-        "firebase/php-jwt": "7.1.0"
+        "firebase/php-jwt": "7.2.0"
     },
     "config": {
         "allow-plugins": false,
