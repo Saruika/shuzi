@@ -1,5 +1,9 @@
 # Hi Shuzi App 安全说明
 
+> 2026-10-21：源码审阅、本次网络检查及未核实项见
+> [媒体访问核查](Docs/MEDIA_ACCESS_AUDIT.md)。独立公开精选与审批专区分开；
+> 下文历史 TestFlight 状态及媒体保护说明须结合 [当前状态](STATUS.md) 阅读。
+
 ## 已落地的保护
 
 - 管理员使用可单独吊销的 WordPress Application Password。App 不持久化访问码；它只留在当次短时内存会话，每次进入管理入口、退到后台、会话超过 5 分钟或服务器拒绝授权后都必须重新登录。升级会主动删除旧版保存的 Keychain 访问码。

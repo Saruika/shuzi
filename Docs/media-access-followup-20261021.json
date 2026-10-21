@@ -1,0 +1,80 @@
+{
+  "observed_at_utc": "2026-10-21T07:19:49.043615+00:00",
+  "scope": "anonymous GET JSON and HEAD only; no redirects; no media bodies or account mutations",
+  "authenticated_lifecycle": "not_tested",
+  "checks": [
+    {
+      "check": "anonymous_member_manifest",
+      "status": null,
+      "error": "transport_or_tls_error",
+      "result": "inconclusive"
+    },
+    {
+      "check": "invalid_bearer_member_manifest",
+      "status": 401,
+      "content_type": "application/json; charset=UTF-8",
+      "cache_control": "private, no-store, max-age=0",
+      "vary": "Authorization, X-Yishu-Install-ID",
+      "content_length": null,
+      "code": "fan_session_invalid",
+      "result": "pass"
+    },
+    {
+      "check": "anonymous_premium_manifest",
+      "status": 401,
+      "content_type": "application/json; charset=UTF-8",
+      "cache_control": "private, no-store, max-age=0",
+      "vary": "Origin",
+      "content_length": null,
+      "code": "premium_credential_required",
+      "result": "pass"
+    },
+    {
+      "check": "anonymous_wordpress_media",
+      "status": 404,
+      "content_type": "application/json; charset=UTF-8",
+      "cache_control": "",
+      "vary": "Accept-Encoding",
+      "content_length": null,
+      "code": "rest_no_route",
+      "result": "pass"
+    },
+    {
+      "check": "anonymous_wordpress_portfolio",
+      "status": 404,
+      "content_type": "application/json; charset=UTF-8",
+      "cache_control": "",
+      "vary": "Accept-Encoding",
+      "content_length": null,
+      "code": "rest_no_route",
+      "result": "pass"
+    },
+    {
+      "check": "anonymous_public_selection",
+      "status": null,
+      "error": "transport_or_tls_error",
+      "result": "inconclusive",
+      "selected_images": 0
+    },
+    {
+      "check": "owner_supplied_private_media_head",
+      "url_sha256": "7d202385c5f4f533451f5501417255ac49af1f0a629e94338892359406dbdc29",
+      "status": 200,
+      "content_type": "image/jpeg",
+      "cache_control": "public, immutable, max-age=2592000",
+      "vary": "",
+      "content_length": "305508",
+      "result": "finding"
+    },
+    {
+      "check": "owner_supplied_private_media_head",
+      "url_sha256": "8608016f049c4a28a395d1ab7f9ceae2497aa95e485b0ccdec2d8058a1000d65",
+      "status": 200,
+      "content_type": "application/vnd.apple.mpegurl",
+      "cache_control": "public, max-age=300, stale-while-revalidate=30",
+      "vary": "",
+      "content_length": "468",
+      "result": "finding"
+    }
+  ]
+}

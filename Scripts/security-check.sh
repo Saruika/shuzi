@@ -108,6 +108,7 @@ python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/entitlement-veri
 python3 -c 'import ast, pathlib; [ast.parse(path.read_text(encoding="utf-8")) for path in pathlib.Path("Server/operations").glob("*.py")]'
 python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("Server/operations/deploy-shuzijun-sync-release").read_text(encoding="utf-8"))'
 python3 Scripts/test-signout-contract.py
+python3 Server/tests/media-access-readonly-test.py
 python3 Scripts/test-apple-login-lifecycle-contract.py
 python3 Scripts/test-launch-poster-contract.py
 python3 Scripts/test-weather-privacy-contract.py
